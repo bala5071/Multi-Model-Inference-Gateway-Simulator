@@ -17,6 +17,9 @@ class CostEstimate:
     prefill_ms: float
     decode_step_ms: float
     cost_usd: float
+    # The profile's fixed per-request time. It delays this request only: the model is
+    # free to serve others meanwhile, and it is not billed.
+    overhead_ms: float = 0.0
 
 
 def decode_step_ms(profile: ModelProfile, batch_size: int) -> float:
@@ -40,7 +43,8 @@ def estimate_cost(
     ``new_prefill_tokens`` counts only prompt tokens that are not already in the KV cache.
     ``batch_size`` is the number of sequences decoding together, including this one.
     ``decode_step_ms`` is the wall time of one decode step for the whole batch; each step
-    yields one token per sequence.
+    yields one token per sequence. Served alone, the request's first token comes after
+    ``overhead_ms + prefill_ms + decode_step_ms``.
     """
     if new_prefill_tokens < 0:
         raise ValueError("new_prefill_tokens must not be negative")
@@ -53,7 +57,12 @@ def estimate_cost(
         new_prefill_tokens * profile.price_per_1k_input_tokens
         + output_tokens * profile.price_per_1k_output_tokens
     ) / 1000
-    return CostEstimate(prefill_ms=prefill_ms, decode_step_ms=step_ms, cost_usd=cost_usd)
+    return CostEstimate(
+        prefill_ms=prefill_ms,
+        decode_step_ms=step_ms,
+        cost_usd=cost_usd,
+        overhead_ms=profile.per_request_overhead_ms,
+    )
 
 
 @dataclass(frozen=True, slots=True)

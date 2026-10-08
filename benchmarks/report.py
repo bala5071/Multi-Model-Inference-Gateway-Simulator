@@ -6,16 +6,20 @@
 Sections 1 to 5 run the simulator on simulated time, so the same code gives the same
 numbers every time. Section 6 summarises the calibration files in benchmarks/calibration/,
 which are measurements of real models and are only re-measured by benchmarks/calibrate.py.
+Sections 1 and 2 also show a variant on the calibrated profiles: the file named by
+GATEWAY_PROFILES, or benchmarks/calibration/calibrated_profiles.json without it.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
+import os
 import random
 import subprocess
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +31,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from benchmarks import chunked_prefill, overload
+from benchmarks.calibrate import spread_across_runs
 from benchmarks.loadgen import LengthBucket, LoadConfig, build_workload
 from benchmarks.plotstyle import (
     INK,
@@ -45,7 +50,7 @@ from gateway.cost_model import OutputLengthGenerator
 from gateway.metrics import percentile
 from gateway.overload import OverloadPolicy
 from gateway.prefix_cache import PrefixCache
-from gateway.profiles import PROFILES, ModelProfile, Tier
+from gateway.profiles import PROFILES, ModelProfile, Tier, load_calibrated_profiles
 from gateway.registry import Worker
 from gateway.routing import load_plans
 from gateway.schema import GenerateRequest, RequestResult
@@ -98,10 +103,61 @@ def _throughput(results: Sequence[RequestResult]) -> float:
     return 1000 * len(results) / span_ms
 
 
+@dataclass(frozen=True, slots=True)
+class Calibrated:
+    """The calibration the calibrated variants of sections 1 and 2 run on."""
+
+    # Where it was read from, as shown in the report.
+    source: str
+    # Only the tiers the file has; timing from the file, everything else illustrative.
+    profiles: dict[Tier, ModelProfile]
+    # The same, with batches held to the highest concurrency that was measured.
+    capped: dict[Tier, ModelProfile]
+    measured_concurrency: dict[Tier, int]
+    # Tiers whose fitted cost per extra sequence the calibration marks unstable.
+    unstable_batching_cost: tuple[Tier, ...] = ()
+
+
+def calibrated_profiles() -> Calibrated | None:
+    """The calibration file named by ``GATEWAY_PROFILES``, else the one in the repository.
+
+    None when there is no such file. The simulator's own default is unchanged: this is
+    only what the report shows beside the illustrative results.
+    """
+    named = os.environ.get("GATEWAY_PROFILES")
+    path = Path(named) if named else CALIBRATION / "calibrated_profiles.json"
+    if not path.exists():
+        return None
+    loaded = load_calibrated_profiles(path)
+    entries = json.loads(path.read_text(encoding="utf-8"))["profiles"]
+    measured = {
+        Tier(name): int(entry.get("max_concurrency_measured", PROFILES[Tier(name)].max_batch_size))
+        for name, entry in entries.items()
+    }
+    profiles = {tier: loaded[tier] for tier in PROFILES if tier in measured}
+    capped = {
+        tier: dataclasses.replace(
+            profile, max_batch_size=min(profile.max_batch_size, measured[tier])
+        )
+        for tier, profile in profiles.items()
+    }
+    try:
+        source = path.resolve().relative_to(REPO).as_posix()
+    except ValueError:
+        source = path.name
+    unstable = tuple(
+        tier
+        for tier in profiles
+        if "decode_ms_per_extra_seq" in entries[tier.value].get("unstable_parameters", [])
+    )
+    return Calibrated(source, profiles, capped, measured, unstable)
+
+
 # --- 1. baseline vs continuous batching ----------------------------------------------------
 
 LOAD_LEVELS = (0.5, 1.0, 2.0, 4.0, 8.0, 16.0)
 BATCHING_REQUESTS = 300
+Curves = dict[Tier, dict[str, list[tuple[float, float]]]]
 
 
 def _batching_arrivals(profile: ModelProfile, load: float) -> list[tuple[float, GenerateRequest]]:
@@ -123,12 +179,15 @@ def _batching_arrivals(profile: ModelProfile, load: float) -> list[tuple[float, 
     return arrivals
 
 
-async def batching() -> Section:
+async def _batching_runs(
+    profiles: Mapping[Tier, ModelProfile], loads: Sequence[float] = LOAD_LEVELS
+) -> tuple[list[list[object]], Curves]:
+    """Both workers on identical arrivals, per tier and load: table rows and the curves."""
     rows = []
-    curves: dict[Tier, dict[str, list[tuple[float, float]]]] = {}
-    for tier, profile in PROFILES.items():
+    curves: Curves = {}
+    for tier, profile in profiles.items():
         curves[tier] = {"baseline": [], "continuous": []}
-        for load in LOAD_LEVELS:
+        for load in loads:
             arrivals = _batching_arrivals(profile, load)
             row: list[object] = [tier.value, f"{load:g}x"]
             for name, make in (
@@ -144,11 +203,14 @@ async def batching() -> Section:
                 curves[tier][name].append((throughput, p99))
                 row.extend([throughput, p99])
             rows.append(row)
+    return rows, curves
 
-    fig, axes = plt.subplots(2, 3, figsize=(13, 7), facecolor=SURFACE)
-    for column, tier in enumerate(PROFILES):
-        for index, name in enumerate(("continuous", "baseline")):
-            points = curves[tier][name]
+
+def _batching_figure(curves: Curves, name: str) -> str:
+    fig, axes = plt.subplots(2, len(curves), figsize=(13, 7), facecolor=SURFACE, squeeze=False)
+    for column, tier in enumerate(curves):
+        for index, worker in enumerate(("continuous", "baseline")):
+            points = curves[tier][worker]
             for row_index, values in enumerate(([p[0] for p in points], [p[1] for p in points])):
                 axes[row_index][column].plot(
                     LOAD_LEVELS,
@@ -157,7 +219,7 @@ async def batching() -> Section:
                     marker=MARKERS[index],
                     linewidth=2,
                     markersize=6,
-                    label=name,
+                    label=worker,
                 )
         style_axes(
             axes[0][column],
@@ -177,7 +239,128 @@ async def batching() -> Section:
         axes[1][column].set_yscale("log")
     legend(axes[0][0], loc="upper left")
     fig.tight_layout()
-    figure = _save(fig, "1-batching.png")
+    return _save(fig, name)
+
+
+def _peak_gain(curves: Curves) -> dict[Tier, float]:
+    """Continuous over baseline requests per second at the highest load that was run."""
+    return {
+        tier: by_worker["continuous"][-1][0] / by_worker["baseline"][-1][0]
+        for tier, by_worker in curves.items()
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class BatchingGains:
+    """Throughput gain of continuous batching over the baseline at the top load level."""
+
+    illustrative: dict[Tier, float]
+    calibrated: dict[Tier, float]
+    capped: dict[Tier, float]
+    measured_concurrency: dict[Tier, int]
+    unstable_batching_cost: tuple[Tier, ...] = ()
+
+
+async def batching_gains() -> BatchingGains | None:
+    """The gains at the top load level only. None when there is no calibration."""
+    found = calibrated_profiles()
+    if found is None:
+        return None
+    top = (LOAD_LEVELS[-1],)
+    return BatchingGains(
+        illustrative=_peak_gain((await _batching_runs(PROFILES, top))[1]),
+        calibrated=_peak_gain((await _batching_runs(found.profiles, top))[1]),
+        capped=_peak_gain((await _batching_runs(found.capped, top))[1]),
+        measured_concurrency=found.measured_concurrency,
+        unstable_batching_cost=found.unstable_batching_cost,
+    )
+
+
+def _unstable_warning(tiers: Sequence[Tier]) -> str:
+    """A sentence for results that rest on a cost per extra sequence that did not repeat."""
+    if not tiers:
+        return ""
+    names = ", ".join(tier.value for tier in tiers)
+    return (
+        f" **The calibration marks the cost per extra sequence unstable on {names}**: it did "
+        "not repeat between calibration runs (section 6), so these gains would differ run by "
+        "run."
+    )
+
+
+_BATCHING_HEADER = (
+    "Tier",
+    "Load",
+    "Baseline req/s",
+    "Baseline p99 ms",
+    "Continuous req/s",
+    "Continuous p99 ms",
+)
+
+
+async def _calibrated_batching(illustrative: Curves) -> str:
+    found = calibrated_profiles()
+    if found is None:
+        return """### With calibrated profiles
+
+No calibration file was found, so there is no calibrated variant of this section. See
+section 6."""
+    rows, curves = await _batching_runs(found.profiles)
+    figure = _batching_figure(curves, "1-batching-calibrated.png")
+    capped = _peak_gain((await _batching_runs(found.capped, (LOAD_LEVELS[-1],)))[1])
+    gains = (_peak_gain(illustrative), _peak_gain(curves), capped)
+    gain_rows = [
+        (
+            tier.value,
+            PROFILES[tier].max_batch_size,
+            f"{gains[0][tier]:.1f}x",
+            f"{gains[1][tier]:.1f}x",
+            found.measured_concurrency[tier],
+            f"{gains[2][tier]:.1f}x",
+        )
+        for tier in found.profiles
+    ]
+    top = f"{LOAD_LEVELS[-1]:g}x"
+    return f"""### With calibrated profiles
+
+The same runs with the timing parameters fitted to real models (`{found.source}`,
+section 6) in place of the illustrative ones. **Still simulated**: this is this repo's scheduler
+with measured step costs, not a measurement of a real server's batching. "Load" is relative to the
+baseline's capacity on the same profile, so compare the shape and the gain, not the requests
+per second, with the table above.
+
+{figure}
+
+{_table(_BATCHING_HEADER, rows)}
+
+Throughput gain of continuous batching over the baseline at {top} load (continuous req/s
+divided by baseline req/s):
+
+{
+        _table(
+            (
+                "Tier",
+                "Batch limit",
+                "Illustrative",
+                "Calibrated, same batch limit",
+                "Largest batch measured",
+                "Calibrated, batches held to that",
+            ),
+            gain_rows,
+        )
+    }
+
+The calibrated gain is far smaller because each extra sequence in a batch was measured to cost
+several times what the illustrative profiles assume. The middle column lets batches grow to the
+illustrative limit, which extrapolates the fitted cost per extra sequence well past the
+concurrency it was measured at; the last column stays inside the measured range and is the
+safer figure. `per_request_overhead_ms` does not hold up the model, so it moves time to first
+token and not these throughputs.{_unstable_warning(found.unstable_batching_cost)}"""
+
+
+async def batching() -> Section:
+    rows, curves = await _batching_runs(PROFILES)
+    figure = _batching_figure(curves, "1-batching.png")
 
     body = f"""{BATCHING_REQUESTS} requests per run with prompts of 20 to 400 words, arriving as a
 Poisson stream. "Load" is the arrival rate as a multiple of what the one-at-a-time baseline can
@@ -186,25 +369,15 @@ prefix cache.
 
 {figure}
 
-{
-        _table(
-            (
-                "Tier",
-                "Load",
-                "Baseline req/s",
-                "Baseline p99 ms",
-                "Continuous req/s",
-                "Continuous p99 ms",
-            ),
-            rows,
-        )
-    }
+{_table(_BATCHING_HEADER, rows)}
 
 Below 1x both keep up, so throughput is just the arrival rate and the difference is in latency.
 Above 1x the baseline's throughput is pinned at its capacity and its queue grows for the whole
 run, so its p99 mostly reflects how long the run was. Continuous batching keeps following the
 arrival rate until its own limit, which is lower for the larger models: they have smaller batch
-limits and a steeper cost per extra sequence."""
+limits and a steeper cost per extra sequence.
+
+{await _calibrated_batching(curves)}"""
     return Section("1. Baseline vs continuous batching", body)
 
 
@@ -213,8 +386,10 @@ limits and a steeper cost per extra sequence."""
 PREFIX_FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
 
 
-async def prefix_cache() -> Section:
-    profile = PROFILES[Tier.STANDARD]
+async def _prefix_runs(
+    profile: ModelProfile,
+) -> tuple[list[list[object]], dict[str, dict[str, list[float]]]]:
+    """Cache off and on at each sharing level: table rows, and the series for the figure."""
     rows = []
     series: dict[str, dict[str, list[float]]] = {
         "cache on": {"ttft": [], "cost": []},
@@ -252,6 +427,55 @@ async def prefix_cache() -> Section:
             row.extend([percentile(ttft, 50), percentile(ttft, 99), 1000 * cost])
         cached_share = sum(r.cached_tokens for r in results) / sum(r.tokens_in for r in results)
         rows.append([*row, f"{cached_share:.0%}"])
+    return rows, series
+
+
+async def _calibrated_prefix_cache(illustrative: Sequence[Sequence[object]]) -> str:
+    found = calibrated_profiles()
+    if found is None or Tier.STANDARD not in found.profiles:
+        return """### With the calibrated profile
+
+No calibration of the standard tier was found, so there is no calibrated variant of this
+section. See section 6."""
+    profile = found.profiles[Tier.STANDARD]
+    illustrative_prefill = PROFILES[Tier.STANDARD].prefill_ms_per_token
+    rows, _ = await _prefix_runs(profile)
+    beside = [
+        (ours[0], theirs[1], theirs[4], ours[1], ours[4], ours[2], ours[5])
+        for theirs, ours in zip(illustrative, rows, strict=True)
+    ]
+    return f"""### With the calibrated profile
+
+The same runs on the standard tier's calibrated timing (`{found.source}`, section 6).
+Prefill is {profile.prefill_ms_per_token:.4f} ms per token against the illustrative {
+        illustrative_prefill:g},
+and every request has {
+        profile.per_request_overhead_ms:.1f} ms of fixed overhead, which the cache does not
+remove. **Still simulated.** Cost is not shown again: prices are not calibrated.
+
+{
+        _table(
+            (
+                "Sharing",
+                "Illustrative off: TTFT p50",
+                "Illustrative on: TTFT p50",
+                "Calibrated off: TTFT p50",
+                "Calibrated on: TTFT p50",
+                "Calibrated off: TTFT p99",
+                "Calibrated on: TTFT p99",
+            ),
+            beside,
+        )
+    }
+
+The cache still holds time to first token at the no-sharing level, but that level is now mostly
+the fixed overhead, so the cache removes a smaller share of the wait than the illustrative
+table suggests."""
+
+
+async def prefix_cache() -> Section:
+    profile = PROFILES[Tier.STANDARD]
+    rows, series = await _prefix_runs(profile)
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), facecolor=SURFACE)
     xs = [100 * f for f in PREFIX_FRACTIONS]
@@ -312,7 +536,9 @@ tokens again. With the cache, time to first token and cost stay close to the no-
 however many requests share the prompt. What the cache cannot remove is the cost of the first
 sharers: a prefix only becomes reusable once a request carrying it has finished, so requests
 that arrive before then pay in full. That is the rise in the cached p99 when everything
-shares."""
+shares.
+
+{await _calibrated_prefix_cache(rows)}"""
     return Section("2. Prefix cache on and off", body)
 
 
@@ -458,7 +684,9 @@ async def cost_latency() -> Section:
     fig.tight_layout()
     figure = _save(fig, "3-cost-latency.png")
 
-    body = f"""**Cost against latency.** The same 200 requests (20 to 300 word prompts, half
+    body = f"""**Illustrative profiles; prices and timings not calibrated.**
+
+**Cost against latency.** The same 200 requests (20 to 300 word prompts, half
 sharing a 200-word system prompt, 64 output tokens, 0.5 req/s) served by each model alone, with
 continuous batching and the prefix cache.
 
@@ -571,7 +799,9 @@ async def overload_section() -> Section:
     fig.tight_layout()
     figure = _save(fig, "4-overload.png")
 
-    body = f"""Every request asks for the premium model and opts in to downgrade. 300 arrive at
+    body = f"""**Illustrative profiles; prices and timings not calibrated.**
+
+Every request asks for the premium model and opts in to downgrade. 300 arrive at
 3 req/s, about three times what premium can serve, then 100 at 0.25 req/s. Admission control is a
 queue limit of 16 on premium; downgrade uses a 20 s p99 SLO over a 30 s window. Latency is over
 the requests that were served; rejected ones got an immediate 429.
@@ -602,8 +832,82 @@ slow requests have finished, so the requests already queued when it engages stil
 Together, the queue limit caps the damage during that reaction time. "State changes" counts how
 often a model switched between healthy and degraded; more than two means it switched back and
 forth. Which defence is right depends on whether a refused request or a lower-quality answer is
-worse for the client."""
+worse for the client.
+
+{overload_on_calibrated()}"""
     return Section("4. Overload: admission control and downgrade", body)
+
+
+def _decode_bound_req_per_s(profile: ModelProfile, mean_output_tokens: float) -> float:
+    """Most requests per second a profile can decode with every batch full.
+
+    An upper bound on what the scheduler can serve: prefill and overhead are left out.
+    """
+    step_ms = profile.decode_base_ms + profile.decode_ms_per_extra_seq * (
+        profile.max_batch_size - 1
+    )
+    return profile.max_batch_size * 1000 / step_ms / mean_output_tokens
+
+
+def overload_on_calibrated() -> str:
+    """What the calibration says about this section, without running it on calibrated profiles."""
+    sentence = (
+        "**How the calibrated batching gain would change this.** With the smaller gain from "
+        "batching that sections 1 and 2 show on the calibrated profiles, every model reaches its "
+        "limit at a far lower arrival rate than these runs assume, so a downgrade would move "
+        "requests onto models with little spare capacity of their own: expect it to relieve less, "
+        "and admission control to refuse more, than the table above shows."
+    )
+    found = calibrated_profiles()
+    if found is None or Tier.PREMIUM not in found.profiles:
+        return f"{sentence} No calibration of the premium tier was found, so this was not checked."
+    lengths = OutputLengthGenerator(seed=overload.SEED)
+    surge = build_workload(overload.SURGE)
+    mean_tokens = sum(lengths.length_for(p.prompt) for p in surge) / len(surge)
+    rate = overload.SURGE.arrival_rate_per_s
+    bounds = {
+        tier: (
+            _decode_bound_req_per_s(PROFILES[tier], mean_tokens),
+            _decode_bound_req_per_s(profile, mean_tokens),
+        )
+        for tier, profile in found.profiles.items()
+    }
+    rows = [
+        (tier.value, illustrative, calibrated, f"{rate / calibrated:.1f}x")
+        for tier, (illustrative, calibrated) in bounds.items()
+    ]
+    table = _table(
+        (
+            "Tier",
+            "Illustrative: most req/s it can decode",
+            "Calibrated: most req/s it can decode",
+            f"Surge of {rate:g} req/s over the calibrated bound",
+        ),
+        rows,
+    )
+    premium = bounds[Tier.PREMIUM][1]
+    if premium >= rate:
+        verdict = (
+            f"By this bound the surge of {rate:g} req/s does not saturate the calibrated premium "
+            "profile. Overload numbers on the calibrated profiles are still not given here: this "
+            "section has only been run on the illustrative ones."
+        )
+    else:
+        verdict = (
+            "**No overload numbers are given for the calibrated profiles, because this workload "
+            f"is saturated on them.** The surge sends {rate:g} req/s to premium, "
+            f"{rate / premium:.0f} times what the calibrated premium profile can decode even with "
+            "every batch full. A run that far over capacity reports the length of its backlog, not "
+            "the behaviour of the defences."
+        )
+    return f"""{sentence}
+
+{verdict} The bound is the decode rate with a full batch at the illustrative batch limit,
+ignoring prefill and overhead, for this workload's mean of {mean_tokens:.0f} output tokens. It
+is generous to the calibrated profiles: it extends the fitted cost per extra sequence to batches
+larger than the 4 requests that were measured together.
+
+{table}"""
 
 
 # --- 5. chunked prefill --------------------------------------------------------------------
@@ -660,7 +964,9 @@ async def chunked() -> Section:
     fig.tight_layout()
     figure = _save(fig, "5-chunked-prefill.png")
 
-    body = f"""Standard tier. {chunked_prefill.SHORT_REQUESTS} short prompts of 20 to 80 words at
+    body = f"""**Illustrative profiles; prices and timings not calibrated.**
+
+Standard tier. {chunked_prefill.SHORT_REQUESTS} short prompts of 20 to 80 words at
 4 req/s, with {chunked_prefill.LONG_REQUESTS} prompts of 6,000 to 10,000 words spread through
 the run. Up to 64 output tokens. ITL is the gap between consecutive tokens of one request.
 
@@ -692,6 +998,246 @@ far tail: p99.9 and the maximum."""
 
 
 # --- 6. simulated against real --------------------------------------------------------------
+
+_PARAMETERS = (
+    ("prefill_ms_per_token", "prefill ms/token"),
+    ("decode_base_ms", "decode base ms"),
+    ("decode_ms_per_extra_seq", "ms per extra sequence"),
+    ("per_request_overhead_ms", "per-request overhead ms"),
+)
+
+
+def _percent(value: float | None) -> str:
+    return "-" if value is None else f"{value:.1f}%"
+
+
+def _spread_rows(spread: Mapping[str, Mapping[str, Any]]) -> list[tuple[object, ...]]:
+    return [
+        (
+            tier,
+            label,
+            f"{parameters[name]['min']:.4g}",
+            f"{parameters[name]['mean']:.4g}",
+            f"{parameters[name]['max']:.4g}",
+            _percent(parameters[name]["range_percent_of_mean"]),
+        )
+        for tier, parameters in spread.items()
+        for name, label in _PARAMETERS
+    ]
+
+
+_SPREAD_HEADER = ("Tier", "Parameter", "Lowest", "Mean", "Highest", "Range, % of mean")
+
+
+def _fit_quality(document: dict[str, Any]) -> str:
+    """The overhead, how good the fits are, and the spread between repeats.
+
+    Empty for a file written before these were recorded.
+    """
+    profiles = {
+        tier: p
+        for tier, p in document["profiles"].items()
+        if "per_request_overhead_ms" in p and "mape_percent_by_concurrency" in p
+    }
+    if not profiles:
+        return ""
+    rows = []
+    for tier, p in profiles.items():
+        by_level = p["mape_percent_by_concurrency"]
+        alone, most = by_level[min(by_level, key=int)], by_level[max(by_level, key=int)]
+        fit = p["fit"]
+        r2 = [fit["ttft_vs_prompt_tokens"]["r2"], fit["per_token_vs_extra_sequences"]["r2"]]
+        rows.append(
+            (
+                tier,
+                f"{p['per_request_overhead_ms']:.1f}",
+                *("-" if value is None else f"{value:.3f}" for value in r2),
+                _percent(alone["ttft"]),
+                _percent(most["ttft"]),
+                _percent(alone["total"]),
+                _percent(most["total"]),
+            )
+        )
+    top = max(int(level) for p in profiles.values() for level in p["mape_percent_by_concurrency"])
+    text = f"""
+The fourth fitted parameter, a fixed overhead per request, with the R² of the two regressions
+and the simulator's error over all requests, split by whether a request was sent alone or with
+the most others ({top} together). The errors by concurrency are where a poor fit shows:
+
+{
+        _table(
+            (
+                "Tier",
+                "Per-request overhead ms",
+                "R² TTFT fit",
+                "R² decode fit",
+                "TTFT error, alone",
+                f"TTFT error, {top} together",
+                "Total error, alone",
+                f"Total error, {top} together",
+            ),
+            rows,
+        )
+    }
+"""
+    spread = {
+        tier: p["spread_across_repeats"]
+        for tier, p in profiles.items()
+        if p.get("spread_across_repeats")
+    }
+    if spread:
+        repeats = document["plan"]["repeats"]
+        text += f"""
+Spread within this run: each of the {repeats} repeats fitted on its own.
+
+{_table(_SPREAD_HEADER, _spread_rows(spread))}
+"""
+    return text
+
+
+def _placement_rows(document: dict[str, Any]) -> list[tuple[object, ...]]:
+    rows: list[tuple[object, ...]] = []
+    for tier, profile in document["profiles"].items():
+        if "hardware_limited" not in profile:
+            continue
+        by_run = profile.get("placement_by_run")
+        placements = (
+            list(by_run.values())
+            if by_run is not None
+            else [document["servers"][tier].get("placement")]
+        )
+        reported = [p for p in placements if p]
+        if not reported:
+            rows.append(
+                (tier, "not recorded", "not recorded", f"0 of {len(placements)}", "unknown")
+            )
+            continue
+        gpu = sorted(p["gpu_percent"] for p in reported)
+        share = f"{gpu[0]:g}%" if gpu[0] == gpu[-1] else f"{gpu[0]:g}% to {gpu[-1]:g}%"
+        size = max(p["size_bytes"] for p in reported) / 2**30
+        rows.append(
+            (
+                tier,
+                f"{size:.1f} GiB",
+                share,
+                f"{len(reported)} of {len(placements)}",
+                "**hardware-limited**" if profile["hardware_limited"] else "fits on the GPU",
+            )
+        )
+    return rows
+
+
+def _placement(document: dict[str, Any]) -> str:
+    """Where the server had each model loaded when it was measured. Empty if never recorded."""
+    rows = _placement_rows(document)
+    if not rows:
+        return ""
+    return f"""
+Where Ollama had each model loaded when it was measured, from its process list. A tier marked
+**hardware-limited** was partly on the CPU: its timings are of a model that does not fit this
+GPU, not of the model on adequate hardware.
+
+{_table(("Tier", "Loaded size", "Share on the GPU", "Runs that recorded it", "Verdict"), rows)}
+"""
+
+
+def _aggregate_quality(document: dict[str, Any]) -> str:
+    """For a calibration that is the median of several runs: ranges, flags and errors."""
+    runs = document["aggregated_from"]
+    limit = document["unstable_above_range_percent"]
+    parameter_rows = []
+    error_rows = []
+    for tier, p in document["profiles"].items():
+        for name, label in _PARAMETERS:
+            c = p["aggregate"][name]
+            parameter_rows.append(
+                (
+                    tier,
+                    label,
+                    f"{c['median']:.4g}",
+                    f"{c['min']:.4g}",
+                    f"{c['max']:.4g}",
+                    _percent(c["range_percent_of_median"]),
+                    "**unstable**" if c["unstable"] else "yes",
+                )
+            )
+        by_level = p["mape_percent_by_concurrency"]
+        alone, most = by_level[min(by_level, key=int)], by_level[max(by_level, key=int)]
+        lowest_r2 = [
+            min((r2 for r2 in p["fit_r2_by_run"][which] if r2 is not None), default=None)
+            for which in ("ttft_vs_prompt_tokens", "per_token_vs_extra_sequences")
+        ]
+        error_rows.append(
+            (
+                tier,
+                *("-" if r2 is None else f"{r2:.3f}" for r2 in lowest_r2),
+                _percent(alone["ttft"]),
+                _percent(most["ttft"]),
+                _percent(alone["total"]),
+                _percent(most["total"]),
+            )
+        )
+    top = max(
+        int(level)
+        for p in document["profiles"].values()
+        for level in p["mape_percent_by_concurrency"]
+    )
+    return f"""
+The parameters above are the **median of {len(runs)} runs** ({", ".join(r["run"] for r in runs)},
+in `benchmarks/calibration/`); no run was chosen over another, and the errors are those of the
+median profile against every run's requests. A parameter is marked **unstable** when its highest
+and lowest fitted values are more than {limit:g}% of the median apart: the median is reported,
+but it did not repeat.
+
+{
+        _table(
+            (
+                "Tier",
+                "Parameter",
+                "Median",
+                "Lowest",
+                "Highest",
+                "Range, % of median",
+                "Repeatable?",
+            ),
+            parameter_rows,
+        )
+    }
+
+The worst R² of the two regressions over the runs, and the simulator's error over all requests,
+split by whether a request was sent alone or with the most others ({top} together). The errors by
+concurrency are where a poor fit shows:
+
+{
+        _table(
+            (
+                "Tier",
+                "Lowest R² TTFT fit",
+                "Lowest R² decode fit",
+                "TTFT error, alone",
+                f"TTFT error, {top} together",
+                "Total error, alone",
+                f"Total error, {top} together",
+            ),
+            error_rows,
+        )
+    }
+"""
+
+
+def _other_runs(document: dict[str, Any]) -> str:
+    """Run-to-run spread, when further runs are kept in ``run*`` folders beside this one."""
+    paths = sorted(CALIBRATION.glob("run*/calibrated_profiles.json"))
+    if not paths:
+        return ""
+    documents = [document, *(json.loads(path.read_text(encoding="utf-8")) for path in paths)]
+    when = ", ".join(str(d["measured_at"]) for d in documents)
+    return f"""
+Spread between runs: the whole calibration was run {len(documents)} times (measured at {when}).
+The parameters above are the first run's; the others are in `benchmarks/calibration/run*/`.
+
+{_table(_SPREAD_HEADER, _spread_rows(spread_across_runs(documents)))}
+"""
 
 
 async def calibration() -> Section:
@@ -737,9 +1283,13 @@ then regenerate this report. See `docs/13-calibration.md`."""
             figures.append(f"![{tier}](../benchmarks/calibration/{tier}.png)")
         notes.extend(f"- **{tier}:** {note}" for note in profile["notes"])
     servers = sorted({f"{s['kind']} {s['version']}" for s in document["servers"].values()})
+    aggregated = "aggregated_from" in document
+    quality = _aggregate_quality(document) if aggregated else _fit_quality(document)
+    runs = "" if aggregated else _other_runs(document)
+    placement = _placement(document)
 
-    body = f"""These are **measurements of real models**, taken once, on one machine. They are the
-only numbers in this report that are not simulated, and they are not reproduced by
+    body = f"""These are **measurements of real models**, taken on one machine on one day. They are
+the only numbers in this report that are not simulated, and they are not reproduced by
 `make report`: that would need the same models running on the same hardware. This section reads
 the files that `benchmarks/calibrate.py` wrote.
 
@@ -773,12 +1323,12 @@ and the simulator's error against held-out measurements (MAPE):
     }
 
 {chr(10).join(notes) if notes else "The tool raised no warnings about these fits."}
-
+{quality}{runs}{placement}
 {chr(10).join(chr(10) + figure for figure in figures)}
 
-Sections 1 to 5 use the illustrative profiles, not these fitted ones. See
-`docs/13-calibration.md` for how the fit is made and where the simulator diverges from the real
-servers. To measure again:
+Sections 1 to 5 use the illustrative profiles, not these fitted ones; sections 1 and 2 show a
+calibrated variant beside them. See `docs/13-calibration.md` for how the fit is made and where
+the simulator diverges from the real servers. To measure again:
 
 ```sh
 {command}
@@ -799,10 +1349,11 @@ SECTIONS: dict[str, Callable[[], Awaitable[Section]]] = {
 
 LIMITATIONS = """## Limitations
 
-- **Sections 1 to 5 are simulations.** No model runs. Timings come from a cost model with three
-  parameters per model, and those parameters are illustrative: invented to give the three tiers
-  different shapes, not measured. Read every figure as "how this scheduler behaves under these
-  assumptions", never as the performance of Llama models or of any hardware.
+- **Sections 1 to 5 are simulations.** No model runs. Timings come from a cost model with a
+  few parameters per model, and those parameters are illustrative: invented to give the three
+  tiers different shapes, not measured. The calibrated variants in sections 1 and 2 swap in
+  measured timings and are simulations all the same. Read every figure as "how this scheduler
+  behaves under these assumptions", never as the performance of Llama models or of any hardware.
 - **Prices are illustrative** and so is every cost. Ratios between tiers follow from the made-up
   prices.
 - **Answer quality is not modelled.** Nothing here says what a tenant loses by being served by a
@@ -818,10 +1369,38 @@ LIMITATIONS = """## Limitations
   Compare those rows by order of magnitude only.
 - **p99 over a few hundred requests is a handful of samples.** It is a nearest-rank percentile
   and can hinge on two or three requests.
-- **Section 6 is one machine, once.** Real measurements are noisy and specific to that hardware,
-  model build and server version. They are not re-measured when this report is regenerated.
+- **Sections 3, 4 and 5 were not run on calibrated profiles.** Their prices and timings are
+  the illustrative ones throughout. Section 4 says why its workload was not rerun.
+- **Section 6 is one machine, on one day.** Real measurements are noisy and specific to that
+  hardware, model build and server version. They are not re-measured when this report is
+  regenerated.
 - **Simulated and real numbers must not be compared directly.** With real models the model
   server does the batching, not this repo's scheduler (`docs/12-real-models.md`).
+"""
+
+
+def _gain_list(gains: Mapping[Tier, float]) -> str:
+    return ", ".join(f"{gain:.1f}x on {tier.value}" for tier, gain in gains.items())
+
+
+def batching_limitation(gains: BatchingGains | None) -> str:
+    """The limitation that depends on the calibration: how much the batching gain shrinks."""
+    if gains is None:
+        return (
+            "- **The batching gain has not been checked against a calibration.** No calibration "
+            "file was found when this report was generated.\n"
+        )
+    measured = sorted(set(gains.measured_concurrency.values()))
+    batch = " or ".join(str(m) for m in measured)
+    top = f"{LOAD_LEVELS[-1]:g}x"
+    warning = _unstable_warning(gains.unstable_batching_cost)
+    return f"""- **The illustrative profiles overstate what batching buys.** At {top} load in
+  section 1, continuous batching serves {_gain_list(gains.illustrative)} of the baseline's requests
+  per second. With the calibrated timings and batches held to the {batch} requests that were
+  measured together, the same simulation gives {_gain_list(gains.capped)}. Letting batches
+  grow to the illustrative limits gives {_gain_list(gains.calibrated)}, which extrapolates the
+  fitted cost per extra sequence beyond what was measured. Every one of these is simulated, and
+  the calibration behind them is one laptop (section 6).{warning}
 """
 
 
@@ -850,14 +1429,15 @@ async def build(only: str | None) -> str:
 Generated by `uv run python -m benchmarks.report` (or `make report`) from commit `{_commit()}`.
 Do not edit by hand; change `benchmarks/report.py` and regenerate.
 
-**Sections 1 to 5 are simulated** with seed {SEED} on illustrative model profiles. They are
-deterministic: the same code produces the same numbers. **Section 6 is measured** on real models
+**Sections 1 to 5 are simulated** with seed {SEED} on illustrative model profiles; sections 1
+and 2 also show the same simulation on calibrated profiles. They are deterministic: the same
+code and calibration file produce the same numbers. **Section 6 is measured** on real models
 and is read from files, not re-measured. Nothing here is a benchmark of real hardware except
 where section 6 says so.
 
 Times are in milliseconds unless stated. Percentiles are nearest-rank.
 """
-    return "\n".join([header, *parts, LIMITATIONS])
+    return "\n".join([header, *parts, LIMITATIONS + batching_limitation(await batching_gains())])
 
 
 def main() -> None:

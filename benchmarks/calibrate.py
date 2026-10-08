@@ -4,9 +4,19 @@
         --out benchmarks/calibration
 
 For each tier it sends controlled requests to the real model (see docs/12-real-models.md
-for starting one), measures time to first token and per-token latency, fits the three
+for starting one), measures time to first token and per-token latency, fits the four
 timing parameters of the simulator's profile by linear regression, then replays the same
 requests through the simulator and reports how far it is from what was measured.
+
+    uv run python -m benchmarks.calibrate --compare run1.json run2.json run3.json
+
+prints how far the fitted parameters of several runs are from each other, and measures
+nothing.
+
+    uv run python -m benchmarks.calibrate --aggregate DIR DIR ... --out benchmarks/calibration
+
+combines every saved run named into one calibration: the median of each parameter with its
+range, marked unstable where the runs disagree. It measures nothing either.
 
 Writes ``calibrated_profiles.json``, ``samples.json`` and one plot per tier. Everything in
 those files is measured on the machine that ran this, which the JSON records.
@@ -52,7 +62,7 @@ from gateway.profiles import PROFILES, ModelProfile, Tier
 from gateway.registry import ModelRegistry
 from gateway.schema import GenerateRequest, RequestResult
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 # A fitted time has to be positive to be a valid profile; this is the floor used when a
 # fit comes out at or below zero, which is then flagged in the notes.
 MIN_MS = 1e-6
@@ -270,12 +280,14 @@ class TierFit:
 
 
 def fit_profile(samples: Sequence[Sample], base: ModelProfile) -> TierFit:
-    """Fit the three timing parameters from the samples that are not held out.
+    """Fit the four timing parameters from the samples that are not held out.
 
     ``prefill_ms_per_token`` is the slope of TTFT against prompt tokens at concurrency 1.
     ``decode_base_ms`` and ``decode_ms_per_extra_seq`` are the intercept and slope of
     per-token latency against the number of *other* requests decoding at the same time.
-    Everything else in the profile is copied from ``base``.
+    ``per_request_overhead_ms`` is the intercept of the TTFT fit less one decode step:
+    the simulator's first token comes one step after prefill, so only the rest of the
+    intercept is overhead. Everything else in the profile is copied from ``base``.
     """
     used = [s for s in samples if not s.holdout]
     alone = [s for s in used if s.concurrency == 1]
@@ -316,6 +328,14 @@ def fit_profile(samples: Sequence[Sample], base: ModelProfile) -> TierFit:
         )
         extra_ms = 0.0
 
+    overhead_ms = prefill.intercept - decode_base_ms
+    if overhead_ms < 0:
+        notes.append(
+            f"fitted per_request_overhead_ms was {overhead_ms:.6g}, negative; set to 0. "
+            "First tokens arrived sooner than prefill plus one decode step would take."
+        )
+        overhead_ms = 0.0
+
     queued = _queueing_note(used)
     if queued:
         notes.append(queued)
@@ -325,8 +345,78 @@ def fit_profile(samples: Sequence[Sample], base: ModelProfile) -> TierFit:
         prefill_ms_per_token=prefill_ms,
         decode_base_ms=decode_base_ms,
         decode_ms_per_extra_seq=extra_ms,
+        per_request_overhead_ms=overhead_ms,
     )
     return TierFit(profile, prefill, decode, max(s.concurrency for s in used), tuple(notes))
+
+
+FITTED = (
+    "prefill_ms_per_token",
+    "decode_base_ms",
+    "decode_ms_per_extra_seq",
+    "per_request_overhead_ms",
+)
+
+
+def _spread(values: Sequence[float]) -> dict[str, Any]:
+    """The values, their mean, and their range as a percentage of the mean."""
+    mean = sum(values) / len(values)
+    return {
+        "values": list(values),
+        "min": min(values),
+        "max": max(values),
+        "mean": mean,
+        "range_percent_of_mean": 100 * (max(values) - min(values)) / mean if mean else None,
+    }
+
+
+def spread_across_repeats(
+    samples: Sequence[Sample], base: ModelProfile
+) -> dict[str, dict[str, Any]] | None:
+    """Fit each repeat on its own and say how far apart the fitted values are.
+
+    Every repeat is a complete pass over the scenarios, minutes or seconds after the
+    one before, so this is the spread to expect from measuring again on the same
+    machine in the same session. The held-out repeat is included: nothing is being
+    checked against it here. None with fewer than two repeats that can be fitted.
+    """
+    fits: list[ModelProfile] = []
+    for repeat in sorted({s.repeat for s in samples}):
+        one = [dataclasses.replace(s, holdout=False) for s in samples if s.repeat == repeat]
+        try:
+            fits.append(fit_profile(one, base).profile)
+        except ValueError:
+            continue
+    if len(fits) < 2:
+        return None
+    return {name: _spread([getattr(fit, name) for fit in fits]) for name in FITTED}
+
+
+def spread_across_runs(documents: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """For each tier in every document: each fitted parameter over the runs, and its spread."""
+    tiers = [t for t in documents[0]["profiles"] if all(t in d["profiles"] for d in documents)]
+    return {
+        tier: {
+            name: _spread([float(d["profiles"][tier].get(name, 0.0)) for d in documents])
+            for name in FITTED
+        }
+        for tier in tiers
+    }
+
+
+def spread_summary(spread: dict[str, dict[str, Any]]) -> str:
+    lines = [
+        f"{'tier':9} {'parameter':26} {'min':>10} {'mean':>10} {'max':>10} {'range':>8}  values"
+    ]
+    for tier, parameters in spread.items():
+        for name, s in parameters.items():
+            wide = s["range_percent_of_mean"]
+            lines.append(
+                f"{tier:9} {name:26} {s['min']:10.4f} {s['mean']:10.4f} {s['max']:10.4f} "
+                f"{'-' if wide is None else format(wide, '.1f') + '%':>8}  "
+                + ", ".join(f"{v:.4f}" for v in s["values"])
+            )
+    return "\n".join(lines)
 
 
 def _queueing_note(samples: Sequence[Sample]) -> str | None:
@@ -419,6 +509,23 @@ def errors(samples: Sequence[Sample], simulated: Sequence[tuple[float, float]]) 
         return mape(measured, [sim[which] for _, sim in rows])
 
     return Errors(one(False, 0), one(False, 1), one(True, 0), one(True, 1))
+
+
+def errors_by_concurrency(
+    samples: Sequence[Sample], simulated: Sequence[tuple[float, float]]
+) -> dict[str, dict[str, float | None]]:
+    """MAPE over all samples, split by how many requests were sent together."""
+    found: dict[str, dict[str, float | None]] = {}
+    for level in sorted({s.concurrency for s in samples}):
+        rows = [
+            (s, sim) for s, sim in zip(samples, simulated, strict=True) if s.concurrency == level
+        ]
+        found[str(level)] = {
+            "requests": len(rows),
+            "ttft": mape([s.ttft_ms for s, _ in rows], [sim[0] for _, sim in rows]),
+            "total": mape([s.total_ms for s, _ in rows], [sim[1] for _, sim in rows]),
+        }
+    return found
 
 
 # --- plots ---------------------------------------------------------------------------------
@@ -625,6 +732,56 @@ async def describe_server(client: httpx.AsyncClient, server: LlamaServer) -> dic
     return info
 
 
+async def describe_placement(
+    client: httpx.AsyncClient, server: LlamaServer
+) -> dict[str, Any] | None:
+    """How much of the tier's model the server holds on the GPU and on the CPU, right now.
+
+    Read from Ollama's process list (``/api/ps``), which reports a loaded model's size and
+    how much of it is in VRAM. None when the server is not Ollama, does not list the model,
+    or will not say: the placement is then unknown, not assumed to be all on the GPU.
+    """
+    if not server.model:
+        return None
+    try:
+        response = await client.get(f"{server.url}/api/ps", timeout=5)
+        models = response.json().get("models", []) if response.status_code == 200 else []
+    except (httpx.HTTPError, ValueError, AttributeError):
+        return None
+    for entry in models if isinstance(models, list) else []:
+        if not isinstance(entry, dict) or server.model not in (
+            entry.get("name"),
+            entry.get("model"),
+        ):
+            continue
+        size, in_vram = entry.get("size"), entry.get("size_vram")
+        if not isinstance(size, int) or not isinstance(in_vram, int) or size <= 0:
+            return None
+        gpu_percent = round(100 * min(in_vram, size) / size, 1)
+        return {
+            "source": "ollama /api/ps",
+            "size_bytes": size,
+            "size_vram_bytes": in_vram,
+            "gpu_percent": gpu_percent,
+            "cpu_percent": round(100 - gpu_percent, 1),
+        }
+    return None
+
+
+def hardware_limited_note(placements: Sequence[dict[str, Any]]) -> str | None:
+    """The note for a tier whose model was partly on the CPU in any of these placements."""
+    offloaded = [p for p in placements if p["size_vram_bytes"] < p["size_bytes"]]
+    if not offloaded:
+        return None
+    worst = max(offloaded, key=lambda p: p["cpu_percent"])
+    return (
+        f"hardware-limited: the model did not fit on the GPU. Ollama had {worst['cpu_percent']:g}% "
+        f"of it on the CPU ({worst['size_vram_bytes'] / 2**30:.1f} of "
+        f"{worst['size_bytes'] / 2**30:.1f} GiB in VRAM) when it was measured. These timings are "
+        "of this model on hardware too small for it, not of the model."
+    )
+
+
 def describe_machine() -> dict[str, Any]:
     return {
         "cpu": _cpu_name(),
@@ -689,6 +846,10 @@ async def calibrate(
         name = tier.value
         document["servers"][name] = await describe_server(client, config.servers[tier])
         samples, failures = await measure_tier(registry, clock, name, plan, run_id)
+        # Asked straight after measuring, while the model is still loaded.
+        placement = await describe_placement(client, config.servers[tier])
+        document["servers"][name]["placement"] = placement
+        limited = hardware_limited_note([placement]) if placement else None
         fitted = fit_profile(samples, PROFILES[tier])
         simulated = await simulate(samples, fitted.profile)
         error = errors(samples, simulated)
@@ -701,6 +862,7 @@ async def calibrate(
             "prefill_ms_per_token": fitted.profile.prefill_ms_per_token,
             "decode_base_ms": fitted.profile.decode_base_ms,
             "decode_ms_per_extra_seq": fitted.profile.decode_ms_per_extra_seq,
+            "per_request_overhead_ms": fitted.profile.per_request_overhead_ms,
             "max_concurrency_measured": fitted.max_concurrency_measured,
             "samples": len(samples),
             "failed_requests": len(failures),
@@ -708,23 +870,210 @@ async def calibrate(
                 "ttft_vs_prompt_tokens": dataclasses.asdict(fitted.prefill),
                 "per_token_vs_extra_sequences": dataclasses.asdict(fitted.decode),
             },
+            # None when the server did not say where the model was loaded.
+            "hardware_limited": bool(limited) if placement else None,
             "mape_percent": dataclasses.asdict(error),
-            "notes": [*fitted.notes, *failures],
+            "mape_percent_by_concurrency": errors_by_concurrency(samples, simulated),
+            "spread_across_repeats": spread_across_repeats(samples, PROFILES[tier]),
+            "notes": [*fitted.notes, *([limited] if limited else []), *failures],
         }
     return CalibrationRun(document, runs)
 
 
-def write_outputs(run: CalibrationRun, out_dir: Path) -> None:
-    """Write calibrated_profiles.json, samples.json and one plot per tier."""
+# --- combining saved runs -------------------------------------------------------------------
+
+# A parameter whose highest and lowest fitted values differ by more than this share of its
+# median, over the runs combined, is marked unstable.
+UNSTABLE_RANGE_PERCENT = 25.0
+
+
+def median(values: Sequence[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    return ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def _combine(values: Sequence[float]) -> dict[str, Any]:
+    mid = median(values)
+    wide = 100 * (max(values) - min(values)) / mid if mid else None
+    return {
+        "median": mid,
+        "min": min(values),
+        "max": max(values),
+        "range_percent_of_median": wide,
+        "unstable": wide is not None and wide > UNSTABLE_RANGE_PERCENT,
+        "values": list(values),
+    }
+
+
+def load_run(directory: Path) -> tuple[dict[str, Any], list[Sample]]:
+    """A saved run: its calibrated_profiles.json and every sample in its samples.json."""
+    document = json.loads((directory / "calibrated_profiles.json").read_text(encoding="utf-8"))
+    if "aggregated_from" in document:
+        raise ValueError(f"{directory} holds an aggregate, not a measured run")
+    samples = json.loads((directory / "samples.json").read_text(encoding="utf-8"))
+    return document, [Sample(**s) for s in samples]
+
+
+async def aggregate(
+    runs: Sequence[tuple[str, dict[str, Any], Sequence[Sample]]],
+) -> CalibrationRun:
+    """Combine saved runs into one calibration: the median of each fitted parameter.
+
+    ``runs`` is (name, document, samples) for every run, in the order given. No run is
+    preferred or dropped: each parameter is the median over all of them, reported with its
+    lowest and highest value, and marked unstable if those are more than
+    ``UNSTABLE_RANGE_PERCENT`` of the median apart. The simulator is then run on the median
+    profile against every run's requests, so the errors are those of the combined profile.
+    A tier counts only if every run measured it.
+    """
+    if len(runs) < 2:
+        raise ValueError("need at least two runs to aggregate")
+    names = [name for name, _, _ in runs]
+    documents = [document for _, document, _ in runs]
+    first = documents[0]
+    differing = [
+        key
+        for key in ("hardware", "plan", "endpoint")
+        if any(d.get(key) != first.get(key) for d in documents)
+    ]
+    document: dict[str, Any] = {
+        "schema": SCHEMA_VERSION,
+        "what_this_is": (
+            f"The median, over {len(runs)} calibration runs, of simulator timing parameters "
+            "fitted to real measurements on the machine described under 'hardware'. Each "
+            "parameter carries its lowest and highest value; one marked unstable did not "
+            "repeat. They do not transfer to other hardware, models, quantizations or server "
+            "versions."
+        ),
+        "measured_at": f"{first['measured_at']} to {documents[-1]['measured_at']}",
+        "aggregated_from": [
+            {"run": name, "measured_at": d["measured_at"], "notes": d.get("notes", "")}
+            for name, d in zip(names, documents, strict=True)
+        ],
+        "unstable_above_range_percent": UNSTABLE_RANGE_PERCENT,
+        "hardware": first["hardware"],
+        "endpoint": first["endpoint"],
+        "plan": first["plan"],
+        "notes": (
+            f"Median of {len(runs)} runs ({', '.join(names)}); no run was preferred or dropped."
+            + (f" The runs differ in: {', '.join(differing)}." if differing else "")
+        ),
+        "servers": {},
+        "profiles": {},
+    }
+    tiers: dict[str, TierRun] = {}
+    for name in [t for t in first["profiles"] if all(t in d["profiles"] for d in documents)]:
+        tier = Tier(name)
+        fitted = [d["profiles"][name] for d in documents]
+        combined = {
+            parameter: _combine([float(p.get(parameter, 0.0)) for p in fitted])
+            for parameter in FITTED
+        }
+        profile = dataclasses.replace(
+            PROFILES[tier], **{parameter: c["median"] for parameter, c in combined.items()}
+        )
+        samples: list[Sample] = []
+        simulated: list[tuple[float, float]] = []
+        for _, _, run_samples in runs:
+            mine = [s for s in run_samples if s.tier == name]
+            samples.extend(mine)
+            simulated.extend(await simulate(mine, profile))
+
+        placements = [d["servers"][name].get("placement") for d in documents]
+        reported = [p for p in placements if p]
+        notes = [
+            f"unstable: {parameter} ranged from {c['min']:.4g} to {c['max']:.4g} over "
+            f"{len(runs)} runs, {c['range_percent_of_median']:.1f}% of its median "
+            f"(limit {UNSTABLE_RANGE_PERCENT:g}%). The median is reported but did not repeat."
+            for parameter, c in combined.items()
+            if c["unstable"]
+        ]
+        limited = hardware_limited_note(reported)
+        if limited:
+            notes.append(limited)
+        notes.extend(
+            f"{run}: {note}"
+            for run, p in zip(names, fitted, strict=True)
+            for note in p.get("notes", [])
+            if not note.startswith("hardware-limited")
+        )
+        server = documents[-1]["servers"][name]
+        document["servers"][name] = {**server, "placement": reported[-1] if reported else None}
+        document["profiles"][name] = {
+            **{parameter: c["median"] for parameter, c in combined.items()},
+            "max_concurrency_measured": min(int(p["max_concurrency_measured"]) for p in fitted),
+            "samples": len(samples),
+            "failed_requests": sum(int(p.get("failed_requests", 0)) for p in fitted),
+            "aggregate": combined,
+            "unstable_parameters": [p for p, c in combined.items() if c["unstable"]],
+            # None when no run recorded where the model was loaded.
+            "hardware_limited": bool(limited) if reported else None,
+            "placement_by_run": dict(zip(names, placements, strict=True)),
+            "fit_r2_by_run": {
+                which: [p["fit"][which]["r2"] for p in fitted]
+                for which in ("ttft_vs_prompt_tokens", "per_token_vs_extra_sequences")
+            },
+            "mape_percent": dataclasses.asdict(errors(samples, simulated)),
+            "mape_percent_by_concurrency": errors_by_concurrency(samples, simulated),
+            "notes": notes,
+        }
+        tiers[name] = TierRun(
+            f"{name} ({server['model']}): simulator on the median of {len(runs)} runs "
+            "vs real model",
+            samples,
+            simulated,
+        )
+    return CalibrationRun(document, tiers)
+
+
+def aggregate_summary(document: dict[str, Any]) -> str:
+    def number(value: float | None) -> str:
+        return "-" if value is None else f"{value:.1f}%"
+
+    lines = [
+        f"{'tier':9} {'parameter':26} {'median':>10} {'min':>10} {'max':>10} {'range':>8}  stable?"
+    ]
+    for tier, p in document["profiles"].items():
+        for parameter, c in p["aggregate"].items():
+            lines.append(
+                f"{tier:9} {parameter:26} {c['median']:10.4f} {c['min']:10.4f} {c['max']:10.4f} "
+                f"{number(c['range_percent_of_median']):>8}  "
+                + ("UNSTABLE" if c["unstable"] else "ok")
+            )
+    lines.append("")
+    lines.append("Simulator on the median profile against every run's requests (MAPE):")
+    for tier, p in document["profiles"].items():
+        e = p["mape_percent"]
+        by_level = "; ".join(
+            f"{level} at once: TTFT {number(v['ttft'])}, total {number(v['total'])}"
+            for level, v in p["mape_percent_by_concurrency"].items()
+        )
+        lines.append(
+            f"{tier:9} n={p['samples']} TTFT fit {number(e['ttft_fit'])} held out "
+            f"{number(e['ttft_holdout'])}; total fit {number(e['total_fit'])} held out "
+            f"{number(e['total_holdout'])}; {by_level}"
+        )
+        lines.extend(f"  note: {note}" for note in p["notes"])
+    return "\n".join(lines)
+
+
+def write_outputs(run: CalibrationRun, out_dir: Path, *, samples: bool = True) -> None:
+    """Write calibrated_profiles.json, one plot per tier and, unless told not to, samples.json.
+
+    An aggregate is written without samples: they stay in the runs it was made from.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     for name, tier in run.tiers.items():
         plot_tier(out_dir / f"{name}.png", tier.title, tier.samples, tier.simulated)
     (out_dir / "calibrated_profiles.json").write_text(
         json.dumps(run.document, indent=2) + "\n", encoding="utf-8", newline="\n"
     )
-    samples = [dataclasses.asdict(s) for tier in run.tiers.values() for s in tier.samples]
+    if not samples:
+        return
+    rows = [dataclasses.asdict(s) for tier in run.tiers.values() for s in tier.samples]
     (out_dir / "samples.json").write_text(
-        json.dumps(samples, indent=1) + "\n", encoding="utf-8", newline="\n"
+        json.dumps(rows, indent=1) + "\n", encoding="utf-8", newline="\n"
     )
 
 
@@ -734,17 +1083,40 @@ def summary(document: dict[str, Any]) -> str:
 
     lines = [
         f"{'tier':9} {'prefill ms/tok':>14} {'decode base ms':>14} {'ms per extra':>12} "
+        f"{'overhead ms':>11} "
         f"{'n':>4} {'TTFT MAPE fit':>13} {'held out':>8} {'total MAPE fit':>14} {'held out':>8}"
     ]
     for tier, p in document["profiles"].items():
         e = p["mape_percent"]
         lines.append(
             f"{tier:9} {p['prefill_ms_per_token']:14.4f} {p['decode_base_ms']:14.3f} "
-            f"{p['decode_ms_per_extra_seq']:12.3f} {p['samples']:4d} "
+            f"{p['decode_ms_per_extra_seq']:12.3f} {p['per_request_overhead_ms']:11.1f} "
+            f"{p['samples']:4d} "
             f"{number(e['ttft_fit']):>12}% {number(e['ttft_holdout']):>7}% "
             f"{number(e['total_fit']):>13}% {number(e['total_holdout']):>7}%"
         )
         lines.extend(f"  note: {note}" for note in p["notes"])
+    lines.append("")
+    lines.append("R2 of the two fits, and MAPE by how many requests were sent together:")
+    for tier, p in document["profiles"].items():
+        fit = p["fit"]
+        by_level = "; ".join(
+            f"{level} at once: TTFT {number(e['ttft'])}%, total {number(e['total'])}%"
+            for level, e in p["mape_percent_by_concurrency"].items()
+        )
+        lines.append(
+            f"{tier:9} R2 TTFT fit {number(fit['ttft_vs_prompt_tokens']['r2'], '.3f')}, "
+            f"R2 decode fit {number(fit['per_token_vs_extra_sequences']['r2'], '.3f')}; {by_level}"
+        )
+    spread = {
+        tier: p["spread_across_repeats"]
+        for tier, p in document["profiles"].items()
+        if p["spread_across_repeats"]
+    }
+    if spread:
+        lines.append("")
+        lines.append("Each repeat fitted on its own (spread within this run):")
+        lines.append(spread_summary(spread))
     return "\n".join(lines)
 
 
@@ -786,7 +1158,38 @@ def main() -> None:
     parser.add_argument("--concurrency", type=_ints, help="e.g. 1,2,4; at most the server's slots")
     parser.add_argument("--repeats", type=int, default=CalibrationPlan().repeats)
     parser.add_argument("--notes", default="", help="free text stored in the output")
+    parser.add_argument(
+        "--compare",
+        type=Path,
+        nargs="+",
+        metavar="FILE",
+        help="print the spread of the fitted parameters over these calibration files and stop",
+    )
+    parser.add_argument(
+        "--aggregate",
+        type=Path,
+        nargs="+",
+        metavar="DIR",
+        help="combine every saved run in these folders into --out (median and range) and stop",
+    )
     args = parser.parse_args()
+    if args.aggregate:
+        if args.out.resolve() in {d.resolve() for d in args.aggregate}:
+            parser.error("--out must not be one of the runs being aggregated")
+        loaded = [(d.name, *load_run(d)) for d in args.aggregate]
+        combined = asyncio.run(aggregate(loaded))
+        write_outputs(combined, args.out, samples=False)
+        print("MEASURED: median of", len(loaded), "calibration runs. Nothing was re-measured.")
+        print(aggregate_summary(combined.document))
+        print(f"wrote {args.out / 'calibrated_profiles.json'} and one plot per tier")
+        return
+    if args.compare:
+        documents = [json.loads(path.read_text(encoding="utf-8")) for path in args.compare]
+        print("MEASURED: fitted parameters of", len(documents), "calibration runs.")
+        for path, document in zip(args.compare, documents, strict=True):
+            print(f"  {path}: measured at {document['measured_at']}")
+        print(spread_summary(spread_across_runs(documents)))
+        return
     run = asyncio.run(_measure(args))
     write_outputs(run, args.out)
     print("MEASURED on this machine against real model servers.")

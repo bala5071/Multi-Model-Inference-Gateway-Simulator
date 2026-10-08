@@ -1,7 +1,40 @@
 {
-  "schema": 1,
-  "what_this_is": "Simulator timing parameters fitted to real measurements on the machine described under 'hardware'. They do not transfer to other hardware, models, quantizations or server versions.",
-  "measured_at": "2026-10-07T23:58:07+00:00",
+  "schema": 3,
+  "what_this_is": "The median, over 6 calibration runs, of simulator timing parameters fitted to real measurements on the machine described under 'hardware'. Each parameter carries its lowest and highest value; one marked unstable did not repeat. They do not transfer to other hardware, models, quantizations or server versions.",
+  "measured_at": "2026-10-08T18:03:07+00:00 to 2026-10-08T18:44:07+00:00",
+  "aggregated_from": [
+    {
+      "run": "run1",
+      "measured_at": "2026-10-08T18:03:07+00:00",
+      "notes": "Run 1 of 3 on 2026-10-08, Ollama started with OLLAMA_NUM_PARALLEL=4; other applications were not closed."
+    },
+    {
+      "run": "run2",
+      "measured_at": "2026-10-08T18:07:35+00:00",
+      "notes": "Run 2 of 3 on 2026-10-08, Ollama started with OLLAMA_NUM_PARALLEL=4; other applications were not closed."
+    },
+    {
+      "run": "run3",
+      "measured_at": "2026-10-08T18:12:08+00:00",
+      "notes": "Run 3 of 3 on 2026-10-08, Ollama started with OLLAMA_NUM_PARALLEL=4; other applications were not closed."
+    },
+    {
+      "run": "run4",
+      "measured_at": "2026-10-08T18:36:20+00:00",
+      "notes": "Run 4 of 6 on 2026-10-08 (second session of three runs), Ollama started with OLLAMA_NUM_PARALLEL=4; other applications were not closed."
+    },
+    {
+      "run": "run5",
+      "measured_at": "2026-10-08T18:40:10+00:00",
+      "notes": "Run 5 of 6 on 2026-10-08 (second session of three runs), Ollama started with OLLAMA_NUM_PARALLEL=4; other applications were not closed."
+    },
+    {
+      "run": "run6",
+      "measured_at": "2026-10-08T18:44:07+00:00",
+      "notes": "Run 6 of 6 on 2026-10-08 (second session of three runs), Ollama started with OLLAMA_NUM_PARALLEL=4; other applications were not closed."
+    }
+  ],
+  "unstable_above_range_percent": 25.0,
   "hardware": {
     "cpu": "Intel(R) Core(TM) Ultra 7 155H",
     "logical_cores": 22,
@@ -29,13 +62,13 @@
       2,
       4
     ],
-    "repeats": 3,
+    "repeats": 5,
     "base_prompt_words": 32,
     "base_output_tokens": 64,
     "prompt_sweep_output_tokens": 8,
     "request_timeout_ms": 300000.0
   },
-  "notes": "Ollama started with OLLAMA_NUM_PARALLEL=4, otherwise default settings (4096-token context). Single run. Other applications on the machine were not closed. Checked with Ollama's process list right after the run: llama3.1:8b did not fit entirely on the GPU (7.4 of 8.65 GB in VRAM), so the premium tier ran partly on the CPU; the 1B model was fully on the GPU; the 3B model was not checked.",
+  "notes": "Median of 6 runs (run1, run2, run3, run4, run5, run6); no run was preferred or dropped.",
   "servers": {
     "economy": {
       "url": "http://127.0.0.1:11434",
@@ -43,7 +76,14 @@
       "version": "0.12.6",
       "model": "llama3.2:1b-instruct-q4_K_M",
       "quantization": "Q4_K_M",
-      "parameter_size": "1.2B"
+      "parameter_size": "1.2B",
+      "placement": {
+        "source": "ollama /api/ps",
+        "size_bytes": 3012384768,
+        "size_vram_bytes": 3012384768,
+        "gpu_percent": 100.0,
+        "cpu_percent": 0.0
+      }
     },
     "standard": {
       "url": "http://127.0.0.1:11434",
@@ -51,7 +91,14 @@
       "version": "0.12.6",
       "model": "llama3.2:3b",
       "quantization": "Q4_K_M",
-      "parameter_size": "3.2B"
+      "parameter_size": "3.2B",
+      "placement": {
+        "source": "ollama /api/ps",
+        "size_bytes": 5364871168,
+        "size_vram_bytes": 5364871168,
+        "gpu_percent": 100.0,
+        "cpu_percent": 0.0
+      }
     },
     "premium": {
       "url": "http://127.0.0.1:11434",
@@ -59,96 +106,460 @@
       "version": "0.12.6",
       "model": "llama3.1:8b",
       "quantization": "Q4_K_M",
-      "parameter_size": "8.0B"
+      "parameter_size": "8.0B",
+      "placement": {
+        "source": "ollama /api/ps",
+        "size_bytes": 8650745856,
+        "size_vram_bytes": 8219789312,
+        "gpu_percent": 95.0,
+        "cpu_percent": 5.0
+      }
     }
   },
   "profiles": {
     "economy": {
-      "prefill_ms_per_token": 0.2098862600736902,
-      "decode_base_ms": 6.666300195545448,
-      "decode_ms_per_extra_seq": 1.914975700648052,
+      "prefill_ms_per_token": 0.19604634758337078,
+      "decode_base_ms": 6.7105306756000225,
+      "decode_ms_per_extra_seq": 2.6755785484127514,
+      "per_request_overhead_ms": 90.07723028380775,
       "max_concurrency_measured": 4,
-      "samples": 42,
+      "samples": 420,
       "failed_requests": 0,
-      "fit": {
-        "ttft_vs_prompt_tokens": {
-          "slope": 0.2098862600736902,
-          "intercept": 92.27098918130658,
-          "r2": 0.9965413882278139,
-          "n": 16
+      "aggregate": {
+        "prefill_ms_per_token": {
+          "median": 0.19604634758337078,
+          "min": 0.1821103407316717,
+          "max": 0.2141076855149056,
+          "range_percent_of_median": 16.321316452797824,
+          "unstable": false,
+          "values": [
+            0.18660341525295152,
+            0.19569514846424002,
+            0.1821103407316717,
+            0.19639754670250154,
+            0.19994504839710248,
+            0.2141076855149056
+          ]
         },
-        "per_token_vs_extra_sequences": {
-          "slope": 1.914975700648052,
-          "intercept": 6.666300195545448,
-          "r2": 0.9329485020385708,
-          "n": 28
+        "decode_base_ms": {
+          "median": 6.7105306756000225,
+          "min": 6.480491213585903,
+          "max": 6.7413040760987215,
+          "range_percent_of_median": 3.8866205240839244,
+          "unstable": false,
+          "values": [
+            6.7284424031023615,
+            6.7413040760987215,
+            6.6103750115821605,
+            6.697610377812161,
+            6.480491213585903,
+            6.723450973387884
+          ]
+        },
+        "decode_ms_per_extra_seq": {
+          "median": 2.6755785484127514,
+          "min": 2.0921540609116374,
+          "max": 3.6855128611040624,
+          "range_percent_of_median": 59.551935081018726,
+          "unstable": true,
+          "values": [
+            2.0921540609116374,
+            2.262510570272895,
+            3.6855128611040624,
+            3.08157435161878,
+            2.289529782208391,
+            3.061627314617112
+          ]
+        },
+        "per_request_overhead_ms": {
+          "median": 90.07723028380775,
+          "min": 75.37140817616577,
+          "max": 113.68355051489442,
+          "range_percent_of_median": 42.532549255808576,
+          "unstable": true,
+          "values": [
+            95.36659420056073,
+            85.88462880981172,
+            94.26983175780377,
+            75.37140817616577,
+            82.91458096693867,
+            113.68355051489442
+          ]
         }
       },
-      "mape_percent": {
-        "ttft_fit": 56.864098015184574,
-        "total_fit": 19.83144703470284,
-        "ttft_holdout": 54.0941747574093,
-        "total_holdout": 18.78581652564697
+      "unstable_parameters": [
+        "decode_ms_per_extra_seq",
+        "per_request_overhead_ms"
+      ],
+      "hardware_limited": false,
+      "placement_by_run": {
+        "run1": null,
+        "run2": null,
+        "run3": null,
+        "run4": {
+          "source": "ollama /api/ps",
+          "size_bytes": 3012384768,
+          "size_vram_bytes": 3012384768,
+          "gpu_percent": 100.0,
+          "cpu_percent": 0.0
+        },
+        "run5": {
+          "source": "ollama /api/ps",
+          "size_bytes": 3012384768,
+          "size_vram_bytes": 3012384768,
+          "gpu_percent": 100.0,
+          "cpu_percent": 0.0
+        },
+        "run6": {
+          "source": "ollama /api/ps",
+          "size_bytes": 3012384768,
+          "size_vram_bytes": 3012384768,
+          "gpu_percent": 100.0,
+          "cpu_percent": 0.0
+        }
       },
-      "notes": []
+      "fit_r2_by_run": {
+        "ttft_vs_prompt_tokens": [
+          0.9663584870835336,
+          0.993169328122436,
+          0.9818762558661599,
+          0.995937370911984,
+          0.9953958330944808,
+          0.960059314807077
+        ],
+        "per_token_vs_extra_sequences": [
+          0.9400641851351113,
+          0.8991075863954652,
+          0.6312962500787123,
+          0.9123457080385491,
+          0.9288568956446552,
+          0.9293521112406044
+        ]
+      },
+      "mape_percent": {
+        "ttft_fit": 12.031320238292253,
+        "total_fit": 8.026279137534868,
+        "ttft_holdout": 13.468411421395544,
+        "total_holdout": 8.12912086663845
+      },
+      "mape_percent_by_concurrency": {
+        "1": {
+          "requests": 240,
+          "ttft": 9.271583976538142,
+          "total": 7.045381067146226
+        },
+        "2": {
+          "requests": 60,
+          "ttft": 14.348478483336123,
+          "total": 10.874938219803163
+        },
+        "4": {
+          "requests": 120,
+          "ttft": 17.398177467450843,
+          "total": 8.635734947550509
+        }
+      },
+      "notes": [
+        "unstable: decode_ms_per_extra_seq ranged from 2.092 to 3.686 over 6 runs, 59.6% of its median (limit 25%). The median is reported but did not repeat.",
+        "unstable: per_request_overhead_ms ranged from 75.37 to 113.7 over 6 runs, 42.5% of its median (limit 25%). The median is reported but did not repeat."
+      ]
     },
     "standard": {
-      "prefill_ms_per_token": 0.39146418511841363,
-      "decode_base_ms": 14.19380724152019,
-      "decode_ms_per_extra_seq": 4.086094303814956,
+      "prefill_ms_per_token": 0.37539946480443515,
+      "decode_base_ms": 15.297783920187612,
+      "decode_ms_per_extra_seq": 4.1332772531601165,
+      "per_request_overhead_ms": 88.43684341604634,
       "max_concurrency_measured": 4,
-      "samples": 42,
+      "samples": 420,
       "failed_requests": 0,
-      "fit": {
-        "ttft_vs_prompt_tokens": {
-          "slope": 0.39146418511841363,
-          "intercept": 92.69947649667162,
-          "r2": 0.9990376057077083,
-          "n": 16
+      "aggregate": {
+        "prefill_ms_per_token": {
+          "median": 0.37539946480443515,
+          "min": 0.3521305956030818,
+          "max": 0.4220650520096066,
+          "range_percent_of_median": 18.629343662745296,
+          "unstable": false,
+          "values": [
+            0.3521305956030818,
+            0.3626369115292473,
+            0.36733380303639895,
+            0.4220650520096066,
+            0.4092950187669001,
+            0.38346512657247134
+          ]
         },
-        "per_token_vs_extra_sequences": {
-          "slope": 4.086094303814956,
-          "intercept": 14.19380724152019,
-          "r2": 0.9816822446012257,
-          "n": 28
+        "decode_base_ms": {
+          "median": 15.297783920187612,
+          "min": 14.747385049006759,
+          "max": 22.17124555097891,
+          "range_percent_of_median": 48.52899309275316,
+          "unstable": true,
+          "values": [
+            15.301267798650564,
+            14.860299488577123,
+            14.747385049006759,
+            15.294300041724659,
+            16.014920145103392,
+            22.17124555097891
+          ]
+        },
+        "decode_ms_per_extra_seq": {
+          "median": 4.1332772531601165,
+          "min": 1.7053199767152583,
+          "max": 4.905171462866419,
+          "range_percent_of_median": 77.4168121362945,
+          "unstable": true,
+          "values": [
+            4.124381955495752,
+            3.660918901789973,
+            4.142172550824481,
+            4.427626999963634,
+            4.905171462866419,
+            1.7053199767152583
+          ]
+        },
+        "per_request_overhead_ms": {
+          "median": 88.43684341604634,
+          "min": 65.47289590123503,
+          "max": 126.14184221789179,
+          "range_percent_of_median": 68.60143801293651,
+          "unstable": true,
+          "values": [
+            91.87102487156807,
+            85.00266196052463,
+            95.60609759168264,
+            65.47289590123503,
+            70.6634796570709,
+            126.14184221789179
+          ]
         }
       },
-      "mape_percent": {
-        "ttft_fit": 42.599133493306276,
-        "total_fit": 10.659926948667716,
-        "ttft_holdout": 42.21254486143807,
-        "total_holdout": 10.48139653555151
+      "unstable_parameters": [
+        "decode_base_ms",
+        "decode_ms_per_extra_seq",
+        "per_request_overhead_ms"
+      ],
+      "hardware_limited": false,
+      "placement_by_run": {
+        "run1": null,
+        "run2": null,
+        "run3": null,
+        "run4": {
+          "source": "ollama /api/ps",
+          "size_bytes": 5364871168,
+          "size_vram_bytes": 5364871168,
+          "gpu_percent": 100.0,
+          "cpu_percent": 0.0
+        },
+        "run5": {
+          "source": "ollama /api/ps",
+          "size_bytes": 5364871168,
+          "size_vram_bytes": 5364871168,
+          "gpu_percent": 100.0,
+          "cpu_percent": 0.0
+        },
+        "run6": {
+          "source": "ollama /api/ps",
+          "size_bytes": 5364871168,
+          "size_vram_bytes": 5364871168,
+          "gpu_percent": 100.0,
+          "cpu_percent": 0.0
+        }
       },
-      "notes": []
+      "fit_r2_by_run": {
+        "ttft_vs_prompt_tokens": [
+          0.9910077257031533,
+          0.9929896011684517,
+          0.9920163441925163,
+          0.9966296705709351,
+          0.997237476901207,
+          0.9479774463291752
+        ],
+        "per_token_vs_extra_sequences": [
+          0.9050441247854409,
+          0.9347742808618136,
+          0.9186069146249974,
+          0.9514033054761927,
+          0.80061400343899,
+          0.04334820162232389
+        ]
+      },
+      "mape_percent": {
+        "ttft_fit": 16.275594927008648,
+        "total_fit": 7.511669712760768,
+        "ttft_holdout": 15.467467344781497,
+        "total_holdout": 7.964587582521911
+      },
+      "mape_percent_by_concurrency": {
+        "1": {
+          "requests": 240,
+          "ttft": 10.380581595078878,
+          "total": 8.06022561408523
+        },
+        "2": {
+          "requests": 60,
+          "ttft": 21.521957579052756,
+          "total": 10.407991961650804
+        },
+        "4": {
+          "requests": 120,
+          "ttft": 24.876750957287125,
+          "total": 5.28343929449963
+        }
+      },
+      "notes": [
+        "unstable: decode_base_ms ranged from 14.75 to 22.17 over 6 runs, 48.5% of its median (limit 25%). The median is reported but did not repeat.",
+        "unstable: decode_ms_per_extra_seq ranged from 1.705 to 4.905 over 6 runs, 77.4% of its median (limit 25%). The median is reported but did not repeat.",
+        "unstable: per_request_overhead_ms ranged from 65.47 to 126.1 over 6 runs, 68.6% of its median (limit 25%). The median is reported but did not repeat."
+      ]
     },
     "premium": {
-      "prefill_ms_per_token": 1.0811782788414679,
-      "decode_base_ms": 49.99154168659865,
-      "decode_ms_per_extra_seq": 15.989924240760145,
+      "prefill_ms_per_token": 0.86225807289451,
+      "decode_base_ms": 45.13840485128059,
+      "decode_ms_per_extra_seq": 24.759616220374745,
+      "per_request_overhead_ms": 161.93209566970938,
       "max_concurrency_measured": 4,
-      "samples": 42,
+      "samples": 420,
       "failed_requests": 0,
-      "fit": {
-        "ttft_vs_prompt_tokens": {
-          "slope": 1.0811782788414679,
-          "intercept": 139.29235682126966,
-          "r2": 0.9950202327384663,
-          "n": 16
+      "aggregate": {
+        "prefill_ms_per_token": {
+          "median": 0.86225807289451,
+          "min": 0.7637389930873507,
+          "max": 0.9576643094514801,
+          "range_percent_of_median": 22.49040310091182,
+          "unstable": false,
+          "values": [
+            0.8297971717424499,
+            0.8554823961974226,
+            0.7637389930873507,
+            0.9197657169884509,
+            0.9576643094514801,
+            0.8690337495915974
+          ]
         },
-        "per_token_vs_extra_sequences": {
-          "slope": 15.989924240760145,
-          "intercept": 49.99154168659865,
-          "r2": 0.9752134361197636,
-          "n": 28
+        "decode_base_ms": {
+          "median": 45.13840485128059,
+          "min": 42.76666655261358,
+          "max": 48.32842579449937,
+          "range_percent_of_median": 12.32156798675175,
+          "unstable": false,
+          "values": [
+            46.021762258949046,
+            45.73990521038932,
+            48.32842579449937,
+            43.42405516006932,
+            42.76666655261358,
+            44.536904492171864
+          ]
+        },
+        "decode_ms_per_extra_seq": {
+          "median": 24.759616220374745,
+          "min": 7.743672227764236,
+          "max": 42.85989766063244,
+          "range_percent_of_median": 141.82863385406992,
+          "unstable": true,
+          "values": [
+            33.5359559680463,
+            37.77630672686161,
+            42.85989766063244,
+            11.661452526860899,
+            15.983276472703187,
+            7.743672227764236
+          ]
+        },
+        "per_request_overhead_ms": {
+          "median": 161.93209566970938,
+          "min": 41.97882570008192,
+          "max": 236.2822620568926,
+          "range_percent_of_median": 119.99068841369697,
+          "unstable": true,
+          "values": [
+            216.4256620113267,
+            230.31814466945204,
+            236.2822620568926,
+            59.81253035246004,
+            41.97882570008192,
+            107.4385293280921
+          ]
         }
       },
-      "mape_percent": {
-        "ttft_fit": 35.570502501137646,
-        "total_fit": 6.093174991505964,
-        "ttft_holdout": 31.408669244599846,
-        "total_holdout": 5.119567929939255
+      "unstable_parameters": [
+        "decode_ms_per_extra_seq",
+        "per_request_overhead_ms"
+      ],
+      "hardware_limited": true,
+      "placement_by_run": {
+        "run1": null,
+        "run2": null,
+        "run3": null,
+        "run4": {
+          "source": "ollama /api/ps",
+          "size_bytes": 8650745856,
+          "size_vram_bytes": 8219789312,
+          "gpu_percent": 95.0,
+          "cpu_percent": 5.0
+        },
+        "run5": {
+          "source": "ollama /api/ps",
+          "size_bytes": 8650745856,
+          "size_vram_bytes": 8219789312,
+          "gpu_percent": 95.0,
+          "cpu_percent": 5.0
+        },
+        "run6": {
+          "source": "ollama /api/ps",
+          "size_bytes": 8650745856,
+          "size_vram_bytes": 8219789312,
+          "gpu_percent": 95.0,
+          "cpu_percent": 5.0
+        }
       },
-      "notes": []
+      "fit_r2_by_run": {
+        "ttft_vs_prompt_tokens": [
+          0.9143678586628309,
+          0.9642160611090093,
+          0.9584519512036596,
+          0.9979843982869223,
+          0.9981066345026439,
+          0.9964453845437086
+        ],
+        "per_token_vs_extra_sequences": [
+          0.968354277223267,
+          0.970200288423586,
+          0.8254245684915141,
+          0.9115273300011291,
+          0.9474582646500249,
+          0.6840408103683693
+        ]
+      },
+      "mape_percent": {
+        "ttft_fit": 35.6878316300633,
+        "total_fit": 19.7814842054724,
+        "ttft_holdout": 35.085720905043935,
+        "total_holdout": 18.736412017952794
+      },
+      "mape_percent_by_concurrency": {
+        "1": {
+          "requests": 240,
+          "ttft": 27.591294333098936,
+          "total": 11.711987102686347
+        },
+        "2": {
+          "requests": 60,
+          "ttft": 40.60265387590294,
+          "total": 18.385046098804764
+        },
+        "4": {
+          "requests": 120,
+          "ttft": 49.002017593558655,
+          "total": 35.8871469331146
+        }
+      },
+      "notes": [
+        "unstable: decode_ms_per_extra_seq ranged from 7.744 to 42.86 over 6 runs, 141.8% of its median (limit 25%). The median is reported but did not repeat.",
+        "unstable: per_request_overhead_ms ranged from 41.98 to 236.3 over 6 runs, 120.0% of its median (limit 25%). The median is reported but did not repeat.",
+        "hardware-limited: the model did not fit on the GPU. Ollama had 5% of it on the CPU (7.7 of 8.1 GiB in VRAM) when it was measured. These timings are of this model on hardware too small for it, not of the model."
+      ]
     }
   }
 }

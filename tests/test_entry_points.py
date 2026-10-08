@@ -169,6 +169,14 @@ async def test_whole_report_builds_with_every_section(
 
     text = await report.build(None)
 
+    # Sections 3, 4 and 5 say what they run on; section 4 says what was not checked.
+    label = "**Illustrative profiles; prices and timings not calibrated.**"
+    assert text.count(label) == 3
+    for section in ("## 3. ", "## 4. ", "## 5. "):
+        assert text.split(section)[1].split("\n\n")[1] == label
+    assert "How the calibrated batching gain would change this." in text
+    assert "No calibration of the premium tier was found, so this was not checked." in text
+
     headings = [line for line in text.splitlines() if line.startswith("## ")]
     assert headings == [
         "## 1. Baseline vs continuous batching",

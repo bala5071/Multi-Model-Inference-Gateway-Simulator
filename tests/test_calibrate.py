@@ -5,23 +5,35 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from benchmarks import calibrate as calibrate_module
 from benchmarks.calibrate import (
     CalibrationPlan,
     CalibrationRun,
     Sample,
+    _combine,
+    aggregate,
     calibrate,
     describe_machine,
+    describe_placement,
     describe_server,
     errors,
+    errors_by_concurrency,
     fit_profile,
+    hardware_limited_note,
     linear_fit,
+    load_run,
     mape,
+    median,
     simulate,
+    spread_across_repeats,
+    spread_across_runs,
+    spread_summary,
     summary,
     write_outputs,
 )
@@ -167,12 +179,15 @@ def test_invalid_plan_is_rejected(overrides: dict[str, Any]) -> None:
 
 
 async def test_calibration_recovers_the_servers_true_parameters() -> None:
-    run, server = await _calibrate()
+    # The server's first token comes 120 ms after the request, plus prefill. One 20 ms
+    # decode step of that is already in the simulator, so the overhead is the other 100.
+    run, server = await _calibrate(overhead_ms=120.0)
     profile = run.document["profiles"]["standard"]
 
     assert profile["prefill_ms_per_token"] == pytest.approx(0.25)
     assert profile["decode_base_ms"] == pytest.approx(20.0)
     assert profile["decode_ms_per_extra_seq"] == pytest.approx(3.0)
+    assert profile["per_request_overhead_ms"] == pytest.approx(100.0)
     assert profile["fit"]["ttft_vs_prompt_tokens"]["r2"] == pytest.approx(1.0)
     assert profile["fit"]["per_token_vs_extra_sequences"]["r2"] == pytest.approx(1.0)
     assert profile["max_concurrency_measured"] == 4
@@ -400,16 +415,134 @@ async def test_error_report_exposes_where_the_simulator_diverges() -> None:
     assert reported["total_fit"] < reported["ttft_fit"]
 
 
-async def test_fixed_overhead_the_simulator_does_not_model_shows_up_as_ttft_error() -> None:
+async def test_fixed_overhead_is_fitted_and_no_longer_shows_up_as_ttft_error() -> None:
     exact, _ = await _calibrate(dataclasses.replace(PLAN, concurrency=(1,)), overhead_ms=20.0)
     slow_start, _ = await _calibrate(dataclasses.replace(PLAN, concurrency=(1,)), overhead_ms=200.0)
 
+    assert exact.document["profiles"]["standard"]["per_request_overhead_ms"] == pytest.approx(0)
     assert exact.document["profiles"]["standard"]["mape_percent"]["ttft_fit"] == pytest.approx(0)
-    # The slope is still found, but the simulator has no term for a constant start-up cost.
+    # A constant start-up cost is the intercept of the TTFT fit, less one decode step.
     profile = slow_start.document["profiles"]["standard"]
     assert profile["prefill_ms_per_token"] == pytest.approx(0.25)
     assert profile["fit"]["ttft_vs_prompt_tokens"]["intercept"] == pytest.approx(200.0)
-    assert profile["mape_percent"]["ttft_fit"] > 50.0
+    assert profile["per_request_overhead_ms"] == pytest.approx(180.0)
+    assert profile["mape_percent"]["ttft_fit"] == pytest.approx(0, abs=1e-6)
+
+
+async def test_an_overhead_that_fits_negative_is_set_to_zero_and_flagged() -> None:
+    # This server's first token comes straight after prefill, a whole decode step
+    # sooner than the simulator can produce one.
+    run, _ = await _calibrate(dataclasses.replace(PLAN, concurrency=(1,)), overhead_ms=0.0)
+    profile = run.document["profiles"]["standard"]
+
+    assert profile["per_request_overhead_ms"] == 0.0
+    assert any("per_request_overhead_ms was -20" in note for note in profile["notes"])
+    assert profile["mape_percent"]["ttft_fit"] > 1.0
+
+
+async def test_errors_are_also_reported_by_concurrency() -> None:
+    run, _ = await _calibrate(overhead_ms=120.0)
+    tier = run.tiers["standard"]
+    by_level = run.document["profiles"]["standard"]["mape_percent_by_concurrency"]
+
+    assert by_level == errors_by_concurrency(tier.samples, tier.simulated)
+    assert list(by_level) == ["1", "2", "4"]
+    assert [by_level[level]["requests"] for level in by_level] == [12, 4, 8]
+    # Alone, this server is exactly what the simulator models.
+    assert by_level["1"]["ttft"] == pytest.approx(0, abs=1e-6)
+    assert by_level["1"]["total"] == pytest.approx(0, abs=1e-6)
+    # Together it prefills in parallel and the simulator does not: the error is shown.
+    assert by_level["4"]["ttft"] > 1.0
+
+
+async def test_repeats_of_an_exact_server_fit_the_same_values() -> None:
+    run, _ = await _calibrate(dataclasses.replace(PLAN, repeats=3), overhead_ms=120.0)
+    spread = run.document["profiles"]["standard"]["spread_across_repeats"]
+
+    assert set(spread) == {
+        "prefill_ms_per_token",
+        "decode_base_ms",
+        "decode_ms_per_extra_seq",
+        "per_request_overhead_ms",
+    }
+    assert spread["decode_base_ms"]["values"] == pytest.approx([20.0, 20.0, 20.0])
+    assert spread["per_request_overhead_ms"]["mean"] == pytest.approx(100.0)
+    assert spread["decode_ms_per_extra_seq"]["range_percent_of_mean"] == pytest.approx(0, abs=1e-6)
+
+
+def test_spread_across_repeats_shows_how_far_apart_the_repeats_are() -> None:
+    def repeat(number: int, per_token_ms: float) -> list[Sample]:
+        return [
+            _sample(repeat=number, prompt_tokens=10, ttft_ms=100.0, per_token_ms=per_token_ms),
+            _sample(repeat=number, prompt_tokens=110, ttft_ms=150.0, per_token_ms=per_token_ms),
+            _sample(
+                repeat=number, sweep="concurrency", concurrency=3, per_token_ms=per_token_ms + 6
+            ),
+        ]
+
+    spread = spread_across_repeats([*repeat(0, 18.0), *repeat(1, 22.0)], STANDARD)
+
+    assert spread is not None
+    assert spread["decode_base_ms"]["values"] == pytest.approx([18.0, 22.0])
+    assert spread["decode_base_ms"]["mean"] == pytest.approx(20.0)
+    assert spread["decode_base_ms"]["range_percent_of_mean"] == pytest.approx(20.0)
+    assert spread["decode_ms_per_extra_seq"]["values"] == pytest.approx([3.0, 3.0])
+    assert spread["prefill_ms_per_token"]["values"] == pytest.approx([0.5, 0.5])
+    # TTFT intercept 95 ms, less the decode step of each repeat.
+    assert spread["per_request_overhead_ms"]["values"] == pytest.approx([77.0, 73.0])
+    assert spread_across_repeats(repeat(0, 18.0), STANDARD) is None
+
+
+def test_spread_across_runs_compares_calibration_files() -> None:
+    def document(base_ms: float, overhead_ms: float | None) -> dict[str, Any]:
+        profile: dict[str, Any] = {
+            "prefill_ms_per_token": 0.5,
+            "decode_base_ms": base_ms,
+            "decode_ms_per_extra_seq": 0.0,
+        }
+        if overhead_ms is not None:
+            profile["per_request_overhead_ms"] = overhead_ms
+        return {"profiles": {"economy": profile}}
+
+    spread = spread_across_runs([document(9.0, 90.0), document(11.0, 110.0), document(10.0, None)])
+
+    assert spread["economy"]["decode_base_ms"]["values"] == [9.0, 11.0, 10.0]
+    assert spread["economy"]["decode_base_ms"]["range_percent_of_mean"] == pytest.approx(20.0)
+    # A file from before the overhead was fitted counts as 0, which the spread shows.
+    assert spread["economy"]["per_request_overhead_ms"]["values"] == [90.0, 110.0, 0.0]
+    # A parameter that is 0 in every run has no relative spread.
+    assert spread["economy"]["decode_ms_per_extra_seq"]["range_percent_of_mean"] is None
+    text = spread_summary(spread)
+    assert "economy   decode_base_ms" in text
+    assert "20.0%" in text
+
+
+def test_compare_option_prints_the_spread_without_measuring(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = []
+    for index, base_ms in enumerate((9.0, 11.0)):
+        profile = {
+            "prefill_ms_per_token": 0.5,
+            "decode_base_ms": base_ms,
+            "decode_ms_per_extra_seq": 1.0,
+            "per_request_overhead_ms": 100.0,
+        }
+        path = tmp_path / f"run{index}.json"
+        path.write_text(
+            json.dumps({"measured_at": f"day {index}", "profiles": {"premium": profile}}),
+            encoding="utf-8",
+        )
+        paths.append(str(path))
+    monkeypatch.setattr(sys, "argv", ["calibrate", "--compare", *paths])
+
+    calibrate_module.main()
+
+    out = capsys.readouterr().out
+    assert "fitted parameters of 2 calibration runs" in out
+    assert "measured at day 1" in out
+    assert "premium   decode_base_ms" in out
+    assert "9.0000, 11.0000" in out
 
 
 async def test_simulate_replays_requests_with_the_measured_token_counts() -> None:
@@ -434,7 +567,7 @@ async def test_outputs_are_written_with_hardware_and_plots(tmp_path: Path) -> No
 
     document = json.loads((out / "calibrated_profiles.json").read_text(encoding="utf-8"))
     assert document == json.loads(json.dumps(run.document))
-    assert document["schema"] == 1
+    assert document["schema"] == 3
     assert document["hardware"] == {"cpu": "test"}
     assert document["measured_at"] == "2026-01-01T00:00:00+00:00"
     assert document["notes"] == "unit test"
@@ -447,6 +580,8 @@ async def test_outputs_are_written_with_hardware_and_plots(tmp_path: Path) -> No
         "version": "unknown",
         "model": "unknown",
         "quantization": "unknown",
+        # This fake server has no process list, so where the model ran is unknown.
+        "placement": None,
     }
     samples = json.loads((out / "samples.json").read_text(encoding="utf-8"))
     assert len(samples) == 24
@@ -527,7 +662,7 @@ async def test_simulator_runs_on_profiles_loaded_from_a_calibration_file(tmp_pat
 
     profiles = load_calibrated_profiles(tmp_path / "calibrated_profiles.json")
 
-    # Only the calibrated tier changed, and only its three timing parameters.
+    # Only the calibrated tier changed, and only its timing parameters.
     assert profiles[Tier.ECONOMY] == PROFILES[Tier.ECONOMY]
     assert profiles[Tier.PREMIUM] == PROFILES[Tier.PREMIUM]
     standard = profiles[Tier.STANDARD]
@@ -571,6 +706,23 @@ def test_bad_calibration_files_are_rejected(tmp_path: Path, content: str, messag
         load_calibrated_profiles(path)
 
 
+def test_calibration_file_overhead_is_optional_and_checked(tmp_path: Path) -> None:
+    timing = {"prefill_ms_per_token": 0.5, "decode_base_ms": 5, "decode_ms_per_extra_seq": 1}
+    path = tmp_path / "calibrated_profiles.json"
+
+    path.write_text(json.dumps({"profiles": {"economy": timing}}), encoding="utf-8")
+    assert load_calibrated_profiles(path)[Tier.ECONOMY].per_request_overhead_ms == 0.0
+
+    with_overhead = {**timing, "per_request_overhead_ms": 90}
+    path.write_text(json.dumps({"profiles": {"economy": with_overhead}}), encoding="utf-8")
+    assert load_calibrated_profiles(path)[Tier.ECONOMY].per_request_overhead_ms == 90.0
+
+    bad = {**timing, "per_request_overhead_ms": "slow"}
+    path.write_text(json.dumps({"profiles": {"economy": bad}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="per_request_overhead_ms must be a number"):
+        load_calibrated_profiles(path)
+
+
 def test_backends_file_can_name_a_calibration_file() -> None:
     config = parse_backend_config({"simulated": {"profiles": "some/dir/calibrated_profiles.json"}})
     assert config.profiles_path == Path("some/dir/calibrated_profiles.json")
@@ -603,3 +755,244 @@ async def test_default_app_loads_calibrated_profiles_by_config(
 
 def test_calibrate_module_does_not_need_a_running_event_loop_to_import() -> None:
     assert asyncio.iscoroutinefunction(calibrate)
+
+
+# --- where the model was loaded -------------------------------------------------------------
+
+OFFLOADED = {
+    "source": "ollama /api/ps",
+    "size_bytes": 8000,
+    "size_vram_bytes": 7600,
+    "gpu_percent": 95.0,
+    "cpu_percent": 5.0,
+}
+
+
+def _process_list_client(models: object) -> httpx.AsyncClient:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": models})
+        return httpx.Response(404)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handle))
+
+
+async def test_placement_is_read_from_the_servers_process_list() -> None:
+    models = [
+        {"name": "another:1b", "size": 10, "size_vram": 10},
+        {"name": "llama3.1:8b", "model": "llama3.1:8b", "size": 8000, "size_vram": 7600},
+    ]
+    async with _process_list_client(models) as client:
+        placement = await describe_placement(
+            client, LlamaServer("http://127.0.0.1:11434", "llama3.1:8b")
+        )
+        other = await describe_placement(
+            client, LlamaServer("http://127.0.0.1:11434", "another:1b")
+        )
+
+    assert placement == OFFLOADED
+    assert other is not None
+    assert (other["gpu_percent"], other["cpu_percent"]) == (100.0, 0.0)
+
+
+def test_a_model_partly_on_the_cpu_gets_the_hardware_limited_note() -> None:
+    on_gpu = {**OFFLOADED, "size_vram_bytes": 8000, "gpu_percent": 100.0, "cpu_percent": 0.0}
+
+    assert hardware_limited_note([on_gpu]) is None
+    note = hardware_limited_note([on_gpu, OFFLOADED])
+    assert note is not None
+    assert note.startswith("hardware-limited: the model did not fit on the GPU.")
+    assert "5% of it on the CPU" in note
+
+
+@pytest.mark.parametrize(
+    "models",
+    [
+        [],
+        [{"name": "llama3.1:8b"}],
+        [{"name": "llama3.1:8b", "size": 0, "size_vram": 0}],
+        [{"name": "llama3.1:8b", "size": "big", "size_vram": 1}],
+        "nonsense",
+    ],
+)
+async def test_placement_is_unknown_when_the_server_does_not_say(models: object) -> None:
+    async with _process_list_client(models) as client:
+        assert (
+            await describe_placement(client, LlamaServer("http://127.0.0.1:11434", "llama3.1:8b"))
+            is None
+        )
+        # A tier with no model name cannot be looked up in the list.
+        assert await describe_placement(client, LlamaServer("http://127.0.0.1:11434")) is None
+
+
+async def test_calibration_records_placement_and_flags_a_hardware_limited_tier() -> None:
+    clock = SimClock()
+    server = _server(clock, overhead_ms=120.0)
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/ps":
+            return httpx.Response(
+                200, json={"models": [{"name": "big", "size": 8000, "size_vram": 7600}]}
+            )
+        return await server._handle(request)
+
+    config = BackendConfig(
+        kind="llamacpp",
+        servers={tier: LlamaServer("http://127.0.0.1:9000", "big") for tier in Tier},
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        run = await calibrate(
+            config,
+            PLAN,
+            tiers=[Tier.STANDARD],
+            clock=clock,
+            client=client,
+            run_id="test",
+            measured_at="2026-01-01T00:00:00+00:00",
+            machine={"cpu": "test"},
+        )
+
+    profile = run.document["profiles"]["standard"]
+    assert run.document["servers"]["standard"]["placement"] == OFFLOADED
+    assert profile["hardware_limited"] is True
+    assert [note for note in profile["notes"] if note.startswith("hardware-limited")]
+    # The fit itself is untouched by the flag.
+    assert profile["decode_base_ms"] == pytest.approx(20.0)
+
+
+async def test_placement_that_was_not_reported_is_unknown_not_assumed() -> None:
+    run, _ = await _calibrate(overhead_ms=120.0)
+
+    assert run.document["servers"]["standard"]["placement"] is None
+    assert run.document["profiles"]["standard"]["hardware_limited"] is None
+    assert run.document["profiles"]["standard"]["notes"] == []
+
+
+# --- combining saved runs -------------------------------------------------------------------
+
+
+async def _saved_runs(folder: Path, extras: tuple[float, ...]) -> list[Path]:
+    """One saved run per value: the same fake server except for its cost per extra sequence."""
+    paths = []
+    for index, extra_ms in enumerate(extras, start=1):
+        run, _ = await _calibrate(overhead_ms=120.0, decode_ms_per_extra_seq=extra_ms)
+        paths.append(folder / f"run{index}")
+        write_outputs(run, paths[-1])
+    return paths
+
+
+def test_median_takes_the_middle_value_or_the_mean_of_the_middle_two() -> None:
+    assert median([3.0, 1.0, 2.0]) == 2.0
+    assert median([4.0, 1.0, 3.0, 2.0]) == 2.5
+    assert median([7.0]) == 7.0
+
+
+def test_a_parameter_is_unstable_only_above_a_quarter_of_its_median() -> None:
+    steady = _combine([90.0, 100.0, 115.0])
+    assert (steady["median"], steady["min"], steady["max"]) == (100.0, 90.0, 115.0)
+    assert steady["range_percent_of_median"] == 25.0
+    assert steady["unstable"] is False
+
+    assert _combine([90.0, 100.0, 116.0])["unstable"] is True
+    # All zero: there is no relative spread to judge.
+    nothing = _combine([0.0, 0.0])
+    assert (nothing["range_percent_of_median"], nothing["unstable"]) == (None, False)
+
+
+async def test_aggregate_reports_the_median_with_its_range_and_flags_what_did_not_repeat(
+    tmp_path: Path,
+) -> None:
+    paths = await _saved_runs(tmp_path, (2.0, 10.0, 3.0))
+
+    combined = await aggregate([(path.name, *load_run(path)) for path in paths])
+    document = combined.document
+    profile = document["profiles"]["standard"]
+
+    # The median: not the mean (5), and not whichever run looks best.
+    assert profile["decode_ms_per_extra_seq"] == pytest.approx(3.0)
+    extra = profile["aggregate"]["decode_ms_per_extra_seq"]
+    assert (extra["min"], extra["max"]) == (pytest.approx(2.0), pytest.approx(10.0))
+    assert extra["values"] == pytest.approx([2.0, 10.0, 3.0])
+    assert extra["range_percent_of_median"] == pytest.approx(800 / 3)
+    assert extra["unstable"] is True
+    assert profile["unstable_parameters"] == ["decode_ms_per_extra_seq"]
+    assert profile["aggregate"]["decode_base_ms"]["unstable"] is False
+    assert profile["decode_base_ms"] == pytest.approx(20.0)
+    assert profile["per_request_overhead_ms"] == pytest.approx(100.0)
+    assert any(
+        note.startswith("unstable: decode_ms_per_extra_seq ranged from 2 to 10 over 3 runs")
+        for note in profile["notes"]
+    )
+
+    assert [r["run"] for r in document["aggregated_from"]] == ["run1", "run2", "run3"]
+    assert "no run was preferred or dropped" in document["notes"]
+    assert document["unstable_above_range_percent"] == 25.0
+    assert profile["samples"] == 72
+    assert profile["hardware_limited"] is None
+    assert profile["fit_r2_by_run"]["ttft_vs_prompt_tokens"] == pytest.approx([1.0, 1.0, 1.0])
+    # Alone, every run's server is what the median profile describes; together they differ.
+    by_level = profile["mape_percent_by_concurrency"]
+    assert by_level["1"]["ttft"] == pytest.approx(0, abs=1e-6)
+    assert by_level["4"]["total"] > 1.0
+    assert len(combined.tiers["standard"].samples) == 72
+
+
+async def test_aggregate_is_written_without_samples_and_loads_into_the_simulator(
+    tmp_path: Path,
+) -> None:
+    paths = await _saved_runs(tmp_path, (2.0, 4.0))
+    out = tmp_path / "combined"
+
+    write_outputs(await aggregate([(p.name, *load_run(p)) for p in paths]), out, samples=False)
+
+    assert sorted(p.name for p in out.iterdir()) == ["calibrated_profiles.json", "standard.png"]
+    loaded = load_calibrated_profiles(out / "calibrated_profiles.json")[Tier.STANDARD]
+    # Two runs: the median is midway between them.
+    assert loaded.decode_ms_per_extra_seq == pytest.approx(3.0)
+    assert loaded.per_request_overhead_ms == pytest.approx(100.0)
+    # An aggregate is not a run: it cannot be fed back in.
+    with pytest.raises(ValueError, match="holds an aggregate"):
+        load_run(out)
+
+
+async def test_aggregate_flags_a_tier_that_was_partly_on_the_cpu_in_any_run(
+    tmp_path: Path,
+) -> None:
+    loaded = [(p.name, *load_run(p)) for p in await _saved_runs(tmp_path, (3.0, 3.0))]
+    loaded[1][1]["servers"]["standard"]["placement"] = OFFLOADED
+
+    profile = (await aggregate(loaded)).document["profiles"]["standard"]
+
+    assert profile["hardware_limited"] is True
+    assert profile["placement_by_run"] == {"run1": None, "run2": OFFLOADED}
+    assert [note for note in profile["notes"] if note.startswith("hardware-limited")]
+    assert profile["unstable_parameters"] == []
+
+
+async def test_aggregate_needs_at_least_two_runs(tmp_path: Path) -> None:
+    (path,) = await _saved_runs(tmp_path, (3.0,))
+    with pytest.raises(ValueError, match="at least two runs"):
+        await aggregate([(path.name, *load_run(path))])
+
+
+def test_aggregate_option_combines_saved_runs_without_measuring(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Not an async test: main() starts an event loop of its own.
+    paths = [str(p) for p in asyncio.run(_saved_runs(tmp_path, (2.0, 10.0, 3.0)))]
+    out = tmp_path / "combined"
+
+    monkeypatch.setattr(sys, "argv", ["calibrate", "--aggregate", *paths, "--out", str(out)])
+    calibrate_module.main()
+
+    text = capsys.readouterr().out
+    assert "median of 3 calibration runs. Nothing was re-measured." in text
+    assert "standard  decode_ms_per_extra_seq" in text
+    assert "UNSTABLE" in text
+    assert "note: unstable: decode_ms_per_extra_seq" in text
+    assert (out / "calibrated_profiles.json").exists()
+
+    # Writing the aggregate over one of the runs it was made from is refused.
+    monkeypatch.setattr(sys, "argv", ["calibrate", "--aggregate", *paths, "--out", paths[0]])
+    with pytest.raises(SystemExit):
+        calibrate_module.main()

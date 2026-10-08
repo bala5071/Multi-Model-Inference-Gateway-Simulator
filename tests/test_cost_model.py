@@ -216,6 +216,7 @@ def test_profiles_are_immutable() -> None:
         {"prefill_ms_per_token": 0.0},
         {"decode_base_ms": 0.0},
         {"decode_ms_per_extra_seq": -0.1},
+        {"per_request_overhead_ms": -1.0},
         {"max_batch_size": 0},
         {"kv_capacity_tokens": 0},
     ],
@@ -224,3 +225,16 @@ def test_profiles_are_immutable() -> None:
 def test_invalid_profile_values_are_rejected(overrides: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="must"):
         dataclasses.replace(ECONOMY, **overrides)  # type: ignore[arg-type]
+
+
+def test_illustrative_profiles_have_no_per_request_overhead() -> None:
+    assert [p.per_request_overhead_ms for p in PROFILES.values()] == [0.0, 0.0, 0.0]
+
+
+def test_estimate_carries_the_per_request_overhead_and_does_not_bill_it() -> None:
+    slow_start = dataclasses.replace(ECONOMY, per_request_overhead_ms=90.0)
+    plain = estimate_cost(ECONOMY, new_prefill_tokens=100, output_tokens=10, batch_size=1)
+    delayed = estimate_cost(slow_start, new_prefill_tokens=100, output_tokens=10, batch_size=1)
+
+    assert plain.overhead_ms == 0.0
+    assert delayed == dataclasses.replace(plain, overhead_ms=90.0)

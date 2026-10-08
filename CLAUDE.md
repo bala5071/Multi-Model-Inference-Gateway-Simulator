@@ -75,16 +75,22 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
 - `benchmarks/chunked_prefill.py` — ITL and TTFT tails with chunked prefill off and on (exists)
 - `benchmarks/metrics_example.py` — what the metrics store reports after the default load;
   the worked example in `docs/05-metrics.md` (exists)
-- `benchmarks/calibrate.py` — measures real models, fits the three timing parameters of each
-  profile, and reports the simulator's error against the measurements. Writes to
-  `benchmarks/calibration/`, which is tracked and holds one calibration (Ollama, one
-  laptop, 2026-10-07). The simulator does not load it by default: the profiles in
-  `profiles.py` are still illustrative (exists)
+- `benchmarks/calibrate.py` — measures real models, fits the four timing parameters of each
+  profile (the fourth is `per_request_overhead_ms`), and reports the simulator's error
+  against the measurements, the spread between repeats, and how much of each model Ollama
+  had on the GPU. `--compare` gives the spread between runs; `--aggregate` combines saved
+  runs into the median of each parameter with its range. `benchmarks/calibration/` is
+  tracked: six runs in `run1/` to `run6/` (Ollama, one laptop, 2026-10-08) and their
+  aggregate, in which most parameters are marked unstable and premium hardware-limited.
+  The simulator does not load it by default: the profiles in `profiles.py` are still
+  illustrative, with an overhead of 0 (exists)
 - `benchmarks/gate.py` + `scripts/perf_gate.py` — the CI performance gate; budgets live in
   `benchmarks/budgets.json` (exists)
 
 - `benchmarks/report.py` — generates `docs/REPORT.md` and `docs/report/*.png` from the
-  benchmarks above (`make report`). Never edit the report by hand; regenerate it (exists)
+  benchmarks above (`make report`). Sections 1 and 2 also show a variant on the calibrated
+  profiles (`GATEWAY_PROFILES`, else the tracked calibration); sections 3 to 5 are
+  illustrative only and say so. Never edit the report by hand; regenerate it (exists)
 
 If a change moves simulated latency on purpose, re-baseline with
 `uv run python scripts/perf_gate.py --update-budgets` and commit `benchmarks/budgets.json`

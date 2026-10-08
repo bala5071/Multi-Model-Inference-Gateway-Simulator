@@ -32,6 +32,10 @@ class ModelProfile:
     decode_ms_per_extra_seq: float
     max_batch_size: int
     kv_capacity_tokens: int
+    # Fixed time every request spends before the model starts on it, whatever its
+    # prompt length. 0 in the illustrative profiles; calibration fits it
+    # (docs/13-calibration.md).
+    per_request_overhead_ms: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -46,6 +50,8 @@ class ModelProfile:
                 raise ValueError(f"{field_name} must be positive")
         if self.decode_ms_per_extra_seq < 0:
             raise ValueError("decode_ms_per_extra_seq must not be negative")
+        if self.per_request_overhead_ms < 0:
+            raise ValueError("per_request_overhead_ms must not be negative")
         if self.max_batch_size < 1:
             raise ValueError("max_batch_size must be at least 1")
         if self.kv_capacity_tokens < 1:
@@ -94,15 +100,18 @@ PROFILES: Final[Mapping[Tier, ModelProfile]] = MappingProxyType(
 
 
 _CALIBRATED_FIELDS = ("prefill_ms_per_token", "decode_base_ms", "decode_ms_per_extra_seq")
+_OVERHEAD_FIELD = "per_request_overhead_ms"
 
 
 def load_calibrated_profiles(path: Path) -> Mapping[Tier, ModelProfile]:
     """The standard profiles with the timing parameters from a calibration file.
 
-    The file is what ``benchmarks/calibrate.py`` writes. Only the three timing parameters
-    are taken from it; prices, batch limits and KV capacities stay as they are, because
-    calibration does not measure them. A tier missing from the file keeps its illustrative
-    profile. Raises ``ValueError`` if the file does not have the expected shape.
+    The file is what ``benchmarks/calibrate.py`` writes. Only the timing parameters are
+    taken from it; prices, batch limits and KV capacities stay as they are, because
+    calibration does not measure them. ``per_request_overhead_ms`` is optional, since
+    files written before it was fitted do not have it, and is then 0. A tier missing
+    from the file keeps its illustrative profile. Raises ``ValueError`` if the file
+    does not have the expected shape.
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -124,10 +133,14 @@ def load_calibrated_profiles(path: Path) -> Mapping[Tier, ModelProfile]:
             if isinstance(value, bool) or not isinstance(value, int | float):
                 raise ValueError(f"{path}: profiles.{name}.{field_name} must be a number")
             values[field_name] = float(value)
+        overhead = entry.get(_OVERHEAD_FIELD, 0.0)
+        if isinstance(overhead, bool) or not isinstance(overhead, int | float):
+            raise ValueError(f"{path}: profiles.{name}.{_OVERHEAD_FIELD} must be a number")
         profiles[tier] = dataclasses.replace(
             PROFILES[tier],
             prefill_ms_per_token=values["prefill_ms_per_token"],
             decode_base_ms=values["decode_base_ms"],
             decode_ms_per_extra_seq=values["decode_ms_per_extra_seq"],
+            per_request_overhead_ms=float(overhead),
         )
     return MappingProxyType(profiles)

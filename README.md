@@ -189,14 +189,26 @@ scheduler behaves under those assumptions, not how fast any model is.
 
 ![Overload](docs/report/4-overload.png)
 
-**The last result is measured**, once, on one laptop (Core Ultra 7 155H, RTX 4060 8 GB,
-Ollama 0.12.6), against the three real models:
+**The last result is measured** on one laptop (Core Ultra 7 155H, RTX 4060 8 GB,
+Ollama 0.12.6), against the three real models. Each value is the median of six runs made
+on 2026-10-08, with the range over those runs in brackets; errors are against held-out
+requests:
 
-| Tier | Prefill ms/token | Decode step ms | ms per extra sequence | Simulator error: TTFT | Simulator error: total latency |
-|---|---:|---:|---:|---:|---:|
-| economy (1B)  | 0.21 | 6.7  | 1.9  | 54% | 19% |
-| standard (3B) | 0.39 | 14.2 | 4.1  | 42% | 11% |
-| premium (8B)  | 1.08 | 50.0 | 16.0 | 31% | 5%  |
+| Tier | Prefill ms/token | Decode step ms | ms per extra sequence | Per-request overhead ms | Simulator error: TTFT | Simulator error: total latency |
+|---|---:|---:|---:|---:|---:|---:|
+| economy (1B)  | 0.20 (0.18-0.21) | 6.7 (6.5-6.7)    | 2.7 (2.1-3.7) *    | 90 (75-114) *  | 14% | 8%  |
+| standard (3B) | 0.38 (0.35-0.42) | 15.3 (14.7-22.2) * | 4.1 (1.7-4.9) *  | 88 (65-126) *  | 16% | 8%  |
+| premium (8B)  | 0.86 (0.76-0.96) | 45.1 (42.8-48.3) | 24.8 (7.7-42.9) *  | 162 (42-236) * | 35% | 19% |
+
+\* Unstable: the range is more than 25% of the median, so the value did not repeat. That is
+seven of the twelve, including the cost per extra sequence on every tier. The premium tier
+is also hardware-limited: Ollama had 5% of the 8B model on the CPU because it does not fit
+the 8 GB GPU.
+
+Run on the median timings instead of the invented ones, the simulated throughput gain of
+continuous batching at 16 times the baseline's capacity falls from 12.3x, 7.7x and 4.5x
+to 1.8x, 2.1x and 1.5x with batches held to the 4 requests that were measured together
+([report, section 1](docs/REPORT.md)). Those gains rest on the unstable parameter.
 
 ![Simulator against the real premium model](benchmarks/calibration/premium.png)
 
@@ -242,11 +254,15 @@ Each step's reasoning is in its own note; start from the [docs index](docs/READM
   nothing about whether this scheduler is good, and simulated and real numbers must not be
   compared directly.
 - **The cost model is simple.** Prefill is linear in tokens, a decode step is linear in batch
-  size, there is no per-request overhead, and each model has its hardware to itself. The
-  calibration shows the missing overhead matters most.
-- **The calibration is one run on one laptop through Ollama**, with concurrency up to 4. The
-  8B model did not fit on the GPU and ran partly on the CPU. It has not been run under
+  size, the per-request overhead is a constant (0 unless a calibration is loaded), and each
+  model has its hardware to itself. After calibration its time to first token is still
+  17% to 49% off when four requests arrive together.
+- **The calibration is six runs on one day on one laptop through Ollama**, with
+  concurrency up to 4, and most of its parameters did not repeat between runs. The 8B
+  model did not fit on the GPU and ran partly on the CPU. It has not been run under
   llama-server.
+- **Only report sections 1 and 2 have a calibrated variant.** Routing, overload and chunked
+  prefill results are on the invented profiles and prices only.
 - **Answer quality is not modelled.** The cost comparisons show what a larger model costs,
   never what it is worth.
 - **Prices and budgets are invented.**

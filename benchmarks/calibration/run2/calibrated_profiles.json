@@ -1,0 +1,370 @@
+{
+  "schema": 2,
+  "what_this_is": "Simulator timing parameters fitted to real measurements on the machine described under 'hardware'. They do not transfer to other hardware, models, quantizations or server versions.",
+  "measured_at": "2026-10-08T18:07:35+00:00",
+  "hardware": {
+    "cpu": "Intel(R) Core(TM) Ultra 7 155H",
+    "logical_cores": 22,
+    "ram_gb": 15.4,
+    "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU, 8188 MiB",
+    "os": "Windows 11 (10.0.26200)",
+    "machine": "AMD64",
+    "python": "3.12.10"
+  },
+  "endpoint": "completions",
+  "plan": {
+    "prompt_words": [
+      32,
+      128,
+      512,
+      1536
+    ],
+    "output_tokens": [
+      16,
+      64,
+      128
+    ],
+    "concurrency": [
+      1,
+      2,
+      4
+    ],
+    "repeats": 5,
+    "base_prompt_words": 32,
+    "base_output_tokens": 64,
+    "prompt_sweep_output_tokens": 8,
+    "request_timeout_ms": 300000.0
+  },
+  "notes": "Run 2 of 3 on 2026-10-08, Ollama started with OLLAMA_NUM_PARALLEL=4; other applications were not closed.",
+  "servers": {
+    "economy": {
+      "url": "http://127.0.0.1:11434",
+      "kind": "ollama",
+      "version": "0.12.6",
+      "model": "llama3.2:1b-instruct-q4_K_M",
+      "quantization": "Q4_K_M",
+      "parameter_size": "1.2B"
+    },
+    "standard": {
+      "url": "http://127.0.0.1:11434",
+      "kind": "ollama",
+      "version": "0.12.6",
+      "model": "llama3.2:3b",
+      "quantization": "Q4_K_M",
+      "parameter_size": "3.2B"
+    },
+    "premium": {
+      "url": "http://127.0.0.1:11434",
+      "kind": "ollama",
+      "version": "0.12.6",
+      "model": "llama3.1:8b",
+      "quantization": "Q4_K_M",
+      "parameter_size": "8.0B"
+    }
+  },
+  "profiles": {
+    "economy": {
+      "prefill_ms_per_token": 0.19569514846424002,
+      "decode_base_ms": 6.7413040760987215,
+      "decode_ms_per_extra_seq": 2.262510570272895,
+      "per_request_overhead_ms": 85.88462880981172,
+      "max_concurrency_measured": 4,
+      "samples": 70,
+      "failed_requests": 0,
+      "fit": {
+        "ttft_vs_prompt_tokens": {
+          "slope": 0.19569514846424002,
+          "intercept": 92.62593288591043,
+          "r2": 0.993169328122436,
+          "n": 32
+        },
+        "per_token_vs_extra_sequences": {
+          "slope": 2.262510570272895,
+          "intercept": 6.7413040760987215,
+          "r2": 0.8991075863954652,
+          "n": 56
+        }
+      },
+      "mape_percent": {
+        "ttft_fit": 9.116019320291455,
+        "total_fit": 5.612326043081161,
+        "ttft_holdout": 8.373537969029348,
+        "total_holdout": 6.926517228478475
+      },
+      "mape_percent_by_concurrency": {
+        "1": {
+          "requests": 40,
+          "ttft": 4.513766160894422,
+          "total": 5.43221254039217
+        },
+        "2": {
+          "requests": 10,
+          "ttft": 12.723234708286945,
+          "total": 15.599891840494397
+        },
+        "4": {
+          "requests": 20,
+          "ttft": 15.9971809992043,
+          "total": 1.898703979530644
+        }
+      },
+      "spread_across_repeats": {
+        "prefill_ms_per_token": {
+          "values": [
+            0.20172097428324987,
+            0.19803369943824117,
+            0.19041681749174447,
+            0.19262688330283578,
+            0.2132009842978979
+          ],
+          "min": 0.19041681749174447,
+          "max": 0.2132009842978979,
+          "mean": 0.19919987176279383,
+          "range_percent_of_mean": 11.437842105282433
+        },
+        "decode_base_ms": {
+          "values": [
+            6.658876785102961,
+            6.611870510631279,
+            6.8748870229876236,
+            6.819581985673016,
+            6.500693086001364
+          ],
+          "min": 6.500693086001364,
+          "max": 6.8748870229876236,
+          "mean": 6.6931818780792485,
+          "range_percent_of_mean": 5.590673371834955
+        },
+        "decode_ms_per_extra_seq": {
+          "values": [
+            2.236331527035609,
+            2.4244490016416473,
+            2.1770607961511454,
+            2.2122009562631795,
+            2.4774788633217386
+          ],
+          "min": 2.1770607961511454,
+          "max": 2.4774788633217386,
+          "mean": 2.305504228882664,
+          "range_percent_of_mean": 13.030471313261799
+        },
+        "per_request_overhead_ms": {
+          "values": [
+            84.71136081890529,
+            88.4771637018732,
+            87.88702725470333,
+            82.45438295290927,
+            82.15413814033585
+          ],
+          "min": 82.15413814033585,
+          "max": 88.4771637018732,
+          "mean": 85.1368145737454,
+          "range_percent_of_mean": 7.426899389171242
+        }
+      },
+      "notes": []
+    },
+    "standard": {
+      "prefill_ms_per_token": 0.3626369115292473,
+      "decode_base_ms": 14.860299488577123,
+      "decode_ms_per_extra_seq": 3.660918901789973,
+      "per_request_overhead_ms": 85.00266196052463,
+      "max_concurrency_measured": 4,
+      "samples": 70,
+      "failed_requests": 0,
+      "fit": {
+        "ttft_vs_prompt_tokens": {
+          "slope": 0.3626369115292473,
+          "intercept": 99.86296144910176,
+          "r2": 0.9929896011684517,
+          "n": 32
+        },
+        "per_token_vs_extra_sequences": {
+          "slope": 3.660918901789973,
+          "intercept": 14.860299488577123,
+          "r2": 0.9347742808618136,
+          "n": 56
+        }
+      },
+      "mape_percent": {
+        "ttft_fit": 12.871405028417787,
+        "total_fit": 3.9832974559052206,
+        "ttft_holdout": 10.616629929542196,
+        "total_holdout": 3.7078435689891585
+      },
+      "mape_percent_by_concurrency": {
+        "1": {
+          "requests": 40,
+          "ttft": 5.902855142273838,
+          "total": 4.793082287933229
+        },
+        "2": {
+          "requests": 10,
+          "ttft": 18.856275176415252,
+          "total": 4.769852359456588
+        },
+        "4": {
+          "requests": 20,
+          "ttft": 22.237727157494042,
+          "total": 1.777632619232275
+        }
+      },
+      "spread_across_repeats": {
+        "prefill_ms_per_token": {
+          "values": [
+            0.3423977844722831,
+            0.3608109466640883,
+            0.36371420406015914,
+            0.38359415811713576,
+            0.3901921911767401
+          ],
+          "min": 0.3423977844722831,
+          "max": 0.3901921911767401,
+          "mean": 0.36814185689808127,
+          "range_percent_of_mean": 12.982605973460037
+        },
+        "decode_base_ms": {
+          "values": [
+            14.633956537025941,
+            14.749339438469832,
+            14.84761836374595,
+            15.210283615066766,
+            14.783642905655997
+          ],
+          "min": 14.633956537025941,
+          "max": 15.210283615066766,
+          "mean": 14.844968171992898,
+          "range_percent_of_mean": 3.8823059191743226
+        },
+        "decode_ms_per_extra_seq": {
+          "values": [
+            4.004394124597603,
+            3.5968212677079805,
+            3.7158200096968326,
+            3.3266402051574766,
+            3.9157318533552057
+          ],
+          "min": 3.3266402051574766,
+          "max": 4.004394124597603,
+          "mean": 3.711881492103019,
+          "range_percent_of_mean": 18.259039812613608
+        },
+        "per_request_overhead_ms": {
+          "values": [
+            95.32401768076635,
+            81.84216155396234,
+            84.5033663626112,
+            78.3449385089188,
+            77.01912607510624
+          ],
+          "min": 77.01912607510624,
+          "max": 95.32401768076635,
+          "mean": 83.40672203627298,
+          "range_percent_of_mean": 21.94654238743424
+        }
+      },
+      "notes": []
+    },
+    "premium": {
+      "prefill_ms_per_token": 0.8554823961974226,
+      "decode_base_ms": 45.73990521038932,
+      "decode_ms_per_extra_seq": 37.77630672686161,
+      "per_request_overhead_ms": 230.31814466945204,
+      "max_concurrency_measured": 4,
+      "samples": 70,
+      "failed_requests": 0,
+      "fit": {
+        "ttft_vs_prompt_tokens": {
+          "slope": 0.8554823961974226,
+          "intercept": 276.05804987984135,
+          "r2": 0.9642160611090093,
+          "n": 32
+        },
+        "per_token_vs_extra_sequences": {
+          "slope": 37.77630672686161,
+          "intercept": 45.73990521038932,
+          "r2": 0.970200288423586,
+          "n": 56
+        }
+      },
+      "mape_percent": {
+        "ttft_fit": 29.35872905543485,
+        "total_fit": 6.605624120838043,
+        "ttft_holdout": 30.89779083625054,
+        "total_holdout": 9.705603265580768
+      },
+      "mape_percent_by_concurrency": {
+        "1": {
+          "requests": 40,
+          "ttft": 17.912428466316953,
+          "total": 8.623520148879066
+        },
+        "2": {
+          "requests": 10,
+          "ttft": 40.34211033467645,
+          "total": 7.164662018548197
+        },
+        "4": {
+          "requests": 20,
+          "ttft": 47.83698284062082,
+          "total": 4.46029851722083
+        }
+      },
+      "spread_across_repeats": {
+        "prefill_ms_per_token": {
+          "values": [
+            0.955095511856143,
+            0.8860249007047771,
+            0.8544377354036172,
+            0.7264965422058388,
+            0.8535246336162916
+          ],
+          "min": 0.7264965422058388,
+          "max": 0.955095511856143,
+          "mean": 0.8551158647573336,
+          "range_percent_of_mean": 26.73309887838141
+        },
+        "decode_base_ms": {
+          "values": [
+            46.34437991147288,
+            44.86162577204731,
+            42.2635009416409,
+            49.4901142163962,
+            53.78702187246822
+          ],
+          "min": 42.2635009416409,
+          "max": 53.78702187246822,
+          "mean": 47.349328542805104,
+          "range_percent_of_mean": 24.33724254486469
+        },
+        "decode_ms_per_extra_seq": {
+          "values": [
+            36.01569411803751,
+            35.231331565885874,
+            43.47613269367395,
+            36.382068529849114,
+            36.8787993350799
+          ],
+          "min": 35.231331565885874,
+          "max": 43.47613269367395,
+          "mean": 37.59680524850527,
+          "range_percent_of_mean": 21.929525855433845
+        },
+        "per_request_overhead_ms": {
+          "values": [
+            206.61133882759012,
+            181.16406491946697,
+            233.59847538863497,
+            299.903036033614,
+            245.60115528952454
+          ],
+          "min": 181.16406491946697,
+          "max": 299.903036033614,
+          "mean": 233.3756140917661,
+          "range_percent_of_mean": 50.878911053430556
+        }
+      },
+      "notes": []
+    }
+  }
+}

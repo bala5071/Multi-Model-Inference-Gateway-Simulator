@@ -37,7 +37,7 @@ says so, and the table below points out the main cases.
 
 - **Simulated** (notes 01 to 11, report sections 1 to 5): exact and reproducible, built on
   illustrative model profiles. They show how the scheduler behaves under those assumptions.
-- **Measured** (note 13, report section 6): one laptop, one run, through Ollama. They show
+- **Measured** (note 13, report section 6): one laptop, six runs on one day, through Ollama. They show
   what three real models did on that machine.
 - The two are not the same kind of number. Note 12 explains why they must not be compared
   directly, and note 13 says where the simulator is wrong.
