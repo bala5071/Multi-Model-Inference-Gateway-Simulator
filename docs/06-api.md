@@ -184,9 +184,9 @@ curl -s -X POST http://127.0.0.1:8000/v1/generate \
 ## Where the example outputs came from
 
 The responses above were copied from one local run of the server (`uvicorn` on Windows 11,
-Python 3.12, working tree for this step, not yet committed; parent commit `ba18512`), using
-the curl commands shown, in this order: models, generate, generate again with the alias
-`llama-3.2-1b`, the two error calls, healthz, metrics. The JSON is reformatted for reading.
+Python 3.12; recorded on the working tree before it was committed; first committed in full as
+`c7e75ac`), using the curl commands shown, in this order: models, generate, generate again
+with the alias `llama-3.2-1b`, the two error calls, healthz, metrics. The JSON is reformatted for reading.
 
 **The timings in them are not model performance.** They are wall-clock waits of a simulator.
 They are also much longer than the cost model asks for: 32 decode steps at 6 ms is 192 ms,

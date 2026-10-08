@@ -73,9 +73,8 @@ Doubling one model's `prefill_ms_per_token` moves its p99 on the standard load b
 | standard     |       3,562.3 |      3,885.4 |  +9.1% |
 | premium      |      10,881.7 |     11,849.2 |  +8.9% |
 
-(From `scripts/perf_gate.py --simulate-regression MODEL=2`, working tree for this step, not
-yet committed; parent commit `ba18512`.) With a 10% tolerance **none of these would fail the
-gate**: latency on this workload is dominated by decoding, so even a doubled prefill cost
+(From `scripts/perf_gate.py --simulate-regression MODEL=2` at commit `c7e75ac`.)
+With a 10% tolerance **none of these would fail the gate**: latency on this workload is dominated by decoding, so even a doubled prefill cost
 stays under 10%. At 2% all three fail. A gate is only as sensitive as its tolerance and its
 workload allow; a prefill-heavy workload would be needed to catch smaller prefill
 regressions.

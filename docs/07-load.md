@@ -94,7 +94,7 @@ so a server that has seen them reports more cache hits the second time.
 ## Example results
 
 **Simulated, from the illustrative profiles of step 1. Not measurements of real models.**
-Working tree for this step (not yet committed; parent commit `ba18512`).
+Commit `c7e75ac`.
 
 `uv run python -m benchmarks.loadgen` (seed 7, 300 requests, 8 req/s, weights 70/20/10, half
 the requests sharing a 200-word system prompt):

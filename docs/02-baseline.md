@@ -55,7 +55,7 @@ measurements of real models and say nothing about real hardware. They were produ
 uv run python -m benchmarks.baseline_limits
 ```
 
-on the working tree for this step (not yet committed; the parent commit is `ba18512`).
+at commit `c7e75ac`.
 Workload: every request has 500 tokens in and 136 tokens out; 10 requests arrive together.
 
 | Tier     | Service ms | Max req/s | Decode tok/s | Mean wait ms (burst of 10) | Last wait ms |

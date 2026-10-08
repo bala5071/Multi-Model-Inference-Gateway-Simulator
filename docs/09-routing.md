@@ -213,9 +213,9 @@ curl -s -X POST http://127.0.0.1:8000/v1/generate -H "Content-Type: application/
 A model that does not exist at all is still a 404 `unknown_model`, for every tenant.
 
 The curl outputs in this note that are not attributed to a test were copied from one local
-run of the default server (`uvicorn`, Windows 11, Python 3.12, working tree for this step,
-not yet committed; parent commit `ba18512`), reformatted for reading. Under `WallClock` the
-`period` values are readings of a monotonic clock, so only their difference is meaningful.
+run of the default server (`uvicorn`, Windows 11, Python 3.12; recorded on the
+working tree before it was committed; first committed in full as `c7e75ac`), reformatted for
+reading. Under `WallClock` the `period` values are readings of a monotonic clock, so only their difference is meaningful.
 
 ## What changed for existing callers
 

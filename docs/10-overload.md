@@ -204,7 +204,7 @@ HTTP and asserts there is exactly one change each way.
 uv run python -m benchmarks.overload
 ```
 
-Working tree for this step (not yet committed; parent commit `ba18512`). Every request asks
+Commit `c7e75ac`. Every request asks
 for the premium model and opts in. 300 requests arrive at 3 req/s, about three times what
 the premium model serves on this workload, followed by 100 at 0.25 req/s. Prompts are
 20-200 words; seed 7. Queue limits and timeouts are off in both runs, so the only difference

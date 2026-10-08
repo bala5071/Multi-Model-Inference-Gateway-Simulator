@@ -64,9 +64,9 @@ Produced by
 uv run python -m benchmarks.compare_batching
 ```
 
-(defaults: seed 7, 200 requests, load 1.5) on the working tree for this step (not yet
-committed; the parent commit is `ba18512`). Prompts are 20 to 400 words; output lengths come
-from the seeded generator. Latency is finish minus enqueue. Percentiles are nearest-rank.
+(defaults: seed 7, 200 requests, load 1.5) at commit `c7e75ac`. Prompts are 20 to 400
+words; output lengths come from the seeded generator. Latency is finish minus enqueue.
+Percentiles are nearest-rank.
 
 Burst: all 200 requests arrive at t=0. This shows maximum throughput.
 

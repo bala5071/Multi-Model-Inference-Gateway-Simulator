@@ -62,9 +62,9 @@ event: done
 data: {"id": "req-1", "text": "[simulated output, 4 tokens]", "model": "economy", "usage": {"prompt_tokens": 9, "cached_tokens": 0, "completion_tokens": 4, "total_tokens": 13}, "timing": {"queue_ms": 0.25029999017715454, "ttft_ms": 19.039200007915497, "total_ms": 46.53619998693466}, "cost": {"usd": 1.3600000000000001e-06}}
 ```
 
-(Copied from one local run of the default server: `uvicorn`, Windows 11, Python 3.12, working
-tree for this step, not yet committed; parent commit `ba18512`. See the note on wall-clock
-timing at the end of this section before reading anything into those times.)
+(Copied from one local run of the default server: `uvicorn`, Windows 11, Python 3.12;
+recorded on the working tree before it was committed; first committed in full as
+`c7e75ac`. See the note on wall-clock timing at the end of this section before reading anything into those times.)
 
 | Event   | When                                  | Data                                              |
 |---------|---------------------------------------|---------------------------------------------------|
@@ -167,7 +167,7 @@ for its first token, because A's decode steps now run between its chunks.
 uv run python -m benchmarks.chunked_prefill
 ```
 
-Working tree for this step (not yet committed; parent commit `ba18512`). One model, the
+Commit `c7e75ac`. One model, the
 standard tier. 400 short prompts of 20-80 words arrive as a Poisson stream at 4 req/s; 8
 long prompts of 6,000-10,000 words are spread evenly through the run. Up to 64 output
 tokens each; no prefix cache; seed 7. All times in ms.
