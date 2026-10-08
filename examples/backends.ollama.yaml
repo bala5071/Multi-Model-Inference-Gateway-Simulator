@@ -1,0 +1,23 @@
+# Ollama as the model server instead of three llama-server processes.
+#
+#   ollama pull llama3.2:1b-instruct-q4_K_M && ollama pull llama3.2:3b && ollama pull llama3.1:8b
+#   GATEWAY_BACKENDS=examples/backends.ollama.yaml \
+#     uv run uvicorn gateway.app:create_default_app --factory --port 8000
+#
+# One Ollama process serves all three tiers, so every tier has the same URL and a
+# different model name. See docs/12-real-models.md.
+backend: llamacpp
+
+llamacpp:
+  endpoint: completions
+  max_in_flight: 8
+  servers:
+    economy:
+      url: http://127.0.0.1:11434
+      model: llama3.2:1b-instruct-q4_K_M
+    standard:
+      url: http://127.0.0.1:11434
+      model: llama3.2:3b
+    premium:
+      url: http://127.0.0.1:11434
+      model: llama3.1:8b

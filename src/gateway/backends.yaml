@@ -1,0 +1,28 @@
+# Which backend serves the models. Override the file with GATEWAY_BACKENDS=/path/to/file,
+# or just the choice below with GATEWAY_BACKEND=llamacpp.
+#
+# simulated: no model runs. The gateway's own scheduler (continuous batching, prefix cache,
+#            chunked prefill) decides the timing from illustrative model profiles.
+# llamacpp:  each tier is a real model behind a llama.cpp llama-server (or anything with
+#            the same OpenAI-compatible streaming API, such as Ollama). The model server
+#            does the batching; the gateway only routes, meters and times.
+backend: simulated
+
+# simulated:
+#   # Replace the illustrative timing parameters with ones fitted to real models by
+#   # benchmarks/calibrate.py. GATEWAY_PROFILES=/path/to/file overrides this.
+#   profiles: benchmarks/calibration/calibrated_profiles.json
+
+llamacpp:
+  # completions -> POST /v1/completions; chat -> POST /v1/chat/completions
+  endpoint: completions
+  # Requests the gateway will have open against one tier at once; more get 429.
+  max_in_flight: 32
+  # One llama-server per tier. scripts/run_local_models.sh starts them on these ports.
+  servers:
+    economy:
+      url: http://127.0.0.1:8081
+    standard:
+      url: http://127.0.0.1:8082
+    premium:
+      url: http://127.0.0.1:8083
