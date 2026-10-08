@@ -1,0 +1,23 @@
+# docker compose up --build
+#
+# Starts the gateway on http://localhost:8000 in simulator mode. No model runs.
+services:
+  gateway:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # simulated (default): the gateway's own scheduler with illustrative model profiles.
+      GATEWAY_BACKEND: simulated
+      GATEWAY_SEED: "0"
+
+      # Real models instead: run the model servers on the host (docs/12-real-models.md),
+      # mount a backends file whose URLs use host.docker.internal instead of 127.0.0.1,
+      # and switch the two lines below on.
+      # GATEWAY_BACKEND: llamacpp
+      # GATEWAY_BACKENDS: /config/backends.yaml
+    # volumes:
+    #   - ./my-backends.yaml:/config/backends.yaml:ro
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"   # needed on Linux
+    restart: unless-stopped
