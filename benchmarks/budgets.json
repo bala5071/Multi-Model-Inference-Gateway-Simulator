@@ -1,0 +1,38 @@
+{
+  "tolerance": 0.02,
+  "workload": {
+    "seed": 7,
+    "total_requests": 1000,
+    "arrival_rate_per_s": 5.0,
+    "model_weights": {
+      "economy": 70,
+      "standard": 20,
+      "premium": 10
+    },
+    "prompt_lengths": [
+      {
+        "min_words": 20,
+        "max_words": 80,
+        "weight": 0.6
+      },
+      {
+        "min_words": 80,
+        "max_words": 300,
+        "weight": 0.3
+      },
+      {
+        "min_words": 300,
+        "max_words": 800,
+        "weight": 0.1
+      }
+    ],
+    "shared_prefix_fraction": 0.5,
+    "shared_prefix_words": 200,
+    "max_tokens": null
+  },
+  "p99_total_ms": {
+    "economy": 1817.854,
+    "standard": 3562.306,
+    "premium": 10881.739
+  }
+}
