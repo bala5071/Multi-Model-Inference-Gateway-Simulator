@@ -1,0 +1,26 @@
+# Plans and tenants for the default server. Prices and budgets are illustrative.
+#
+# models: the registered model ids a plan may use, cheapest first. The order matters:
+#   quality "cheapest" picks the first, "best" the last, "balanced" the middle one.
+# price_multiplier: what the tenant is billed, as a multiple of the model's base cost.
+# monthly_token_budget: billed tokens (uncached prompt + completion) per 30-day period.
+
+plans:
+  free:
+    models: [economy]
+    price_multiplier: 0.0
+    monthly_token_budget: 100000
+  pro:
+    models: [economy, standard]
+    price_multiplier: 1.0
+    monthly_token_budget: 5000000
+  enterprise:
+    models: [economy, standard, premium]
+    price_multiplier: 0.8
+    monthly_token_budget: 100000000
+
+# tenant id -> plan. Demo tenants; a real deployment would load these from its own store.
+tenants:
+  initech: free
+  globex: pro
+  acme: enterprise
