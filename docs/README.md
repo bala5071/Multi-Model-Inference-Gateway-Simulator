@@ -23,6 +23,7 @@ says so, and the table below points out the main cases.
 | [02 Baseline](02-baseline.md) | Clocks, registry, backend interface, the one-at-a-time worker | |
 | [03 Continuous batching](03-continuous-batching.md) | The iteration-level batching scheduler | Prefill behaviour is extended in note 11 |
 | [04 Prefix cache](04-prefix-cache.md) | Radix-tree KV-cache stand-in, tokenizer | |
+| [05 Metrics](05-metrics.md) | The bounded metrics store, the percentile method, what small samples mean | Written after note 13; it replaces the recorder that notes 03, 06 and 11 mention |
 | [06 API](06-api.md) | The HTTP endpoints | Its examples predate tenants: add a `tenant_id` (note 09) |
 | [07 Load generator](07-load.md) | Seeded load, byte-identical results, isolation between models | |
 | [08 CI gate](08-ci-gate.md) | p99 budgets, why the gate is not flaky | |
@@ -31,8 +32,6 @@ says so, and the table below points out the main cases.
 | [11 Streaming and chunked prefill](11-streaming-chunked-prefill.md) | Server-sent events, inter-token latency, chunked prefill | |
 | [12 Real models](12-real-models.md) | llama.cpp / Ollama backend, setup, the Llama license | **Read its first section before comparing anything** |
 | [13 Calibration](13-calibration.md) | Fitting the simulator to real models, and how far off it is | |
-
-There is no note 05: no step with that number was built.
 
 ## Which numbers to trust for what
 

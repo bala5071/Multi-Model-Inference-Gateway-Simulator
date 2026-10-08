@@ -4,7 +4,10 @@ Step 6 puts a FastAPI app in front of the registry. Code: `src/gateway/app.py`, 
 `MetricsRecorder` in `metrics.py` and `aclose` on the workers and registry.
 Tests: `tests/test_app.py`.
 
-(There is no `docs/05-*.md`: no step 5 has been implemented in this repo.)
+**Updated by the metrics step (`docs/05-metrics.md`, built after step 13).** `MetricsStore`
+replaced `MetricsRecorder`. `/metrics/summary` keeps the shape shown below; its percentiles
+now cover the last five minutes (at most 10,000 requests per model) instead of every
+request since the process started, and `GET /metrics/detail` has the fuller figures.
 
 **Updated by the routing step (`docs/09-routing.md`).** The default server now loads tenant
 plans, so every `/v1/generate` call to it needs a `tenant_id` (`initech`, `globex` or `acme`

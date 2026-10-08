@@ -18,6 +18,7 @@ from benchmarks import (
     compare_batching,
     fairness,
     loadgen,
+    metrics_example,
     overload,
     report,
 )
@@ -84,6 +85,18 @@ async def test_chunked_prefill_benchmark_prints_a_row_per_chunk_size(
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == SIMULATED
     assert [line.split()[0] for line in lines[3:]] == ["off", "4096", "1024", "256", "64", "16"]
+
+
+async def test_metrics_example_prints_the_rows_in_the_docs(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    await metrics_example.main()
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == SIMULATED
+    # The rows quoted in docs/05-metrics.md.
+    assert "premium   queue_ms       35    2373.4    2893.6    4936.0    6266.1    6266.1" in out
+    assert "premium   total_ms       35    9522.5    9585.4   13458.2   17402.3   17402.3" in out
+    assert "economy   itl_ms      26311       7.4       7.0       7.8      16.6      71.8" in out
 
 
 def test_load_generator_command_line(

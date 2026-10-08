@@ -34,6 +34,7 @@ bench:
 	uv run python -m benchmarks.fairness
 	uv run python -m benchmarks.overload
 	uv run python -m benchmarks.chunked_prefill
+	uv run python -m benchmarks.metrics_example
 
 # Regenerates docs/REPORT.md and docs/report/*.png. Sections 1 to 5 are simulated and
 # reproduce exactly. Section 6 reads benchmarks/calibration/ and does not re-measure.

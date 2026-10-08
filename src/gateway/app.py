@@ -25,7 +25,7 @@ from gateway.backends import BackendError
 from gateway.clock import Clock, WallClock
 from gateway.continuous import RequestTooLargeError, build_continuous_registry
 from gateway.ledger import BudgetExceededError, CostLedger, ModelUsage
-from gateway.metrics import MetricsRecorder, Percentiles
+from gateway.metrics import Distribution, MetricsStore
 from gateway.overload import (
     OverloadPolicy,
     QueueFullError,
@@ -126,6 +126,49 @@ class MetricsSummary(BaseModel):
     models: dict[str, ModelMetrics]
 
 
+class DistributionStats(BaseModel):
+    samples: int
+    mean: float
+    p50: float
+    p90: float
+    p99: float
+    max: float
+
+
+class WindowStats(BaseModel):
+    window_ms: float
+    span_ms: float
+    requests: int
+    prompt_tokens: int
+    cached_tokens: int
+    completion_tokens: int
+    cost_usd: float
+    truncated: bool
+    itl_truncated: bool
+
+
+class LifetimeStats(BaseModel):
+    requests: int
+    prompt_tokens: int
+    cached_tokens: int
+    completion_tokens: int
+    cost_usd: float
+
+
+class ModelMetricsDetail(BaseModel):
+    lifetime: LifetimeStats
+    window: WindowStats
+    queue_ms: DistributionStats | None
+    ttft_ms: DistributionStats | None
+    total_ms: DistributionStats | None
+    itl_ms: DistributionStats | None
+
+
+class MetricsDetail(BaseModel):
+    percentile_method: str
+    models: dict[str, ModelMetricsDetail]
+
+
 class UsageTotals(BaseModel):
     requests: int
     prompt_tokens: int
@@ -167,10 +210,23 @@ class OverloadStatus(BaseModel):
     models: dict[str, ModelOverload]
 
 
-def _pair(percentiles: Percentiles | None) -> PercentilePair | None:
-    if percentiles is None:
+def _pair(distribution: Distribution | None) -> PercentilePair | None:
+    if distribution is None:
         return None
-    return PercentilePair(p50=percentiles.p50, p99=percentiles.p99)
+    return PercentilePair(p50=distribution.p50, p99=distribution.p99)
+
+
+def _stats(distribution: Distribution | None) -> DistributionStats | None:
+    if distribution is None:
+        return None
+    return DistributionStats(
+        samples=distribution.samples,
+        mean=distribution.mean,
+        p50=distribution.p50,
+        p90=distribution.p90,
+        p99=distribution.p99,
+        max=distribution.max,
+    )
 
 
 def _totals(usage: ModelUsage) -> UsageTotals:
@@ -214,6 +270,7 @@ def create_app(
     *,
     plans: PlansConfig | None = None,
     overload: OverloadPolicy | None = None,
+    metrics: MetricsStore | None = None,
 ) -> FastAPI:
     """Build the API around an already wired registry.
 
@@ -229,8 +286,12 @@ def create_app(
     With ``overload``, requests are cancelled after its timeout, and a request that sets
     ``allow_downgrade`` is moved to a cheaper model while its own is missing its SLO.
     Queue limits are a property of the workers in ``registry``.
+
+    ``metrics`` replaces the default ``MetricsStore``, for a different window or ring size.
+    It must be built on the same ``clock``.
     """
-    metrics = MetricsRecorder()
+    if metrics is None:
+        metrics = MetricsStore(clock)
     request_numbers = itertools.count(1)
     started_ms = clock.now_ms()
     router = Router(plans, registry) if plans is not None else None
@@ -547,6 +608,7 @@ def create_app(
                 "GET /v1/tenants/{tenant_id}/usage",
                 "GET /v1/overload",
                 "GET /metrics/summary",
+                "GET /metrics/detail",
                 "GET /healthz",
             ],
         }
@@ -608,6 +670,40 @@ def create_app(
                 )
                 for name, s in summaries.items()
             }
+        )
+
+    @app.get("/metrics/detail")
+    async def metrics_detail() -> MetricsDetail:
+        summaries = {name: metrics.summary(name) for name in registry.names}
+        return MetricsDetail(
+            percentile_method="nearest-rank",
+            models={
+                name: ModelMetricsDetail(
+                    lifetime=LifetimeStats(
+                        requests=s.requests,
+                        prompt_tokens=s.tokens_in,
+                        cached_tokens=s.cached_tokens,
+                        completion_tokens=s.tokens_out,
+                        cost_usd=s.cost_usd,
+                    ),
+                    window=WindowStats(
+                        window_ms=s.window.window_ms,
+                        span_ms=s.window.span_ms,
+                        requests=s.window.requests,
+                        prompt_tokens=s.window.tokens_in,
+                        cached_tokens=s.window.cached_tokens,
+                        completion_tokens=s.window.tokens_out,
+                        cost_usd=s.window.cost_usd,
+                        truncated=s.window.truncated,
+                        itl_truncated=s.window.itl_truncated,
+                    ),
+                    queue_ms=_stats(s.queue_ms),
+                    ttft_ms=_stats(s.ttft_ms),
+                    total_ms=_stats(s.total_ms),
+                    itl_ms=_stats(s.itl_ms),
+                )
+                for name, s in summaries.items()
+            },
         )
 
     return app

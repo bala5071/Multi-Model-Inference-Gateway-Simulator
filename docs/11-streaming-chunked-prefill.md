@@ -28,8 +28,9 @@ with an occasional long gap reads as a stutter.
 "itl_ms": {"p50": 4.5, "p99": 4.5}
 ```
 
-It is `null` until some request has produced at least two tokens. (The class is
-`MetricsRecorder`; there is no `MetricsStore` in this repo.)
+It is `null` until some request has produced at least two tokens. (When this step was
+built the class was `MetricsRecorder`; `MetricsStore` replaced it later, see
+`docs/05-metrics.md`.)
 
 ## Streaming
 

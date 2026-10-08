@@ -59,7 +59,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   clock, and the budget check (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),
   `pick_downgrade`, `QueueFullError`; the queue limit itself is in the worker (exists)
-- `metrics.py` — nearest-rank `percentile` and `MetricsRecorder` (exists)
+- `metrics.py` — nearest-rank `percentile` and `MetricsStore`: per-model metrics in bounded
+  memory, a sliding time window over a fixed-size ring (exists)
 - `app.py` — FastAPI app: `create_app(registry, clock)` for tests, `create_default_app()`
   for the server; JSON or server-sent-event responses (exists)
 
@@ -72,6 +73,8 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
 - `benchmarks/fairness.py` — per-model isolation demo (exists)
 - `benchmarks/overload.py` — p99 with and without SLO-aware downgrade (exists)
 - `benchmarks/chunked_prefill.py` — ITL and TTFT tails with chunked prefill off and on (exists)
+- `benchmarks/metrics_example.py` — what the metrics store reports after the default load;
+  the worked example in `docs/05-metrics.md` (exists)
 - `benchmarks/calibrate.py` — measures real models, fits the three timing parameters of each
   profile, and reports the simulator's error against the measurements. Writes to
   `benchmarks/calibration/`, which is tracked and holds one calibration (Ollama, one
