@@ -1,0 +1,71 @@
+[project]
+name = "gateway"
+version = "0.1.0"
+description = "Cost-aware multi-model inference gateway: tiered routing, continuous batching, prefix reuse, latency gates."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "pyyaml>=6.0",
+    "uvicorn>=0.30",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27",
+    "matplotlib>=3.8",
+    "mypy>=1.11",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "types-pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gateway"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF", "TID", "ASYNC", "PT"]
+
+[tool.ruff.lint.per-file-ignores]
+# The Clock implementations are the only place allowed to touch real time.
+"src/gateway/clock.py" = ["TID251"]
+# The calibration tool measures real servers and stamps its output with the real date.
+"benchmarks/calibrate.py" = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"time.sleep".msg = "Use the injected Clock (see CLAUDE.md hard rules)."
+"time.time".msg = "Use the injected Clock (see CLAUDE.md hard rules)."
+"time.monotonic".msg = "Use the injected Clock (see CLAUDE.md hard rules)."
+"time.perf_counter".msg = "Use the injected Clock (see CLAUDE.md hard rules)."
+"asyncio.sleep".msg = "Use the injected Clock (see CLAUDE.md hard rules)."
+"datetime.datetime.now".msg = "Use the injected Clock (see CLAUDE.md hard rules)."
+"datetime.datetime.utcnow".msg = "Use the injected Clock (see CLAUDE.md hard rules)."
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+files = ["src", "tests", "scripts", "benchmarks"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers --strict-config"
+xfail_strict = true
+markers = [
+    "real_models: needs real model servers running locally; skipped unless GATEWAY_REAL_MODELS=1",
+]
