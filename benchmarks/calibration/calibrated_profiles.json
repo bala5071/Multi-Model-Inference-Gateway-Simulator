@@ -1,0 +1,154 @@
+{
+  "schema": 1,
+  "what_this_is": "Simulator timing parameters fitted to real measurements on the machine described under 'hardware'. They do not transfer to other hardware, models, quantizations or server versions.",
+  "measured_at": "2026-10-07T23:58:07+00:00",
+  "hardware": {
+    "cpu": "Intel(R) Core(TM) Ultra 7 155H",
+    "logical_cores": 22,
+    "ram_gb": 15.4,
+    "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU, 8188 MiB",
+    "os": "Windows 11 (10.0.26200)",
+    "machine": "AMD64",
+    "python": "3.12.10"
+  },
+  "endpoint": "completions",
+  "plan": {
+    "prompt_words": [
+      32,
+      128,
+      512,
+      1536
+    ],
+    "output_tokens": [
+      16,
+      64,
+      128
+    ],
+    "concurrency": [
+      1,
+      2,
+      4
+    ],
+    "repeats": 3,
+    "base_prompt_words": 32,
+    "base_output_tokens": 64,
+    "prompt_sweep_output_tokens": 8,
+    "request_timeout_ms": 300000.0
+  },
+  "notes": "Ollama started with OLLAMA_NUM_PARALLEL=4, otherwise default settings (4096-token context). Single run. Other applications on the machine were not closed. Checked with Ollama's process list right after the run: llama3.1:8b did not fit entirely on the GPU (7.4 of 8.65 GB in VRAM), so the premium tier ran partly on the CPU; the 1B model was fully on the GPU; the 3B model was not checked.",
+  "servers": {
+    "economy": {
+      "url": "http://127.0.0.1:11434",
+      "kind": "ollama",
+      "version": "0.12.6",
+      "model": "llama3.2:1b-instruct-q4_K_M",
+      "quantization": "Q4_K_M",
+      "parameter_size": "1.2B"
+    },
+    "standard": {
+      "url": "http://127.0.0.1:11434",
+      "kind": "ollama",
+      "version": "0.12.6",
+      "model": "llama3.2:3b",
+      "quantization": "Q4_K_M",
+      "parameter_size": "3.2B"
+    },
+    "premium": {
+      "url": "http://127.0.0.1:11434",
+      "kind": "ollama",
+      "version": "0.12.6",
+      "model": "llama3.1:8b",
+      "quantization": "Q4_K_M",
+      "parameter_size": "8.0B"
+    }
+  },
+  "profiles": {
+    "economy": {
+      "prefill_ms_per_token": 0.2098862600736902,
+      "decode_base_ms": 6.666300195545448,
+      "decode_ms_per_extra_seq": 1.914975700648052,
+      "max_concurrency_measured": 4,
+      "samples": 42,
+      "failed_requests": 0,
+      "fit": {
+        "ttft_vs_prompt_tokens": {
+          "slope": 0.2098862600736902,
+          "intercept": 92.27098918130658,
+          "r2": 0.9965413882278139,
+          "n": 16
+        },
+        "per_token_vs_extra_sequences": {
+          "slope": 1.914975700648052,
+          "intercept": 6.666300195545448,
+          "r2": 0.9329485020385708,
+          "n": 28
+        }
+      },
+      "mape_percent": {
+        "ttft_fit": 56.864098015184574,
+        "total_fit": 19.83144703470284,
+        "ttft_holdout": 54.0941747574093,
+        "total_holdout": 18.78581652564697
+      },
+      "notes": []
+    },
+    "standard": {
+      "prefill_ms_per_token": 0.39146418511841363,
+      "decode_base_ms": 14.19380724152019,
+      "decode_ms_per_extra_seq": 4.086094303814956,
+      "max_concurrency_measured": 4,
+      "samples": 42,
+      "failed_requests": 0,
+      "fit": {
+        "ttft_vs_prompt_tokens": {
+          "slope": 0.39146418511841363,
+          "intercept": 92.69947649667162,
+          "r2": 0.9990376057077083,
+          "n": 16
+        },
+        "per_token_vs_extra_sequences": {
+          "slope": 4.086094303814956,
+          "intercept": 14.19380724152019,
+          "r2": 0.9816822446012257,
+          "n": 28
+        }
+      },
+      "mape_percent": {
+        "ttft_fit": 42.599133493306276,
+        "total_fit": 10.659926948667716,
+        "ttft_holdout": 42.21254486143807,
+        "total_holdout": 10.48139653555151
+      },
+      "notes": []
+    },
+    "premium": {
+      "prefill_ms_per_token": 1.0811782788414679,
+      "decode_base_ms": 49.99154168659865,
+      "decode_ms_per_extra_seq": 15.989924240760145,
+      "max_concurrency_measured": 4,
+      "samples": 42,
+      "failed_requests": 0,
+      "fit": {
+        "ttft_vs_prompt_tokens": {
+          "slope": 1.0811782788414679,
+          "intercept": 139.29235682126966,
+          "r2": 0.9950202327384663,
+          "n": 16
+        },
+        "per_token_vs_extra_sequences": {
+          "slope": 15.989924240760145,
+          "intercept": 49.99154168659865,
+          "r2": 0.9752134361197636,
+          "n": 28
+        }
+      },
+      "mape_percent": {
+        "ttft_fit": 35.570502501137646,
+        "total_fit": 6.093174991505964,
+        "ttft_holdout": 31.408669244599846,
+        "total_holdout": 5.119567929939255
+      },
+      "notes": []
+    }
+  }
+}
