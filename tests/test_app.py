@@ -226,7 +226,9 @@ async def test_root_points_a_visitor_at_the_real_endpoints(gateway: Gateway) -> 
     for entry in body["endpoints"]:
         method, path = entry.split()
         if method == "GET" and "{" not in path:
-            assert (await gateway.client.get(path)).status_code == 200, path
+            # The monitoring stream never ends by itself; ask it for a single push.
+            url = f"{path}?count=1" if path == "/v1/monitor/stream" else path
+            assert (await gateway.client.get(url)).status_code == 200, path
 
 
 async def test_models_lists_names_and_aliases(gateway: Gateway) -> None:

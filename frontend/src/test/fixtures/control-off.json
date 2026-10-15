@@ -1,0 +1,13 @@
+{
+  "seed": 0,
+  "load": {
+    "available": false,
+    "presets": null,
+    "status": null
+  },
+  "simulation": {
+    "active": false,
+    "speed": null,
+    "speeds": null
+  }
+}

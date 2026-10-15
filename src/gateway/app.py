@@ -1,31 +1,37 @@
 """The HTTP API. This is the only module that imports FastAPI and the only wiring point.
 
 See docs/06-api.md, docs/09-routing.md, docs/10-overload.md,
-docs/11-streaming-chunked-prefill.md and docs/12-real-models.md.
+docs/11-streaming-chunked-prefill.md, docs/12-real-models.md, docs/15-monitoring-api.md,
+docs/16-dashboard.md and docs/17-playground-load-replay.md.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import itertools
 import json
 import math
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from gateway.backend_config import build_llamacpp_registry, load_backend_config
 from gateway.backends import BackendError
-from gateway.clock import Clock, WallClock
+from gateway.clock import Clock, PacedSimClock, WallClock
 from gateway.continuous import RequestTooLargeError, build_continuous_registry
+from gateway.events import EventBus
 from gateway.ledger import BudgetExceededError, CostLedger, ModelUsage
+from gateway.loadcontrol import PRESETS, LoadController, UnknownPresetError
 from gateway.metrics import Distribution, MetricsStore
+from gateway.monitoring import Monitor, Snapshot, render_prometheus
 from gateway.overload import (
     OverloadPolicy,
     QueueFullError,
@@ -47,6 +53,16 @@ from gateway.routing import (
     pick_by_quality,
 )
 from gateway.schema import GenerateRequest, RequestResult
+from gateway.timeseries import TimeSeriesStore
+from gateway.workload import PlannedRequest
+
+# How often /v1/monitor/stream pushes a snapshot, on the injected clock.
+MONITOR_STREAM_INTERVAL_MS = 1000.0
+PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+# The speeds the dashboard offers for simulated live mode.
+SIMULATION_SPEEDS = (1.0, 5.0, 20.0)
+# Where `npm run build` in frontend/ puts the dashboard. Not tracked; absent until built.
+DASHBOARD_DIR = Path(__file__).resolve().parent / "dashboard"
 
 
 class GenerateBody(BaseModel):
@@ -88,6 +104,20 @@ class GenerateResponse(BaseModel):
     usage: Usage
     timing: Timing
     cost: Cost
+
+
+class LoadStartBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preset: str = Field(min_length=1)
+    # Without one, the gateway's own seed is used.
+    seed: int | None = None
+
+
+class SpeedBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    speed: float
 
 
 class ModelInfo(BaseModel):
@@ -241,8 +271,9 @@ def _totals(usage: ModelUsage) -> UsageTotals:
     )
 
 
-def _sse(event: str, data: object) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+def _sse(event: str, data: object, *, event_id: int | None = None) -> str:
+    prefix = f"id: {event_id}\n" if event_id is not None else ""
+    return f"{prefix}event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 def _backend_failure(exc: BackendError) -> dict[str, object]:
@@ -271,6 +302,12 @@ def create_app(
     plans: PlansConfig | None = None,
     overload: OverloadPolicy | None = None,
     metrics: MetricsStore | None = None,
+    series: TimeSeriesStore | None = None,
+    events: EventBus | None = None,
+    dashboard_dir: Path | None = None,
+    load_control: bool = False,
+    seed: int = 0,
+    autostart_load: str | None = None,
 ) -> FastAPI:
     """Build the API around an already wired registry.
 
@@ -288,7 +325,21 @@ def create_app(
     Queue limits are a property of the workers in ``registry``.
 
     ``metrics`` replaces the default ``MetricsStore``, for a different window or ring size.
-    It must be built on the same ``clock``.
+    ``series`` and ``events`` do the same for the monitoring time series and event log.
+    All three must be built on the same ``clock``.
+
+    ``dashboard_dir`` is a built copy of the monitoring dashboard (``frontend/``), served
+    at ``/dashboard``. Without it, or if the folder has no ``index.html``, ``/dashboard``
+    answers 404 and says how to build it.
+
+    ``load_control`` lets clients start and stop the seeded load generator inside this
+    process, through ``/v1/control/load``. It is off unless asked for: on a gateway
+    anyone can reach it is a switch for overloading it. ``seed`` is the seed a run uses
+    when the client names none. ``autostart_load`` names a preset to start when the
+    server starts.
+
+    On a ``PacedSimClock`` the gateway is in simulated live mode: ``/v1/control`` says so
+    and ``/v1/control/speed`` changes how fast simulated time is let through.
     """
     if metrics is None:
         metrics = MetricsStore(clock)
@@ -297,19 +348,40 @@ def create_app(
     router = Router(plans, registry) if plans is not None else None
     ledger = CostLedger(clock)
     timeout_ms = overload.request_timeout_ms if overload is not None else None
+    slo_policy = overload.slo if overload is not None else None
+    # Monitoring only watches: it is told what happened and decides nothing.
+    monitoring = Monitor(
+        clock,
+        registry,
+        metrics,
+        series=series if series is not None else TimeSeriesStore(clock),
+        events=events if events is not None else EventBus(clock),
+        ledger=ledger if plans is not None else None,
+        plans=plans,
+        slo_models=tuple(slo_policy.p99_ms) if slo_policy is not None else (),
+    )
     monitor = (
-        SloMonitor(overload.slo, clock)
-        if overload is not None and overload.slo is not None
+        SloMonitor(slo_policy, clock, on_transition=monitoring.slo_transition)
+        if slo_policy is not None
         else None
     )
 
+    # Filled in further down, once the generate handler it sends through exists.
+    load: LoadController | None = None
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if load is not None and autostart_load is not None:
+            await load.start(autostart_load, seed)
         yield
+        if load is not None:
+            await load.stop()
         await registry.aclose()
 
     app = FastAPI(title="Cost-aware multi-model inference gateway", lifespan=lifespan)
     app.state.slo_monitor = monitor
+    app.state.monitoring = monitoring
+    app.state.clock = clock
 
     @app.exception_handler(UnknownModelError)
     async def unknown_model(_: Request, exc: UnknownModelError) -> JSONResponse:
@@ -372,10 +444,11 @@ def create_app(
         )
 
     def failure(
-        exc: QueueFullError | RequestTimeoutError, model: str
+        exc: QueueFullError | RequestTimeoutError, model: str, tenant_id: str | None
     ) -> tuple[int, dict[str, object], dict[str, str] | None]:
         """Status, error body and headers for a request the model could not serve."""
         if isinstance(exc, QueueFullError):
+            monitoring.queue_full(model, tenant_id, exc)
             retry_after_s = max(1, math.ceil(exc.retry_after_ms / 1000))
             return (
                 429,
@@ -395,6 +468,7 @@ def create_app(
             # A request that timed out took at least this long; without this the monitor
             # would only ever see the requests that made it.
             monitor.record(model, exc.timeout_ms)
+        monitoring.timed_out(model, tenant_id, exc.timeout_ms)
         return (
             504,
             {
@@ -414,6 +488,7 @@ def create_app(
         model: str,
         tenant_id: str | None,
         price_multiplier: float,
+        live_tokens: int,
     ) -> GenerateResponse:
         """Record a finished request everywhere it counts and build its response body."""
         metrics.record(model, result)
@@ -424,6 +499,9 @@ def create_app(
             cost_usd = ledger.record(
                 tenant_id, result, model=model, price_multiplier=price_multiplier
             )
+        monitoring.completed(
+            model, tenant_id, result, billed_cost_usd=cost_usd, live_tokens=live_tokens
+        )
         return GenerateResponse(
             id=request_id,
             # A simulated run generates no text, so say so in its place.
@@ -475,7 +553,11 @@ def create_app(
                     401, "tenant_required", "This gateway needs a tenant_id on every request."
                 )
             route = router.route(body.tenant_id, model=body.model, quality=body.quality)
-            ledger.check_budget(body.tenant_id, route.plan.monthly_token_budget)
+            try:
+                ledger.check_budget(body.tenant_id, route.plan.monthly_token_budget)
+            except BudgetExceededError as exc:
+                monitoring.budget_exhausted(route.model, exc)
+                raise
             model = route.model
             price_multiplier = route.plan.price_multiplier
             allowed_models = route.plan.models
@@ -492,23 +574,38 @@ def create_app(
         headers = {"X-Model-Used": model}
         if downgraded_from is not None:
             headers["X-Downgraded-From"] = downgraded_from
+            monitoring.downgraded(tenant_id, downgraded_from, model)
 
         # Token events for a streaming response; None marks the end of the request.
         tokens: asyncio.Queue[tuple[int, float, str] | None] = asyncio.Queue()
         arrived_ms = clock.now_ms()
+        # Output tokens reported to monitoring as they were produced.
+        live_tokens = 0
 
         def on_token(index: int, at_ms: float, text: str) -> None:
-            tokens.put_nowait((index, at_ms - arrived_ms, text))
+            nonlocal live_tokens
+            live_tokens += 1
+            monitoring.token(model)
+            if body.stream:
+                tokens.put_nowait((index, at_ms - arrived_ms, text))
 
         request = GenerateRequest(request_id, model, body.prompt, body.max_tokens)
-        work = registry.submit(request, on_token=on_token if body.stream else None)
+
+        async def tracked() -> RequestResult:
+            monitoring.request_started(model)
+            try:
+                return await registry.submit(request, on_token=on_token)
+            finally:
+                monitoring.request_ended(model)
+
+        work = tracked()
         guarded = run_with_timeout(clock, work, timeout_ms) if timeout_ms is not None else work
 
         if not body.stream:
             try:
                 result = await guarded
             except (QueueFullError, RequestTimeoutError) as exc:
-                status, error, error_headers = failure(exc, model)
+                status, error, error_headers = failure(exc, model, tenant_id)
                 return JSONResponse({"error": error}, status_code=status, headers=error_headers)
             payload = settle(
                 result,
@@ -516,6 +613,7 @@ def create_app(
                 model=model,
                 tenant_id=tenant_id,
                 price_multiplier=price_multiplier,
+                live_tokens=live_tokens,
             )
             response.headers.update(headers)
             response.headers["X-Cost-USD"] = f"{payload.cost.usd:.10f}"
@@ -533,7 +631,7 @@ def create_app(
             # answer exactly as a non-streaming request would.
             failed = task.exception()
             if isinstance(failed, QueueFullError | RequestTimeoutError):
-                status, error, error_headers = failure(failed, model)
+                status, error, error_headers = failure(failed, model, tenant_id)
                 return JSONResponse({"error": error}, status_code=status, headers=error_headers)
             task.result()
             raise AssertionError("a request finished without producing a token")
@@ -555,10 +653,11 @@ def create_app(
                         model=model,
                         tenant_id=tenant_id,
                         price_multiplier=price_multiplier,
+                        live_tokens=live_tokens,
                     )
                     yield _sse("done", payload.model_dump())
                 elif isinstance(failed, RequestTimeoutError):
-                    yield _sse("error", failure(failed, model)[1])
+                    yield _sse("error", failure(failed, model, tenant_id)[1])
                 elif isinstance(failed, BackendError):
                     yield _sse("error", _backend_failure(failed))
                 else:
@@ -607,6 +706,10 @@ def create_app(
                 "GET /v1/models",
                 "GET /v1/tenants/{tenant_id}/usage",
                 "GET /v1/overload",
+                "GET /v1/control",
+                "GET /v1/monitor/snapshot",
+                "GET /v1/monitor/stream",
+                "GET /metrics",
                 "GET /metrics/summary",
                 "GET /metrics/detail",
                 "GET /healthz",
@@ -706,6 +809,197 @@ def create_app(
             },
         )
 
+    # --- load control and simulated live mode ---------------------------------------------
+
+    # Which tenants may use each model, in the plans file's order.
+    tenants_for: dict[str, list[str]] = {}
+    if plans is not None:
+        for tenant, plan_name in plans.tenants.items():
+            for allowed in plans.plans[plan_name].models:
+                tenants_for.setdefault(allowed, []).append(tenant)
+
+    async def send_planned(planned: PlannedRequest, allow_downgrade: bool) -> bool:
+        """Put one generated request through the same handler an HTTP request reaches."""
+        tenant_id = None
+        if plans is not None:
+            candidates = tenants_for.get(registry.resolve(planned.model), [])
+            if not candidates:
+                return False
+            # Spread over the tenants that may use the model, by a rule with no randomness.
+            tenant_id = candidates[planned.index % len(candidates)]
+        body = GenerateBody(
+            model=planned.model,
+            prompt=planned.prompt,
+            max_tokens=planned.max_tokens,
+            tenant_id=tenant_id,
+            allow_downgrade=allow_downgrade,
+        )
+        try:
+            answer = await generate(body, Response())
+        except (
+            BackendError,
+            BudgetExceededError,
+            ModelNotAllowedError,
+            RequestTooLargeError,
+            UnknownModelError,
+            UnknownTenantError,
+        ):
+            return False
+        return isinstance(answer, GenerateResponse)
+
+    if load_control:
+        load = LoadController(clock, send_planned)
+    app.state.load = load
+
+    def control_status() -> dict[str, object]:
+        paced = clock if isinstance(clock, PacedSimClock) else None
+        return {
+            "seed": seed,
+            "load": {
+                "available": load is not None,
+                "presets": [
+                    {"name": preset.name, "description": preset.description}
+                    for preset in PRESETS.values()
+                ]
+                if load is not None
+                else None,
+                "status": dataclasses.asdict(load.status()) if load is not None else None,
+            },
+            "simulation": {
+                "active": paced is not None,
+                "speed": paced.speed if paced is not None else None,
+                "speeds": list(SIMULATION_SPEEDS) if paced is not None else None,
+            },
+        }
+
+    def load_disabled() -> JSONResponse:
+        return _error(
+            403,
+            "load_control_disabled",
+            "Load control is not enabled on this gateway. Start it with "
+            "GATEWAY_LOAD_CONTROL=1, or in simulated live mode. See "
+            "docs/17-playground-load-replay.md.",
+        )
+
+    @app.get("/v1/control")
+    async def control() -> dict[str, object]:
+        return control_status()
+
+    @app.post("/v1/control/load/start")
+    async def load_start(body: LoadStartBody) -> JSONResponse:
+        if load is None:
+            return load_disabled()
+        try:
+            await load.start(body.preset, seed if body.seed is None else body.seed)
+        except UnknownPresetError as exc:
+            return _error(404, "unknown_preset", str(exc), valid_presets=list(exc.valid))
+        return JSONResponse(control_status())
+
+    @app.post("/v1/control/load/stop")
+    async def load_stop() -> JSONResponse:
+        if load is None:
+            return load_disabled()
+        await load.stop()
+        return JSONResponse(control_status())
+
+    @app.post("/v1/control/speed")
+    async def set_speed(body: SpeedBody) -> JSONResponse:
+        if not isinstance(clock, PacedSimClock):
+            return _error(
+                409,
+                "not_simulated",
+                "This gateway is not in simulated live mode, so its time has no speed to set.",
+            )
+        if body.speed not in SIMULATION_SPEEDS:
+            return _error(
+                422,
+                "invalid_speed",
+                f"Speed must be one of {', '.join(f'{v:g}' for v in SIMULATION_SPEEDS)}.",
+                valid_speeds=list(SIMULATION_SPEEDS),
+            )
+        clock.speed = body.speed
+        return JSONResponse(control_status())
+
+    def take_snapshot(*, history_ms: float = 0.0, recent_events: int = 0) -> Snapshot:
+        # Asking the SLO monitor for a model's health makes it re-evaluate, exactly as
+        # GET /v1/overload does.
+        health = (
+            {name: monitor.health(name) for name in registry.names} if monitor is not None else None
+        )
+        return monitoring.snapshot(
+            history_ms=history_ms, recent_events=recent_events, health=health
+        )
+
+    @app.get("/v1/monitor/snapshot")
+    async def monitor_snapshot(
+        history_s: float = Query(default=0.0, ge=0.0),
+        events: int = Query(default=50, ge=0),
+    ) -> JSONResponse:
+        snapshot = take_snapshot(history_ms=history_s * 1000, recent_events=events)
+        return JSONResponse(dataclasses.asdict(snapshot))
+
+    @app.get("/v1/monitor/stream")
+    async def monitor_stream(
+        request: Request,
+        history_s: float = Query(default=0.0, ge=0.0),
+        count: int | None = Query(default=None, ge=1),
+        last_event_id: int | None = Query(default=None, ge=0),
+    ) -> StreamingResponse:
+        bus = monitoring.events
+        # A reconnecting client says which event it saw last and gets the ones after it:
+        # in the header a browser sends when it retries by itself, or in the query, for a
+        # client that opens a new connection.
+        header = request.headers.get("last-event-id", "")
+        if last_event_id is not None:
+            cursor = last_event_id
+        else:
+            cursor = int(header) if header.isdecimal() else bus.last_seq
+
+        async def pushes() -> AsyncIterator[str]:
+            nonlocal cursor
+            # The first snapshot carries the history asked for; later ones only what one
+            # interval can have changed.
+            history_ms = history_s * 1000
+            sent = 0
+            while True:
+                # Taken first: building it can itself change a model's state, and that
+                # event must reach the client before the snapshot showing it.
+                snapshot = take_snapshot(history_ms=history_ms)
+                page = bus.since(cursor)
+                cursor = bus.last_seq
+                if page.missed:
+                    yield _sse("events_missed", {"missed": page.missed})
+                for event in page.events:
+                    yield _sse("event", dataclasses.asdict(event), event_id=event.seq)
+                yield _sse("snapshot", dataclasses.asdict(snapshot))
+                sent += 1
+                if count is not None and sent >= count:
+                    return
+                history_ms = MONITOR_STREAM_INTERVAL_MS
+                await clock.sleep_ms(MONITOR_STREAM_INTERVAL_MS)
+
+        return StreamingResponse(
+            pushes(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
+        )
+
+    @app.get("/metrics")
+    async def prometheus_metrics() -> Response:
+        return Response(render_prometheus(take_snapshot()), media_type=PROMETHEUS_CONTENT_TYPE)
+
+    if dashboard_dir is not None and (dashboard_dir / "index.html").is_file():
+        app.mount("/dashboard", StaticFiles(directory=dashboard_dir, html=True), name="dashboard")
+    else:
+
+        @app.get("/dashboard")
+        @app.get("/dashboard/{path:path}")
+        async def dashboard_not_built(path: str = "") -> JSONResponse:
+            return _error(
+                404,
+                "dashboard_not_built",
+                "The dashboard has not been built. Run `npm install` and `npm run build` in "
+                "frontend/, then restart the gateway. See docs/16-dashboard.md.",
+            )
+
     return app
 
 
@@ -716,6 +1010,42 @@ DEFAULT_OVERLOAD = OverloadPolicy(
     request_timeout_ms=120_000.0,
     slo=SloPolicy(p99_ms={"economy": 5_000.0, "standard": 10_000.0, "premium": 30_000.0}),
 )
+
+
+def create_simulated_live_app(
+    *,
+    seed: int = 0,
+    speed: float = 1.0,
+    preset: str = "steady",
+    wait: Callable[[float], Awaitable[None]] | None = None,
+    dashboard_dir: Path | None = DASHBOARD_DIR,
+) -> FastAPI:
+    """Simulated live mode: the default simulated wiring on a paced simulation clock.
+
+    Simulated time is let through at ``speed`` times real time, and the load preset is
+    started with ``seed`` as the server starts. Every latency, event and timestamp is then
+    simulated time: the same seed gives the same sequence on any machine, at any speed.
+    Nothing here measures a real model. ``wait`` replaces the real waiting, for tests.
+    """
+    if preset not in PRESETS:
+        raise UnknownPresetError(preset, tuple(PRESETS))
+    clock = PacedSimClock(speed, wait=wait)
+    registry = build_continuous_registry(
+        clock,
+        seed=seed,
+        max_queue_len=DEFAULT_MAX_QUEUE_LEN,
+        prefill_chunk_tokens=DEFAULT_PREFILL_CHUNK_TOKENS,
+    )
+    return create_app(
+        registry,
+        clock,
+        plans=load_plans(),
+        overload=DEFAULT_OVERLOAD,
+        dashboard_dir=dashboard_dir,
+        load_control=True,
+        seed=seed,
+        autostart_load=preset,
+    )
 
 
 def create_default_app() -> FastAPI:
@@ -733,9 +1063,28 @@ def create_default_app() -> FastAPI:
 
     ``GATEWAY_SEED`` (default 0) seeds the simulated output lengths. ``GATEWAY_PLANS`` is
     the path of a plans file; without it the plans packaged with the gateway are used.
+
+    ``GATEWAY_LOAD_CONTROL=1`` lets the dashboard start and stop load against this server.
+
+    ``GATEWAY_SIMULATED_LIVE=1`` gives simulated live mode instead of all the above (see
+    ``create_simulated_live_app``): ``GATEWAY_SIM_SPEED`` (1, 5 or 20; default 1) and
+    ``GATEWAY_SIM_PRESET`` (default ``steady``) set its speed and load, ``GATEWAY_SEED``
+    its seed. It cannot be combined with real models.
     """
-    clock = WallClock()
     seed = int(os.environ.get("GATEWAY_SEED", "0"))
+    if os.environ.get("GATEWAY_SIMULATED_LIVE") == "1":
+        if os.environ.get("GATEWAY_BACKEND", "simulated") != "simulated":
+            raise ValueError(
+                "GATEWAY_SIMULATED_LIVE=1 replays a simulated workload and cannot be "
+                "combined with GATEWAY_BACKEND=" + os.environ["GATEWAY_BACKEND"]
+            )
+        speed = float(os.environ.get("GATEWAY_SIM_SPEED", "1"))
+        if speed not in SIMULATION_SPEEDS:
+            raise ValueError("GATEWAY_SIM_SPEED must be 1, 5 or 20")
+        return create_simulated_live_app(
+            seed=seed, speed=speed, preset=os.environ.get("GATEWAY_SIM_PRESET", "steady")
+        )
+    clock = WallClock()
     plans_path = os.environ.get("GATEWAY_PLANS")
     plans = load_plans(Path(plans_path) if plans_path else None)
     backends_path = os.environ.get("GATEWAY_BACKENDS")
@@ -754,4 +1103,12 @@ def create_default_app() -> FastAPI:
             prefill_chunk_tokens=DEFAULT_PREFILL_CHUNK_TOKENS,
             profiles=load_calibrated_profiles(Path(profiles_path)) if profiles_path else PROFILES,
         )
-    return create_app(registry, clock, plans=plans, overload=DEFAULT_OVERLOAD)
+    return create_app(
+        registry,
+        clock,
+        plans=plans,
+        overload=DEFAULT_OVERLOAD,
+        dashboard_dir=DASHBOARD_DIR,
+        load_control=os.environ.get("GATEWAY_LOAD_CONTROL") == "1",
+        seed=seed,
+    )

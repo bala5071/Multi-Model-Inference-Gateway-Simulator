@@ -1,7 +1,8 @@
 # Common tasks. Everything runs through uv, so the only prerequisite is uv itself.
 # On Windows without make, run the command on the right-hand side directly.
 
-.PHONY: install lint format typecheck test gate check bench report demo serve calibrate
+.PHONY: install lint format typecheck test gate check bench report demo serve serve-sim
+.PHONY: calibrate dashboard dashboard-check dashboard-dev dashboard-e2e pictures
 
 install:
 	uv sync
@@ -48,6 +49,36 @@ demo:
 # The gateway on http://127.0.0.1:8000 in simulator mode. API docs at /docs.
 serve:
 	uv run uvicorn gateway.app:create_default_app --factory --port 8000
+
+# The gateway in simulated live mode: no models, a seeded load replayed on simulated time
+# at 5 times real time. Everything it shows is simulated. See
+# docs/17-playground-load-replay.md.
+serve-sim:
+	GATEWAY_SIMULATED_LIVE=1 GATEWAY_SIM_SPEED=5 uv run uvicorn gateway.app:create_default_app --factory --port 8000
+
+# Builds the monitoring dashboard into src/gateway/dashboard, which `make serve` then
+# serves at /dashboard. Needs Node 20. See docs/16-dashboard.md.
+dashboard:
+	cd frontend && npm ci && npm run build
+
+# Lint, formatting, types and component tests of the dashboard.
+dashboard-check:
+	cd frontend && npm run check
+
+# Browser smoke tests: builds the dashboard and runs it against the gateway in simulated
+# live mode. Needs a browser: `npx playwright install chromium` in frontend/, or set
+# PLAYWRIGHT_CHANNEL=chrome. See docs/18-demo.md.
+dashboard-e2e:
+	cd frontend && npm run e2e
+
+# Retakes the pictures in docs/img. Same browser needs as dashboard-e2e.
+pictures:
+	uv run python scripts/capture_demo.py
+
+# The dashboard with hot reload on http://localhost:5173/dashboard/, proxying the API to
+# a gateway on port 8000 (`make serve` in another terminal).
+dashboard-dev:
+	cd frontend && npm run dev
 
 # Measures real models; needs model servers running. See docs/13-calibration.md.
 # Example: make calibrate BACKENDS=examples/backends.ollama.yaml

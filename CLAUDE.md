@@ -32,13 +32,16 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `profiles.py` — `Tier`, `ModelProfile`, the three profiles (exists; numbers are
   illustrative), and `load_calibrated_profiles` for a calibration file
 - `cost_model.py` — `estimate_cost`, `OutputLengthGenerator` (exists)
-- `clock.py` — `Clock` protocol, `SimClock`, `WallClock`; times are milliseconds (exists)
+- `clock.py` — `Clock` protocol, `SimClock`, `WallClock`, and `PacedSimClock` (simulated
+  time let through at a multiple of real time, for simulated live mode); times are
+  milliseconds (exists)
 - `schema.py` — `GenerateRequest`, `RequestResult` (exists)
 - `backends/` — abstract `Backend`, `SimulatedBackend`; a backend returns token counts and
   takes no simulated time, workers do the timing (exists)
 - `registry.py` — `ModelRegistry`, `UnknownModelError`, `Worker` protocol (exists)
 - `backends/llamacpp.py` — `LlamaCppBackend`: a real model behind llama-server or Ollama,
-  over the OpenAI-compatible streaming API (exists)
+  over the OpenAI-compatible streaming API; optional `sampling` fields such as
+  temperature (exists)
 - `passthrough.py` — `PassthroughWorker`: forwards to a backend that does its own
   batching and only times the result; the pair for `LlamaCppBackend` (exists)
 - `backend_config.py` + `backends.yaml` — which backend to use and where each tier's
@@ -61,8 +64,24 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `pick_downgrade`, `QueueFullError`; the queue limit itself is in the worker (exists)
 - `metrics.py` — nearest-rank `percentile` and `MetricsStore`: per-model metrics in bounded
   memory, a sliding time window over a fixed-size ring (exists)
+- `timeseries.py` — `TimeSeriesStore`: per-model and per-tenant series at 1 s resolution
+  over a 15-minute window, in bounded memory; buckets are filled by events and reads, with
+  no background task (exists)
+- `events.py` — `EventBus`: in-process events with a bounded log, read with a cursor (exists)
+- `monitoring.py` — `Monitor`: told by `app.py` what happened to each request, builds the
+  snapshot behind `/v1/monitor/snapshot`, `/v1/monitor/stream` and Prometheus `/metrics`;
+  `SchedulerView` is the protocol a worker must match for its queue, batch, KV and cache to
+  be reported (exists)
+- `workload.py` — `LoadConfig`, `build_workload`: the seeded request schedule, a pure
+  function of its config. `benchmarks/loadgen.py` re-exports it and runs it over HTTP
+  (exists)
+- `loadcontrol.py` — `LoadController` and the load presets: runs that schedule inside
+  the server for the dashboard, through the same handler an HTTP request reaches. Off
+  unless `GATEWAY_LOAD_CONTROL=1` or simulated live mode (exists)
 - `app.py` — FastAPI app: `create_app(registry, clock)` for tests, `create_default_app()`
-  for the server; JSON or server-sent-event responses (exists)
+  for the server, `create_simulated_live_app()` for simulated live mode
+  (`GATEWAY_SIMULATED_LIVE=1`); JSON or server-sent-event responses; serves the built
+  dashboard at `/dashboard` (exists)
 
 Outside the package, `benchmarks/` is a package run with `python -m`:
 
@@ -84,20 +103,49 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   aggregate, in which most parameters are marked unstable and premium hardware-limited.
   The simulator does not load it by default: the profiles in `profiles.py` are still
   illustrative, with an overhead of 0 (exists)
+- `benchmarks/quality_eval.py` — asks each tier's real model 100 fixed multiple-choice
+  questions (an MMLU sample, MIT license, in `benchmarks/quality/`) at temperature 0 and
+  scores exact match on the option letter. `benchmarks/quality/results.json` is tracked and
+  holds one run (Ollama, one laptop, 2026-10-09). Small and unrepeated: always quote the
+  interval with the accuracy (exists)
 - `benchmarks/gate.py` + `scripts/perf_gate.py` — the CI performance gate; budgets live in
   `benchmarks/budgets.json` (exists)
 
 - `benchmarks/report.py` — generates `docs/REPORT.md` and `docs/report/*.png` from the
   benchmarks above (`make report`). Sections 1 and 2 also show a variant on the calibrated
   profiles (`GATEWAY_PROFILES`, else the tracked calibration); sections 3 to 5 are
-  illustrative only and say so. Never edit the report by hand; regenerate it (exists)
+  illustrative only and say so; section 7 sets measured accuracy beside simulated cost. Never edit the report by hand; regenerate it (exists)
 
 If a change moves simulated latency on purpose, re-baseline with
 `uv run python scripts/perf_gate.py --update-budgets` and commit `benchmarks/budgets.json`
 in the same change, with the printed diff in the PR description. Never update budgets to
 make an unexplained failure pass.
 
-`scripts/` holds operational entry points only: `perf_gate.py`, `demo.py` and
+`frontend/` is the monitoring dashboard: React, TypeScript, Vite, uPlot. It only reads
+the monitoring API (`docs/15`); it has no logic of its own about the gateway.
+
+- `src/api/types.ts` mirrors the API by hand. `src/test/fixtures/*.json` are snapshots the
+  gateway produced; `tests/test_dashboard.py` fails when they are out of date
+  (`GATEWAY_UPDATE_FIXTURES=1 uv run pytest tests/test_dashboard.py` regenerates them), and
+  the frontend's type check then shows what has to follow. Never edit a fixture by hand.
+- Data transforms are pure functions in `src/charts/transforms.ts`, `src/api/store.ts` and
+  `src/api/derive.ts`, each with tests. Components do not compute.
+- A metric with `available: false` is drawn with the `Unavailable` component, never as 0.
+- Every chart goes through `ChartPanel` (units in the title, pause, table view,
+  downsampling).
+- `npm run build` writes to `src/gateway/dashboard/`, which is not tracked.
+
+- The dashboard must label simulated live mode on every tab (`SimulationBanner`).
+- `frontend/e2e/*.e2e.ts` are Playwright smoke tests against the gateway in simulated
+  live mode (`npm run e2e`). They wait for a state, never for a time.
+- `docs/img/` is taken by `scripts/capture_demo.py` in simulated live mode. Never edit
+  a picture; retake it. Any caption must say it is simulated.
+- The Dockerfile builds the dashboard in a Node stage and serves it from the Python
+  stage; `docker-compose.yml` is the simulated live demo. Neither has been run on the
+  development machine (no Docker): do not write that they work until CI has built them.
+
+`scripts/` holds operational entry points only: `perf_gate.py`, `demo.py`,
+`capture_demo.py` (retakes the dashboard pictures in `docs/img/`) and
 `run_local_models.sh`. Anything that measures or compares goes in `benchmarks/`.
 
 Rules:
@@ -111,6 +159,17 @@ Backends and workers go in pairs: `SimulatedBackend` with `ContinuousBatchingWor
 server does the batching and this repo's scheduler, prefix cache and chunked prefill are
 not in the path. Never present a real-mode number as a result of our scheduler, and never
 compare simulated and real numbers as if they measured the same thing.
+
+Monitoring watches and decides nothing: no scheduling, routing or admission code may read
+from `Monitor`, `TimeSeriesStore` or `EventBus`. A metric the gateway cannot observe (queue,
+batch, KV and cache behind `PassthroughWorker`) is reported as unavailable, `null` with
+`available: false`, never as zero. The schema is in `docs/15-monitoring-api.md`.
+
+Simulated live mode (`docs/17-playground-load-replay.md`) is the simulated wiring on a
+`PacedSimClock` with a load preset running. It must stay deterministic: the same seed
+gives the same events and snapshots at any speed (`tests/test_live_sim.py`). Nothing in
+it may read real time; `PacedSimClock` uses real time only to decide when simulated
+time may move, never what it moves to. Never present anything from it as a measurement.
 
 Tests that need a real model server are marked `real_models` and skipped unless
 `GATEWAY_REAL_MODELS=1`; CI never runs them.
@@ -153,6 +212,16 @@ uv run python -m benchmarks.report   # regenerate docs/REPORT.md
 ```
 
 The `Makefile` wraps these (`make check`, `make report`).
+
+The dashboard has its own, run in `frontend/` (Node 20):
+
+```sh
+npm ci            # install
+npm run check     # eslint, prettier --check, tsc, vitest
+npm run build     # build into src/gateway/dashboard
+npm run dev       # dev server, proxying the API to a gateway on port 8000
+npm run e2e       # browser smoke tests (PLAYWRIGHT_CHANNEL=chrome to use Chrome)
+```
 
 All of these must pass before a step is called done. CI runs the same commands on
 Python 3.11 and 3.12.

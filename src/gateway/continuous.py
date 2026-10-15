@@ -168,6 +168,23 @@ class ContinuousBatchingWorker:
         """
         return self._waiting(arriving=0)
 
+    @property
+    def batch_size(self) -> int:
+        """Requests seated in the batch now, decoding or still being prefilled.
+
+        Read-only, for monitoring. Like ``waiting``, it leaves out requests whose caller
+        has given up.
+        """
+        return sum(1 for r in self._running if not r.queued.done.cancelled())
+
+    @property
+    def kv_used_tokens(self) -> int:
+        """Tokens held against the KV capacity now: running requests plus the prefix cache.
+
+        Read-only, for monitoring. The same number ``StepRecord.kv_tokens`` reports.
+        """
+        return self._kv_tokens()
+
     def _waiting(self, *, arriving: int) -> int:
         queued = sum(1 for q in self._queue if not q.done.cancelled()) + arriving
         queued += self._preparing

@@ -1,0 +1,45 @@
+{
+  "seed": 7,
+  "load": {
+    "available": true,
+    "presets": [
+      {
+        "name": "steady",
+        "description": "8 requests a second across the three models, the load generator's default mix."
+      },
+      {
+        "name": "burst",
+        "description": "20 quiet seconds at 2 requests a second, then 10 seconds at 30."
+      },
+      {
+        "name": "overload",
+        "description": "Mostly premium, at several times what it can serve; requests may be downgraded."
+      },
+      {
+        "name": "long-prompts",
+        "description": "Mostly prompts of 300 to 800 words, most of them sharing a system prompt."
+      }
+    ],
+    "status": {
+      "running": true,
+      "preset": "steady",
+      "seed": 7,
+      "started_ms": 0.0,
+      "phases_started": 1,
+      "sent": 87,
+      "served": 74,
+      "refused": 0,
+      "skipped": 0,
+      "in_progress": 13
+    }
+  },
+  "simulation": {
+    "active": true,
+    "speed": 5.0,
+    "speeds": [
+      1.0,
+      5.0,
+      20.0
+    ]
+  }
+}

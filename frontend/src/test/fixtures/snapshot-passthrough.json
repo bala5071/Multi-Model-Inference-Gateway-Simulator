@@ -1,0 +1,286 @@
+{
+  "at_ms": 70.0,
+  "resolution_ms": 1000.0,
+  "window_ms": 900000.0,
+  "models": {
+    "economy": {
+      "traffic": {
+        "available": true,
+        "in_flight": 0,
+        "arrived_total": 0,
+        "completed_total": 0,
+        "output_tokens_total": 0,
+        "queue_full_total": 0,
+        "timeout_total": 0,
+        "downgrade_total": 0
+      },
+      "queue": {
+        "available": false,
+        "length": null
+      },
+      "batch": {
+        "available": false,
+        "size": null,
+        "max_size": null
+      },
+      "kv": {
+        "available": false,
+        "used_tokens": null,
+        "capacity_tokens": null
+      },
+      "cache": {
+        "available": false,
+        "size_tokens": null,
+        "lookups_total": null,
+        "hits_total": null,
+        "prompt_tokens_total": null,
+        "cached_tokens_total": null,
+        "hit_rate": null,
+        "token_hit_rate": null
+      },
+      "latency": {
+        "available": true,
+        "window_ms": 300000.0,
+        "ttft_ms": null,
+        "itl_ms": null,
+        "total_ms": null
+      },
+      "slo": {
+        "available": false,
+        "degraded": null,
+        "slo_p99_ms": null,
+        "recent_p99_ms": null,
+        "samples": null
+      },
+      "series": [
+        {
+          "t_ms": 0.0,
+          "final": false,
+          "arrived": 0,
+          "completed": 0,
+          "req_per_s": 0.0,
+          "output_tokens": 0,
+          "tokens_per_s": 0.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 0,
+          "in_flight_max": 0,
+          "queue_len": null,
+          "queue_len_max": null,
+          "batch_size": null,
+          "batch_size_max": null,
+          "kv_used_tokens": null,
+          "kv_used_tokens_max": null,
+          "cache_lookups": null,
+          "cache_hit_rate": null,
+          "cache_token_hit_rate": null,
+          "ttft_p50_ms": null,
+          "ttft_p99_ms": null,
+          "itl_p50_ms": null,
+          "itl_p99_ms": null,
+          "total_p50_ms": null,
+          "total_p99_ms": null,
+          "latency_truncated": false,
+          "degraded": null
+        }
+      ]
+    },
+    "standard": {
+      "traffic": {
+        "available": true,
+        "in_flight": 0,
+        "arrived_total": 0,
+        "completed_total": 0,
+        "output_tokens_total": 0,
+        "queue_full_total": 0,
+        "timeout_total": 0,
+        "downgrade_total": 0
+      },
+      "queue": {
+        "available": false,
+        "length": null
+      },
+      "batch": {
+        "available": false,
+        "size": null,
+        "max_size": null
+      },
+      "kv": {
+        "available": false,
+        "used_tokens": null,
+        "capacity_tokens": null
+      },
+      "cache": {
+        "available": false,
+        "size_tokens": null,
+        "lookups_total": null,
+        "hits_total": null,
+        "prompt_tokens_total": null,
+        "cached_tokens_total": null,
+        "hit_rate": null,
+        "token_hit_rate": null
+      },
+      "latency": {
+        "available": true,
+        "window_ms": 300000.0,
+        "ttft_ms": null,
+        "itl_ms": null,
+        "total_ms": null
+      },
+      "slo": {
+        "available": false,
+        "degraded": null,
+        "slo_p99_ms": null,
+        "recent_p99_ms": null,
+        "samples": null
+      },
+      "series": [
+        {
+          "t_ms": 0.0,
+          "final": false,
+          "arrived": 0,
+          "completed": 0,
+          "req_per_s": 0.0,
+          "output_tokens": 0,
+          "tokens_per_s": 0.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 0,
+          "in_flight_max": 0,
+          "queue_len": null,
+          "queue_len_max": null,
+          "batch_size": null,
+          "batch_size_max": null,
+          "kv_used_tokens": null,
+          "kv_used_tokens_max": null,
+          "cache_lookups": null,
+          "cache_hit_rate": null,
+          "cache_token_hit_rate": null,
+          "ttft_p50_ms": null,
+          "ttft_p99_ms": null,
+          "itl_p50_ms": null,
+          "itl_p99_ms": null,
+          "total_p50_ms": null,
+          "total_p99_ms": null,
+          "latency_truncated": false,
+          "degraded": null
+        }
+      ]
+    },
+    "premium": {
+      "traffic": {
+        "available": true,
+        "in_flight": 0,
+        "arrived_total": 1,
+        "completed_total": 1,
+        "output_tokens_total": 3,
+        "queue_full_total": 0,
+        "timeout_total": 0,
+        "downgrade_total": 0
+      },
+      "queue": {
+        "available": false,
+        "length": null
+      },
+      "batch": {
+        "available": false,
+        "size": null,
+        "max_size": null
+      },
+      "kv": {
+        "available": false,
+        "used_tokens": null,
+        "capacity_tokens": null
+      },
+      "cache": {
+        "available": false,
+        "size_tokens": null,
+        "lookups_total": null,
+        "hits_total": null,
+        "prompt_tokens_total": null,
+        "cached_tokens_total": null,
+        "hit_rate": null,
+        "token_hit_rate": null
+      },
+      "latency": {
+        "available": true,
+        "window_ms": 300000.0,
+        "ttft_ms": {
+          "p50": 50.0,
+          "p99": 50.0,
+          "samples": 1
+        },
+        "itl_ms": {
+          "p50": 10.0,
+          "p99": 10.0,
+          "samples": 2
+        },
+        "total_ms": {
+          "p50": 70.0,
+          "p99": 70.0,
+          "samples": 1
+        }
+      },
+      "slo": {
+        "available": false,
+        "degraded": null,
+        "slo_p99_ms": null,
+        "recent_p99_ms": null,
+        "samples": null
+      },
+      "series": [
+        {
+          "t_ms": 0.0,
+          "final": false,
+          "arrived": 1,
+          "completed": 1,
+          "req_per_s": 1.0,
+          "output_tokens": 3,
+          "tokens_per_s": 3.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 0,
+          "in_flight_max": 1,
+          "queue_len": null,
+          "queue_len_max": null,
+          "batch_size": null,
+          "batch_size_max": null,
+          "kv_used_tokens": null,
+          "kv_used_tokens_max": null,
+          "cache_lookups": null,
+          "cache_hit_rate": null,
+          "cache_token_hit_rate": null,
+          "ttft_p50_ms": 50.0,
+          "ttft_p99_ms": 50.0,
+          "itl_p50_ms": 10.0,
+          "itl_p99_ms": 10.0,
+          "total_p50_ms": 70.0,
+          "total_p99_ms": 70.0,
+          "latency_truncated": false,
+          "degraded": null
+        }
+      ]
+    }
+  },
+  "tenants": {
+    "available": false,
+    "tenants": null
+  },
+  "events": {
+    "available": true,
+    "capacity": 1000,
+    "retained": 0,
+    "last_seq": 0,
+    "counts": {
+      "state_change": 0,
+      "queue_full": 0,
+      "timeout": 0,
+      "downgrade": 0,
+      "budget_exhausted": 0
+    },
+    "recent": []
+  }
+}

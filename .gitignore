@@ -226,3 +226,12 @@ perf-gate-results.json
 perf-gate.txt
 models/
 .run/
+
+# Dashboard: dependencies and build output (npm run build in frontend/)
+frontend/node_modules/
+src/gateway/dashboard/
+
+# Playwright output
+frontend/e2e/results/
+frontend/test-results/
+frontend/playwright-report/

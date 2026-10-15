@@ -15,3 +15,8 @@ examples
 scripts
 perf-gate-results.json
 perf-gate.txt
+# The image builds the dashboard itself, from a clean install.
+frontend/node_modules
+frontend/e2e/results
+frontend/test-results
+src/gateway/dashboard
