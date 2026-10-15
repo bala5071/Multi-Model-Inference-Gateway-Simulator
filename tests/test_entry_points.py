@@ -166,6 +166,7 @@ async def test_whole_report_builds_with_every_section(
 ) -> None:
     monkeypatch.setattr(report, "FIGURES", tmp_path / "figures")
     monkeypatch.setattr(report, "CALIBRATION", tmp_path / "no-calibration")
+    monkeypatch.setattr(report, "QUALITY_RESULTS", tmp_path / "no-results.json")
 
     text = await report.build(None)
 
@@ -185,9 +186,10 @@ async def test_whole_report_builds_with_every_section(
         "## 4. Overload: admission control and downgrade",
         "## 5. Chunked prefill",
         "## 6. Simulated against real models",
+        "## 7. Answer quality against cost",
         "## Limitations",
     ]
-    assert text.count("Reproduce this section: `uv run python -m benchmarks.report --only ") == 6
+    assert text.count("Reproduce this section: `uv run python -m benchmarks.report --only ") == 7
     assert "**Sections 1 to 5 are simulated**" in text
     assert sorted(p.name for p in (tmp_path / "figures").iterdir()) == [
         "1-batching.png",

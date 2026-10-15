@@ -17,7 +17,7 @@ def figures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return target
 
 
-def test_report_has_the_six_sections_in_order() -> None:
+def test_report_has_the_seven_sections_in_order() -> None:
     assert list(report.SECTIONS) == [
         "batching",
         "prefix-cache",
@@ -25,6 +25,7 @@ def test_report_has_the_six_sections_in_order() -> None:
         "overload",
         "chunked-prefill",
         "calibration",
+        "quality",
     ]
 
 
@@ -131,7 +132,7 @@ def test_limitations_cover_the_points_a_reader_must_not_miss() -> None:
     for phrase in (
         "Sections 1 to 5 are simulations",
         "Prices are illustrative",
-        "Answer quality is not modelled",
+        "Answer quality is one small measurement",
         "one seed and one workload",
         "must not be compared directly",
     ):
@@ -486,3 +487,133 @@ async def test_calibration_section_says_when_placement_was_not_recorded(
 
     assert "| economy | not recorded | not recorded | 0 of 1 | unknown |" in body
     assert "hardware-limited** was partly on the CPU" in body
+
+
+# --- section 7: answer quality ---------------------------------------------------------------
+
+
+def _quality_results() -> dict[str, object]:
+    def tier(correct: int, low: float, high: float, unparsed: int) -> dict[str, object]:
+        return {
+            "questions": 10,
+            "correct": correct,
+            "accuracy": correct / 10,
+            "ci95": {"low": low, "high": high, "method": "Wilson score"},
+            "unparsed": unparsed,
+            "failed": 0,
+            "latency_ms": {
+                "ttft_p50": 90.0,
+                "total_p50": 100.0,
+                "total_p99": 150.0,
+                "total_max": 160.0,
+            },
+            "hardware_limited": False,
+            "notes": [],
+        }
+
+    def answers(chosen: str) -> list[dict[str, object]]:
+        return [
+            {"gold": "ABCD"[i % 4], "chosen": letter if letter != "-" else None}
+            for i, letter in enumerate(chosen)
+        ]
+
+    def server(model: str) -> dict[str, object]:
+        return {"kind": "ollama", "version": "1", "model": model, "quantization": "Q4"}
+
+    return {
+        "measured_at": "one afternoon",
+        "hardware": {"cpu": "Test CPU", "ram_gb": 16, "gpu": "Test GPU"},
+        "questions": {
+            "name": "a test set",
+            "license": "MIT",
+            "selection": "ten of them",
+            "count": 10,
+        },
+        "method": {
+            "temperature": 0.0,
+            "seed": 7,
+            "max_tokens": 8,
+            "scoring": "exact match on the option letter",
+        },
+        "servers": {
+            "economy": server("small"),
+            "standard": server("mid"),
+            "premium": server("big"),
+        },
+        "tiers": {
+            "economy": tier(3, 0.11, 0.60, 2),
+            "standard": tier(6, 0.31, 0.83, 0),
+            "premium": tier(7, 0.40, 0.89, 0),
+        },
+        "answers": {
+            "economy": answers("AAAAAABB--"),
+            "standard": answers("ABCDABCDAA"),
+            "premium": answers("ABCDABCDAB"),
+        },
+        "differences": {
+            "standard_minus_economy": {"difference": 0.3, "low": 0.05, "high": 0.55},
+            "premium_minus_economy": {"difference": 0.4, "low": 0.10, "high": 0.70},
+            "premium_minus_standard": {"difference": 0.1, "low": -0.15, "high": 0.35},
+        },
+    }
+
+
+async def test_quality_section_says_so_when_nothing_was_measured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(report, "QUALITY_RESULTS", tmp_path / "nothing.json")
+
+    section = await report.quality()
+
+    assert section.title == "7. Answer quality against cost"
+    assert "**No quality evaluation has been run.**" in section.body
+    assert "benchmarks.quality_eval" in section.body
+
+
+async def test_quality_section_sets_measured_accuracy_beside_simulated_cost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, figures: Path
+) -> None:
+    path = tmp_path / "results.json"
+    path.write_text(json.dumps(_quality_results()), encoding="utf-8")
+    monkeypatch.setattr(report, "QUALITY_RESULTS", path)
+
+    body = (await report.quality()).body
+
+    # What kind of number each column is, and how small the sample is, come first.
+    assert body.startswith("**Accuracy here is measured on real models; cost and the first latency")
+    assert "**This is a small, one-run measurement: 10 questions, each asked once.**" in body
+    assert "49 to 52 points wide" in body
+    assert (
+        "| Questions | 10 multiple-choice questions from a test set, license MIT; ten of them |"
+        in body
+    )
+    assert "![7-quality.png](report/7-quality.png)" in body
+    assert (figures / "7-quality.png").exists()
+
+    assert "| economy | small | 3 of 10 | 30% | 11% to 60% | 2 |" in body
+    assert "| premium | big | 7 of 10 | 70% | 40% to 89% | 0 |" in body
+    # Replies without an option letter are counted wrong, and that is spelled out.
+    assert (
+        "- **economy:** 2 replies did not open with an option letter and count as wrong. "
+        "Of the 8 that did, 3 were right (38%)." in body
+    )
+    assert "| economy | 6 | 2 | 0 | 0 | 2 |" in body
+    assert "| right answer | 3 | 3 | 2 | 2 | 0 |" in body
+
+    assert (
+        "- **premium against economy:** +40.0 points (95% interval +10.0 to +70.0). "
+        "The interval excludes zero." in body
+    )
+    assert (
+        "- **premium against standard:** +10.0 points (95% interval -15.0 to +35.0). "
+        "The interval includes zero: on this sample the two cannot be told apart." in body
+    )
+
+    # The plan scenario: cost saved (simulated) against accuracy given up (measured).
+    plan_rows = [line for line in body.splitlines() if line.startswith("| initech (free)")]
+    assert len(plan_rows) == 1
+    assert "| economy |" in plan_rows[0]
+    assert plan_rows[0].endswith("| 30% | -40.0 points (-70.0 to -10.0) |")
+    assert "| globex (pro) | standard |" in body
+    assert "-10.0 points (-35.0 to +15.0) |" in body
+    assert "| 0% | 70% | nothing: this plan gets the best model |" in body

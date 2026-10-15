@@ -1,0 +1,1218 @@
+{
+ "source": {
+  "name": "MMLU (Measuring Massive Multitask Language Understanding)",
+  "authors": "Hendrycks, Burns, Basart, Zou, Mazeika, Song, Steinhardt (2021)",
+  "paper": "https://arxiv.org/abs/2009.03300",
+  "dataset": "https://huggingface.co/datasets/cais/mmlu",
+  "config": "all",
+  "split": "test",
+  "license": "MIT",
+  "license_text": "benchmarks/quality/LICENSE-MMLU.txt",
+  "copyright": "Copyright (c) 2020 Dan Hendrycks",
+  "selection": "random.Random(7).sample(range(14042), 100), sorted, as row numbers of the test split",
+  "fetched_at": "2026-10-09T19:36:51+00:00",
+  "fetched_from": "https://datasets-server.huggingface.co/rows"
+ },
+ "items": [
+  {
+   "id": "mmlu-test-614",
+   "subject": "clinical_knowledge",
+   "question": "Insensible loss does not come from:",
+   "choices": [
+    "pyrexia.",
+    "using unhumidified oxygen.",
+    "excessive weight loss.",
+    "diarrhoea."
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-763",
+   "subject": "college_biology",
+   "question": "Targeting of a newly synthesized protein is most likely to require two different signal peptides for which of the following destinations?",
+   "choices": [
+    "Plasma membrane",
+    "Lysosome",
+    "Cytosol",
+    "Chloroplast"
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-791",
+   "subject": "college_biology",
+   "question": "An embryologist studying the development of a vertebrate organism from the zygote stage to fetus would be justified in drawing which of the following conclusions?",
+   "choices": [
+    "Ontogeny recapitulates phylogeny.",
+    "Early embryos display identical features of their class, order, and species.",
+    "An early human embryo has features in common with early fish and avian embryos.",
+    "A human embryo displays features of adult fish and birds in the course of its development."
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-812",
+   "subject": "college_biology",
+   "question": "In the formation of the earliest cells, which of the following components most likely arose first?",
+   "choices": [
+    "Nucleus",
+    "Plasma membrane",
+    "Mitochondrion",
+    "Flagellum"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-950",
+   "subject": "college_chemistry",
+   "question": "Calculate spin density on the central carbon atom of malonic acid radical (•CH(COOH)2) if the hyperfine value for the α-hydrogen atom is 21.9 G.",
+   "choices": [
+    "0.95",
+    "0.85",
+    "0.15",
+    "0.65"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-968",
+   "subject": "college_chemistry",
+   "question": "The number of allowed energy levels for the 55Mn nuclide are:",
+   "choices": [
+    "3",
+    "5",
+    "8",
+    "4"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-976",
+   "subject": "college_chemistry",
+   "question": "Which of the following metal ions cannot be used as a paramagnetic quencher?",
+   "choices": [
+    "Ti3+",
+    "Cr3+",
+    "Fe3+",
+    "Zn2+"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-1013",
+   "subject": "college_computer_science",
+   "question": "The language {ww | w in (0 + 1)*} is",
+   "choices": [
+    "not accepted by any Turing machine",
+    "accepted by some Turing machine, but by no pushdown automaton",
+    "accepted by some pushdown automaton, but not context-free",
+    "context-free, but not regular"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-1028",
+   "subject": "college_computer_science",
+   "question": "Bob writes down a number between 1 and 1,000. Mary must identify that number by asking \"yes/no\" questions of Bob. Mary knows that Bob always tells the truth. If Mary uses an optimal strategy, then she will determine the answer at the end of exactly how many questions in the worst case?",
+   "choices": [
+    "1,000",
+    "999",
+    "500",
+    "10"
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-1144",
+   "subject": "college_mathematics",
+   "question": "Which of the following are valid intervals of convergence for a power series?\n(I) [−1, 3)\n(II) (−∞, 0]\n(III) [2, 2] ∪ [3, 3]\n(IV) (−∞,∞)",
+   "choices": [
+    "Only (II)",
+    "Only (IV )",
+    "(I) and (IV )",
+    "(II) and (III)"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-1186",
+   "subject": "college_mathematics",
+   "question": "If A is the 2 by 2 matrix whose (i, j) entry is equal to i + j, and B is the 3 by 3 matrix whose (i, j) entry is equal to i + j, find the value of the sum detA + detB.",
+   "choices": [
+    "-2",
+    "-1",
+    "0",
+    "2"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-1199",
+   "subject": "college_medicine",
+   "question": "The complete resynthesis of phosphocreatine after very high intensity exercise normally takes:",
+   "choices": [
+    "about 10 seconds.",
+    "about 30 seconds.",
+    "about 1 minute.",
+    "about 4 minutes."
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-1341",
+   "subject": "college_medicine",
+   "question": "The main fate of lactate that leaves muscle and enters the circulation is:",
+   "choices": [
+    "conversion to urea in the liver.",
+    "conversion to glucose in the heart.",
+    "excretion via the kidneys.",
+    "uptake and oxidation by other tissues."
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-1408",
+   "subject": "college_physics",
+   "question": "The energy from electromagnetic waves in equilibrium in a cavity is used to melt ice. If the Kelvin temperature of the cavity is increased by a factor of two, the mass of ice that can be melted in a fixed amount of time is increased by a factor of",
+   "choices": [
+    "2",
+    "4",
+    "8",
+    "16"
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-1486",
+   "subject": "computer_security",
+   "question": "_______________ is the central node of 802.11 wireless operations.",
+   "choices": [
+    "WPA",
+    "Access Point",
+    "WAP",
+    "Access Port"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-1542",
+   "subject": "computer_security",
+   "question": "When the data must arrive at the receiver exactly as they were sent, its called",
+   "choices": [
+    "Message Condentiality",
+    "Message Integrity",
+    "Message Splashing",
+    "Message Sending"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-1596",
+   "subject": "conceptual_physics",
+   "question": "When an increase in speed doubles the kinetic energy of a moving body its momentum",
+   "choices": [
+    "increases but less than doubles",
+    "doubles",
+    "more than doubles",
+    "depends on factors not stated"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-1688",
+   "subject": "conceptual_physics",
+   "question": "The factors, both of which will increase the magnetic field strength of an electromagnet, are",
+   "choices": [
+    "increased electrical current and fewer coils of wire",
+    "increased diameter of coil and an increase in the number of coils",
+    "an increase in the electrical current and using a strong ferromagnetic material like iron",
+    "using an air core instead of iron and increasing the diameter of the coil"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-1929",
+   "subject": "electrical_engineering",
+   "question": "LC oscillators are used for produce a waveform with frequency ranging from",
+   "choices": [
+    "1MHz to 500 MHz",
+    "100 KHz to 500 MHz",
+    "1 KHz to 1 MHz",
+    "1MHz to 100 GHz"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-1934",
+   "subject": "electrical_engineering",
+   "question": "1 F is theoretically equal to",
+   "choices": [
+    "1 ohm of resistance",
+    "ratio of 1 V to 1 C",
+    "ratio of 1 C to 1 V",
+    "none of these"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-2028",
+   "subject": "electrical_engineering",
+   "question": "The illumination at a point 5 meters below a lamp in 6 lux. The candle power of the lamp is",
+   "choices": [
+    "30",
+    "140.",
+    "150.",
+    "200."
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-2181",
+   "subject": "elementary_mathematics",
+   "question": "Change 34 L 18 cL to liters.",
+   "choices": [
+    "34.18 L",
+    "35.8 L",
+    "34.018 L",
+    "214 L"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-2363",
+   "subject": "elementary_mathematics",
+   "question": "Each story of a building is 14.3 feet tall. If the height of the building is 185.9 feet, how many floors does the building have?",
+   "choices": [
+    "10",
+    "13",
+    "17",
+    "9"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-2471",
+   "subject": "formal_logic",
+   "question": "Select the best translation into predicate logic: Either Taylor or Eric is a latte boy.",
+   "choices": [
+    "Lt ∨ Le",
+    "Lx ∨ Ly",
+    "tL ∨ eL",
+    "Tl ⊃ El"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-2490",
+   "subject": "formal_logic",
+   "question": " Use the following key to translate the given formula of PL to natural, English sentences.\nA: Marina reads a Percy Jackson book.\nB: Izzy plays Minecraft.\nC: Emily stops working.\nD: Russell makes dinner.\nE: Ashleigh stops by.\n~(A ⊃ B) • (B ⊃ ~E)",
+   "choices": [
+    "It's not the case that Marina's reading a Percy Jackson book entails that Izzy plays Minecraft, but Izzy's playing Minecraft does entail that Ashleigh doesn't stop by.",
+    "If Marina doesn't read a Percy Jackson book, then Izzy plays Minecraft, which entails that Ashleigh doesn't stop by.",
+    "Marina's reading a Percy Jackson book does not entail that Izzy plays Minecraft, but Izzy plays Minecraft provided that Ashleigh doesn't stop by.",
+    "It's not true that Marina reads a Percy Jackson book only when Izzy plays Minecraft, but Izzy plays Minecraft only when Ashleigh stops by."
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-2702",
+   "subject": "high_school_biology",
+   "question": "Male satin bowerbirds adorn structures that they build, called \"bowers,\" with parrot feathers, flowers, and other bizarre ornaments in order to attract females. Females inspect the bowers and, if suitably impressed, allow males to mate with them. The evolution of this male behavior is due to",
+   "choices": [
+    "frequency-dependent selection.",
+    "artificial selection.",
+    "sexual selection.",
+    "natural selection."
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-2945",
+   "subject": "high_school_biology",
+   "question": "An eager AP Biology student interested in studying osmosis and the movement of water in solutions took a dialysis bag containing a 0.5 M solution and placed it into a beaker containing a 0.6 M solution. Which of the following is true about water potential?",
+   "choices": [
+    "An eager AP Biology student interested in studying osmosis and the movement of water in solutions took a dialysis bag containing a 0.5 M solution and placed it into a beaker containing a 0.6 M solution. It drives the movement of water from a region of lower water potential to a region of higher water potential.",
+    "Solute potential is the only factor that determines the water potential.",
+    "Pressure potential combines with solute potential to determine the water potential.",
+    "Water potential always drives water from an area of lower pressure potential to an area of higher pressure potential."
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-2961",
+   "subject": "high_school_biology",
+   "question": "A child with type A B blood inherits an IA allele from one parent and an IB allele from the other. The child will carry both A and B glycoproteins on the surface of all red blood cells. This pattern of expression is referred to as",
+   "choices": [
+    "codominance",
+    "epistasis",
+    "polygenic",
+    "linkage"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-3078",
+   "subject": "high_school_chemistry",
+   "question": "The Pauli exclusion principle states that",
+   "choices": [
+    "no two electrons can have the same four quantum numbers",
+    "no two electrons with the same spin can occupy an orbital",
+    "no two electrons can occupy separate orbitals",
+    "no two electrons can pair up if there is an empty orbital available"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-3374",
+   "subject": "high_school_european_history",
+   "question": "This question refers to the following information.\nFlorence is more beautiful and five hundred forty years older than your Venice. … We have round about us thirty thousand estates, owned by nobleman and merchants, citizens and craftsman, yielding us yearly bread and meat, wine and oil, vegetables and cheese, hay and wood, to the value of nine thousand ducats in cash. … We have two trades greater than any four of yours in Venice put together—the trades wool and silk. … Our beautiful Florence contains within the city … two hundred seventy shops belonging to the wool merchant's guild, from whence their wares are sent to Rome and the Marches, Naples and Sicily, Constantinople … and the whole of Turkey. It contains also eighty-three rich and splendid warehouses of the silk merchant's guild.\nBenedetto Dei, \"Letter to a Venetian,\" 1472\nFrom the passage, one may infer that the economy of Renaissance Florence was primarily based on",
+   "choices": [
+    "banking",
+    "the export of agricultural goods",
+    "war and conquest",
+    "the manufacture and export of wool and silk products"
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-3517",
+   "subject": "high_school_geography",
+   "question": "Which group represents the Persian (Iranian) variation of Islam and believes in the infallibility and divine right to authority of the Imams descended from Ali?",
+   "choices": [
+    "Sunni",
+    "Shiite",
+    "Imam",
+    "Untouchables"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-3622",
+   "subject": "high_school_geography",
+   "question": "Change in any culture is introduced through all the following processes EXCEPT",
+   "choices": [
+    "innovation.",
+    "diffusion.",
+    "acculturation.",
+    "gravity."
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-3657",
+   "subject": "high_school_government_and_politics",
+   "question": "According to The Federalist Papers, federalism has which of the following effects on political factions?",
+   "choices": [
+    "It provides a structured environment in which factions may flourish.",
+    "It limits the dangers of factionalism by diluting political power.",
+    "It allows factions to dominate on the national level while limiting their influence on state governments.",
+    "It eliminates any opportunity for factions to form."
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-3943",
+   "subject": "high_school_macroeconomics",
+   "question": "For years you work as a grocery checker at a supermarket and one day you are replaced by self-serve checkout stations. What type of unemployment is this?",
+   "choices": [
+    "Cyclical",
+    "Structural",
+    "Seasonal",
+    "Frictional"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-3999",
+   "subject": "high_school_macroeconomics",
+   "question": "A budget deficit exists when",
+   "choices": [
+    "the total amount that the government owes at a given time is positive",
+    "government spending exceeds tax collections for a given period",
+    "exports exceed imports in a given year",
+    "imports exceed exports in a given year"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-4070",
+   "subject": "high_school_macroeconomics",
+   "question": "Labor productivity and economic growth increase if",
+   "choices": [
+    "a nation subsidizes education for all citizens.",
+    "a nation imposes tariffs and quotas on imported goods.",
+    "a nation removes penalties for firms that pollute natural resources.",
+    "a nation ignores societal barriers like discrimination."
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-4717",
+   "subject": "high_school_microeconomics",
+   "question": "In the same period there is a drought affecting the supply of pineapples and a discovery that may assist in the avoidance of cancer. How will this combination of events affect the equilibrium price and quantity of pineapples?Equilibrium Quantity",
+   "choices": [
+    "Increases         Decreases",
+    "Increases         Indeterminate",
+    "Indeterminate         Increases",
+    "Decreases         Indeterminate"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-4744",
+   "subject": "high_school_physics",
+   "question": "A box of mass m slides on a horizontal surface with initial speed v0. It feels no forces other than gravity and the force from the surface. If the coefficient of kinetic friction between the box and the surface is μ, how far does the box slide before coming to rest?",
+   "choices": [
+    "v0^2/(2μg)",
+    "v0^2/(μg)",
+    "2v0^2/(μg)",
+    "mv0^2/(μg)"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-4911",
+   "subject": "high_school_psychology",
+   "question": "Research indicates that which of the following factors most influence a person's sexual orientation?",
+   "choices": [
+    "parenting style",
+    "masculine/feminine personality traits",
+    "hormones released in the womb",
+    "sexual orientation of parents"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-4919",
+   "subject": "high_school_psychology",
+   "question": "An unjustifiable and usually negative attitude toward a group and its members is called",
+   "choices": [
+    "prejudice",
+    "ethnocentrism",
+    "in-group bias",
+    "discrimination"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-5054",
+   "subject": "high_school_psychology",
+   "question": "Children develop internal representational systems that allow them verbally to describe people, events, and feelings during which of Piaget's stages of cognitive development?",
+   "choices": [
+    "Sensorimotor",
+    "Preoperational",
+    "Symbolic",
+    "Concrete operational"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-5146",
+   "subject": "high_school_psychology",
+   "question": "Why might a researcher use a variable ratio of reinforcement rather than a fixed ratio?",
+   "choices": [
+    "Fixed ratio schedules of reinforcements are more time intensive.",
+    "Variable ratio schedules of reinforcements produce results more quickly.",
+    "Variable ratio schedules of reinforcements avoid problems such as generalization and the Premack principle.",
+    "Variable ratio schedules of reinforcement are more resistant to extinction than fixed schedules."
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-5305",
+   "subject": "high_school_psychology",
+   "question": "Receptors that respond to gravity and keep you informed of your body's location in space are located primarily in the",
+   "choices": [
+    "cochlea of the ear",
+    "macula of the eye",
+    "olfactory mucosa",
+    "muscles and joints of the skeleton"
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-5604",
+   "subject": "high_school_statistics",
+   "question": "A shipment of resistors have an average resistance of 200 ohms with a standard deviation of 5 ohms, and the resistances are normally distributed. Suppose a randomly chosen resistor has a resistance under 194 ohms. What is the probability that its resistance is greater than 188 ohms?",
+   "choices": [
+    "0.07",
+    "0.12",
+    "0.50",
+    "0.93"
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-5627",
+   "subject": "high_school_statistics",
+   "question": "Which among the following would result in the narrowest confidence interval?",
+   "choices": [
+    "Small sample size and 95% confidence",
+    "Small sample size and 99% confidence",
+    "Large sample size and 95% confidence",
+    "Large sample size and 99% confidence"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-5924",
+   "subject": "high_school_world_history",
+   "question": "This question refers to the following information.\nWoman, wake up; the bell of reason is being heard throughout the whole universe; discover your rights. Enslaved man has multiplied his strength, [but] having become free, he has become unjust to his companion. Oh, women, women! When will you cease to be blind? What advantage have you received from the Revolution? A more pronounced scorn, a more marked disdain. If our leaders persist, courageously oppose the force of reason to their empty pretentions of superiority. Regardless of what barriers confront you, it is in your power to free yourselves!\nOlympe de Gouges, \"Declaration of the Rights of Woman and the Female Citizen,\" 1791\nThe independence? Nothing of what I hoped for was achieved. I had expected that my children would be able to have an education, but they did not get it. We were poor peasants then, we are poor peasants now. Nothing has changed. Everything is the same. The only thing is that we are free, the war is over, we work without fear—but apart from that, nothing has changed.\nHalima Ghomri, interviewed in the 1970s, after Algeria's war of independence\nWhich of the following factors is likeliest to have prevented the sort of progress hoped for by the speaker in the second passage?",
+   "choices": [
+    "Failure to eradicate Islamic traditionalism",
+    "Lack of industrial assets or infrastructure",
+    "Hostility to women's rights on the part of new elites",
+    "Prioritization of national liberation over social reform"
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-5991",
+   "subject": "high_school_world_history",
+   "question": "This question refers to the following information.\n\"We are not Europeans; we are not Indians; we are but a mixed species of aborigines and Spaniards. Americans by birth and Europeans by law, we find ourselves engaged in a dual conflict: we are disputing with the natives for titles of ownership, and at the same time we are struggling to maintain ourselves in the country that gave us birth against the opposition of the invaders. Thus our position is most extraordinary and complicated. But there is more. As our role has always been strictly passive and political existence nil, we find that our quest for liberty is now even more difficult of accomplishment; for we, having been placed in a state lower than slavery, had been robbed not only of our freedom but also of the right to exercise an active domestic tyranny…We have been ruled more by deceit than by force, and we have been degraded more by vice than by superstition. Slavery is the daughter of darkness: an ignorant people is a blind instrument of its own destruction. Ambition and intrigue abuses the credulity and experience of men lacking all political, economic, and civic knowledge; they adopt pure illusion as reality; they take license for liberty, treachery for patriotism, and vengeance for justice. If a people, perverted by their training, succeed in achieving their liberty, they will soon lose it, for it would be of no avail to endeavor to explain to them that happiness consists in the practice of virtue; that the rule of law is more powerful than the rule of tyrants, because, as the laws are more inflexible, every one should submit to their beneficent austerity; that proper morals, and not force, are the bases of law; and that to practice justice is to practice liberty.\"\nSimón de Bolívar, Message to the Congress of Angostura, 1819\nThe author of this text expresses a belief in which of the following as requirements for a properly functioning legal system?",
+   "choices": [
+    "Truth and religion",
+    "Freedom and democracy",
+    "Intelligence and order",
+    "Morality and justice"
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-6101",
+   "subject": "human_aging",
+   "question": "Which of the following is most strongly associated with loss of bone density?",
+   "choices": [
+    "Genetic factors",
+    "Lifestyle factors like not exercising",
+    "Hormonal factors such as loss of estrogen",
+    "Cohort factors"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-6468",
+   "subject": "international_law",
+   "question": "In Osman v UK (1998), the European Court laid down a test, which can be used to apply a general positive obligation on a state. Which of the following statements is not part of the Osman test?",
+   "choices": [
+    "The risk must emanate from a state agent",
+    "If a real and imminent risk (of death/harm)",
+    "A state should take reasonable steps to prevent death/harm occurring",
+    "A state knows or ought to have known"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-6499",
+   "subject": "international_law",
+   "question": "What are self-executing treaties?",
+   "choices": [
+    "Self-executing treaties are adopted only by the executive",
+    "Self-executive treaties are clear and precise enough so as not to require any further implementing measures",
+    "Self-executing rely on implementing measures stipulated in the treaty Itself",
+    "Self-executing treaties follow the doctrine of transformation"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-6850",
+   "subject": "machine_learning",
+   "question": "Statement 1| Layer Normalization is used in the original ResNet paper, not Batch Normalization. Statement 2| DCGANs use self-attention to stabilize training.",
+   "choices": [
+    "True, True",
+    "False, False",
+    "True, False",
+    "False, True"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-6851",
+   "subject": "machine_learning",
+   "question": "In building a linear regression model for a particular data set, you observe the coefficient of one of the features having a relatively high negative value. This suggests that",
+   "choices": [
+    "This feature has a strong effect on the model (should be retained)",
+    "This feature does not have a strong effect on the model (should be ignored)",
+    "It is not possible to comment on the importance of this feature without additional information",
+    "Nothing can be determined."
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-6867",
+   "subject": "machine_learning",
+   "question": "Statement 1| After mapped into feature space Q through a radial basis kernel function, 1-NN using unweighted Euclidean distance may be able to achieve better classification performance than in original space (though we can’t guarantee this). Statement 2| The VC dimension of a Perceptron is smaller than the VC dimension of a simple linear SVM.",
+   "choices": [
+    "True, True",
+    "False, False",
+    "True, False",
+    "False, True"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-6955",
+   "subject": "management",
+   "question": "Which writer is most associated with bureaucratic structures?",
+   "choices": [
+    "Henry Fayol",
+    "Max Weber",
+    "Adam Smith",
+    "Mary Parker Follett"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-7005",
+   "subject": "management",
+   "question": "Which writer was concerned with the reaction of workers to key characteristics of bureaucracies?",
+   "choices": [
+    "Merton",
+    "Weber",
+    "Gouldner",
+    "Mayo"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-7104",
+   "subject": "marketing",
+   "question": "Marketing research:",
+   "choices": [
+    "Is work undertaken to understand how to make specific marketing strategy decisions.",
+    "Is the collection and analysis of data from a sample or census of individuals or organizations.",
+    "Includes all forms of market, opinion, and social research such as consumer and industrial surveys.",
+    "Is work undertaken to determine either structural characteristics of the industry of concern."
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-7353",
+   "subject": "medical_genetics",
+   "question": "Which of the following karyotypes is not compatible with survival to birth?",
+   "choices": [
+    "47,XY,+13",
+    "47,XX,+18",
+    "47,XY,+21",
+    "45,Y"
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-7424",
+   "subject": "miscellaneous",
+   "question": "Which of these countries was not a member of the Axis alliance during World War II?",
+   "choices": [
+    "Germany",
+    "Italy",
+    "Spain",
+    "Japan"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-7628",
+   "subject": "miscellaneous",
+   "question": "Which of these is not a fabric?",
+   "choices": [
+    "Velveteen",
+    "Celotex",
+    "Seersucker",
+    "Tencel"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-8011",
+   "subject": "miscellaneous",
+   "question": "Which of these is commonly used to treat allergies?",
+   "choices": [
+    "antimatter",
+    "anticoagulants",
+    "antiseptics",
+    "antihistamines"
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-8111",
+   "subject": "miscellaneous",
+   "question": "According to legend if you give someone the 'evil eye' what are you doing?",
+   "choices": [
+    "cursing them",
+    "blessing a child",
+    "counting money",
+    "passing time"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-8133",
+   "subject": "miscellaneous",
+   "question": "Which of these words means 'yes'-in French?",
+   "choices": [
+    "qui",
+    "oui",
+    "ja",
+    "okey-dokey"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-8313",
+   "subject": "moral_disputes",
+   "question": " What does Marquis think is the main reason why it is wrong to kill a fetus?",
+   "choices": [
+    "The fetus can feel pain.",
+    "Abortion will harm the woman.",
+    "Killing the fetus would deprive it of a valuable future.",
+    "all of the above"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-8387",
+   "subject": "moral_disputes",
+   "question": " Which of the following capacities does Carruther's assume that animals lack?",
+   "choices": [
+    "the capacity for suffering",
+    "the capacity for practical reasoning",
+    "the capacity for rational agency",
+    "the capacity for conscious experience"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-8604",
+   "subject": "moral_scenarios",
+   "question": "For which of these two scenarios does the main character (who uses I/me/my) do something clearly morally wrong, according to ordinary moral standards in the US as of 2020? Scenario 1 | I let my children throw icicles at each other, since it's only water. Scenario 2 | On my evening walk, I notice a child has fallen in a shallow pond and appears to be drowning, so I wade in and pull the child out.",
+   "choices": [
+    "Wrong, Wrong",
+    "Wrong, Not wrong",
+    "Not wrong, Wrong",
+    "Not wrong, Not wrong"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-8711",
+   "subject": "moral_scenarios",
+   "question": "For which of these two scenarios does the main character (who uses I/me/my) do something clearly morally wrong, according to ordinary moral standards in the US as of 2020? Scenario 1 | I keep the kimchi in the garage because it would really stink up the house. Scenario 2 | When I visited at my grandma's house, I removed the batteries in her smoke alarms.",
+   "choices": [
+    "Wrong, Wrong",
+    "Wrong, Not wrong",
+    "Not wrong, Wrong",
+    "Not wrong, Not wrong"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-8779",
+   "subject": "moral_scenarios",
+   "question": "For which of these two scenarios does the main character (who uses I/me/my) do something clearly morally wrong, according to ordinary moral standards in the US as of 2020? Scenario 1 | I gave the hungry dog lots of kibble when I got home. Scenario 2 | I kept the princess in the dungeon of the castle.",
+   "choices": [
+    "Wrong, Wrong",
+    "Wrong, Not wrong",
+    "Not wrong, Wrong",
+    "Not wrong, Not wrong"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-8858",
+   "subject": "moral_scenarios",
+   "question": "For which of these two scenarios does the main character (who uses I/me/my) do something clearly morally wrong, according to ordinary moral standards in the US as of 2020? Scenario 1 | I picked up my cat and placed him on the lit stove. Scenario 2 | I guided the plane into the tallest mountain that I could see.",
+   "choices": [
+    "Wrong, Wrong",
+    "Wrong, Not wrong",
+    "Not wrong, Wrong",
+    "Not wrong, Not wrong"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-8974",
+   "subject": "moral_scenarios",
+   "question": "For which of these two scenarios does the main character (who uses I/me/my) do something clearly morally wrong, according to ordinary moral standards in the US as of 2020? Scenario 1 | I cover my eyes when I see starving animals because it pains me so. Scenario 2 | As I packed to leave the hotel, my suitcase was overflowing with hotel towels.",
+   "choices": [
+    "Wrong, Wrong",
+    "Wrong, Not wrong",
+    "Not wrong, Wrong",
+    "Not wrong, Not wrong"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-9028",
+   "subject": "moral_scenarios",
+   "question": "For which of these two scenarios does the main character (who uses I/me/my) do something clearly morally wrong, according to ordinary moral standards in the US as of 2020? Scenario 1 | I mowed the lawn and was paid handsomely. Scenario 2 | I took pictures of my niece for birthday memories.",
+   "choices": [
+    "Wrong, Wrong",
+    "Wrong, Not wrong",
+    "Not wrong, Wrong",
+    "Not wrong, Not wrong"
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-9120",
+   "subject": "moral_scenarios",
+   "question": "For which of these two scenarios does the main character (who uses I/me/my) do something clearly morally wrong, according to ordinary moral standards in the US as of 2020? Scenario 1 | I revealed my best friend's dark secrets. Scenario 2 | When I went to the bank, I covered my face with a mask to prevent getting caught by the authorities.",
+   "choices": [
+    "Wrong, Wrong",
+    "Wrong, Not wrong",
+    "Not wrong, Wrong",
+    "Not wrong, Not wrong"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-9179",
+   "subject": "moral_scenarios",
+   "question": "For which of these two scenarios does the main character (who uses I/me/my) do something clearly morally wrong, according to ordinary moral standards in the US as of 2020? Scenario 1 | I stole a necklace from my girlfriend. Scenario 2 | I bought Joe's painting, and then Joe stole it back.",
+   "choices": [
+    "Wrong, Wrong",
+    "Wrong, Not wrong",
+    "Not wrong, Wrong",
+    "Not wrong, Not wrong"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-9246",
+   "subject": "moral_scenarios",
+   "question": "For which of these two scenarios does the main character (who uses I/me/my) do something clearly morally wrong, according to ordinary moral standards in the US as of 2020? Scenario 1 | I got a good grade on the test because I studied for it. Scenario 2 | I made my boyfriend an homemade dinner from our chicken's eggs.",
+   "choices": [
+    "Wrong, Wrong",
+    "Wrong, Not wrong",
+    "Not wrong, Wrong",
+    "Not wrong, Not wrong"
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-9264",
+   "subject": "moral_scenarios",
+   "question": "For which of these two scenarios does the main character (who uses I/me/my) do something clearly morally wrong, according to ordinary moral standards in the US as of 2020? Scenario 1 | I laid the baby on the nails Scenario 2 | I usually prefer to hurt people instead trying to protect them.",
+   "choices": [
+    "Wrong, Wrong",
+    "Wrong, Not wrong",
+    "Not wrong, Wrong",
+    "Not wrong, Not wrong"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-9353",
+   "subject": "moral_scenarios",
+   "question": "For which of these two scenarios does the main character (who uses I/me/my) do something clearly morally wrong, according to ordinary moral standards in the US as of 2020? Scenario 1 | I took the food from the clearly starving dog. Scenario 2 | My mother-in-law is nervous about her upcoming cruise, so I bring her to see \"Titanic\".",
+   "choices": [
+    "Wrong, Wrong",
+    "Wrong, Not wrong",
+    "Not wrong, Wrong",
+    "Not wrong, Not wrong"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-9358",
+   "subject": "moral_scenarios",
+   "question": "For which of these two scenarios does the main character (who uses I/me/my) do something clearly morally wrong, according to ordinary moral standards in the US as of 2020? Scenario 1 | I took $1 million from friends Scenario 2 | I submitted my timecard at work with precisely the correct hours I worked.",
+   "choices": [
+    "Wrong, Wrong",
+    "Wrong, Not wrong",
+    "Not wrong, Wrong",
+    "Not wrong, Not wrong"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-9411",
+   "subject": "nutrition",
+   "question": "What are the main causes of the obesity epidemic?\n",
+   "choices": [
+    "Increased energy quantity/density and a more sedentary life-style",
+    "Decreased leisure time activity",
+    "Changes in genetic profiles",
+    "None of the options given is correct"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-9455",
+   "subject": "nutrition",
+   "question": "Which of the following vitamins provides the coenzyme for carboxylation reactions?\n",
+   "choices": [
+    "Biotin",
+    "Niacin",
+    "Riboflavin",
+    "Thiamin"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-9528",
+   "subject": "nutrition",
+   "question": "The Atherogenic Lipoprotein Phenotype (ALP) is a collection of which lipoprotein abnormalities?\n",
+   "choices": [
+    "Reduced levels of HDL, a high proportion of small dense LDL and raised triglycerides",
+    "Reduced levels of HDL, a high proportion of small dense LDL and normal triglycerides",
+    "Raised levels of HDL, a high proportion of small dense LDL and raised triglycerides",
+    "Reduced levels of HDL, a low proportion of small dense LDL and raised triglycerides"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-9548",
+   "subject": "nutrition",
+   "question": "Supplementation with long-chain fatty acids EPA and DHA during pregnancy and infancy will likely benefit the following:\n",
+   "choices": [
+    "Visual performance",
+    "Motor performance",
+    "Behaviour disorders",
+    "Memory"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-9551",
+   "subject": "nutrition",
+   "question": "Which of the following statements is correct regarding intracellular fat metabolism?\n",
+   "choices": [
+    "The mechanism by which non-esterified fatty acids are taken up by cells is by diffusion only.",
+    "The mechanism by which non-esterified fatty acids are taken up by cells is by a combination of diffusion and carrier-mediated transport involving fatty acid binding, translocase and transport proteins.",
+    "The mechanism by which non-esterified fatty acids are taken up by cells is by a combination of diffusion and carrier-mediated transport involving fatty acid esterification, synthesis and transport proteins.",
+    "The mechanism by which non-esterified fatty acids are taken up by cells is by carrier-mediated transport only involving fatty acid binding, translocase and transport proteins."
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-9593",
+   "subject": "nutrition",
+   "question": "Occasionally infants are born without a normally functioning immune system. What are the signs most suggestive of a severe combined immunodeficiency?\n",
+   "choices": [
+    "Recurrent severe infections",
+    "Family history of unexplained death in infancy",
+    "Generalised spread of the Tuberculosis strain BCG after vaccination",
+    "All of the options given are correct"
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-9977",
+   "subject": "philosophy",
+   "question": "Logical behaviorism is at odds with our commonsense intuition that mental states _____.",
+   "choices": [
+    "cause behavior",
+    "never cause behavior",
+    "exist",
+    "do not exist"
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-10141",
+   "subject": "prehistory",
+   "question": "Unlike Mesopotamian writings, the records left by the Maya are principally concerned with:",
+   "choices": [
+    "political and military history.",
+    "philosophy and religion.",
+    "trade and economics.",
+    "astronomy and mathematics."
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-10279",
+   "subject": "prehistory",
+   "question": "When did the Inca begin their military expansion across South America?",
+   "choices": [
+    "200 A.D.",
+    "900 A.D.",
+    "1450 A.D.",
+    "1650 A.D."
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-10332",
+   "subject": "prehistory",
+   "question": "The ability of humans to live in different environments, from Arctic tundra to tropical forests, is made possible by:",
+   "choices": [
+    "specific biological adaptations to each new habitat.",
+    "the rapid evolution of novel physical characteristics, which allows for movement into a new geographic range.",
+    "intelligence and cultural adaptations.",
+    "genetic changes and racial differences."
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-10467",
+   "subject": "professional_accounting",
+   "question": "Brill Co. made the following expenditures relating to Product X: Labor and material costs incurred in producing a prototype $100000 Cost of testing the prototype $40000 Legal costs to file a patent $5000 Production of Product X commenced when the patent was granted. What amount of the above costs should be expensed as research and development costs?",
+   "choices": [
+    "$40,000",
+    "$100,000",
+    "$140,000",
+    "145000"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-10664",
+   "subject": "professional_law",
+   "question": "A nightclub owner applied for a required zoning permit to open a nude-dancing nightclub in the theater district of a city. An organization of influential city residents began an intensive lobbying effort to persuade the city council to deny the owner a permit to operate any type of nude- dancing facility at any time or in any place in the city. The owner has sued the city in an appropriate federal court, seeking an injunction that would prohibit the city council from considering the organization's views, on the ground that if the organization is successful in its lobbying efforts, the owner's First and Fourteenth Amendment rights would be violated. The city has moved to dismiss the action. Should the court dismiss the owner's action?",
+   "choices": [
+    "No, because nude dancing is symbolic speech and is therefore protected by the First and Fourteenth Amendments.",
+    "No, because the organization does not seek a reasonable time, place, and manner regulation of nude dancing, but instead seeks a total ban on the owner's opening any type of nude-dancing facility at any time or in any place in the city.",
+    "Yes, because the action is not ripe.",
+    "Yes, because the First and Fourteenth Amendments do not protect obscenity, and nude dancing is obscene."
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-11147",
+   "subject": "professional_law",
+   "question": "A patient domiciled in State A sued a surgeon domiciled in State B in a federal court in State A, alleging claims for malpractice. The surgeon moved to dismiss the action for lack of personal jurisdiction. The court denied the motion and set discovery cutoff and trial dates. The surgeon has appealed the denial of the motion. Should the appellate court hear the merits of the surgeon's appeal?",
+   "choices": [
+    "No, because the appellate court lacks jurisdiction over the appeal.",
+    "No, because the district court's decision on jurisdiction is final.",
+    "Yes, because a contrary appellate decision could terminate the action.",
+    "Yes, because the surgeon's personal- jurisdiction challenge raises a constitutional question."
+   ],
+   "answer": "A"
+  },
+  {
+   "id": "mmlu-test-11173",
+   "subject": "professional_law",
+   "question": "Recently, Congress enacted a statute requiring all boat owners to register their boats with a newly created federal boat registry. Among the purposes of the statute are the prevention of theft of boats in coastal waters and the protection of the rights of individual boat owners throughout the United States. Congress enacted the statute despite the fact that all states require boat owners to register their craft with the state department of motor vehicles. In addition, there is uncontradicted evidence that most stolen boats are kept or resold in the state in which the theft occurred. Nonetheless, an increasing number of boats are transported to other states and other countries for resale. Is the statute likely to be held constitutional?",
+   "choices": [
+    "No, because most stolen boats remain within the state in which they were stolen.",
+    "No, because the registration of boats is a matter reserved to the states by the Tenth Amendment.",
+    "Yes, because Congress could determine that the transportation of stolen boats affects interstate commerce.",
+    "Yes, because Congress has the power to regulate property for the general welfare."
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-11452",
+   "subject": "professional_law",
+   "question": "An owner of a large, three-story office building planned to renovate the building and requested several contractors to submit bids to perform the work. One of the contractors in turn sought bids from several subcontractors to determine the overall cost of the job. An electrician submitted a bid to do the electrical work to the contractor, which the contractor used in computing the bid he sent to the owner. The contractor notified the electrician to that effect. Two weeks later, the contractor submitted his bid to the owner, in which he offered to perform the renovation work for $75,000. The next day, the electrician notified the contractor that he was unable to perform the electrical work on the owner's project. Two days later, the owner sent the contractor a signed confirmation letter wherein she stated, \"I hereby accept your offer to perform the renovation work for the quoted cost of $75,000. \"Thereafter, the contractor hired another electrician to complete the electrical work at a cost of $5,000 above the first electrician's bid. The contractor explained the situation to the owner and informed her that the overall cost of the job would have to be increased to $80,000. The owner responded that she would hold the contractor to his original bid of $75,000 and would not be responsible for any additional costs. The contractor then performed the renovation work, but the owner has not yet paid him anything. In an action by the contractor against the owner for the services rendered, the contractor will probably be able to recover",
+   "choices": [
+    "only in quantum meruit, because of the doctrifle of commercial frustration.",
+    "only in quantum meruit, because by demanding $80,000 the contractor, in effect, repudiated his contract with the owner.",
+    "$75,000 only, because that was the contract price.",
+    "$80,000, because the contractor reasonably relied to his detriment on the electrician's bid in formulating his job estimate."
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-11667",
+   "subject": "professional_law",
+   "question": "A state statute made it a crime to be addicted to the use of narcotic drugs. A man was arrested and charged with the crime of drug addiction. Two officers testified that they examined \"track\" marks on the defendant's arms and wrists, and that he admitted to past drug usage. The accused testified that he was not an addict and the marks were from an allergic reaction. The trial court instructed the jury that it could find him guilty on proof that he was an addict, without proof of drug usage. The jury did not believe the defendant's denials, and found him guilty based on the observed track marks. The court sentenced him to six months imprisonment. He appealed, claiming cruel and unusual punishment prohibited by the Eighth and Fourteenth Amendments of the United States Constitution. Will the conviction likely be reversed on appeal?",
+   "choices": [
+    "No, because the arrest is based on the regular use of illegal narcotics and is a proper concern of the criminal law.",
+    "No, because the state has the power to forbid the use of narcotics within its borders and that's what this statute does.",
+    "Yes, because the statute makes it criminal to use illegal drugs, which constitutes cruel and unusual punishment.",
+    "Yes, because the statute punishes having the illness of drug addiction, which is like punishing someone for having a cold, and it is thus cruel and unusual punishment."
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-11951",
+   "subject": "professional_law",
+   "question": "While parked on a downtown street, a police officer noticed a man sauntering down the street, whistling. As the man came under a street light, the officer recognized him as a parolee from a neighboring state. The officer got out, stood in front of the man, and asked him to give an account of himself. The man replied, \"I'm the president, you dope . . . get out of my way or the Secret Service will gun you down,\" and reached into his coat pocket to bring something out, which he held in his clenched fist. The officer forced the man's hand open and found a number of diamond rings therein. Just then, the police radio in the officer's car announced that the burglar alarm of a jewelry store had rung in police headquarters. Believing that the man was responsible for burglarizing the jewelry store, the officer arrested him and took him to the police station where he was booked and fingerprinted. After he was given his Miranda warnings, the man requested to speak to his attorney. The officer led the man to a telephone and asked him if he knew his attorney's phone number. The man responded and gave the officer a phone number. The officer dialed the number and waited until a voice answered, \"law offices. \" The officer then handed the telephone receiver to the man. As the officer was walking out of the room, he heard the man say, \"Hello, it's me. I just got arrested after robbing a jewelry store. \"At trial, the officer is called to testify to what the man told his attorney during their telephone conversation. Upon proper objection by the man's attorney, the officer's proposed testimony should be",
+   "choices": [
+    "admitted, because the man's confession was not coerced.",
+    "admitted, because the statement was not the product of interrogation.",
+    "excluded, because the officer's conduct violated the man's Sixth Amendment right to counsel.",
+    "excluded, because the officer's conduct violated the man's attorney-client privilege."
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-12404",
+   "subject": "professional_medicine",
+   "question": "A 63-year-old woman is in the hospital recovery room 4 hours after elective left hemicolectomy for colon carcinoma at the splenic flexure. She has a preoperative written directive for no blood products through transfusion for religious reasons. Medical history is significant for hypertension and coronary artery disease. The nurse tells you the patient's blood pressure has progressively declined since the operation. Vital signs now are temperature 35.8°C (96.4°F), pulse 130/min, respirations 20/min, and blood pressure 80/50 mm Hg. Physical examination discloses a slightly distended abdomen with an intact incision. ECG shows sinus tachycardia. Urine output has been 10 mL during the past 2 hours. Hematocrit is 30%; preoperative hematocrit was 41%. The patient has received 4 L of intravenous crystalloid in the recovery room. Reported operative blood loss was 200 mL. Drainage from the nasogastric tube is clear. Damage to which of the following structures is most likely responsible for these findings?",
+   "choices": [
+    "Epigastric artery",
+    "Liver",
+    "Middle colic artery",
+    "Spleen"
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-12734",
+   "subject": "professional_psychology",
+   "question": "What two theories provide the conceptual framework for the evolution of mating adaptations?",
+   "choices": [
+    "Long-term mating and short-term mating",
+    "Parental investment and ecological warming",
+    "Sexual selection and parental investment",
+    "Levels of analysis and sexual selection"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-12776",
+   "subject": "professional_psychology",
+   "question": "In a study where groups of children competed against each other, intergroup hostility was lessened by finding tasks that required the efforts of all the children. This approach is an example of",
+   "choices": [
+    "integrative demands",
+    "superordinate goals",
+    "threat reduction",
+    "intergroup contact"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-13015",
+   "subject": "professional_psychology",
+   "question": "Ethical behavior in the practice of individual psychologists is regulated by",
+   "choices": [
+    "the discretion of individual therapists",
+    "national laws",
+    "professional codes and state and provincial laws",
+    "accrediting agencies"
+   ],
+   "answer": "C"
+  },
+  {
+   "id": "mmlu-test-13371",
+   "subject": "security_studies",
+   "question": "Which of these statements is commonly regarded as a tangible benefit of the securitization process?",
+   "choices": [
+    "Securitizing injects urgency into an issue and leads to a sustained mobilization of political support and deployment of resources.",
+    "Securitization encourages more efficient handling of complex problems.",
+    "Securitization mobilizes popular support for policies in specific areas by calling them security relevant and encourages the allocation of more resources.",
+    "All of these options."
+   ],
+   "answer": "D"
+  },
+  {
+   "id": "mmlu-test-13455",
+   "subject": "sociology",
+   "question": "Theories of racialized discourse suggest that:",
+   "choices": [
+    "race is an objective way of categorizing people on biological grounds",
+    "the idea of race is socially constructed through powerful ideologies",
+    "race relations in Britain and America can be traced back to colonial times",
+    "people choose their racial identity and this becomes fixed"
+   ],
+   "answer": "B"
+  },
+  {
+   "id": "mmlu-test-13547",
+   "subject": "sociology",
+   "question": "The market model of state welfare is based on the principle of:",
+   "choices": [
+    "individuals buying welfare privately, with some means-tested benefits",
+    "regular benefit payments to men as earners of the 'family wage'",
+    "a universalist system of welfare for all, regardless of income",
+    "decommodifying social welfare through state provision"
+   ],
+   "answer": "A"
+  }
+ ]
+}

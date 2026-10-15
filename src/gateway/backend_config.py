@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import httpx
 import yaml
@@ -125,12 +125,17 @@ def load_backend_config(
 
 
 def build_llamacpp_registry(
-    config: BackendConfig, clock: Clock, *, client: httpx.AsyncClient | None = None
+    config: BackendConfig,
+    clock: Clock,
+    *,
+    client: httpx.AsyncClient | None = None,
+    sampling: Mapping[str, Any] | None = None,
 ) -> ModelRegistry:
     """One pass-through worker per tier, each in front of its configured model server.
 
     Names and aliases are the same as the simulated registries', so plans, routing and the
     rest of the gateway do not change. ``client`` replaces the HTTP client, for tests.
+    ``sampling`` is passed to every backend (see ``LlamaCppBackend``).
     """
     registry = ModelRegistry()
     for tier, profile in PROFILES.items():
@@ -141,6 +146,7 @@ def build_llamacpp_registry(
             model=server.model,
             endpoint=config.endpoint,
             client=client,
+            sampling=sampling,
         )
         worker = PassthroughWorker(profile, backend, clock, max_in_flight=config.max_in_flight)
         registry.register(tier.value, worker, aliases=[profile.name])

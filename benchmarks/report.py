@@ -4,7 +4,8 @@
     uv run python -m benchmarks.report --only batching   # one section, printed
 
 Sections 1 to 5 run the simulator on simulated time, so the same code gives the same
-numbers every time. Section 6 summarises the calibration files in benchmarks/calibration/,
+numbers every time. Section 7 reads the accuracy measured by benchmarks/quality_eval.py.
+Section 6 summarises the calibration files in benchmarks/calibration/,
 which are measurements of real models and are only re-measured by benchmarks/calibrate.py.
 Sections 1 and 2 also show a variant on the calibrated profiles: the file named by
 GATEWAY_PROFILES, or benchmarks/calibration/calibrated_profiles.json without it.
@@ -60,6 +61,7 @@ REPO = Path(__file__).resolve().parent.parent
 DOCS = REPO / "docs"
 FIGURES = DOCS / "report"
 CALIBRATION = REPO / "benchmarks" / "calibration"
+QUALITY_RESULTS = REPO / "benchmarks" / "quality" / "results.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -600,7 +602,8 @@ async def _plan_scenario(by_plan: bool) -> dict[str, Any]:
     return per_tenant
 
 
-async def cost_latency() -> Section:
+async def _cost_points() -> list[tuple[str, float, float, float]]:
+    """Each model alone on one workload: USD per 1,000 requests, p50 and p99 latency."""
     config = LoadConfig(
         seed=SEED,
         total_requests=200,
@@ -631,6 +634,11 @@ async def cost_latency() -> Section:
                 percentile([r.latency_ms for r in results], 99),
             )
         )
+    return points
+
+
+async def cost_latency() -> Section:
+    points = await _cost_points()
 
     routed = await _plan_scenario(by_plan=True)
     all_premium = await _plan_scenario(by_plan=False)
@@ -702,7 +710,8 @@ continuous batching and the prefix cache.
 This is not a trade-off curve. On these two axes the economy model is both cheapest and fastest
 and the premium model is both dearest and slowest, so economy dominates. The reason to pay for a
 larger model is the quality of its answers, which this simulator does not model at all. The chart
-shows what quality costs, not whether it is worth it.
+shows what quality costs, not whether it is worth it. Section 7 puts a small measurement of
+quality beside it.
 
 **Routing by plan.** {PLAN_REQUESTS} requests at 1 req/s from three tenants, 60% on the free
 plan, 30% on pro and 10% on enterprise. Every request asks for the best model available. With
@@ -1336,6 +1345,253 @@ the simulator diverges from the real servers. To measure again:
     return Section("6. Simulated against real models", body)
 
 
+# --- 7. answer quality against cost ----------------------------------------------------------
+
+
+def _points(value: float) -> str:
+    return f"{100 * value:+.1f}"
+
+
+def _difference(document: dict[str, Any], better: str, worse: str) -> dict[str, float] | None:
+    found = document["differences"].get(f"{better}_minus_{worse}")
+    return found if isinstance(found, dict) else None
+
+
+async def quality() -> Section:
+    title = "7. Answer quality against cost"
+    command = "uv run python -m benchmarks.quality_eval --backends <file>"
+    if not QUALITY_RESULTS.exists():
+        body = f"""**No quality evaluation has been run.** There is no
+`benchmarks/quality/results.json`, so nothing here says what a tenant gives up by being served by
+a smaller model.
+
+To produce it, start the real models (`docs/12-real-models.md`) and run:
+
+```sh
+{command}
+```
+
+then regenerate this report. See `docs/14-quality-eval.md`."""
+        return Section(title, body)
+
+    document = json.loads(QUALITY_RESULTS.read_text(encoding="utf-8"))
+    tiers = document["tiers"]
+    method = document["method"]
+    asked = document["questions"]
+    machine = document["hardware"]
+    servers = sorted({f"{s['kind']} {s['version']}" for s in document["servers"].values()})
+    simulated = {name: (cost, p99) for name, cost, _, p99 in await _cost_points()}
+
+    rows = []
+    notes: list[str] = []
+    option_rows = []
+    widths = []
+    for name, t in tiers.items():
+        cost, p99 = simulated.get(name, (None, None))
+        widths.append(100 * (t["ci95"]["high"] - t["ci95"]["low"]))
+        answers = document["answers"][name]
+        option_rows.append(
+            (
+                name,
+                *(sum(1 for a in answers if a["chosen"] == letter) for letter in "ABCD"),
+                t["unparsed"] + t["failed"],
+            )
+        )
+        if t["unparsed"]:
+            parsed = t["questions"] - t["unparsed"] - t["failed"]
+            notes.append(
+                f"- **{name}:** {t['unparsed']} replies did not open with an option letter and "
+                f"count as wrong. Of the {parsed} that did, {t['correct']} were right "
+                f"({100 * t['correct'] / parsed:.0f}%)."
+            )
+        rows.append(
+            (
+                name,
+                document["servers"][name]["model"],
+                f"{t['correct']} of {t['questions']}",
+                f"{100 * t['accuracy']:.0f}%",
+                f"{100 * t['ci95']['low']:.0f}% to {100 * t['ci95']['high']:.0f}%",
+                t["unparsed"],
+                "-" if cost is None else f"{cost:.3f}",
+                "-" if p99 is None else p99,
+                "-" if t["latency_ms"]["total_p99"] is None else t["latency_ms"]["total_p99"],
+            )
+        )
+        notes.extend(f"- **{name}:** {note}" for note in t["notes"])
+
+    fig, ax = plt.subplots(figsize=(7.5, 4.4), facecolor=SURFACE)
+    plotted = [(name, simulated[name][0], t) for name, t in tiers.items() if name in simulated]
+    for name, cost, t in plotted:
+        accuracy = 100 * t["accuracy"]
+        ax.errorbar(
+            [cost],
+            [accuracy],
+            yerr=[[accuracy - 100 * t["ci95"]["low"]], [100 * t["ci95"]["high"] - accuracy]],
+            fmt="o",
+            color=SERIES[0],
+            ecolor=SERIES[0],
+            markersize=7,
+            markeredgecolor=SURFACE,
+            capsize=4,
+            linewidth=1.5,
+        )
+        ax.annotate(
+            f"{name} ({accuracy:.0f}%)",
+            (cost, accuracy),
+            xytext=(9, -3),
+            textcoords="offset points",
+            color=INK,
+            fontsize=9,
+        )
+    style_axes(
+        ax,
+        title=f"Accuracy on {asked['count']} questions against serving cost (bars: 95% interval)",
+        xlabel="Cost per 1,000 requests, USD (simulated workload, illustrative prices)",
+        ylabel="Accuracy, % (measured)",
+    )
+    ax.set_ylim(0, 100)
+    ax.set_xlim(left=0)
+    ax.margins(x=0.25)
+    fig.tight_layout()
+    figure = _save(fig, "7-quality.png")
+
+    difference_lines = []
+    for pair, d in document["differences"].items():
+        better, worse = pair.split("_minus_")
+        apart = d["low"] > 0 or d["high"] < 0
+        difference_lines.append(
+            f"- **{better} against {worse}:** {_points(d['difference'])} points "
+            f"(95% interval {_points(d['low'])} to {_points(d['high'])}). "
+            + (
+                "The interval excludes zero."
+                if apart
+                else "The interval includes zero: on this sample the two cannot be told apart."
+            )
+        )
+
+    first = next(iter(document["answers"].values()))
+    option_rows.append(
+        ("right answer", *(sum(1 for a in first if a["gold"] == letter) for letter in "ABCD"), 0)
+    )
+
+    plans = load_plans()
+    routed = await _plan_scenario(by_plan=True)
+    all_premium = await _plan_scenario(by_plan=False)
+    best = all_premium[PLAN_TENANTS[0][0]]["model"]
+    plan_rows = []
+    for tenant, _ in PLAN_TENANTS:
+        mine, premium = routed[tenant], all_premium[tenant]
+        on_plan = 1000 * mine["serving_cost"] / mine["requests"]
+        on_best = 1000 * premium["serving_cost"] / premium["requests"]
+        model = mine["model"]
+        d = _difference(document, best, model)
+        if model == best:
+            given_up = "nothing: this plan gets the best model"
+        elif d is None or model not in tiers:
+            given_up = "not measured"
+        else:
+            given_up = (
+                f"{_points(-d['difference'])} points "
+                f"({_points(-d['high'])} to {_points(-d['low'])})"
+            )
+        plan_rows.append(
+            (
+                f"{tenant} ({plans.tenants[tenant]})",
+                model,
+                f"{on_plan:.3f}",
+                f"{on_best:.3f}",
+                f"{100 * (1 - on_plan / on_best):.0f}%",
+                f"{100 * tiers[model]['accuracy']:.0f}%" if model in tiers else "-",
+                given_up,
+            )
+        )
+
+    body = f"""**Accuracy here is measured on real models; cost and the first latency column are
+simulated on the illustrative profiles and prices.** They are different kinds of number, set side
+by side because each tier has one of each. Do not read the simulated latency as the real models'.
+
+**This is a small, one-run measurement: {asked["count"]} questions, each asked once.** The 95%
+intervals around the accuracies below are {min(widths):.0f} to {max(widths):.0f} points wide, and
+nothing here was repeated.
+
+| | |
+|---|---|
+| Questions | {asked["count"]} multiple-choice questions from {asked["name"]}, license {
+        asked["license"]
+    }; {asked["selection"]} |
+| Method | temperature {method["temperature"]:g}, seed {method["seed"]}, at most {
+        method["max_tokens"]
+    } output tokens, one fixed prompt template, one request at a time |
+| Scoring | {method["scoring"]} |
+| Measured at | {document["measured_at"]} |
+| Machine | {machine["cpu"]}, {machine["ram_gb"]} GB RAM, {machine["gpu"]} |
+| Model server | {", ".join(servers)} |
+
+{figure}
+
+{
+        _table(
+            (
+                "Tier",
+                "Model",
+                "Correct",
+                "Accuracy (measured)",
+                "95% interval",
+                "Replies with no option letter",
+                "Cost per 1,000 requests, USD (simulated, section 3)",
+                "p99 latency ms (simulated, section 3)",
+                "p99 latency ms of these questions (measured)",
+            ),
+            rows,
+        )
+    }
+
+A question has four options, so guessing scores about 25%. The measured latency is of a prompt
+with a one-letter answer, which is nothing like the simulated workload beside it.
+
+{chr(10).join(notes) if notes else ""}
+
+Which option each model chose, against how often each is the right answer. A model that
+leans towards one letter is answering the format as well as the question:
+
+{_table(("Tier", "Chose A", "Chose B", "Chose C", "Chose D", "No option"), option_rows)}
+
+Differences between tiers on the same questions:
+
+{chr(10).join(difference_lines)}
+
+**What a plan gives up.** The routing scenario of section 3 ({PLAN_REQUESTS} requests, every
+tenant asking for the best model its plan allows), with the accuracy measured for the model each
+plan is served by. Cost is simulated at illustrative prices; "saved" is against serving the same
+requests on {best}. Accuracy given up is against {best} on the same questions, with its 95%
+interval.
+
+{
+        _table(
+            (
+                "Tenant (plan)",
+                "Model served",
+                "Cost per 1,000 requests, USD",
+                f"Same on {best}",
+                "Cost saved",
+                "Accuracy (measured)",
+                f"Accuracy given up against {best}",
+            ),
+            plan_rows,
+        )
+    }
+
+The saving is certain within the simulation; the accuracy given up is an estimate from
+{asked["count"]} questions of one kind. Multiple-choice recall is not what tenants send, and a
+plan is worth what its model does on their own requests. See `docs/14-quality-eval.md`. To
+measure again:
+
+```sh
+{command}
+```"""
+    return Section(title, body)
+
+
 # --- the report ----------------------------------------------------------------------------
 
 SECTIONS: dict[str, Callable[[], Awaitable[Section]]] = {
@@ -1345,6 +1601,7 @@ SECTIONS: dict[str, Callable[[], Awaitable[Section]]] = {
     "overload": overload_section,
     "chunked-prefill": chunked,
     "calibration": calibration,
+    "quality": quality,
 }
 
 LIMITATIONS = """## Limitations
@@ -1356,8 +1613,10 @@ LIMITATIONS = """## Limitations
   behaves under these assumptions", never as the performance of Llama models or of any hardware.
 - **Prices are illustrative** and so is every cost. Ratios between tiers follow from the made-up
   prices.
-- **Answer quality is not modelled.** Nothing here says what a tenant loses by being served by a
-  smaller model, which is the other half of every cost comparison in section 3.
+- **Answer quality is one small measurement.** Section 7 asks each model about a hundred
+  multiple-choice questions, once. That is enough to see a large gap between models and not
+  enough to size a small one, and it says nothing about other kinds of request. The simulator
+  itself still does not model quality.
 - **The simulator is simplified** in ways that matter: prefill is linear in tokens and blocks the
   batch unless chunked; a decode step is linear in batch size; output length is known when a
   request is admitted; one token is one whitespace-separated word; each model has its hardware
@@ -1371,7 +1630,7 @@ LIMITATIONS = """## Limitations
   and can hinge on two or three requests.
 - **Sections 3, 4 and 5 were not run on calibrated profiles.** Their prices and timings are
   the illustrative ones throughout. Section 4 says why its workload was not rerun.
-- **Section 6 is one machine, on one day.** Real measurements are noisy and specific to that
+- **Sections 6 and 7 are one machine.** Real measurements are noisy and specific to that
   hardware, model build and server version. They are not re-measured when this report is
   regenerated.
 - **Simulated and real numbers must not be compared directly.** With real models the model
@@ -1434,9 +1693,9 @@ Do not edit by hand; change `benchmarks/report.py` and regenerate.
 
 **Sections 1 to 5 are simulated** with seed {SEED} on illustrative model profiles; sections 1
 and 2 also show the same simulation on calibrated profiles. They are deterministic: the same
-code and calibration file produce the same numbers. **Section 6 is measured** on real models
-and is read from files, not re-measured. Nothing here is a benchmark of real hardware except
-where section 6 says so.
+code and calibration file produce the same numbers. **Section 6 and the accuracy in section 7
+are measured** on real models and are read from files, not re-measured. Nothing here is a
+benchmark of real hardware except where those sections say so.
 
 Times are in milliseconds unless stated. Percentiles are nearest-rank.
 """

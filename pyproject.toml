@@ -43,6 +43,8 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF", "TID", "ASYNC", "PT
 "src/gateway/clock.py" = ["TID251"]
 # The calibration tool measures real servers and stamps its output with the real date.
 "benchmarks/calibrate.py" = ["TID251"]
+# The quality evaluation measures real servers too, and stamps its output the same way.
+"benchmarks/quality_eval.py" = ["TID251"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "time.sleep".msg = "Use the injected Clock (see CLAUDE.md hard rules)."
