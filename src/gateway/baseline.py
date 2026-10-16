@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from gateway.backends import Backend, SimulatedBackend
 from gateway.clock import Clock
 from gateway.cost_model import estimate_cost
-from gateway.profiles import PROFILES, ModelProfile
+from gateway.profiles import PROFILES, ModelProfile, Tier
 from gateway.registry import ModelRegistry
 from gateway.schema import GenerateRequest, RequestResult, TokenCallback
 
@@ -116,11 +117,16 @@ class BaselineWorker:
         )
 
 
-def build_baseline_registry(clock: Clock, *, seed: int) -> ModelRegistry:
-    """One baseline worker per tier, named by tier, with the model name as an alias."""
+def build_baseline_registry(
+    clock: Clock, *, seed: int, profiles: Mapping[Tier, ModelProfile] = PROFILES
+) -> ModelRegistry:
+    """One baseline worker per tier, named by tier, with the model name as an alias.
+
+    ``profiles`` replaces the standard model profiles.
+    """
     backend = SimulatedBackend(seed=seed)
     registry = ModelRegistry()
-    for tier, profile in PROFILES.items():
+    for tier, profile in profiles.items():
         registry.register(
             tier.value, BaselineWorker(profile, backend, clock), aliases=[profile.name]
         )

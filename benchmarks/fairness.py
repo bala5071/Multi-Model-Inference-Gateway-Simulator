@@ -1,6 +1,6 @@
 """Show that a saturated model does not slow a lightly loaded one, and what breaks that.
 
-Simulated, from the illustrative profiles: nothing here is a measurement of a real model.
+Simulated, on the calibrated profiles: nothing here is a measurement of a real model.
 
     uv run python -m benchmarks.fairness
 
@@ -30,11 +30,14 @@ from gateway.prefix_cache import PrefixCache
 from gateway.profiles import ECONOMY
 from gateway.registry import ModelRegistry
 
+# Economy is saturated on purpose (about 140% of its capacity); premium gets about a third
+# of its own. Its 60 or so requests are enough for a p99 that is not just the maximum.
+# Checked with ``uv run python -m benchmarks.saturation`` (docs/07-load.md).
 CONFIG = LoadConfig(
     seed=7,
-    total_requests=1000,
-    arrival_rate_per_s=200,
-    model_weights={"economy": 98, "premium": 2},
+    total_requests=2000,
+    arrival_rate_per_s=20,
+    model_weights={"economy": 97, "premium": 3},
     prompt_lengths=(LengthBucket(20, 80, 1.0),),
     shared_prefix_fraction=0.0,
     max_tokens=16,
@@ -72,7 +75,8 @@ async def main() -> None:
         "premium alone": ([p for p in planned if p.model == "premium"], separate_workers),
         "one shared queue": (planned, one_shared_queue),
     }
-    print("SIMULATED with illustrative profiles; not measurements of real models.")
+    print("SIMULATED on the calibrated profiles; not measurements of real models.")
+    print("economy is saturated on purpose: its p99 measures its backlog, not latency.")
     print(f"{'scenario':18} {'model':8} {'reqs':>5} {'total p50 ms':>13} {'total p99 ms':>13}")
     for name, (plan, make_registry) in scenarios.items():
         outcomes = await run(plan, make_registry)

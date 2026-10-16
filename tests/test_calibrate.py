@@ -49,6 +49,7 @@ from gateway.clock import SimClock
 from gateway.continuous import build_continuous_registry
 from gateway.profiles import PROFILES, STANDARD, Tier, load_calibrated_profiles
 from gateway.schema import GenerateRequest
+from helpers import TEST_STANDARD
 from mock_llama import GroundTruthServer
 
 CONFIG = BackendConfig(
@@ -551,7 +552,7 @@ async def test_simulate_replays_requests_with_the_measured_token_counts() -> Non
         _sample(prompt_tokens=8, completion_tokens=3, concurrency=1, repeat=1),
     ]
     profile = dataclasses.replace(
-        STANDARD, prefill_ms_per_token=0.5, decode_base_ms=10.0, decode_ms_per_extra_seq=0.0
+        TEST_STANDARD, prefill_ms_per_token=0.5, decode_base_ms=10.0, decode_ms_per_extra_seq=0.0
     )
     assert await simulate(samples, profile) == [(30.0, 70.0), (14.0, 34.0)]
 

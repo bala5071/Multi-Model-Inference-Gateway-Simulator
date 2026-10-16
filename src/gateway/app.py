@@ -1003,7 +1003,8 @@ def create_app(
     return app
 
 
-# Illustrative limits for the default server, like the model profiles they sit beside.
+# Operator settings for the default server, not measurements: queue limits, chunk size and
+# SLOs were chosen, not measured.
 DEFAULT_MAX_QUEUE_LEN = {Tier.ECONOMY: 256, Tier.STANDARD: 128, Tier.PREMIUM: 64}
 DEFAULT_PREFILL_CHUNK_TOKENS = 256
 DEFAULT_OVERLOAD = OverloadPolicy(

@@ -1,13 +1,16 @@
 """Compare the baseline worker with continuous batching on the same seeded workload.
 
-Simulated, from the illustrative profiles: nothing here is a measurement of a real model.
+Simulated, on the calibrated profiles: nothing here is a measurement of a real model.
 
-    uv run python -m benchmarks.compare_batching [--seed 7] [--requests 200] [--load 1.5]
+    uv run python -m benchmarks.compare_batching [--seed 7] [--requests 200] [--load 0.5]
 
 Two arrival patterns are run per tier:
 
-- burst: every request arrives at t=0, which shows the maximum throughput;
-- poisson: random arrivals at ``--load`` times the rate the baseline can sustain.
+- burst: every request arrives at t=0, which shows the maximum throughput. Its queue is
+  the whole run, so no latency is printed for it;
+- poisson: random arrivals at ``--load`` times the rate the baseline can sustain. The
+  default of 0.5 keeps both workers under 60% of their capacity on the calibrated profiles
+  (above that a p99 measures the backlog; see benchmarks/saturation.py).
 """
 
 from __future__ import annotations
@@ -82,14 +85,16 @@ async def run(
     return list(await asyncio.gather(*(arrive(a) for a in arrivals)))
 
 
-def report(label: str, results: list[RequestResult]) -> str:
+def report(label: str, results: list[RequestResult], *, latency: bool = True) -> str:
     span_s = (max(r.finish_ms for r in results) - min(r.enqueue_ms for r in results)) / 1000
     latencies = [r.latency_ms for r in results]
     ttfts = [r.time_to_first_token_ms for r in results]
     tokens_out = sum(r.tokens_out for r in results)
+    line = f"  {label:11} {len(results) / span_s:8.2f} {tokens_out / span_s:9.1f}"
+    if not latency:
+        return line
     return (
-        f"  {label:11} {len(results) / span_s:8.2f} {tokens_out / span_s:9.1f} "
-        f"{percentile(latencies, 50):12.1f} {percentile(latencies, 99):12.1f} "
+        f"{line} {percentile(latencies, 50):12.1f} {percentile(latencies, 99):12.1f} "
         f"{percentile(ttfts, 99):12.1f}"
     )
 
@@ -98,12 +103,12 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--requests", type=int, default=200)
-    parser.add_argument("--load", type=float, default=1.5)
+    parser.add_argument("--load", type=float, default=0.5)
     args = parser.parse_args()
 
     prompts = make_prompts(args.seed, args.requests)
     print(f"seed={args.seed} requests={args.requests} load={args.load}")
-    print("SIMULATED with illustrative profiles; not measurements of real models.")
+    print("SIMULATED on the calibrated profiles (batches of at most 4); not measurements.")
     for tier, profile in PROFILES.items():
         service_ms = await baseline_service_ms(profile, prompts, args.seed)
         patterns = {
@@ -113,13 +118,14 @@ async def main() -> None:
         for pattern, mean_gap_ms in patterns.items():
             arrivals = make_arrivals(profile, prompts, args.seed, mean_gap_ms)
             print(f"\n{tier.value} ({profile.name}), {pattern}")
-            print(
-                f"  {'worker':11} {'req/s':>8} {'tok/s':>9} "
-                f"{'p50 ms':>12} {'p99 ms':>12} {'p99 TTFT ms':>12}"
-            )
+            burst = mean_gap_ms == 0
+            header = f"  {'worker':11} {'req/s':>8} {'tok/s':>9}"
+            if not burst:
+                header += f" {'p50 ms':>12} {'p99 ms':>12} {'p99 TTFT ms':>12}"
+            print(header)
             for label, make_worker in WORKERS.items():
                 results = await run(make_worker, profile, arrivals, args.seed)
-                print(report(label, results))
+                print(report(label, results, latency=not burst))
 
 
 if __name__ == "__main__":

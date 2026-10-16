@@ -5,7 +5,7 @@
 It builds the default app in this process and calls it the way a client would: three
 tenants on three plans, a request outside a plan, a prompt-cache hit, a streamed answer
 and the usage ledger. No server is started and no model runs; timings are simulated waits
-from illustrative model profiles.
+from the calibrated model profiles; prices are placeholders.
 """
 
 from __future__ import annotations
@@ -51,7 +51,10 @@ async def main() -> None:
         async def generate(**body: Any) -> httpx.Response:
             return await client.post("/v1/generate", json={"max_tokens": 24, **body})
 
-        print("Simulator mode: no model runs. Timings and prices are illustrative.")
+        print(
+            "Simulator mode: no model runs. Timings are simulated on the calibrated profiles; "
+            "prices are placeholders, not data."
+        )
         for tenant, plan in (("initech", "free"), ("globex", "pro"), ("acme", "enterprise")):
             show(
                 f'{tenant} ({plan} plan) asks for quality "best"',

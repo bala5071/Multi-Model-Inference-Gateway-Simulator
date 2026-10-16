@@ -14,7 +14,7 @@ Tests: `frontend/src/**/*.test.ts(x)` (Vitest), `tests/test_dashboard.py`.
 - **The build is not tracked.** `/dashboard` answers 404 `dashboard_not_built` until
   `npm run build` has been run.
 - **What it shows is whatever the gateway reports.** In simulator mode that is simulated
-  time on illustrative profiles; with real models most of the Capacity tab is unavailable
+  time on the calibrated profiles of note 01, with placeholder prices; with real models most of the Capacity tab is unavailable
   (note 15). The dashboard labels neither; note 12 still applies to how the numbers are read.
 - **The Playground tab is described in note 17**, which added it.
 

@@ -49,7 +49,8 @@ most about one step (plus any prefills ahead of it) to get in rather than a whol
 short request that arrives behind a long one finishes first, because it is not tied to the
 long one's lifetime.
 
-The first test in `test_continuous.py` shows this on a hand-checked timeline: a 2-token
+The first test in `test_continuous.py` shows this on a hand-checked timeline, on a hand-made
+test profile (`EXACT` in `tests/helpers.py`: a fixture, not data): a 2-token
 request arriving at t=10 finishes at t=23.5, while the 50-token request that started at t=0
 finishes at t=207.5. The baseline finishes the short one at t=215. A static batcher is not
 implemented in this repo, so the comparison with static batching is by argument, not by a
@@ -57,45 +58,51 @@ run.
 
 ## Results against the baseline
 
-**Simulated, from the illustrative step 1 profiles. Not measurements of real models.**
-Produced by
+**Simulated on the calibrated profiles (note 01), with batches of at most 4, the most requests
+measured together. Not measurements of a model server.** Produced by
 
 ```sh
 uv run python -m benchmarks.compare_batching
 ```
 
-(defaults: seed 7, 200 requests, load 1.5) at commit `c7e75ac`. Prompts are 20 to 400
-words; output lengths come from the seeded generator. Latency is finish minus enqueue.
-Percentiles are nearest-rank.
+(defaults: seed 7, 200 requests, load 0.5) on the tree of the commit that added this text
+(parent commit `38bbb94`). Prompts are 20 to 400 words; output lengths come from the seeded
+generator. Latency is finish minus enqueue. Percentiles are nearest-rank.
 
-Burst: all 200 requests arrive at t=0. This shows maximum throughput.
+Burst: all 200 requests arrive at t=0. This shows maximum throughput. Its queue lasts the
+whole run, so no latency is given for it: a p99 there would measure the length of the run.
 
-| Tier     | Worker     | req/s | tok/s   | p50 ms    | p99 ms    |
-|----------|------------|------:|--------:|----------:|----------:|
-| economy  | baseline   |  1.16 |   164.6 |  81,537.2 | 170,846.2 |
-| economy  | continuous | 14.78 | 2,089.9 |   7,372.4 |  13,385.7 |
-| standard | baseline   |  0.58 |    81.8 | 164,091.6 | 343,788.6 |
-| standard | continuous |  4.50 |   636.1 |  22,279.5 |  43,968.1 |
-| premium  | baseline   |  0.23 |    32.4 | 414,806.4 | 868,904.4 |
-| premium  | continuous |  1.03 |   145.3 |  94,026.1 | 194,003.3 |
+| Tier     | Worker     | req/s | tok/s |
+|----------|------------|------:|------:|
+| economy  | baseline   |  1.01 | 142.7 |
+| economy  | continuous |  1.77 | 250.8 |
+| standard | baseline   |  0.45 |  63.0 |
+| standard | continuous |  0.94 | 133.2 |
+| premium  | baseline   |  0.15 |  21.5 |
+| premium  | continuous |  0.23 |  32.1 |
 
-Poisson arrivals at 1.5 times the rate the baseline can sustain. The baseline falls behind
-and its queue grows for the whole run; continuous batching keeps up, so its throughput here
-is the arrival rate, not its limit.
+Poisson arrivals at half the rate the baseline can sustain, so neither worker is saturated
+and both keep up: throughput is the arrival rate, and the difference is in latency.
 
 | Tier     | Worker     | req/s | tok/s | p50 ms    | p99 ms    | p99 TTFT ms |
 |----------|------------|------:|------:|----------:|----------:|------------:|
-| economy  | baseline   |  1.16 | 164.6 |  31,283.5 |  67,552.2 |    66,878.6 |
-| economy  | continuous |  1.89 | 267.0 |     936.4 |   1,810.4 |        35.2 |
-| standard | baseline   |  0.58 |  81.8 |  62,953.6 | 135,914.5 |   134,530.3 |
-| standard | continuous |  0.94 | 132.6 |   1,989.8 |   3,908.5 |       103.4 |
-| premium  | baseline   |  0.23 |  32.4 | 159,123.8 | 343,432.2 |   339,804.2 |
-| premium  | continuous |  0.37 |  52.5 |   5,325.8 |  11,686.4 |     1,107.0 |
+| economy  | baseline   |  0.50 |  70.9 |   1,633.9 |   7,527.8 |     6,941.6 |
+| economy  | continuous |  0.50 |  70.9 |   1,311.1 |   4,059.0 |     1,763.1 |
+| standard | baseline   |  0.23 |  32.8 |   3,667.2 |  17,328.7 |    15,892.4 |
+| standard | continuous |  0.23 |  32.8 |   2,695.2 |   7,553.8 |     2,313.0 |
+| premium  | baseline   |  0.08 |  11.4 |  10,813.4 |  50,958.9 |    46,650.9 |
+| premium  | continuous |  0.08 |  11.4 |   8,912.1 |  37,540.0 |    18,472.3 |
 
-The gain shrinks going up the tiers (about 12.7x, 7.8x and 4.5x in burst throughput), as the
-profiles intend: the larger model has a smaller batch limit and a steeper per-sequence step
-cost. The baseline p99 figures mostly measure how long the run was, since its queue never
-drains; read them as "unbounded", not as a latency to compare closely.
+- **With batches held to 4, continuous batching gets a little under twice the baseline's
+  throughput** in the burst, less on premium, where each extra sequence was measured to cost
+  over half a base step.
+- **That gain rests on `decode_ms_per_extra_seq`, unstable on every tier.** Section 1 of
+  `docs/REPORT.md` shows the gain at the median and at the lowest and highest values the six
+  calibration runs fitted; on premium it ranges from barely any gain to about two and a half
+  times.
+- **How these models batch beyond 4 requests was never measured**, so nothing here goes
+  past 4. The earlier, larger gains in this note came from invented profiles with batch
+  limits of 32, 16 and 8 and were removed (note 13).
 
 ## Assumptions and simplifications
 

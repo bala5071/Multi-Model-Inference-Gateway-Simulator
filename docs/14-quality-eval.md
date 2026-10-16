@@ -13,8 +13,9 @@ Data: `benchmarks/quality/` (questions, license, results). Tests: `tests/test_qu
 - **It is small and it was run once.** 100 questions, each asked once per model. The 95%
   interval around each accuracy is 18 to 19 points wide. Nothing was repeated, so there is
   no run-to-run spread to report.
-- **Accuracy is measured on real models. The costs it is set beside are simulated** on the
-  illustrative profiles and prices. They are different kinds of number (`docs/12`).
+- **Accuracy is measured on real models.** No cost is set beside it: prices were never
+  measured (note 01), so no saving is reported. Earlier drafts did, on invented prices; that
+  was removed (note 13).
 - **It measures one narrow thing:** picking a letter on exam-style questions, with no room
   to reason first. It is not a measure of how good a model's answers to a tenant's own
   requests are.
@@ -142,25 +143,24 @@ Every question, reply and score is in `benchmarks/quality/results.json`.
 
 ## What a plan gives up
 
-Section 7 of `docs/REPORT.md` puts these accuracies beside two simulated results from
-section 3: the cost and p99 latency of each model alone, and the routing scenario in which
-each tenant gets the best model its plan allows.
+Section 7 of `docs/REPORT.md` sets the accuracy of the best model each plan includes against
+premium's, on the same questions:
 
-| Tenant (plan) | Model | Simulated cost per 1,000 requests | Saved against premium | Measured accuracy | Given up against premium |
-|---|---|---:|---:|---:|---:|
-| initech (free)    | economy  | $0.023 | 90% | 33% | 24 points (14.4 to 33.6) |
-| globex (pro)      | standard | $0.068 | 70% | 52% | 5 points (-2.5 to 12.5) |
-| acme (enterprise) | premium  | $0.227 |  0% | 57% | nothing |
+| Plan | Best model included | Measured accuracy | Given up against premium |
+|---|---|---:|---:|
+| free       | economy  | 33% | 24 points (14.4 to 33.6) |
+| pro        | standard | 52% | 5 points (-2.5 to 12.5) |
+| enterprise | premium  | 57% | nothing |
 
-(`uv run python -m benchmarks.report --only quality`. Costs are simulated on illustrative
-prices; accuracy is the measurement above.)
+(`uv run python -m benchmarks.report --only quality`; the measurement above.)
 
-- **Free gives up a lot for its saving**: about 24 points of accuracy on this set for a 90%
-  lower serving cost.
-- **Pro's trade is not resolved by this measurement.** It saves 70% and the accuracy it
-  gives up is somewhere between nothing and 12 points.
-- The saving is exact within the simulation and rests on invented prices. The accuracy is an
-  estimate from 100 questions of one kind. Neither is a statement about a real deployment.
+- **Free gives up a lot**: about 24 points of accuracy on this set, an interval that
+  excludes zero.
+- **Pro's loss is not resolved by this measurement**: somewhere between nothing and 12
+  points.
+- What a plan saves is not reported: prices are placeholders, operator-supplied, not data.
+  The accuracy is an estimate from 100 questions of one kind, not a statement about a real
+  deployment.
 
 ## Limitations
 

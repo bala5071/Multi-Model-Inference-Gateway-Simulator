@@ -15,7 +15,7 @@ from gateway.clock import SimClock
 from gateway.continuous import ContinuousBatchingWorker, StepRecord, build_continuous_registry
 from gateway.registry import ModelRegistry
 from gateway.schema import GenerateRequest
-from helpers import EXACT
+from helpers import EXACT, TEST_PROFILES
 
 # Ten words: 10 prompt tokens, so 5 ms of prefill on the EXACT profile.
 PROMPT = "one two three four five six seven eight nine ten"
@@ -327,7 +327,8 @@ async def test_prefix_cache_hits_show_up_in_usage_and_metrics() -> None:
 
 async def test_shutdown_stops_the_scheduler_loops_and_cancels_what_is_in_flight() -> None:
     clock = SimClock()
-    registry = build_continuous_registry(clock, seed=7)
+    # No per-request overhead, so both requests are being served 1 ms in.
+    registry = build_continuous_registry(clock, seed=7, profiles=TEST_PROFILES)
     app = create_app(registry, clock)
     worker = registry.get("premium")
     assert isinstance(worker, ContinuousBatchingWorker)

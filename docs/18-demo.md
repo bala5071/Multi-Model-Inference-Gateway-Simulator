@@ -15,7 +15,8 @@ Pictures: `docs/img/`.
   the `docker` CI job is the first place they will be exercised. CI itself has not run:
   nothing has been pushed.
 - **The demo is simulated live mode** (note 17). No model runs; everything in it, and in the
-  pictures, is simulated time on illustrative profiles. Nothing in it is a measurement.
+  pictures, is simulated time on the calibrated profiles (note 01), with placeholder prices.
+  Nothing in it is a measurement.
 - **The smoke tests and the capture were run on one Windows laptop**, with the installed
   Chrome. They have not been run with the Chromium that Playwright downloads, which is what
   CI would use.
@@ -66,7 +67,7 @@ simulated live mode at speed 20 on port 8177 and stops it afterwards.
 | Test | Checks |
 |---|---|
 | The page loads | The three model cards arrive over the stream, the page says "Live" and carries the simulated-mode banner with its seed and speed, every tab opens, a chart is drawn, and the page raised no error |
-| A load preset changes the queue chart | With load stopped the premium queue chart's newest points are all 0; after starting `overload` from the Playground they exceed 10, and the Overview card shows the batch full |
+| A load preset changes the queue chart | With load stopped the premium queue chart's newest points are all 0; after starting `overload` from the Playground they exceed 10, and the Overview card shows the batch full (4 of 4 seats) |
 | A downgrade event appears under overload | With `overload` running, the Events tab filtered to downgrades lists "A request for premium was served by …", a state change says premium is degraded, and the Overview card says Degraded |
 
 Things to know:
@@ -103,8 +104,12 @@ pixels wide with 64 colours.
 - **The pictures are of simulated live mode and say so in their own banner.**
 - **A retake differs in detail.** The seed fixes what the gateway does; when each picture is
   taken is real time. Do not edit the pictures; retake them.
-- The ones in the repository were taken on the development machine, on the tree this note
-  was first committed with (parent commit `cb42d66`).
+- The ones in the repository were taken on the development machine, with
+  `PLAYWRIGHT_CHANNEL=chrome`, on the tree of the commit that retook them for the
+  calibrated profiles (parent commit `38bbb94`). The first set showed invented profiles and
+  was replaced (note 13).
+- **Every picture shows the simulated-mode banner.** The Capacity picture is the whole page
+  for that reason, rather than scrolled down to the premium model.
 
 ## Design decisions
 

@@ -37,8 +37,10 @@ in-flight limit per tier, metrics (TTFT, ITL, total), and streaming to the clien
   real models through llama-server exercises llama.cpp's scheduler, not ours. A latency
   number from this mode says nothing about whether our batching design is good.
 - **Simulated and real numbers are not comparable.** The simulator's model profiles are
-  illustrative and uncalibrated. Do not put a figure from `docs/03` to `docs/11` beside a
-  figure measured here and read the difference as meaning anything.
+  calibrated against these servers (note 13), but a simulated figure is this repo's
+  scheduler with those step costs, and a real-mode figure is the model server's own
+  scheduling. Do not put a figure from `docs/03` to `docs/08` beside a figure measured here
+  and read the difference as meaning anything.
 - **You cannot A/B our scheduler against llama-server's** with this setup. That would need
   a backend that exposes prefill and single decode steps to our scheduler, which the HTTP
   API does not.
@@ -64,8 +66,9 @@ in-flight limit per tier, metrics (TTFT, ITL, total), and streaming to the clien
   prompt tokens for "Say hi.".
 - **`usage.cached_tokens` is always 0.** llama-server's prompt cache is not read.
 - **ITL** is the gap between streamed pieces. A piece is usually one token, not always.
-- **`cost`** is the real token counts times the *illustrative* prices from step 1, times the
-  plan's multiplier. The token counts are real; the prices are not.
+- **`cost`** is the real token counts times the *placeholder* prices of note 01
+  (operator-supplied, not data), times the plan's multiplier. The token counts are real; the
+  prices are not.
 - **`text`** is the model's real output.
 
 ## Setup with llama-server

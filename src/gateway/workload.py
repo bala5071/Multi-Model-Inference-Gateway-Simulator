@@ -38,9 +38,13 @@ DEFAULT_LENGTHS: tuple[LengthBucket, ...] = (
 @dataclass(frozen=True, slots=True)
 class LoadConfig:
     seed: int = 7
-    total_requests: int = 300
+    # With 300 requests the standard model got 68, too few for a p99 that is more than its
+    # slowest request; 1000 gives each model enough (docs/07-load.md).
+    total_requests: int = 1000
     # Mean arrival rate of the Poisson process, over all models together.
-    arrival_rate_per_s: float = 8.0
+    # 0.8 req/s leaves every model at or below 60% of its capacity on the calibrated
+    # profiles with the default mix (benchmarks/saturation.py, docs/07-load.md).
+    arrival_rate_per_s: float = 0.8
     # Model name -> relative weight. Each request picks its model with these odds.
     model_weights: Mapping[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
     # Length of the part of the prompt that is unique to the request.

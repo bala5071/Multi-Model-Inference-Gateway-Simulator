@@ -17,6 +17,7 @@ from gateway.continuous import build_continuous_registry
 from gateway.overload import OverloadPolicy, SloPolicy
 from gateway.profiles import Tier
 from gateway.routing import load_plans
+from helpers import TEST_PROFILES
 from mock_llama import MockLlamaServer
 
 FIXTURES = Path(__file__).resolve().parent.parent / "frontend" / "src" / "test" / "fixtures"
@@ -69,9 +70,15 @@ async def test_dashboard_that_was_not_built_says_how_to_build_it(tmp_path: Path)
 
 
 async def _simulated_snapshot() -> dict[str, Any]:
-    """Three simulated models with plans and SLOs, after a surge that degrades premium."""
+    """Three simulated models with plans and SLOs, after a surge that degrades premium.
+
+    A scripted scenario on the hand-made test profiles (fixtures, not data), so that what
+    the frontend's tests check can be followed by hand.
+    """
     clock = SimClock()
-    registry = build_continuous_registry(clock, seed=7, max_queue_len={Tier.PREMIUM: 2})
+    registry = build_continuous_registry(
+        clock, seed=7, max_queue_len={Tier.PREMIUM: 2}, profiles=TEST_PROFILES
+    )
     slo = SloPolicy(
         p99_ms={"economy": 5000.0, "standard": 10_000.0, "premium": 2000.0},
         window_ms=10_000.0,
@@ -193,9 +200,11 @@ async def test_frontend_fixtures_are_what_the_gateway_produces() -> None:
 
 async def test_stream_takes_the_last_event_id_as_a_query_parameter() -> None:
     clock = SimClock()
-    registry = build_continuous_registry(clock, seed=7, max_queue_len={Tier.PREMIUM: 0})
+    registry = build_continuous_registry(
+        clock, seed=7, max_queue_len={Tier.PREMIUM: 0}, profiles=TEST_PROFILES
+    )
     async with _client(create_app(registry, clock)) as client:
-        # Eight are seated and three refused: events 1, 2 and 3.
+        # The test profile seats eight and three refused: events 1, 2 and 3.
         await asyncio.gather(
             *(
                 client.post(

@@ -22,10 +22,10 @@ async function setSpeed(page: Page, speed: number): Promise<void> {
   await expect(button).toHaveAttribute("aria-pressed", "true");
 }
 
-async function still(page: Page, name: string): Promise<void> {
+async function still(page: Page, name: string, fullPage = false): Promise<void> {
   // The pointer is parked off the charts, so no hover readout is in the picture.
   await page.mouse.move(0, 0);
-  await page.screenshot({ path: path.join(IMAGES, `${name}.png`) });
+  await page.screenshot({ path: path.join(IMAGES, `${name}.png`), fullPage });
 }
 
 test("capture the README pictures", async ({ page }) => {
@@ -66,16 +66,11 @@ test("capture the README pictures", async ({ page }) => {
   await expect(page.locator("canvas").first()).toBeVisible();
   await still(page, "latency");
   await openTab(page, "Capacity");
-  // The premium model is the one under load; bring its charts to the top of the picture.
+  // The premium model is the one under load, below the other two. The whole page is taken,
+  // so that the simulated-mode banner at the top is in the picture with its charts.
   const premium = page.getByRole("region", { name: "premium capacity" });
   await expect(premium.locator("canvas").first()).toBeVisible();
-  await premium.evaluate((section) => {
-    section.scrollIntoView({ block: "start" });
-  });
-  await still(page, "capacity");
-  await page.evaluate(() => {
-    window.scrollTo(0, 0);
-  });
+  await still(page, "capacity", true);
   await openTab(page, "Tenants");
   await still(page, "tenants");
 

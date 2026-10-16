@@ -6,10 +6,12 @@ budget.
 Code: `benchmarks/gate.py`, `scripts/perf_gate.py`, `benchmarks/budgets.json`, the
 `perf-gate` job in `.github/workflows/ci.yml`. Tests: `tests/test_perf_gate.py`.
 
-**What it guards.** The gate runs on simulated time with the illustrative model profiles.
-It catches changes to the gateway's own logic (scheduling, batching, caching, the cost
-model, the profiles) that make simulated latency worse. It says nothing about the speed of
-real models or hardware. Every number below is simulated.
+**What it guards: the scheduler logic, not real hardware.** The gate runs on simulated time
+with the calibrated model profiles (note 01: step costs measured once on one laptop with
+Ollama, batches of at most 4). It catches changes to the gateway's own logic (scheduling,
+batching, caching, the cost model, the profiles) that make simulated latency worse. **It does
+not measure real hardware**, real models or a model server, and a passing gate says nothing
+about how fast any of them is. Every number below is simulated.
 
 ## Using it
 
@@ -29,11 +31,12 @@ uv run python scripts/perf_gate.py --simulate-regression premium=2   # watch it 
 A passing run:
 
 ```
-workload: seed=7 requests=1000 rate=5.0/s weights={'economy': 70, 'standard': 20, 'premium': 10}
+Simulated time, calibrated model profiles (batches of at most 4): this checks the scheduler logic, not real hardware.
+workload: seed=7 requests=1000 rate=0.8/s weights={'economy': 70, 'standard': 20, 'premium': 10}
 model      requests     p99 ms  budget ms  limit ms (+2%)  vs budget  status
-economy         693     1817.9     1817.9          1854.2      +0.0%  ok
-standard        204     3562.3     3562.3          3633.6      +0.0%  ok
-premium         103    10881.7    10881.7         11099.4      +0.0%  ok
+economy         693     3099.0     3099.0          3161.0      +0.0%  ok
+standard        204     5316.9     5316.9          5423.2      +0.0%  ok
+premium         103    25175.3    25175.3         25678.8      +0.0%  ok
 
 Performance gate passed.
 ```
@@ -41,10 +44,50 @@ Performance gate passed.
 ## The standard load and the budgets
 
 The gate always runs `STANDARD_LOAD` from `benchmarks/gate.py`: seed 7, 1000 requests,
-Poisson arrivals at 5 req/s, weights 70/20/10, the default prompt-length mix, half the
+Poisson arrivals at **0.8 req/s**, weights 70/20/10, the default prompt-length mix, half the
 requests sharing a 200-word system prompt. It runs in-process through the HTTP API on
-`SimClock` and takes about two seconds. At this rate all three models are busy but none is
-saturated; a saturated model's p99 mostly measures the length of the run.
+`SimClock` and takes a few seconds.
+
+**No model may be saturated on it**, because a saturated model's p99 measures the length of
+the run, and a gate on that would guard the run length, not the scheduler. The rate was
+chosen from this check (`uv run python -m benchmarks.saturation --rate 0.6 0.8 1.0 1.2 1.5`;
+simulated, parent commit `38bbb94`). A model counts as saturated when it is offered more than
+60% of its capacity (requests per second when the same requests arrive all at once) or its
+p99 grows by more than 25% when the run is doubled.
+
+| Rate | economy | standard | premium | Verdict |
+|-----:|--------:|---------:|--------:|---|
+| 0.6/s | 23% | 13% | 27% | ok |
+| **0.8/s** | **30%** | **17%** | **36%** | **ok** |
+| 1.0/s | 38% | 21% | 45% | ok |
+| 1.2/s | 45% | 26% | 54% | ok |
+| 1.5/s | 56% | 32% | 68% | premium saturated |
+
+Utilisation per model at the median timings; at every rate shown the p99 moved by less than
+10% when the run was doubled. Premium sets the limit: on this mix it serves about 0.23
+requests a second. Its capacity rests on `decode_ms_per_extra_seq`, which is **unstable** (7.7
+to 42.9 ms over the six calibration runs, median 24.8), so the same check was run with that
+parameter at the highest value fitted on every tier:
+
+| Rate | economy | standard | premium | Verdict |
+|-----:|--------:|---------:|--------:|---|
+| **0.8/s** | **36%** | **18%** | **52%** | **ok** |
+| 1.0/s | 45% | 23% | 65% | premium saturated |
+
+So 0.8 req/s is the highest of the rates checked that leaves premium unsaturated across the
+whole measured range of its least stable parameter. The budgets were recorded with the
+explicit flow below, which printed:
+
+```
+workload: CHANGED (budgets below are for the new workload)
+~ economy: p99 budget 1817.854 ms -> 3099.029 ms (+70.5%)
+~ standard: p99 budget 3562.306 ms -> 5316.909 ms (+49.3%)
+~ premium: p99 budget 10881.739 ms -> 25175.307 ms (+131.4%)
+```
+
+The old budgets were recorded on invented profiles at 5 req/s; on the calibrated profiles
+that workload offers economy 188%, standard 107% and premium 227% of its capacity, so they
+were measuring backlogs (note 13).
 
 `benchmarks/budgets.json` holds:
 
@@ -69,15 +112,15 @@ Doubling one model's `prefill_ms_per_token` moves its p99 on the standard load b
 
 | Model slowed | p99 before ms | p99 after ms | Change |
 |--------------|--------------:|-------------:|-------:|
-| economy      |       1,817.9 |      1,909.9 |  +5.1% |
-| standard     |       3,562.3 |      3,885.4 |  +9.1% |
-| premium      |      10,881.7 |     11,849.2 |  +8.9% |
+| economy      |       3,099.0 |      3,253.8 |  +5.0% |
+| standard     |       5,316.9 |      5,812.1 |  +9.3% |
+| premium      |      25,175.3 |     26,839.8 |  +6.6% |
 
-(From `scripts/perf_gate.py --simulate-regression MODEL=2` at commit `c7e75ac`.)
-With a 10% tolerance **none of these would fail the gate**: latency on this workload is dominated by decoding, so even a doubled prefill cost
-stays under 10%. At 2% all three fail. A gate is only as sensitive as its tolerance and its
-workload allow; a prefill-heavy workload would be needed to catch smaller prefill
-regressions.
+(From `scripts/perf_gate.py --simulate-regression MODEL=2`, simulated, parent commit
+`38bbb94`.) With a 10% tolerance **none of these would fail the gate**: latency on this
+workload is dominated by decoding, so even a doubled prefill cost stays under 10%. At 2% all
+three fail. A gate is only as sensitive as its tolerance and its workload allow; a
+prefill-heavy workload would be needed to catch smaller prefill regressions.
 
 ## Updating budgets
 
@@ -89,8 +132,8 @@ separate, explicit action:
   illustration of the format, not output from a real re-baseline):
 
   ```
-  ~ premium: p99 budget 10881.739 ms -> 11849.200 ms (+8.9%)
-    economy: p99 budget 1817.854 ms (unchanged)
+  ~ premium: p99 budget 25175.307 ms -> 26839.800 ms (+6.6%)
+    economy: p99 budget 3099.029 ms (unchanged)
   ```
 
 - it is **refused when `CI` is set**, so a pipeline cannot quietly re-baseline itself;
@@ -111,13 +154,14 @@ The same thing by hand, with `--simulate-regression premium=2`:
 
 ```
 DEMO: simulating a regression (premium=2 on prefill cost).
-workload: seed=7 requests=1000 rate=5.0/s weights={'economy': 70, 'standard': 20, 'premium': 10}
+Simulated time, calibrated model profiles (batches of at most 4): this checks the scheduler logic, not real hardware.
+workload: seed=7 requests=1000 rate=0.8/s weights={'economy': 70, 'standard': 20, 'premium': 10}
 model      requests     p99 ms  budget ms  limit ms (+2%)  vs budget  status
-economy         693     1817.9     1817.9          1854.2      +0.0%  ok
-standard        204     3562.3     3562.3          3633.6      +0.0%  ok
-premium         103    11849.2    10881.7         11099.4      +8.9%  FAIL
+economy         693     3099.0     3099.0          3161.0      +0.0%  ok
+standard        204     5316.9     5316.9          5423.2      +0.0%  ok
+premium         103    26839.8    25175.3         25678.8      +6.6%  FAIL
 
-FAIL: premium: p99 total latency 11849.2 ms exceeds its limit of 11099.4 ms (budget 10881.7 ms + 2%)
+FAIL: premium: p99 total latency 26839.8 ms exceeds its limit of 25678.8 ms (budget 25175.3 ms + 2%)
 Performance gate FAILED.
 If the change is intended, re-baseline with `uv run python scripts/perf_gate.py --update-budgets` and commit benchmarks/budgets.json.
 ```
@@ -133,8 +177,8 @@ step 7.
 passes or fails. The JSON contains the verdicts and the full load report.
 
 **Not yet verified:** the workflow has not run on GitHub, because nothing has been pushed.
-Locally the gate was run with `CI=true` set and passed. The budgets were recorded on Windows
-with Python 3.12; the first CI run on Linux is the real check that the numbers match across
+Locally the gate was run with `CI=true` set and passed. The current budgets were recorded on
+Windows with Python 3.12; the first CI run on Linux is the real check that the numbers match across
 platforms (see below).
 
 ## Why a deterministic simulator makes this gate non-flaky

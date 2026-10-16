@@ -13,8 +13,9 @@ export function SimulationBanner({ control }: { control: Control }) {
     <div className="sim-banner" role="status" aria-label="Simulated live mode">
       <div>
         <strong>Simulated live mode.</strong> No model is running. Everything shown is a
-        deterministic replay on simulated time, from illustrative model profiles: the same seed
-        gives the same sequence. Times and rates are simulated, not wall-clock.
+        deterministic replay on simulated time, on model profiles calibrated once on one laptop: the
+        same seed gives the same sequence. Times and rates are simulated, not wall-clock; costs use
+        placeholder prices.
         <span className="sim-facts">
           {" "}
           Seed {load?.seed ?? status.seed}

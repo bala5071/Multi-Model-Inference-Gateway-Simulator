@@ -9,7 +9,7 @@ Against a running server on real time:
     uv run python -m benchmarks.loadgen --url http://127.0.0.1:8000 --tenant acme \
         --requests 50 --rate 5
 
-See docs/07-load.md. In-process results are simulated from illustrative model profiles;
+See docs/07-load.md. In-process results are simulated on the calibrated model profiles;
 they are not measurements of real models.
 """
 
@@ -329,7 +329,7 @@ def main() -> None:
         mode = f"LIVE against {args.url} on wall-clock time"
     else:
         report = asyncio.run(run_in_process(config))
-        mode = "IN-PROCESS on simulated time; illustrative profiles, not real measurements"
+        mode = "IN-PROCESS on simulated time; calibrated profiles, not real measurements"
 
     if args.json:
         print(report.to_json(), end="")
@@ -341,6 +341,7 @@ def main() -> None:
             f"shared_prefix={config.shared_prefix_fraction} x {config.shared_prefix_words} words"
         )
         print(report.to_table())
+        print("cost USD is at PLACEHOLDER prices: operator-supplied, not data.")
 
 
 if __name__ == "__main__":

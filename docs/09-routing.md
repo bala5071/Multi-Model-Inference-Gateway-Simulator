@@ -12,8 +12,9 @@ in `src/gateway/app.py`. Tests: `tests/test_routing.py`, `tests/test_ledger.py`,
 A company selling model access to business clients does not have one customer; it has
 customers at different price points. A startup on a free tier, a mid-size team paying a
 flat rate and an enterprise with a negotiated contract should not all get the same thing,
-because serving them costs very different amounts: on this project's illustrative profiles
-the premium model costs ten times the economy model per token and is far slower.
+because serving them costs very different amounts: a larger model needs more hardware per
+request, and on the calibrated profiles (note 01) the premium model's prefill is over four
+times the economy model's per token and its decode step about seven times as long.
 
 Plans are how that difference is sold. A cheaper plan is served by cheaper models, which is
 what makes the low price sustainable; a more expensive plan buys access to better models,
@@ -28,7 +29,10 @@ because it is the one component every request passes through:
   invoices and for seeing which customers cost more than they pay.
 - **Limits:** a budget stops one customer from running up unbounded cost.
 
-All prices, multipliers and budgets in this repo are illustrative.
+**All prices, multipliers and budgets in this repo are placeholders: operator-supplied, not
+data.** Nothing measured them. The costs in the examples below show how the ledger works; they
+are not what serving anything costs, and no saving or ratio between plans is reported
+anywhere.
 
 ## Plans
 

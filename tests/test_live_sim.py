@@ -44,7 +44,7 @@ async def _running(app: Any) -> AsyncIterator[httpx.AsyncClient]:
         yield client
 
 
-async def _replay(seed: int, *, speed: float = 20.0, seconds: float = 150.0) -> Replay:
+async def _replay(seed: int, *, speed: float = 20.0, seconds: float = 300.0) -> Replay:
     """Simulated live mode's overload preset for ``seconds`` of simulated time."""
     waits = Waits()
     app = create_simulated_live_app(
@@ -65,10 +65,11 @@ async def test_the_same_seed_gives_the_same_event_sequence() -> None:
     first = await _replay(7)
     again = await _replay(7)
 
-    # The replay has something to compare: premium is pushed past its queue limit.
+    # The replay has something to compare: premium is pushed past its queue limit, marked
+    # degraded, and requests are moved off it.
     assert len(first.events) > 20
     assert first.events[0]["seq"] == 1
-    assert "queue_full" in {e["type"] for e in first.events}
+    assert {"queue_full", "state_change", "downgrade"} <= {e["type"] for e in first.events}
     # Every event: its number, its simulated time, its model, tenant and details.
     assert first.events == again.events
     # And everything else the dashboard is shown: every series point, total and tenant.
@@ -77,8 +78,8 @@ async def test_the_same_seed_gives_the_same_event_sequence() -> None:
 
 
 async def test_a_different_seed_gives_a_different_sequence() -> None:
-    first = await _replay(7, seconds=60.0)
-    other = await _replay(8, seconds=60.0)
+    first = await _replay(7)
+    other = await _replay(8)
 
     assert first.events != other.events
     assert first.snapshot["models"] != other.snapshot["models"]
@@ -107,8 +108,8 @@ async def test_replay_times_are_simulated_times() -> None:
         7,
         0.0,
     )
-    # About 6 requests a second for 60 seconds.
-    assert 300 <= status["sent"] <= 420
+    # About 1 request a second for 60 seconds.
+    assert 45 <= status["sent"] <= 80
     assert status["sent"] == status["served"] + status["refused"] + status["in_progress"]
     arrived = sum(m["traffic"]["arrived_total"] for m in replay.snapshot["models"].values())
     # A request refused for its tenant's budget never reaches a model; the rest all do.
@@ -147,7 +148,7 @@ async def test_load_can_be_started_and_stopped_through_the_api() -> None:
     async with _running(app) as client:
         idle = (await client.get("/v1/control")).json()
         started = await client.post("/v1/control/load/start", json={"preset": "steady"})
-        await clock.sleep_ms(5000.0)
+        await clock.sleep_ms(50_000.0)
         running = (await client.get("/v1/control")).json()
         snapshot = (await client.get("/v1/monitor/snapshot")).json()
         with_seed = await client.post("/v1/control/load/start", json={"preset": "burst", "seed": 9})
@@ -171,7 +172,7 @@ async def test_load_can_be_started_and_stopped_through_the_api() -> None:
     assert (started.json()["load"]["status"]["preset"], started.json()["seed"]) == ("steady", 42)
     assert started.json()["load"]["status"]["seed"] == 42
     status = running["load"]["status"]
-    # About 8 requests a second for 5 seconds, through the ordinary request path: the
+    # About 0.8 requests a second for 50 seconds, through the ordinary request path: the
     # models saw them and the tenants were charged.
     assert 20 <= status["sent"] <= 70
     assert status["served"] > 0

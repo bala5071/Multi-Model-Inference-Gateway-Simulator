@@ -5,15 +5,15 @@
     "presets": [
       {
         "name": "steady",
-        "description": "8 requests a second across the three models, the load generator's default mix."
+        "description": "0.8 requests a second across the three models, the load generator's default mix."
       },
       {
         "name": "burst",
-        "description": "20 quiet seconds at 2 requests a second, then 10 seconds at 30."
+        "description": "75 quiet seconds at 0.4 requests a second, then 10 seconds at 3."
       },
       {
         "name": "overload",
-        "description": "Mostly premium, at several times what it can serve; requests may be downgraded."
+        "description": "Mostly premium, at about three times what it can serve; requests may be downgraded."
       },
       {
         "name": "long-prompts",
@@ -26,11 +26,11 @@
       "seed": 7,
       "started_ms": 0.0,
       "phases_started": 1,
-      "sent": 87,
-      "served": 74,
+      "sent": 7,
+      "served": 7,
       "refused": 0,
       "skipped": 0,
-      "in_progress": 13
+      "in_progress": 0
     }
   },
   "simulation": {

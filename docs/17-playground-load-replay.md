@@ -14,7 +14,8 @@ and in `frontend/` `api/playground.test.ts`, `tabs/Playground.test.tsx`, `App.te
 ## Read this first
 
 - **Simulated live mode measures nothing.** No model runs. Every latency, rate and event in
-  it is simulated time on the illustrative profiles of note 01. The dashboard says so in a
+  it is simulated time on the calibrated profiles of note 01 (step costs measured once on one
+  laptop; prices are placeholders). The dashboard says so in a
   banner on every tab.
 - **Load control is off by default.** It lets anyone who can reach the gateway put load on
   it, and the gateway has no authentication.
@@ -80,12 +81,21 @@ and pass.
 
 | Preset | Phases, repeated until stopped |
 |---|---|
-| `steady` | 240 requests at 8 req/s, the load generator's default model mix |
-| `burst` | 40 requests at 2 req/s, then 300 at 30 req/s |
-| `overload` | 180 requests at 6 req/s, 80% of them premium, with `allow_downgrade` |
-| `long-prompts` | 120 requests at 4 req/s, 80% with prompts of 300 to 800 words, 80% sharing the system prompt |
+| `steady` | 240 requests at 0.8 req/s, the load generator's default model mix |
+| `burst` | 30 requests at 0.4 req/s, then 30 at 3 req/s |
+| `overload` | 180 requests at 1 req/s, 80% of them premium, with `allow_downgrade` |
+| `long-prompts` | 120 requests at 0.4 req/s, 80% with prompts of 300 to 800 words, 80% sharing the system prompt |
 
-They are illustrative, sized against the illustrative profiles.
+They are demo settings, not measurements, sized against the calibrated profiles with batches
+of at most 4, on which premium serves about 0.23 requests a second on the default mix.
+`steady` repeats the load generator's default mix at 0.8 req/s; over 1000 requests of that mix
+no model is saturated (`benchmarks/saturation.py`, note 07; premium, the busiest, at 36% of its
+capacity). `long-prompts` passes the same check over its 120 requests (premium at 26%).
+`burst` goes over for about ten seconds and recovers: in a seed-7 replay at most 11 requests
+were in progress at once, and none by 150 s. `overload` offers premium about three and a half times what it
+can serve, on purpose: in a seed-7 replay premium's queue first fills (64 waiting) at 104 s of
+simulated time and downgrades start at 165 s. They were first sized for invented profiles, at
+ten times these rates (note 13).
 
 - **A run is a function of its preset and seed.** Phase `n` of a run (counting from 0, across
   repeats) is `build_workload` with seed `seed * 1000 + n`. No two phases share a prompt

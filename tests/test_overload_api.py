@@ -18,6 +18,7 @@ from gateway.metrics import percentile
 from gateway.overload import OverloadPolicy, SloMonitor, SloPolicy
 from gateway.profiles import Tier
 from gateway.routing import Plan, PlansConfig
+from helpers import TEST_PROFILES
 
 PLANS = PlansConfig(
     plans={
@@ -64,7 +65,9 @@ async def _gateway(
     max_queue_len: Mapping[Tier, int] | None = None,
 ) -> AsyncIterator[Gateway]:
     clock = SimClock()
-    registry = build_continuous_registry(clock, seed=7, max_queue_len=max_queue_len)
+    registry = build_continuous_registry(
+        clock, seed=7, max_queue_len=max_queue_len, profiles=TEST_PROFILES
+    )
     app = create_app(registry, clock, plans=plans, overload=overload)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
@@ -345,9 +348,10 @@ async def test_default_app_has_overload_protection_switched_on() -> None:
 
 
 async def test_benchmark_shows_downgrade_cutting_p99_without_flapping() -> None:
-    plain, no_transitions = await overload_benchmark.run(None)
+    # On the hand-made test profiles: this pins the mechanism, it is not a result.
+    plain, no_transitions = await overload_benchmark.run(None, profiles=TEST_PROFILES)
     protected, transitions = await overload_benchmark.run(
-        OverloadPolicy(slo=overload_benchmark.SLO)
+        OverloadPolicy(slo=overload_benchmark.SLO), profiles=TEST_PROFILES
     )
 
     assert no_transitions == ()

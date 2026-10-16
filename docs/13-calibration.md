@@ -22,10 +22,10 @@ this repository with that in mind.
 The first calibration, a single run on 2026-10-07 with three repeats and no overhead term,
 is in the history at commit `e36ce3b`.
 
-**The simulator does not use the calibration by default.** The illustrative profiles are
-still what `profiles.py`, the performance gate and the main tables of `docs/REPORT.md` run
-on. Loading the calibration is opt-in (see "Using a calibration in the simulator" below).
-Sections 1 and 2 of the report show a calibrated variant beside the illustrative results.
+**This calibration is the simulator's default.** `profiles.py` holds its medians (a test
+fails if the two differ), with batches of at most 4, the most requests measured together, and
+placeholder prices and KV capacities, which were never measured. The performance gate, the
+step notes and `docs/REPORT.md` all run on it. "What changed" below says what that replaced.
 
 ### What was measured
 
@@ -103,10 +103,9 @@ Every run, in order (`uv run python -m benchmarks.calibrate --compare` over the 
   of 0.043: per-token latency barely tracked concurrency in that run, and the fit put the
   cost into the base step (22.2 ms) instead of the slope (1.7 ms). It is one of six values
   going into each median, and it is why two of standard's parameters are unstable.
-- Against the illustrative profiles the medians say: prefill is 1.4 to 3.9 times dearer;
-  each extra sequence adds 40%, 27% and 55% of the base step, not 3% to 8%; and every
-  request pays a fixed overhead the illustrative profiles do not have. Concurrency was
-  measured up to 4 only; the illustrative batch limits of 32, 16 and 8 were not tested.
+- **Each extra sequence in a batch adds 40%, 27% and 55% of the base step** on the three
+  tiers, by the medians, and every request pays a fixed overhead before its first token.
+  Concurrency was measured up to 4 only; nothing is known about larger batches.
 
 ### How well the calibrated simulator matches
 
@@ -143,28 +142,27 @@ are included in section 6 of `docs/REPORT.md`.
 
 ### What the calibrated profiles do to the simulated results
 
-Sections 1 and 2 of `docs/REPORT.md` run the same simulations on the calibrated profiles,
-beside the illustrative ones (`uv run python -m benchmarks.report`). Simulated in both cases.
+`docs/REPORT.md` (`uv run python -m benchmarks.report`) runs sections 1 to 3 on these
+profiles; still simulated. Every workload is checked for saturation first, and a saturated
+run's p99 is not reported. From section 1, the capacity of continuous batching over the
+one-at-a-time baseline, with batches of at most 4:
 
-| Tier | Throughput gain of continuous batching at 16x load: illustrative | Calibrated, batches up to the illustrative limit | Calibrated, batches of at most 4 (the measured range) |
-|----------|------:|-----:|-----:|
-| economy  | 12.3x | 2.3x | 1.8x |
-| standard |  7.7x | 2.9x | 2.1x |
-| premium  |  4.5x | 1.6x | 1.5x |
+| Tier | Gain, median cost per extra sequence | Lowest fitted cost | Highest fitted cost |
+|----------|------:|------:|------:|
+| economy  | 1.76x | 1.97x | 1.48x |
+| standard | 2.11x | 2.79x | 1.96x |
+| premium  | 1.49x | 2.52x | 1.04x |
 
-- **Within the measured range the batching gain is 1.5x to 2.1x, not 4.5x to 12.3x.** The
-  middle column extrapolates the fitted cost per extra sequence to batches that were never
-  measured.
-- **These gains rest on the least stable parameter.** The cost per extra sequence is
-  unstable on all three tiers, so the gains would differ run by run; they were computed
-  from the median only.
-- The prefix cache still holds median TTFT at its no-sharing level, but on the calibrated
-  standard profile that level is 142 ms, most of it the 88 ms overhead, against 24 ms on
-  the illustrative one.
-- **Sections 3, 4 and 5 of the report were not run on calibrated profiles** and say so.
-  Section 4's surge of 3 req/s is about 12 times what the calibrated premium profile can
-  decode with every batch full, so that workload is saturated and a calibrated run would
-  only measure its backlog.
+- **The gain rests on the least stable parameter.** The cost per extra sequence is unstable
+  on all three tiers, so the last two columns rerun the simulation with it at the lowest and
+  highest value the six runs fitted (both measured). On premium the gain ranges from almost
+  nothing to two and a half times.
+- **Nothing batches beyond 4**, so nothing extrapolates the fitted cost past the measured
+  range.
+- **Overload and chunked prefill have no results** (report sections 4 and 5, notes 10 and
+  11): on these profiles the old overload workload is saturated and its outcome rests on
+  unstable parameters, and the chunked-prefill workload needs prompts far beyond the 1,536
+  words measured. They are listed as not measured on real data.
 
 ### What this calibration is not
 
@@ -176,6 +174,44 @@ beside the illustrative ones (`uv run python -m benchmarks.report`). Simulated i
 
 The four `real_models` tests were run against these three models through Ollama on
 2026-10-07 and passed; they were not run again on 2026-10-08.
+
+## What changed: the invented profiles were removed
+
+Until this change, the simulator ran on **invented model profiles**, written in step 1 to give
+the three tiers plausible, clearly different shapes: prefill of 0.05, 0.15 and 0.6 ms per
+token, decode steps of 6, 12 and 30 ms, 0.2 to 2.5 ms per extra sequence, no per-request
+overhead, and batch limits of 32, 16 and 8. Every simulated result in the report, the step
+notes, the README and the performance gate's budgets came from them, labelled as
+illustrative.
+
+They were removed because measurement showed them wrong where it matters, and a labelled
+wrong number still gets quoted:
+
+- **They made batching look several times cheaper than it was.** Each extra sequence was
+  measured to add 27% to 55% of a decode step, not 3% to 8%, and the batch limits they relied
+  on were never measured. The batching gains quoted from them (up to about 12 times) were
+  largely an artefact of those two choices.
+- **Their workloads were saturated on the measured timings.** The gate's workload offered
+  premium more than twice its calibrated capacity; the overload surge about fifteen times. A
+  p99 from such a run measures the length of the run.
+- **Their prices were never data**, so the cost savings computed from them (a routing saving
+  and per-plan savings) were statements about made-up numbers.
+
+What replaced them:
+
+- the six-run median above is the default profile set, with batches of at most 4;
+- every simulated workload that is reported is first checked for saturation
+  (`benchmarks/saturation.py`), and rates were lowered where needed, saying so;
+- results that could not be redone honestly (overload, chunked prefill, every cost saving)
+  were deleted and are listed as not measured on real data;
+- prices and KV capacities are kept only as `PLACEHOLDER_*` values, operator-supplied, not
+  data, and no cost result is reported;
+- the old numbers survive only as `TEST_PROFILES` in `tests/helpers.py`, hand-made fixtures
+  for tests that need timings checkable by hand. Nothing outside the tests may import them.
+
+**The caveat on everything that replaced them:** it is calibrated once, on one laptop, with
+Ollama, the 8B model partly on the CPU, and seven of the twelve parameters did not repeat
+between runs.
 
 ## What the tool does
 
@@ -215,8 +251,9 @@ already comes one step after prefill; only the rest of the intercept is unexplai
 was added after the first calibration showed an intercept of 92 to 139 ms that the
 simulator could not represent (`docs/01-cost-model.md` says how the simulator applies it).
 
-Everything else in the profile (prices, `max_batch_size`, `kv_capacity_tokens`) is copied
-from the illustrative profile; calibration does not measure it. A fit that comes out at or
+Everything else in the profile (prices, `kv_capacity_tokens`) is copied from the default
+profile, where they are placeholders, operator-supplied, not data; calibration does not
+measure them. `max_batch_size` is set to the highest concurrency measured. A fit that comes out at or
 below zero is clamped and flagged in the notes rather than passed off as a result.
 
 ### 3. Check
@@ -305,16 +342,17 @@ simulated:
   profiles: benchmarks/calibration/calibrated_profiles.json
 ```
 
-`load_calibrated_profiles(path)` returns the standard profiles with the timing parameters
-replaced for every tier in the file; a tier that is not in the file keeps its
-illustrative profile. A file written before the overhead was fitted has no
+The default profiles already are the tracked aggregate; this is for another calibration file.
+`load_calibrated_profiles(path)` returns the default profiles with the timing parameters
+replaced for every tier in the file, and the batch limit set to the file's
+`max_concurrency_measured`; a tier that is not in the file keeps its default profile. A file written before the overhead was fitted has no
 `per_request_overhead_ms` and loads with 0. An aggregate loads the same way: the
 medians are in the same fields. The loader does not act on the `unstable` or
 `hardware_limited` flags; they are for the reader and the report. In code, pass the result as `profiles=` to
 `build_continuous_registry` or `run_in_process`.
 
-The performance gate does not use calibrated profiles. Its budgets were recorded with the
-illustrative ones; switching would be a deliberate re-baseline.
+The performance gate runs on the default profiles, so it uses this calibration; loading
+another file does not change it (`docs/08-ci-gate.md`).
 
 ## Limitations, and where the simulator diverges
 
@@ -341,9 +379,9 @@ Some of these are structural and some were seen in the tool check below.
   uses 4), or set `OLLAMA_NUM_PARALLEL`.
 - Step time is modelled as linear in batch size. In the check the fit explained only half
   to three quarters of the variance.
-- Only the measured range is known. The illustrative profiles allow batches of 32, 16 and
-  8; a calibration that measured up to 4 says nothing about 32. `max_concurrency_measured`
-  is in the output for this reason.
+- Only the measured range is known: a calibration that measured up to 4 says nothing about
+  32. `max_concurrency_measured` is in the output for this reason, and the simulator's batch
+  limit is set to it.
 
 **It is one machine on one day.**
 

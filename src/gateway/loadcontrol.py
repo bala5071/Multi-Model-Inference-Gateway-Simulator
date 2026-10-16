@@ -30,32 +30,35 @@ class Preset:
     phases: tuple[Phase, ...]
 
 
-# Illustrative, like the model profiles they are sized against. The seeds in these configs
-# are placeholders; ``LoadController`` replaces them.
+# Sized against the calibrated profiles with batches of at most 4, where premium serves
+# about 0.23 requests a second on the default mix. "steady" and "long-prompts" keep every
+# model under 60% of its capacity (benchmarks/saturation.py); "burst" briefly goes over and
+# recovers; "overload" is overloaded on purpose. They are demo settings, not measurements.
+# The seeds in these configs are placeholders; ``LoadController`` replaces them.
 PRESETS: Mapping[str, Preset] = {
     preset.name: preset
     for preset in (
         Preset(
             "steady",
-            "8 requests a second across the three models, the load generator's default mix.",
-            (Phase(LoadConfig(total_requests=240, arrival_rate_per_s=8.0)),),
+            "0.8 requests a second across the three models, the load generator's default mix.",
+            (Phase(LoadConfig(total_requests=240, arrival_rate_per_s=0.8)),),
         ),
         Preset(
             "burst",
-            "20 quiet seconds at 2 requests a second, then 10 seconds at 30.",
+            "75 quiet seconds at 0.4 requests a second, then 10 seconds at 3.",
             (
-                Phase(LoadConfig(total_requests=40, arrival_rate_per_s=2.0)),
-                Phase(LoadConfig(total_requests=300, arrival_rate_per_s=30.0)),
+                Phase(LoadConfig(total_requests=30, arrival_rate_per_s=0.4)),
+                Phase(LoadConfig(total_requests=30, arrival_rate_per_s=3.0)),
             ),
         ),
         Preset(
             "overload",
-            "Mostly premium, at several times what it can serve; requests may be downgraded.",
+            "Mostly premium, at about three times what it can serve; requests may be downgraded.",
             (
                 Phase(
                     LoadConfig(
                         total_requests=180,
-                        arrival_rate_per_s=6.0,
+                        arrival_rate_per_s=1.0,
                         model_weights={"economy": 10, "standard": 10, "premium": 80},
                     ),
                     allow_downgrade=True,
@@ -69,7 +72,7 @@ PRESETS: Mapping[str, Preset] = {
                 Phase(
                     LoadConfig(
                         total_requests=120,
-                        arrival_rate_per_s=4.0,
+                        arrival_rate_per_s=0.4,
                         prompt_lengths=(LengthBucket(300, 800, 0.8), LengthBucket(20, 80, 0.2)),
                         shared_prefix_fraction=0.8,
                     )

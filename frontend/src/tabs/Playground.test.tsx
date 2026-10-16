@@ -223,10 +223,10 @@ describe("load control", () => {
         .map((o) => o.textContent),
     ).toEqual(["steady", "burst", "overload", "long-prompts"]);
     const fact = (label: string) => section.getByText(label).parentElement?.textContent;
-    expect(fact("Sent")).toBe("Sent87");
-    expect(fact("Served")).toBe("Served74");
+    expect(fact("Sent")).toBe("Sent7");
+    expect(fact("Served")).toBe("Served7");
     expect(fact("Refused")).toBe("Refused0");
-    expect(fact("In progress")).toBe("In progress13");
+    expect(fact("In progress")).toBe("In progress0");
   });
 
   it("starts the chosen preset with the seed typed, and stops it", async () => {
@@ -234,7 +234,7 @@ describe("load control", () => {
     const section = within(screen.getByRole("region", { name: "Load" }));
 
     await user.selectOptions(section.getByLabelText("Preset"), "overload");
-    expect(section.getByText(/Mostly premium, at several times/)).toBeInTheDocument();
+    expect(section.getByText(/Mostly premium, at about three times/)).toBeInTheDocument();
     await user.clear(section.getByLabelText("Seed"));
     await user.type(section.getByLabelText("Seed"), "42");
     await user.click(section.getByRole("button", { name: "Restart" }));

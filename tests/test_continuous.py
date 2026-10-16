@@ -18,10 +18,10 @@ from gateway.continuous import (
 )
 from gateway.cost_model import decode_step_ms
 from gateway.overload import QueueFullError
-from gateway.profiles import ECONOMY, PREMIUM, PROFILES, STANDARD, ModelProfile, Tier
+from gateway.profiles import PROFILES, ModelProfile, Tier
 from gateway.registry import UnknownModelError, Worker
 from gateway.schema import GenerateRequest, RequestResult
-from helpers import EXACT, SizedBackend
+from helpers import EXACT, TEST_ECONOMY, TEST_PREMIUM, TEST_STANDARD, SizedBackend
 
 WorkerFactory = Callable[[ModelProfile, Backend, SimClock], Worker]
 WORKER_KINDS: tuple[WorkerFactory, ...] = (BaselineWorker, ContinuousBatchingWorker)
@@ -218,7 +218,9 @@ async def test_admission_is_first_come_first_served_even_if_a_later_request_woul
 # --- throughput ----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("profile", [ECONOMY, STANDARD, PREMIUM], ids=lambda p: p.tier.value)
+@pytest.mark.parametrize(
+    "profile", [TEST_ECONOMY, TEST_STANDARD, TEST_PREMIUM], ids=lambda p: p.tier.value
+)
 async def test_twenty_concurrent_requests_have_higher_throughput_than_baseline(
     profile: ModelProfile,
 ) -> None:

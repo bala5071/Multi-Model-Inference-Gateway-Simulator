@@ -29,8 +29,11 @@ Stack: Python 3.11+, FastAPI, asyncio, pytest, ruff, mypy, uv. Free/open-source 
 
 Planned modules under `src/gateway/` (added step by step; most do not exist yet):
 
-- `profiles.py` — `Tier`, `ModelProfile`, the three profiles (exists; numbers are
-  illustrative), and `load_calibrated_profiles` for a calibration file
+- `profiles.py` — `Tier`, `ModelProfile`, the three profiles (exists): timing is the
+  six-run median of the tracked calibration (`UNSTABLE_PARAMETERS`, `HARDWARE_LIMITED`),
+  batches capped at `MEASURED_MAX_BATCH_SIZE` (4); prices and KV capacities are
+  `PLACEHOLDER_*` values, operator-supplied, not data. `load_calibrated_profiles` loads
+  another calibration file
 - `cost_model.py` — `estimate_cost`, `OutputLengthGenerator` (exists)
 - `clock.py` — `Clock` protocol, `SimClock`, `WallClock`, and `PacedSimClock` (simulated
   time let through at a multiple of real time, for simulated live mode); times are
@@ -101,20 +104,26 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   runs into the median of each parameter with its range. `benchmarks/calibration/` is
   tracked: six runs in `run1/` to `run6/` (Ollama, one laptop, 2026-10-08) and their
   aggregate, in which most parameters are marked unstable and premium hardware-limited.
-  The simulator does not load it by default: the profiles in `profiles.py` are still
-  illustrative, with an overhead of 0 (exists)
+  Its medians are the default profiles; `tests/test_profiles.py` keeps the two in step
+  (exists)
 - `benchmarks/quality_eval.py` — asks each tier's real model 100 fixed multiple-choice
   questions (an MMLU sample, MIT license, in `benchmarks/quality/`) at temperature 0 and
   scores exact match on the option letter. `benchmarks/quality/results.json` is tracked and
   holds one run (Ollama, one laptop, 2026-10-09). Small and unrepeated: always quote the
   interval with the accuracy (exists)
 - `benchmarks/gate.py` + `scripts/perf_gate.py` — the CI performance gate; budgets live in
-  `benchmarks/budgets.json` (exists)
+  `benchmarks/budgets.json` (exists). It runs 1000 requests at 0.8 req/s, a rate at which no
+  model is saturated; it protects the scheduler logic and does not measure hardware
+- `benchmarks/saturation.py` — checks that no model is saturated by a workload (offered
+  above 60% of capacity, or p99 growing over 25% when the run is doubled) before its p99 is
+  reported (exists)
 
 - `benchmarks/report.py` — generates `docs/REPORT.md` and `docs/report/*.png` from the
-  benchmarks above (`make report`). Sections 1 and 2 also show a variant on the calibrated
-  profiles (`GATEWAY_PROFILES`, else the tracked calibration); sections 3 to 5 are
-  illustrative only and say so; section 7 sets measured accuracy beside simulated cost. Never edit the report by hand; regenerate it (exists)
+  benchmarks above (`make report`). Sections 1 to 3 run on the calibrated profiles
+  (`GATEWAY_PROFILES` names another file) and leave out the p99 of a saturated run;
+  sections 4 and 5 (overload, chunked prefill) have no results: not measured on real data;
+  section 7 is measured accuracy with no cost. Never edit the report by hand; regenerate it
+  (exists)
 
 If a change moves simulated latency on purpose, re-baseline with
 `uv run python scripts/perf_gate.py --update-budgets` and commit `benchmarks/budgets.json`
@@ -188,6 +197,11 @@ Tests that need a real model server are marked `real_models` and skipped unless
 4. **Never claim measured numbers that weren't measured.** Any figure in the README, docs,
    commit messages or PRs must name the command and commit that produced it. Numbers from
    the simulator are labelled as simulated. If it wasn't run, don't write a number.
+5. **No invented data in results.** `TEST_PROFILES` in `tests/helpers.py` are hand-made
+   fixtures, not data: only tests may import them (`tests/test_profiles.py` enforces it) and
+   no document may quote a number from them. Never report a cost, saving or ratio from the
+   placeholder prices, never batch past the measured 4 in a reported result, and mark every
+   result that rests on an unstable calibrated parameter as such.
 
 ## Coding conventions
 

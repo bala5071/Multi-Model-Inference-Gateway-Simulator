@@ -40,8 +40,8 @@ class BackendConfig:
     endpoint: Endpoint = "completions"
     max_in_flight: int | None = None
     servers: Mapping[Tier, LlamaServer] = field(default_factory=dict)
-    # A calibration file whose timing parameters replace the illustrative ones in the
-    # simulator. Only used by the simulated backend.
+    # A calibration file whose timing parameters replace the default (calibrated) ones in
+    # the simulator. Only used by the simulated backend.
     profiles_path: Path | None = None
 
 

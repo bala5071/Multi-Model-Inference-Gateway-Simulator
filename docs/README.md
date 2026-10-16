@@ -22,7 +22,7 @@ says so, and the table below points out the main cases.
 | Note | Covers | Read with |
 |---|---|---|
 | [00 Scaffolding](00-scaffolding.md) | Layout, tooling, CI, the clock rule enforced by ruff | |
-| [01 Cost model](01-cost-model.md) | The three illustrative model profiles and the cost formulas | Real measurements are in note 13 |
+| [01 Cost model](01-cost-model.md) | The three model profiles, calibrated on one laptop, and the cost formulas | Prices and KV capacities are placeholders, not data |
 | [02 Baseline](02-baseline.md) | Clocks, registry, backend interface, the one-at-a-time worker | |
 | [03 Continuous batching](03-continuous-batching.md) | The iteration-level batching scheduler | Prefill behaviour is extended in note 11 |
 | [04 Prefix cache](04-prefix-cache.md) | Radix-tree KV-cache stand-in, tokenizer | |
@@ -43,15 +43,24 @@ says so, and the table below points out the main cases.
 
 ## Which numbers to trust for what
 
-- **Simulated** (notes 01 to 11, report sections 1 to 5): exact and reproducible, built on
-  illustrative model profiles. They show how the scheduler behaves under those assumptions.
+- **Simulated** (notes 02 to 08, report sections 1 to 3): exact and reproducible, built on
+  the calibrated model profiles of note 01 (the median of six runs on one laptop with Ollama,
+  the 8B model partly on the CPU, batches of at most 4, seven of twelve parameters unstable).
+  They show how this scheduler behaves with those step costs, not how fast a model server is.
+  Every workload was checked for saturation first.
+- **Not measured on real data** (notes 10 and 11, report sections 4 and 5): overload and
+  chunked prefill. The mechanisms are described and tested on hand-made test profiles; no
+  results are given.
+- **Never measured**: prices, KV capacity and the prefix cache's behaviour. Prices and KV
+  capacities are placeholders, operator-supplied, not data; no cost or saving is reported.
 - **Measured** (note 13, report section 6): one laptop, six runs on one day, through Ollama. They show
   what three real models did on that machine.
-- **Measured, once** (note 14, the accuracy in report section 7): 100 questions, one run. The
-  costs beside it in section 7 are simulated.
+- **Measured, once** (note 14, report section 7): 100 questions, one run.
 - **Simulated, live** (notes 17 and 18, the dashboard in simulated live mode, the pictures
-  in `img/`): the same simulator on the same illustrative profiles, replayed at a chosen
+  in `img/`): the same simulator on the same calibrated profiles, replayed at a chosen
   speed. Deterministic for a seed, and not a measurement of anything.
+- **Earlier drafts** quoted results from invented model profiles. They were removed; note 13
+  says what changed and why.
 - **What the dashboard shows otherwise** is whatever the gateway it is attached to reports:
   simulated in simulator mode, measured at the gateway in real-model mode, where it cannot
   see the model server's queue, batch or cache and says so (note 15).

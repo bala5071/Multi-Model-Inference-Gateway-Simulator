@@ -1,6 +1,6 @@
 """Print what the metrics store reports after the default load, as docs/05-metrics.md quotes.
 
-Simulated, from the illustrative profiles: nothing here is a measurement of a real model.
+Simulated, on the calibrated profiles: nothing here is a measurement of a real model.
 
     uv run python -m benchmarks.metrics_example
 
@@ -33,7 +33,7 @@ async def run(config: LoadConfig = CONFIG) -> tuple[dict[str, Any], float]:
 
 async def main() -> None:
     detail, read_at_ms = await run()
-    print("SIMULATED with illustrative profiles; not measurements of real models.")
+    print("SIMULATED on the calibrated profiles; not measurements of real models.")
     print(
         f"workload: seed={CONFIG.seed} requests={CONFIG.total_requests} "
         f"rate={CONFIG.arrival_rate_per_s}/s; read at t={read_at_ms / 1000:.1f} s; "
@@ -66,6 +66,7 @@ async def main() -> None:
             f"{life['cached_tokens']:10d} {life['completion_tokens']:10d} "
             f"{life['cost_usd']:10.6f} {'yes' if window['truncated'] else 'no':>9}"
         )
+    print("cost USD is at PLACEHOLDER prices: operator-supplied, not data.")
 
 
 if __name__ == "__main__":

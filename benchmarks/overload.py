@@ -1,6 +1,10 @@
 """Compare p99 latency with and without SLO-aware downgrade while one model is overloaded.
 
-Simulated, from the illustrative profiles: nothing here is a measurement of a real model.
+A demonstration of the mechanism, not a result: NOT MEASURED ON REAL DATA. On the calibrated
+profiles the surge is many times what the premium model can serve, so the run measures
+its backlog; and the outcome rests on the cost per extra sequence and the per-request
+overhead, which the calibration marks unstable, and on SLO thresholds nobody measured.
+Do not quote its numbers (docs/10-overload.md).
 
     uv run python -m benchmarks.overload
 
@@ -32,11 +36,11 @@ from gateway.clock import SimClock
 from gateway.continuous import build_continuous_registry
 from gateway.metrics import percentile
 from gateway.overload import OverloadPolicy, SloMonitor, SloPolicy, Transition
-from gateway.profiles import Tier
+from gateway.profiles import PROFILES, ModelProfile, Tier
 
 SEED = 7
-# 300 requests at 3 req/s (about 100 s; the premium model manages roughly 1 req/s on this
-# workload), then 100 requests at 0.25 req/s (about 400 s) so the backlog can clear.
+# 300 requests at 3 req/s, far more than the premium model can serve, then 100 requests at
+# 0.25 req/s (about 400 s) so the backlog can clear.
 SURGE = LoadConfig(
     seed=SEED,
     total_requests=300,
@@ -70,9 +74,12 @@ async def run(
     policy: OverloadPolicy | None,
     *,
     max_queue_len: Mapping[Tier, int] | None = None,
+    profiles: Mapping[Tier, ModelProfile] = PROFILES,
 ) -> tuple[list[RequestOutcome], tuple[Transition, ...]]:
     clock = SimClock()
-    registry = build_continuous_registry(clock, seed=SEED, max_queue_len=max_queue_len)
+    registry = build_continuous_registry(
+        clock, seed=SEED, max_queue_len=max_queue_len, profiles=profiles
+    )
     app = create_app(registry, clock, overload=policy)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
@@ -101,7 +108,10 @@ async def main() -> None:
     protected, transitions = await run(OverloadPolicy(slo=SLO))
     assert all(o.ok for o in [*plain, *protected])
 
-    print("SIMULATED with illustrative profiles; not measurements of real models.")
+    print(
+        "MECHANISM DEMO, NOT MEASURED ON REAL DATA: the surge saturates premium on the "
+        "calibrated profiles. Do not quote these numbers (docs/10-overload.md)."
+    )
     print(
         f"workload: {SURGE.total_requests} premium requests at {SURGE.arrival_rate_per_s}/s, "
         f"then {CALM.total_requests} at {CALM.arrival_rate_per_s}/s; all opt in to downgrade"

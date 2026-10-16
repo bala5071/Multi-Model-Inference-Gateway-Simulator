@@ -55,7 +55,7 @@ test("a load preset changes the queue chart", async ({ page }) => {
 
   // The card on the Overview says the same thing.
   await openTab(page, "Overview");
-  await expect(page.getByRole("article", { name: "premium" })).toContainText("8 of 8 seats");
+  await expect(page.getByRole("article", { name: "premium" })).toContainText("4 of 4 seats");
 });
 
 test("a downgrade event appears under overload", async ({ page }) => {

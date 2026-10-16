@@ -4,8 +4,8 @@
 #   http://localhost:8000/dashboard/
 #
 # No model runs. A seeded load is replayed on simulated time, and every number the
-# dashboard shows is simulated on illustrative model profiles: nothing here is a
-# measurement. See docs/18-demo.md and docs/17-playground-load-replay.md.
+# dashboard shows is simulated on the calibrated model profiles, with placeholder prices:
+# nothing here is a measurement. See docs/18-demo.md and docs/17-playground-load-replay.md.
 services:
   gateway:
     build: .

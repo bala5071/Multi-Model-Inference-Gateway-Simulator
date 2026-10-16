@@ -458,7 +458,8 @@ def summarise(answers: Sequence[Answer]) -> dict[str, Any]:
         "mean_completion_tokens": (
             sum(a.completion_tokens for a in served) / len(served) if served else None
         ),
-        # Illustrative prices applied to the tokens the server reported.
+        # PLACEHOLDER prices (operator-supplied, not data) applied to the tokens the server
+        # reported. No document quotes this.
         "cost_per_1000_requests_usd": (
             1000 * sum(a.cost_usd for a in served) / len(served) if served else None
         ),
