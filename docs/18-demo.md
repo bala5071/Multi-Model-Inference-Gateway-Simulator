@@ -98,15 +98,26 @@ uv run python scripts/capture_demo.py     # add PLAYWRIGHT_CHANNEL=chrome to use
 It runs `frontend/e2e/demo.capture.ts` against the same simulated gateway (seed 7) and
 writes `docs/img/`: `overview.png`, `latency.png`, `capacity.png`, `tenants.png`,
 `events.png`, `playground.png`, and `overload.gif`, thirty frames of the Overview at speed 5
-while the `overload` preset takes hold. The GIF is assembled with Pillow, scaled to 960
+while the `overload` preset takes hold. The GIFs are assembled with Pillow, scaled to 960
 pixels wide with 64 colours.
+
+It then runs `frontend/e2e/demo.tour.ts` (`npm run tour`, `playwright.tour.config.ts`)
+against a second gateway of its own, on port 8178 in simulated live mode with the `steady`
+preset and seed 7, and writes `docs/img/demo.gif`: a silent tour of every tab, 91 frames
+taken 400 ms apart (Pillow merges identical neighbours). Steady load on the Overview and
+Latency tabs at 5x; one request of up to 128 tokens to the standard model, streamed at 1x
+so the tokens can be seen arriving; then the `overload` preset at 20x until premium is
+marked degraded, through the Overview, Capacity, Events and Tenants tabs. Every frame is
+the top 1280 x 720 of the page, so the simulated-mode banner is in all of them. The tour
+has a gateway of its own so that it always starts from the same calm state and does not
+change what the stills see.
 
 - **The pictures are of simulated live mode and say so in their own banner.**
 - **A retake differs in detail.** The seed fixes what the gateway does; when each picture is
   taken is real time. Do not edit the pictures; retake them.
 - The ones in the repository were taken on the development machine, with
-  `PLAYWRIGHT_CHANNEL=chrome`, on the tree of the commit that retook them for the
-  calibrated profiles (parent commit `38bbb94`). The first set showed invented profiles and
+  `PLAYWRIGHT_CHANNEL=chrome`, on the tree of the commit that added the tour (parent
+  commit `879ee2f`). The first set showed invented profiles and
   was replaced (note 13).
 - **Every picture shows the simulated-mode banner.** The Capacity picture is the whole page
   for that reason, rather than scrolled down to the premium model.

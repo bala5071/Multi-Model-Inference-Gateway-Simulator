@@ -56,7 +56,11 @@ docker compose up --build
 
 Then open <http://localhost:8000/dashboard/>.
 
-![The dashboard's Overview while the overload preset takes hold](docs/img/overload.gif)
+![A tour of the dashboard in simulated live mode: the Overview and Latency tabs under steady load, one request streamed from the Playground, then the overload preset taking hold, with the Overview, Capacity, Events and Tenants tabs](docs/img/demo.gif)
+
+*A silent tour of every tab, about 36 seconds: steady load, one streamed request, then the
+`overload` preset until premium and standard are marked degraded and requests move to
+cheaper models. Simulated, not a measurement.*
 
 **This is simulated live mode. No model is running, and nothing in these pictures is a
 measurement.** The gateway replays a seeded load on simulated time, on the calibrated model
@@ -66,18 +70,22 @@ dashboard can be watched working with nothing else installed; the same seed give
 sequence of events on any machine
 ([docs/17](docs/17-playground-load-replay.md), [docs/18](docs/18-demo.md)).
 
-In the GIF the `overload` preset sends the premium model about three times what it can
-serve: its batch fills at 4, its queue grows, and its p99 passes the SLO. Later, once
-enough slow requests have finished, it is marked degraded and requests that allow it are
-served by the standard model; the Events picture below shows that.
+![The dashboard's Overview while the overload preset takes hold](docs/img/overload.gif)
+
+In this GIF the `overload` preset sends the premium model about three times what it can
+serve: its batch fills at 4, its queue grows, and its p99 passes the SLO. It is not marked
+degraded yet, and the card says why: too few requests have finished in the SLO window to
+judge. Later it is, and requests that allow it are served by the standard model; the tour
+above and the Events picture below show that.
 
 | | |
 |---|---|
 | ![Capacity tab](docs/img/capacity.png) Queue, batch, KV and cache for every model through the same overload; premium is at the bottom | ![Events tab](docs/img/events.png) Every downgrade, refusal and state change, as it happens |
 | ![Latency tab](docs/img/latency.png) p50 and p99 per second, with the SLO where it is in range | ![Playground tab](docs/img/playground.png) One streamed request, token by token, and the load controls |
 
-The pictures were taken with `uv run python scripts/capture_demo.py`, seed 7, on the tree
-of the commit that retook them for the calibrated profiles (parent commit `38bbb94`).
+The pictures and both GIFs were taken with `uv run python scripts/capture_demo.py`, seed
+7, with `PLAYWRIGHT_CHANNEL=chrome`, on the tree of the commit that added the tour (parent
+commit `879ee2f`).
 
 **Docker has not been run for this project**: the development machine does not have it
 ([Limitations](#limitations)). What was run is the same thing without it, which needs

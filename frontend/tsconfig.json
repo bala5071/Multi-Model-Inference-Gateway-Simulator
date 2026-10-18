@@ -21,6 +21,7 @@
     "e2e",
     "vite.config.ts",
     "playwright.config.ts",
-    "playwright.capture.config.ts"
+    "playwright.capture.config.ts",
+    "playwright.tour.config.ts"
   ]
 }
