@@ -21,13 +21,49 @@ describe("ModelCard", () => {
     const view = card(simulated, "premium");
 
     expect(view.getByText("Degraded")).toBeInTheDocument();
+    // The headline p99 says which window it covers.
     expect(stat(view, "p99 total latency")).toContain("3,733 ms");
-    expect(view.getByText("SLO 2,000 ms")).toBeInTheDocument();
-    const meter = view.getByRole("meter", { name: "premium p99 total latency against its SLO" });
+    expect(stat(view, "p99 total latency")).toContain("last 5 min");
+    // The SLO is set against the p99 the badge is decided on, over the monitor's window.
+    expect(
+      view.getByText("SLO 2,000 ms, judged on the p99 of the last 10 s: 3,733 ms over 10 requests"),
+    ).toBeInTheDocument();
+    const meter = view.getByRole("meter", { name: "premium p99 of the last 10 s against its SLO" });
     // 3732.5 ms against 2000 ms: the bar is full, and marked as over.
     expect(meter).toHaveAttribute("aria-valuenow", "100");
     expect(meter).toHaveClass("meter-exhausted");
     expect(stat(view, "p99 TTFT")).toContain("2,150 ms");
+  });
+
+  it("does not set a long-window p99 against the SLO the badge is judged on", () => {
+    // Over its five minutes premium is far over its SLO; in the monitor's window it has
+    // recovered. The badge and the SLO line must agree with each other, not with the
+    // headline number.
+    const model = simulated.models.premium;
+    if (model === undefined) throw new Error("fixture has no premium");
+    const view = card(simulated, "premium", {
+      slo: { ...model.slo, degraded: false, recent_p99_ms: 900, samples: 12 },
+    });
+
+    expect(view.getByText("Healthy")).toBeInTheDocument();
+    expect(stat(view, "p99 total latency")).toContain("3,733 ms");
+    expect(
+      view.getByText("SLO 2,000 ms, judged on the p99 of the last 10 s: 900 ms over 12 requests"),
+    ).toBeInTheDocument();
+    expect(
+      view.getByRole("meter", { name: "premium p99 of the last 10 s against its SLO" }),
+    ).toHaveClass("meter-ok");
+  });
+
+  it("says when the SLO window holds too few requests to judge", () => {
+    // Standard has four requests in the window and the monitor needs five.
+    const view = card(simulated, "standard");
+
+    expect(
+      view.getByText(
+        "SLO 10,000 ms, judged on the p99 of the last 10 s: 97.5 ms over 4 requests, too few to judge",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("shows a healthy model with its load, queue and batch", () => {

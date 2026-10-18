@@ -62,7 +62,9 @@
         "degraded": false,
         "slo_p99_ms": 5000.0,
         "recent_p99_ms": 49.80000000000018,
-        "samples": 6
+        "samples": 6,
+        "window_ms": 10000.0,
+        "min_samples": 5
       },
       "series": [
         {
@@ -250,7 +252,9 @@
         "degraded": false,
         "slo_p99_ms": 10000.0,
         "recent_p99_ms": 97.5,
-        "samples": 4
+        "samples": 4,
+        "window_ms": 10000.0,
+        "min_samples": 5
       },
       "series": [
         {
@@ -438,7 +442,9 @@
         "degraded": true,
         "slo_p99_ms": 2000.0,
         "recent_p99_ms": 3732.5,
-        "samples": 10
+        "samples": 10,
+        "window_ms": 10000.0,
+        "min_samples": 5
       },
       "series": [
         {

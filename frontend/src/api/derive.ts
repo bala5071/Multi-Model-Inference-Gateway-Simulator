@@ -10,6 +10,39 @@ export function health(slo: SloGroup): Health {
   return slo.degraded ? "degraded" : "healthy";
 }
 
+export interface SloStanding {
+  /** The p99 the SLO is judged on, over the SLO monitor's window; null if nothing finished. */
+  p99_ms: number | null;
+  slo_ms: number;
+  window_ms: number;
+  samples: number;
+  /** Fewer requests in the window than the monitor needs before it judges either way. */
+  tooFew: boolean;
+  /** p99 as a share of the SLO, for a meter; null if nothing finished. */
+  ratio: number | null;
+  level: "ok" | "warning" | "exhausted";
+}
+
+/**
+ * Where a model stands against its SLO, on the same p99 and window the health badge is
+ * decided by. null for a model with no SLO.
+ */
+export function sloStanding(slo: SloGroup): SloStanding | null {
+  if (!slo.available || slo.slo_p99_ms === null || slo.window_ms === null) return null;
+  const p99 = slo.recent_p99_ms;
+  const samples = slo.samples ?? 0;
+  const ratio = p99 === null ? null : p99 / slo.slo_p99_ms;
+  return {
+    p99_ms: p99,
+    slo_ms: slo.slo_p99_ms,
+    window_ms: slo.window_ms,
+    samples,
+    tooFew: samples < (slo.min_samples ?? 1),
+    ratio,
+    level: ratio === null || ratio <= 0.8 ? "ok" : ratio <= 1 ? "warning" : "exhausted",
+  };
+}
+
 /**
  * Requests per second over the last second that has ended. The second in progress would
  * understate it. null if no second has ended yet.

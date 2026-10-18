@@ -65,6 +65,8 @@ NO_SLO = {
     "slo_p99_ms": None,
     "recent_p99_ms": None,
     "samples": None,
+    "window_ms": None,
+    "min_samples": None,
 }
 # The fields of a point that only a worker with its own scheduler can fill.
 SCHEDULER_FIELDS = (
@@ -720,6 +722,9 @@ async def test_degradation_downgrade_and_recovery_show_in_flags_counters_and_eve
         "slo_p99_ms": 10.0,
         "recent_p99_ms": None,
         "samples": 0,
+        # The SLO monitor's own window, so a reader can tell it from the latency group's.
+        "window_ms": 10_000.0,
+        "min_samples": 1,
     }
     assert healthy["models"]["big"]["series"][0]["degraded"] is False
     # A model without an SLO has no degraded flag at all.
@@ -734,6 +739,8 @@ async def test_degradation_downgrade_and_recovery_show_in_flags_counters_and_eve
         "slo_p99_ms": 10.0,
         "recent_p99_ms": 17.0,
         "samples": 1,
+        "window_ms": 10_000.0,
+        "min_samples": 1,
     }
     assert degraded["models"]["big"]["traffic"]["downgrade_total"] == 1
     (point,) = degraded["models"]["big"]["series"]

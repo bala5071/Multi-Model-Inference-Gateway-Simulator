@@ -116,8 +116,12 @@ class Transition:
 class ModelHealth:
     degraded: bool
     slo_p99_ms: float | None
+    # The p99 total latency of the requests finished in the last ``window_ms``: the number
+    # the SLO is judged on, and only once there are at least ``min_samples`` of them.
     recent_p99_ms: float | None
     samples: int
+    window_ms: float
+    min_samples: int
 
 
 @dataclass(slots=True)
@@ -169,6 +173,8 @@ class SloMonitor:
             slo_p99_ms=self._policy.p99_ms.get(model),
             recent_p99_ms=_p99(state),
             samples=len(state.window),
+            window_ms=self._policy.window_ms,
+            min_samples=self._policy.min_samples,
         )
 
     def _evaluate(self, model: str, state: _ModelState) -> None:

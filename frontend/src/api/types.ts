@@ -64,8 +64,11 @@ export interface SloGroup {
   available: boolean;
   degraded: boolean | null;
   slo_p99_ms: number | null;
+  /** Over the SLO monitor's own window, `window_ms`: not the latency group's window. */
   recent_p99_ms: number | null;
   samples: number | null;
+  window_ms: number | null;
+  min_samples: number | null;
 }
 
 /** One model over one second starting at `t_ms`. */

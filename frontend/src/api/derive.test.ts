@@ -10,6 +10,7 @@ import {
   filterEvents,
   health,
   occupancy,
+  sloStanding,
 } from "./derive";
 import type { GatewayEvent, ModelSnapshot, TenantSnapshot } from "./types";
 
@@ -29,6 +30,38 @@ describe("health", () => {
 
   it("does not call a model without an SLO healthy", () => {
     expect(health(model(passthrough, "premium").slo)).toBe("no-slo");
+  });
+});
+
+describe("sloStanding", () => {
+  it("uses the SLO monitor's own p99 and window, the ones the badge is decided on", () => {
+    expect(sloStanding(model(simulated, "premium").slo)).toEqual({
+      p99_ms: 3732.5,
+      slo_ms: 2000,
+      window_ms: 10_000,
+      samples: 10,
+      tooFew: false,
+      ratio: 3732.5 / 2000,
+      level: "exhausted",
+    });
+  });
+
+  it("flags a window with fewer requests than the monitor needs", () => {
+    const standing = sloStanding(model(simulated, "standard").slo);
+    expect(standing?.samples).toBe(4);
+    expect(standing?.tooFew).toBe(true);
+    expect(standing?.level).toBe("ok");
+  });
+
+  it("has no ratio when nothing finished in the window, and nothing without an SLO", () => {
+    const slo = { ...model(simulated, "economy").slo, recent_p99_ms: null, samples: 0 };
+    expect(sloStanding(slo)).toMatchObject({ p99_ms: null, ratio: null, tooFew: true });
+    expect(sloStanding(model(passthrough, "premium").slo)).toBeNull();
+  });
+
+  it("warns above 80% of the SLO", () => {
+    const slo = { ...model(simulated, "economy").slo, recent_p99_ms: 4500 };
+    expect(sloStanding(slo)?.level).toBe("warning");
   });
 });
 

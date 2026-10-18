@@ -96,7 +96,7 @@ one line in the real stream.)
 | `kv` | `used_tokens`, `capacity_tokens` | the worker has its own scheduler |
 | `cache` | `size_tokens`, `lookups_total`, `hits_total`, `prompt_tokens_total`, `cached_tokens_total`, `hit_rate`, `token_hit_rate` | the worker has a prefix cache |
 | `latency` | `window_ms`, and `ttft_ms`, `itl_ms`, `total_ms`, each `{p50, p99, samples}` or `null` | always |
-| `slo` | `degraded`, `slo_p99_ms`, `recent_p99_ms`, `samples` | an SLO is configured for this model |
+| `slo` | `degraded`, `slo_p99_ms`, `recent_p99_ms`, `samples`, `window_ms`, `min_samples` | an SLO is configured for this model |
 
 Which worker gives what:
 
@@ -131,7 +131,14 @@ Definitions:
 - **`latency`** is the `MetricsStore` sliding window (note 05): the same numbers as
   `/metrics/detail`, measured from enqueue, nearest-rank.
 - **`slo`** is `SloMonitor.health` (note 10). A model with no SLO has no degraded flag;
-  that is `available: false`, not `degraded: false`.
+  that is `available: false`, not `degraded: false`. **Its window is not `latency`'s.**
+  `recent_p99_ms` is the p99 of the requests finished in the SLO monitor's own window,
+  `slo.window_ms` (60 s by default), and is the number `degraded` is decided on, once the
+  window holds at least `min_samples` requests and outside the hysteresis band of note 10.
+  `latency.total_ms.p99` is over the metrics window (five minutes). The two can disagree
+  for minutes after a burst, so a client must not set `latency` against the SLO and read
+  the result as the model's health. `window_ms` and `min_samples` were added after the
+  dashboard did exactly that (note 16).
 
 After one request of 10 prompt and 3 output tokens on the test profile
 (`test_snapshot_of_one_request_has_exact_values`):
@@ -152,7 +159,7 @@ After one request of 10 prompt and 3 output tokens on the test profile
               "itl_ms": {"p50": 4.0, "p99": 4.0, "samples": 2},
               "total_ms": {"p50": 17.0, "p99": 17.0, "samples": 1}},
   "slo": {"available": false, "degraded": null, "slo_p99_ms": null, "recent_p99_ms": null,
-          "samples": null}
+          "samples": null, "window_ms": null, "min_samples": null}
 }
 ```
 

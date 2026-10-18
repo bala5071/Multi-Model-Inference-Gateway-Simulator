@@ -120,8 +120,11 @@ class SloGroup:
     available: bool
     degraded: bool | None
     slo_p99_ms: float | None
+    # Over the SLO monitor's own window, ``window_ms``, which is not the latency group's.
     recent_p99_ms: float | None
     samples: int | None
+    window_ms: float | None
+    min_samples: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,7 +389,7 @@ class Monitor:
 
         model_health = health.get(name) if health is not None else None
         if model_health is None or model_health.slo_p99_ms is None:
-            slo = SloGroup(False, None, None, None, None)
+            slo = SloGroup(False, None, None, None, None, None, None)
         else:
             slo = SloGroup(
                 available=True,
@@ -394,6 +397,8 @@ class Monitor:
                 slo_p99_ms=model_health.slo_p99_ms,
                 recent_p99_ms=model_health.recent_p99_ms,
                 samples=model_health.samples,
+                window_ms=model_health.window_ms,
+                min_samples=model_health.min_samples,
             )
 
         summary = self._metrics.summary(name)

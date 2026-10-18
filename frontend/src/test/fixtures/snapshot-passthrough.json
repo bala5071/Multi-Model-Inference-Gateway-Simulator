@@ -50,7 +50,9 @@
         "degraded": null,
         "slo_p99_ms": null,
         "recent_p99_ms": null,
-        "samples": null
+        "samples": null,
+        "window_ms": null,
+        "min_samples": null
       },
       "series": [
         {
@@ -133,7 +135,9 @@
         "degraded": null,
         "slo_p99_ms": null,
         "recent_p99_ms": null,
-        "samples": null
+        "samples": null,
+        "window_ms": null,
+        "min_samples": null
       },
       "series": [
         {
@@ -228,7 +232,9 @@
         "degraded": null,
         "slo_p99_ms": null,
         "recent_p99_ms": null,
-        "samples": null
+        "samples": null,
+        "window_ms": null,
+        "min_samples": null
       },
       "series": [
         {

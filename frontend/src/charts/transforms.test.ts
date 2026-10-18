@@ -5,6 +5,7 @@ import {
   formatAge,
   formatUsd,
   formatValue,
+  formatWindow,
   largest,
   secondsBefore,
   toColumns,
@@ -211,5 +212,15 @@ describe("formatting", () => {
       ]),
     ).toBe(7);
     expect(largest([[null], []])).toBeNull();
+  });
+});
+
+describe("formatWindow", () => {
+  it("says seconds up to two minutes, then whole minutes", () => {
+    expect(formatWindow(10_000)).toBe("10 s");
+    expect(formatWindow(60_000)).toBe("60 s");
+    expect(formatWindow(300_000)).toBe("5 min");
+    expect(formatWindow(900_000)).toBe("15 min");
+    expect(formatWindow(150_000)).toBe("150 s");
   });
 });

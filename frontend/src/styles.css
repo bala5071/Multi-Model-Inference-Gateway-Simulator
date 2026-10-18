@@ -252,6 +252,15 @@ button[aria-pressed="true"] {
   font-weight: 600;
 }
 
+/* The SLO and where the model stands against it, across the card's full width. */
+.slo-line {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+}
+
 .unavailable {
   display: flex;
   flex-direction: column;

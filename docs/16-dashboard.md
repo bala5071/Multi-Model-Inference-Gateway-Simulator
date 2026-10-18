@@ -45,7 +45,7 @@ its `frontend` job, and then the build.
 
 | Tab | Shows |
 |---|---|
-| Overview | One card per model: health, req/s, in flight, queue depth, batch occupancy, p99 total latency against the SLO, p99 TTFT |
+| Overview | One card per model: health, req/s, in flight, queue depth, batch occupancy, p99 total latency and p99 TTFT over the metrics window, and the SLO against the p99 it is judged on |
 | Latency | Per model, p50 and p99 lines for TTFT, inter-token latency and total latency |
 | Capacity | Per model, batch size against its maximum, KV tokens against capacity, prefix-cache hit rate |
 | Tenants | Plan, spend, token budget bar, requests, rejections by reason, timeouts, downgrades |
@@ -55,8 +55,19 @@ its `frontend` job, and then the build.
 Things to know:
 
 - **The SLO is drawn on total latency only.** The gateway's SLO is on p99 total latency
-  (note 10); there is no TTFT SLO. The Overview card compares p99 total with the SLO and
-  shows p99 TTFT beside it as a plain number.
+  (note 10); there is no TTFT SLO.
+- **The card sets the SLO against the p99 the health badge is decided on**: the SLO
+  monitor's p99 over its own window (`slo.recent_p99_ms` over `slo.window_ms`, 60 s by
+  default), with the number of requests in it and "too few to judge" below the monitor's
+  minimum. The headline p99 total and p99 TTFT are over the five-minute metrics window and
+  say so ("last 5 min").
+
+  The first version compared the five-minute p99 with the SLO. Found while checking the
+  dashboard under the `overload` preset: standard's card showed a red bar at 15.6 s
+  against its 10 s SLO while its badge said Healthy, because the monitor's 60 s window was
+  by then empty. Premium's card stayed near 120 s for minutes after it had recovered. Both
+  numbers were right for their own windows; setting one against the other was wrong, and
+  the snapshot did not say what window the SLO used. It now does (note 15).
 - **Health has three states**: healthy, degraded, and "No SLO". A model without an SLO is
   not shown as healthy.
 - **The card's req/s is the last second that has ended.** The second in progress would

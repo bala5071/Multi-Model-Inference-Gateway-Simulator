@@ -152,6 +152,12 @@ export function formatUsd(value: number): string {
   return `$${value.toFixed(value !== 0 && Math.abs(value) < 0.01 ? 6 : 2)}`;
 }
 
+/** A window length for a label: "60 s", "5 min", "15 min". */
+export function formatWindow(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  return seconds % 60 === 0 && seconds >= 120 ? `${seconds / 60} min` : `${seconds} s`;
+}
+
 /** A 0..1 ratio as a percentage; null stays null. */
 export function toPercent(ratio: number | null): number | null {
   return ratio === null ? null : ratio * 100;

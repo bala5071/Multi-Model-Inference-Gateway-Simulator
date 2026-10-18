@@ -1,6 +1,6 @@
-import { currentRate, health, occupancy, type Health } from "../api/derive";
+import { currentRate, health, occupancy, sloStanding, type Health } from "../api/derive";
 import type { ModelPoint, ModelSnapshot } from "../api/types";
-import { formatValue } from "../charts/transforms";
+import { formatValue, formatWindow } from "../charts/transforms";
 import { Meter } from "./Meter";
 import { Unavailable } from "./Unavailable";
 
@@ -36,7 +36,9 @@ export function ModelCard({ name, model, points }: ModelCardProps) {
   const seats = occupancy(model.batch);
   const total = model.latency.total_ms;
   const ttft = model.latency.ttft_ms;
-  const slo = model.slo.slo_p99_ms;
+  // The health badge is decided on the SLO monitor's p99 over its own window, so the SLO
+  // line and meter use that one too; the headline p99 is over the longer metrics window.
+  const standing = sloStanding(model.slo);
 
   return (
     <article className="card" aria-label={name}>
@@ -80,19 +82,33 @@ export function ModelCard({ name, model, points }: ModelCardProps) {
             {formatValue(total?.p99 ?? null)}
             <span className="unit"> ms</span>
           </span>
-          <span className="muted">
-            {slo === null ? "No SLO for this model" : `SLO ${formatValue(slo)} ms`}
-          </span>
-          {slo !== null && total !== null && (
-            <Meter
-              label={`${name} p99 total latency against its SLO`}
-              ratio={total.p99 / slo}
-              level={total.p99 > slo ? "exhausted" : total.p99 > slo * 0.8 ? "warning" : "ok"}
-            />
-          )}
+          <span className="muted">last {formatWindow(model.latency.window_ms)}</span>
         </div>
         <Stat label="p99 TTFT" value={formatValue(ttft?.p99 ?? null)} unit="ms" />
       </div>
+
+      {standing === null ? (
+        <p className="muted slo-line">No SLO for this model</p>
+      ) : (
+        <div className="slo-line">
+          <span className="muted">
+            SLO {formatValue(standing.slo_ms)} ms, judged on the p99 of the last{" "}
+            {formatWindow(standing.window_ms)}:{" "}
+            {standing.p99_ms === null
+              ? "no request finished"
+              : `${formatValue(standing.p99_ms)} ms over ${standing.samples} ${
+                  standing.samples === 1 ? "request" : "requests"
+                }${standing.tooFew ? ", too few to judge" : ""}`}
+          </span>
+          {standing.ratio !== null && (
+            <Meter
+              label={`${name} p99 of the last ${formatWindow(standing.window_ms)} against its SLO`}
+              ratio={standing.ratio}
+              level={standing.level}
+            />
+          )}
+        </div>
+      )}
     </article>
   );
 }
