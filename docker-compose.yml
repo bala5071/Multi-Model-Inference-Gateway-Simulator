@@ -10,7 +10,9 @@ services:
   gateway:
     build: .
     ports:
-      - "8000:8000"
+      # This machine only. Monitoring and load control are not authenticated; do not publish
+      # on other interfaces (docs/platform-plan.md, section 9).
+      - "127.0.0.1:8000:8000"
     environment:
       GATEWAY_SIMULATED_LIVE: "1"
       # Simulated seconds per real second: 1, 5 or 20. The dashboard can change it.

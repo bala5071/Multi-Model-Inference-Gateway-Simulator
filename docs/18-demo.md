@@ -53,6 +53,11 @@ image.
 
 - **`docker run` on the image alone is the plain simulator**, as it was. Simulated live mode
   is chosen by the compose file's environment, not baked into the image.
+- **The port is published on `127.0.0.1` only** (`-p 127.0.0.1:8000:8000`, and the same in
+  the compose file). Inside the container the server must bind `0.0.0.0` to be reachable at
+  all; a plain `-p 8000:8000` would then publish it on every interface of the host, and
+  monitoring and load control are not authenticated. `tests/test_docker_publish.py` fails on
+  the unsafe form anywhere in the docs.
 - **`npm run build` type-checks first**, so a dashboard that does not compile fails the
   image build.
 - `.dockerignore` keeps `frontend/node_modules` and any dashboard built on the host out of

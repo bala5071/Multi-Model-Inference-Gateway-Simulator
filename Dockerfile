@@ -1,7 +1,10 @@
 # The gateway with its dashboard, in two stages: Node builds the dashboard, Python serves it.
 #
 #   docker build -t inference-gateway .
-#   docker run --rm -p 8000:8000 inference-gateway
+#   docker run --rm -p 127.0.0.1:8000:8000 inference-gateway
+#
+# Publish on 127.0.0.1 only: monitoring and load control are not authenticated, and a plain
+# `-p 8000:8000` publishes on every interface (docs/platform-plan.md, section 9).
 #
 # That is the plain simulator: no model, no GPU, nothing else to run. `docker compose up`
 # starts the same image in simulated live mode, with load running (docs/18-demo.md).
