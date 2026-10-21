@@ -202,6 +202,15 @@ Tests that need a real model server are marked `real_models` and skipped unless
    no document may quote a number from them. Never report a cost, saving or ratio from the
    placeholder prices, never batch past the measured 4 in a reported result, and mark every
    result that rests on an unstable calibrated parameter as such.
+6. **Secrets only from environment variables.** No key, pepper or token in YAML, code,
+   fixtures, docs or logs. API keys are stored only as an HMAC with a pepper from the
+   environment.
+7. **No prompts or responses stored, and no real data.** No runtime store, log, event or
+   metric may contain prompt text, response text or token ids (including the prefix
+   cache's hashed tokens). Benchmark records built from public datasets with their license
+   attribution, such as `benchmarks/quality/`, are exempt from this rule because they are
+   not request traffic. No customer or user data exists in the repo and none is added.
+   The plan these rules came with is `docs/platform-plan.md`.
 
 ## Coding conventions
 

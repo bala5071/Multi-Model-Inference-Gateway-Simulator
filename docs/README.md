@@ -13,6 +13,12 @@ or Python and Node, start from [note 18](18-demo.md).
 | [`../benchmarks/quality/`](../benchmarks/quality/) | The one quality evaluation: the 100 questions, their license, and each model's answers. |
 | [`img/`](img/) | Pictures of the dashboard in simulated live mode. Taken by `scripts/capture_demo.py`; retake, do not edit. **Simulated, not results.** |
 
+## Plans
+
+| Document | What it is |
+|---|---|
+| [platform-plan.md](platform-plan.md) | Applications, API keys and persistent usage: the concept map, migration order and risks. A plan, not a record of what was built |
+
 ## Design notes, in the order things were built
 
 Each note records what was decided at that step and why. **They are snapshots.** A later

@@ -403,7 +403,10 @@ in this README are of three different kinds.
 - **Prices and budgets are placeholders**, operator-supplied, not data.
 - **No authentication.** A tenant id is taken on trust; anyone who can reach the gateway can
   read any tenant's usage, open the dashboard, and, where load control is enabled, start
-  load. Load control is off by default for that reason.
+  load. Load control is off by default for that reason. The server binds to `127.0.0.1`;
+  **do not expose it to a network.** API keys and persistent usage are being added
+  ([platform plan](docs/platform-plan.md)); monitoring and load control stay
+  unauthenticated until a later phase protects them with roles.
 - **State is in memory and per process**: ledger, metrics, monitoring history, cache and
   overload state are lost on restart and not shared between instances.
 
