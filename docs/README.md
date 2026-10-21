@@ -46,6 +46,7 @@ says so, and the table below points out the main cases.
 | [16 Dashboard](16-dashboard.md) | The React dashboard in `frontend/`: how to run and build it, what each tab shows, how it stays in step with the API | Not authenticated: it shows every tenant's spend |
 | [17 Playground, load control, simulated live mode](17-playground-load-replay.md) | Sending one request from the dashboard, starting seeded load from it, and a server mode that replays a simulated workload at 1x, 5x or 20x | **Simulated live mode measures nothing**; load control is off by default |
 | [18 Demo packaging](18-demo.md) | The two-stage Docker image, the compose demo, the browser smoke tests, and how the README's pictures are taken | **The image has never been built**: the development machine has no Docker |
+| [19 Usage store](19-usage-store.md) | Usage events, the epoch source, versioned migrations, SQLite settings and how long a write takes | Platform plan step 1; the default server still keeps usage in memory |
 
 ## Which numbers to trust for what
 

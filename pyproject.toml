@@ -52,6 +52,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF", "TID", "ASYNC", "PT
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "time.sleep".msg = "Use the injected Clock (see CLAUDE.md hard rules)."
 "time.time".msg = "Use the injected Clock (see CLAUDE.md hard rules)."
+"time.time_ns".msg = "Use the injected Clock or EpochSource (see CLAUDE.md hard rules)."
 "time.monotonic".msg = "Use the injected Clock (see CLAUDE.md hard rules)."
 "time.perf_counter".msg = "Use the injected Clock (see CLAUDE.md hard rules)."
 "asyncio.sleep".msg = "Use the injected Clock (see CLAUDE.md hard rules)."

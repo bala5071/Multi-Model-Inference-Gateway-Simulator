@@ -37,7 +37,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `cost_model.py` — `estimate_cost`, `OutputLengthGenerator` (exists)
 - `clock.py` — `Clock` protocol, `SimClock`, `WallClock`, and `PacedSimClock` (simulated
   time let through at a multiple of real time, for simulated live mode); times are
-  milliseconds (exists)
+  milliseconds. Also `EpochSource`, `SystemEpoch` and `ClockEpoch`: calendar time for
+  dating stored rows, injected separately from `Clock` (exists)
 - `schema.py` — `GenerateRequest`, `RequestResult` (exists)
 - `backends/` — abstract `Backend`, `SimulatedBackend`; a backend returns token counts and
   takes no simulated time, workers do the timing (exists)
@@ -61,8 +62,12 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `routing.py` — `Plan`, `PlansConfig`, `load_plans`, and the `Router` that picks a model
   within a tenant's plan, by model name or by quality (exists)
 - `plans.yaml` — the packaged plans and demo tenants (exists)
-- `ledger.py` — `CostLedger`: per-tenant tokens and spend per 30-day period on the injected
-  clock, and the budget check (exists)
+- `ledger.py` — `CostLedger`: per-tenant tokens and spend per 30-day period of epoch time,
+  and the budget check; a facade over a `UsageStore` (exists)
+- `usage.py` — `UsageEvent`, the `UsageStore` protocol, `InMemoryUsageStore` (bounded ring)
+  and `SqliteUsageStore`; store calls are synchronous and never awaited (exists)
+- `database.py` + `migrations/` — `open_database` (WAL, busy timeout, autocommit) and the
+  versioned `MigrationRunner`; migration 1 is `usage_events` (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),
   `pick_downgrade`, `QueueFullError`; the queue limit itself is in the worker (exists)
 - `metrics.py` — nearest-rank `percentile` and `MetricsStore`: per-model metrics in bounded
@@ -117,6 +122,8 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
 - `benchmarks/saturation.py` — checks that no model is saturated by a workload (offered
   above 60% of capacity, or p99 growing over 25% when the run is doubled) before its p99 is
   reported (exists)
+- `benchmarks/usage_store_writes.py` — times one usage-event write on the local disk; the
+  numbers in `docs/19-usage-store.md` (exists)
 
 - `benchmarks/report.py` — generates `docs/REPORT.md` and `docs/report/*.png` from the
   benchmarks above (`make report`). Sections 1 to 3 run on the calibrated profiles

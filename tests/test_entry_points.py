@@ -21,6 +21,7 @@ from benchmarks import (
     metrics_example,
     overload,
     report,
+    usage_store_writes,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -87,6 +88,19 @@ async def test_chunked_prefill_benchmark_prints_a_row_per_chunk_size(
     lines = capsys.readouterr().out.splitlines()
     assert lines[0].startswith(MECHANISM_DEMO)
     assert [line.split()[0] for line in lines[3:]] == ["off", "4096", "1024", "256", "64", "16"]
+
+
+def test_usage_store_write_benchmark_times_every_store(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    usage_store_writes.main(["--writes", "5", "--dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert out.startswith("MEASURED on this machine")
+    rows = [line.split() for line in out.splitlines() if line.startswith(("in-memory", "sqlite"))]
+    assert [" ".join(r[:-5]) for r in rows] == ["in-memory", "sqlite WAL FULL", "sqlite WAL NORMAL"]
+    assert all(r[-5] == "5" for r in rows)
+    # The temporary database was removed.
+    assert list(tmp_path.iterdir()) == []
 
 
 async def test_metrics_example_prints_the_rows_in_the_docs(

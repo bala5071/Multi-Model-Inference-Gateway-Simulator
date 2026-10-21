@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from gateway.backend_config import build_llamacpp_registry, load_backend_config
 from gateway.backends import BackendError
-from gateway.clock import Clock, PacedSimClock, WallClock
+from gateway.clock import Clock, EpochSource, PacedSimClock, WallClock
 from gateway.continuous import RequestTooLargeError, build_continuous_registry
 from gateway.events import EventBus
 from gateway.ledger import BudgetExceededError, CostLedger, ModelUsage
@@ -54,6 +54,7 @@ from gateway.routing import (
 )
 from gateway.schema import GenerateRequest, RequestResult
 from gateway.timeseries import TimeSeriesStore
+from gateway.usage import UsageStore
 from gateway.workload import PlannedRequest
 
 # How often /v1/monitor/stream pushes a snapshot, on the injected clock.
@@ -308,6 +309,8 @@ def create_app(
     load_control: bool = False,
     seed: int = 0,
     autostart_load: str | None = None,
+    usage_store: UsageStore | None = None,
+    epoch: EpochSource | None = None,
 ) -> FastAPI:
     """Build the API around an already wired registry.
 
@@ -323,6 +326,10 @@ def create_app(
     With ``overload``, requests are cancelled after its timeout, and a request that sets
     ``allow_downgrade`` is moved to a cheaper model while its own is missing its SLO.
     Queue limits are a property of the workers in ``registry``.
+
+    ``usage_store`` is where the ledger stores a usage event for every charged request
+    (default: in memory), and ``epoch`` dates those events (default: the clock read as
+    epoch time). See docs/19-usage-store.md.
 
     ``metrics`` replaces the default ``MetricsStore``, for a different window or ring size.
     ``series`` and ``events`` do the same for the monitoring time series and event log.
@@ -346,7 +353,7 @@ def create_app(
     request_numbers = itertools.count(1)
     started_ms = clock.now_ms()
     router = Router(plans, registry) if plans is not None else None
-    ledger = CostLedger(clock)
+    ledger = CostLedger(clock, store=usage_store, epoch=epoch)
     timeout_ms = overload.request_timeout_ms if overload is not None else None
     slo_policy = overload.slo if overload is not None else None
     # Monitoring only watches: it is told what happened and decides nothing.

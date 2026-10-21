@@ -18,6 +18,40 @@ class Clock(Protocol):
     async def sleep_ms(self, duration_ms: float) -> None: ...
 
 
+class EpochSource(Protocol):
+    """Calendar time: milliseconds since the Unix epoch.
+
+    Separate from ``Clock`` on purpose. ``Clock`` times requests and drives the simulator;
+    ``WallClock`` reads ``perf_counter``, which has no fixed origin and cannot date anything
+    that must outlive the process. An ``EpochSource`` dates what is stored. It never
+    decides how long anything waits.
+    """
+
+    def epoch_ms(self) -> float: ...
+
+
+class SystemEpoch:
+    """The system's calendar time, for the server."""
+
+    def epoch_ms(self) -> float:
+        return time.time() * 1000
+
+
+class ClockEpoch:
+    """Calendar time that follows a ``Clock``: ``origin_ms`` plus the clock's reading.
+
+    On a ``SimClock`` this moves with simulated time and is as deterministic as the clock,
+    which is what tests and simulated runs need.
+    """
+
+    def __init__(self, clock: Clock, origin_ms: float = 0.0) -> None:
+        self._clock = clock
+        self._origin_ms = origin_ms
+
+    def epoch_ms(self) -> float:
+        return self._origin_ms + self._clock.now_ms()
+
+
 def _check_duration(duration_ms: float) -> None:
     if duration_ms < 0:
         raise ValueError("duration_ms must not be negative")
