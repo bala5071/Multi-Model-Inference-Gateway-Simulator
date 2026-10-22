@@ -76,9 +76,9 @@ and send requests through the Playground as an application. **That is acceptable
 local, single-user demo**, on a machine with no container you do not trust. Do not use the
 setting anywhere else.
 
-**Finding where the host's requests arrive from.** Only Linux Docker in CI has run the demo;
-Docker Desktop on Windows or macOS may present the host's requests from another address. The
-gateway's access log names the peer of every request. With the demo running:
+**Finding where the host's requests arrive from.** Docker Desktop may present the host's
+requests from another address than Linux Docker does. The gateway's access log names the peer
+of every request. With the demo running:
 
 ```sh
 curl -s http://127.0.0.1:8000/v1/control
@@ -96,8 +96,42 @@ docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}/{{.IP
 If the address is outside `172.16.0.0/12`, add that one address, not a range:
 `GATEWAY_LOCAL_NETWORKS: "172.16.0.0/12,ADDRESS/32"`. The narrowest setting of all would be
 that one address in place of the range; the compose file uses the range because Docker
-chooses the bridge network's addresses when it creates it. None of these commands has been
-run on Docker Desktop; CI's `docker` job prints the log line on Linux.
+chooses the bridge network's addresses when it creates it. CI's `docker` job prints the log
+line on Linux.
+
+### What was observed on Docker Desktop
+
+Run once, on 2026-10-22, on the tree of `7e0d79b`. The machine: Windows 11 (10.0.26200), Docker
+Desktop 29.8.2 with the WSL 2 backend (kernel 6.6.87.2-microsoft-standard-WSL2), x86_64. The
+compose demo was started with `docker compose up --build --detach` and a throwaway, git-ignored
+`gateway.env`, which was deleted afterwards.
+
+- **Where the host's requests come from:** `172.18.0.1`, the bridge network's gateway. The
+  container was `172.18.0.2/16 via 172.18.0.1`. Both commands above gave this; the log line was
+  `INFO:     172.18.0.1:32942 - "GET /v1/control HTTP/1.1" 200 OK`. The address is inside
+  `172.16.0.0/12`, so the compose file's setting needs no change here.
+- **Accepted from the host through `127.0.0.1:8000`, all 200:** `/healthz`, `/dashboard/`,
+  `GET /v1/control`, `POST /v1/playground/generate` (JSON) and `/v1/monitor/snapshot`.
+- **Published on loopback only:** `docker compose port gateway 8000` answered `127.0.0.1:8000`,
+  and `netstat -ano` showed one listener for the port, `127.0.0.1:8000`, owned by Docker
+  Desktop's backend.
+- **Not served on the LAN address:** `curl http://192.168.1.211:8000/healthz` (the Wi-Fi
+  address) could not connect (curl exit 7).
+- **The shared bridge, seen from another container on the compose network:**
+  `GET http://gateway:8000/v1/control` from `172.18.0.3` was refused, `403 host_not_allowed`,
+  because its Host was `gateway:8000`. **The same request with `Host: localhost` was served,
+  200.** So the Host allowlist does not stop a container on the bridge; any container that sets
+  the header is served. That is why the setting is acceptable only for a local, single-user
+  demo.
+- **Cleanup:** `docker compose down -v` removed the container, the volume and the network.
+  Afterwards `docker ps -a` and `docker volume ls` showed nothing from the project, and nothing
+  was listening on port 8000.
+
+**Not tested:** macOS; Docker Desktop's Hyper-V backend or any version other than 29.8.2;
+WSL's mirrored networking mode, or Docker Engine run inside a WSL distribution; rootless Docker,
+Podman, and Linux hosts other than CI's runner; another machine on the LAN (the LAN address was
+tried only from this machine); IPv6 publishing; and the plain server (`gateway.env`, the
+volume, API keys) in Docker, which has not been started.
 
 ## The launcher
 
