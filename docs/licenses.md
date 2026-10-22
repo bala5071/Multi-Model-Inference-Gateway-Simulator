@@ -64,18 +64,20 @@ As resolved in `uv.lock` for Python 3.11 and 3.12.
 | | |
 |---|---|
 | File | `src/gateway/data/common-passwords.txt` |
-| Source | SecLists, `Passwords/Common-Credentials/10k-most-common.txt` |
-| URL | https://github.com/danielmiessler/SecLists/blob/913b327317496d062bcc7cace524aaad8a693be2/Passwords/Common-Credentials/10k-most-common.txt |
-| Commit | `913b327317496d062bcc7cace524aaad8a693be2` (2026-09-08, the last change to the file when it was taken) |
-| sha256 of the file | `68782d6a4a19a4768d5f15dd66bd534e7a33055cc755411e33f16d18c50fdcce` |
-| License | MIT |
+| Source | SecLists, `Passwords/Common-Credentials/100k-most-used-passwords-NCSC.txt` |
+| URL | https://github.com/danielmiessler/SecLists/blob/1a7bb9127eca9e6ff2fc0301c597fe6e16a0cb56/Passwords/Common-Credentials/100k-most-used-passwords-NCSC.txt |
+| Commit | `1a7bb9127eca9e6ff2fc0301c597fe6e16a0cb56` (2025-11-19, the last change to the file when it was taken) |
+| sha256 of the source file | `c2e5696882c603b76bb67a47ee970897e5a76fc4c3f5547abe3d0ca340c576e0` (99,839 passwords, one per line, UTF-8) |
+| What is stored | Only its entries of 12 or more characters, in the source's order: the shorter ones are already refused by the length rule. 1,212 entries; 1,197 once case is ignored |
+| sha256 of the stored file | `4a5f7c5ddf4ae43e7207e8c810bf01d1402fa088ead34ffddd229555ac3904ed` |
+| License | MIT (SecLists) |
 | Attribution | Copyright (c) 2018 Daniel Miessler; the license text is in `src/gateway/data/LICENSE-SecLists.txt` |
-| Contents | 10,001 passwords, one per line, ASCII, at most 18 characters |
+| Provenance | The list is the UK National Cyber Security Centre's publication of the 100,000 most common passwords in Have I Been Pwned's breach corpus. SecLists distributes it under its MIT license and does not state the upstream terms; we rely on SecLists' license, and record the origin here |
 
 **Public data under the rule 7 exemption** (CLAUDE.md, hard rule 7): a public dataset with its
-license attribution. It is not request traffic, not user data and not anyone's credentials;
-the gateway only reads it to refuse these passwords.
+license attribution. It is not request traffic, not user data and not anyone's credentials:
+the passwords are not linked to any account, and the gateway only reads the list to refuse
+them.
 
-Only 10 of its 10,001 entries have 12 or more characters, so with the 12-character minimum it
-refuses very little (docs/24). SecLists has larger lists under the same license (100,000
-entries, about 800 KB; 1,000,000, about 8.5 MB) if more is wanted.
+It replaced SecLists' `10k-most-common.txt` (commit `913b3273`), of whose 10,001 entries only
+10 had 12 or more characters.

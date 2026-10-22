@@ -111,18 +111,17 @@ def test_key_check_benchmark_times_checks_and_last_used_writes(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_password_hashing_benchmark_times_hash_verify_and_logins_together(
+def test_password_hashing_benchmark_compares_settings(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    password_hashing.main(["--repeats", "2", "--together", "3"])
+    password_hashing.main(
+        ["--repeats", "1", "--together", "2", "--setting", "64,1,1", "--setting", "128,1,1"]
+    )
     out = capsys.readouterr().out
     assert out.startswith("MEASURED on this machine")
-    assert "argon2id m=19456 KiB, t=2, p=1" in out
-    names = [
-        line.split()[0] for line in out.splitlines() if line[:6] in ("hash  ", "verify", "login,")
-    ]
-    assert names == ["hash", "verify", "login,"]
-    assert "longest event-loop stall during the logins" in out
+    rows = [line.split() for line in out.splitlines() if "|" in line and line.strip()[0].isdigit()]
+    assert [(r[0], r[1], r[2]) for r in rows] == [("0", "1", "1"), ("0", "1", "1")]
+    assert "peak MiB is above the process's use before any hashing" in out
 
 
 def test_retention_benchmark_times_batched_and_unbatched_pruning(
