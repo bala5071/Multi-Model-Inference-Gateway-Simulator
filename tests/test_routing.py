@@ -45,7 +45,9 @@ def _app(app_id: str) -> Application:
     """A demo application, created from its template in the packaged plans."""
     templates = load_plans()
     demo = templates.applications[app_id]
-    return application_from_template(app_id, demo.name, templates, demo.plan, created_at_ms=0.0)
+    return application_from_template(
+        app_id, demo.name, templates, demo.plan, organization_id="default", created_at_ms=0.0
+    )
 
 
 def _valid_document() -> dict[str, Any]:
@@ -160,7 +162,7 @@ def test_pick_by_quality_needs_at_least_one_model() -> None:
 def test_the_router_uses_the_applications_own_plan_not_the_template() -> None:
     # An application keeps the settings it was created with, even if the template changes.
     custom = Application(
-        "custom", "Custom", Plan("enterprise", ("standard",), 1.0, 10), None, None, 0.0
+        "custom", "Custom", Plan("enterprise", ("standard",), 1.0, 10), None, None, 0.0, "default"
     )
     assert _router().route(custom, quality=Quality.BEST).model == "standard"
     with pytest.raises(ModelNotAllowedError) as excinfo:

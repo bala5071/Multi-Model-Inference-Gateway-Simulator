@@ -275,6 +275,24 @@ been built (`cd frontend && npm ci && npm run build`, Node 20;
 [docs/16-dashboard.md](docs/16-dashboard.md)). More keys, rotation, revocation, backup and
 restore: `uv run python scripts/manage.py --help` and [docs/21](docs/21-persistence.md).
 
+Applications belong to organizations ([docs/26](docs/26-organizations.md)). The ones above
+are in `default`, which every database has; others are created with the CLI. Application
+names are unique within an organization, and a disabled organization's keys stop working:
+
+```sh
+uv run python scripts/manage.py create-organization --id north --name "North" --kind business
+uv run python scripts/manage.py create-application --id north-shop --name "Shop" --plan pro --organization north
+uv run python scripts/manage.py list-organizations
+uv run python scripts/manage.py organization-usage --organization north
+uv run python scripts/manage.py disable-organization --organization north
+uv run python scripts/manage.py enable-organization --organization north
+```
+
+Upgrading a database from before organizations: stop the server and run
+`uv run python scripts/manage.py migrate --dry-run` to see what would change, then
+`uv run python scripts/manage.py migrate`, which backs the database up first and prints where.
+The server refuses to start until then, rather than rebuild a table without a backup.
+
 `docker compose up --build` starts the demo of [See it running](#see-it-running), not this
 plain server; the compose file says how to run the plain one, with `gateway.env` and a
 volume for the database.
@@ -530,6 +548,10 @@ These are not built, and the server is not ready for a network until they are:
   ([docs/21](docs/21-persistence.md)).
 - **Rotating the pepper means re-issuing every key.** Rotation without downtime is not built
   ([docs/20](docs/20-applications-api-keys.md)).
+- **Organizations have no members yet.** Users, logins and roles arrive in the next identity
+  step; until then organizations only group applications. An organization has no budget of
+  its own: the most it can be billed in a period is the sum of its applications' budgets
+  ([docs/26](docs/26-organizations.md)).
 
 **Not run.**
 

@@ -5,9 +5,10 @@ from __future__ import annotations
 import os
 import random
 import zlib
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -22,9 +23,10 @@ from gateway.applications import (
     seed_demo_applications,
 )
 from gateway.backends import Backend, BackendTokenCallback, Generation
-from gateway.clock import Clock, ClockEpoch, SystemEpoch
+from gateway.clock import Clock, ClockEpoch, SimClock, SystemEpoch
 from gateway.database import open_database
 from gateway.migrations import MIGRATIONS, MigrationRunner
+from gateway.organizations import DEFAULT_ORGANIZATION_ID
 from gateway.profiles import ModelProfile, Tier
 from gateway.routing import PlansConfig, load_plans
 from gateway.schema import GenerateRequest
@@ -140,7 +142,12 @@ def application_access(
     else:
         for app_id, plan in apps.items():
             application = application_from_template(
-                app_id, app_id, templates, plan, created_at_ms=epoch.epoch_ms()
+                app_id,
+                app_id,
+                templates,
+                plan,
+                organization_id=DEFAULT_ORGANIZATION_ID,
+                created_at_ms=epoch.epoch_ms(),
             )
             if limits and app_id in limits:
                 max_tokens, rpm = limits[app_id]
@@ -191,3 +198,20 @@ def default_server() -> Iterator[FastAPI]:
         yield app
     finally:
         app.state.database_lock.release()
+
+
+def version3_database(path: Path, applications: Sequence[tuple[str, str]] = ()) -> None:
+    """A database at migration 3, as an installation from before organizations has it, with
+    the given (id, name) applications, written with plain SQL."""
+    connection = open_database(path)
+    try:
+        MigrationRunner(connection, MIGRATIONS, ClockEpoch(SimClock())).migrate(3)
+        for app_id, name in applications:
+            connection.execute(
+                "INSERT INTO applications (id, name, plan_name, models, price_multiplier,"
+                " monthly_token_budget, max_tokens, requests_per_minute, created_at_ms)"
+                " VALUES (?, ?, 'pro', '[\"economy\"]', 1.0, 1000, NULL, NULL, 0)",
+                (app_id, name),
+            )
+    finally:
+        connection.close()

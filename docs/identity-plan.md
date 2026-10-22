@@ -63,7 +63,7 @@ New migrations only; the A1 tables are unchanged except for the one column in mi
 
 | Migration | Adds |
 |---|---|
-| 4 | `organizations (id, name, kind, created_at)`, `kind` being `individual` or `business`; `applications.organization_id`, backfilled: every existing application goes into one organization named `default` with kind `business` |
+| 4 | `organizations (id, name unique, kind, created_at, disabled)`, `kind` being `individual` or `business`; a required `applications.organization_id`, backfilled: every existing application goes into one organization named `default` with kind `business`; application names unique within an organization. Done in step 3 (note 26) |
 | 5 | `users (id, username unique, password_hash, organization_id, created_at, disabled, must_change_password, bootstrap, failed_logins, first_failure_at, locked_until)` |
 | 6 | `role_assignments (user_id, role, scope_type, scope_id, granted_by, granted_at)`; `app_roles (application_id, name)` for application-defined roles such as `clinic_staff` |
 | 7 | `sessions (id_hash, user_id, csrf_hash, created_at, last_seen_at, expires_at, step_up_until, revoked)`; session ids and CSRF tokens are stored only as SHA-256 |
@@ -74,6 +74,11 @@ refuses to add anyone else. A `business` organization has any number of members 
 every role. Accounts are created by an admin in both cases; there is no self-signup.
 Applications belong to one organization. Nothing assumes there is only one organization: the
 backfill puts the existing applications into one, which is data, not code.
+
+Step 3 (note 26) built organizations, the migration, the CLI and the roll-up of usage; the
+individual rule is the pure function `membership_decision`, which step 4 calls when it adds a
+user. A disabled organization's keys stop working, and an organization has no budget of its
+own: its limit is the sum of its applications' budgets.
 
 ## 4. Users, passwords and login
 
@@ -291,7 +296,7 @@ Each step is its own pull request and stops for review.
 2. The local-only guard for monitoring and control (peer address, forwarded headers, Host
    allowlist, Origin, content type), the launcher, the README, Makefile and Dockerfile on the
    launcher, and the CI check that compose publishes only on loopback (section 10).
-3. Organizations: migration 4 and the backfill; individual and business rules.
+3. Organizations: migration 4 and the backfill; individual and business rules. Done (note 26).
 4. Users, the one-time bootstrap admin, login, lockout, sessions, CSRF, password change,
    `must_change_password`, the CLI (`create-user`, `reset-password`, `unlock-user`), and the
    audit log for these. One login and a burst of 8 timed through the running server at the

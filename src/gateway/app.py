@@ -49,7 +49,7 @@ from gateway.ledger import BudgetExceededError, CostLedger, ModelUsage, run_rete
 from gateway.loadcontrol import PRESETS, LoadController, UnknownPresetError
 from gateway.localonly import LocalOnlyMiddleware, LocalOnlyPolicy, policy_from
 from gateway.metrics import Distribution, MetricsStore
-from gateway.migrations import MIGRATIONS, MigrationRunner
+from gateway.migrations import MIGRATIONS, MigrationError, MigrationRunner
 from gateway.monitoring import Monitor, Snapshot, render_prometheus
 from gateway.overload import (
     OverloadPolicy,
@@ -1222,8 +1222,8 @@ def create_simulated_live_app(
     # Applications and keys in memory only, for the life of the process: the pepper is a
     # throwaway too, and no key is ever printed or written anywhere.
     templates = load_plans()
-    store = InMemoryApplicationStore()
     epoch = ClockEpoch(clock)
+    store = InMemoryApplicationStore(created_at_ms=epoch.epoch_ms())
     seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms())
     keys = ApiKeyService(store, secrets.token_bytes(32), epoch)
     return create_app(
@@ -1258,7 +1258,9 @@ def create_default_app() -> FastAPI:
 
     Applications and API keys are read from the SQLite database ``GATEWAY_DATABASE``
     (default: the user's local data folder, outside the working tree; see
-    ``gateway.database``), created owner-only and migrated if needed. Usage events are
+    ``gateway.database``), created owner-only and migrated if needed; a migration that
+    rebuilds a table on a database with data is refused here, and run with
+    ``scripts/manage.py migrate``, which backs the database up first. Usage events are
     stored there too, kept for ``GATEWAY_USAGE_RETENTION_DAYS`` (default 400), and budget
     periods are calendar months in UTC; ``scripts/manage.py`` creates
     applications and issues keys. ``GATEWAY_KEY_PEPPER`` is required: without it the server
@@ -1297,7 +1299,19 @@ def create_default_app() -> FastAPI:
     # One gateway process per database: a second one refuses to start (docs/21).
     lock = ProcessLock(path)
     database = open_database(path)
-    MigrationRunner(database, MIGRATIONS, epoch).migrate()
+    runner = MigrationRunner(database, MIGRATIONS, epoch)
+    rebuilds = [m.version for m in runner.pending() if m.rebuilds_tables]
+    if rebuilds and runner.current_version() > 0:
+        # A migration that rebuilds a table runs only from the CLI, which backs the database
+        # up first (docs/26-organizations.md); a new, empty database needs no backup.
+        database.close()
+        lock.release()
+        raise MigrationError(
+            f"{path} needs migration {rebuilds[0]}, which rebuilds a table. Stop here and run "
+            "`uv run python scripts/manage.py migrate` (it backs the database up first; "
+            "`--dry-run` shows what it would do), then start the gateway again."
+        )
+    runner.migrate()
     access = ApplicationAccess(
         ApiKeyService(SqliteApplicationStore(database), pepper, epoch), templates
     )

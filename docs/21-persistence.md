@@ -130,6 +130,8 @@ uv run python scripts/manage.py restore --from /backups/gateway-2025-06-01.db
 Restore checks the backup's integrity and that it is a gateway database before touching
 anything, refuses while a gateway process holds the database (the lock above), and copies
 the backup in through the same API. The server migrates it forward when it next starts.
+**Updated since:** except for a migration that rebuilds a table (migration 4); for that, run
+`scripts/manage.py migrate` first, which backs the database up (note 26).
 `tests/test_backup.py` backs up a live database, revokes a key, adds usage and deletes an
 application, restores, and finds the applications, the key and the usage exactly as they
 were; it also checks refusals (a running server, a damaged file, a non-gateway file, an
