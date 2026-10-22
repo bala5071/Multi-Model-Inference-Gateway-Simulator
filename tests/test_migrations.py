@@ -228,15 +228,20 @@ def test_the_gateway_migrations_create_exactly_their_tables(tmp_path: Path) -> N
 
     # Migration 4 adds organizations and a required applications.organization_id
     # (docs/26-organizations.md; tests/test_organizations_migration.py covers it in depth).
-    assert runner.migrate() == (4,)
+    assert runner.migrate(4) == (4,)
     every_table = {"schema_migrations", "usage_events", "applications", "api_keys"}
     assert _tables(db) == every_table | {"organizations"}
     assert _columns(db, "organizations") == ["id", "name", "kind", "created_at_ms", "disabled"]
     assert _columns(db, "applications")[-1] == "organization_id"
 
-    assert runner.rollback(1) == (4, 3, 2)
+    # Migrations 5 to 7: users, sessions and the audit log (docs/27-users-and-sessions.md).
+    assert runner.migrate() == (5, 6, 7)
+    accounts = {"users", "sessions", "audit_log"}
+    assert _tables(db) == every_table | {"organizations"} | accounts
+
+    assert runner.rollback(1) == (7, 6, 5, 4, 3, 2)
     assert _tables(db) == {"schema_migrations", "usage_events"}
     assert runner.rollback(0) == (1,)
     assert _tables(db) == {"schema_migrations"}
-    assert runner.migrate() == (1, 2, 3, 4)
-    assert _tables(db) == every_table | {"organizations"}
+    assert runner.migrate() == (1, 2, 3, 4, 5, 6, 7)
+    assert _tables(db) == every_table | {"organizations"} | accounts

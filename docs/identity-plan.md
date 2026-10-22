@@ -345,7 +345,7 @@ Each step is its own pull request and stops for review.
    audit log for these, with retention, the unknown-user cap and session pruning. One login
    and a burst of 8 timed through the running server at the default argon2 setting (64 MiB,
    3, 1), with the hardware, in note 24; the known-versus-unknown failure timing and the
-   cost of writing `last_seen_at`, in note 27.
+   cost of writing `last_seen_at`, in note 27. Done (note 27).
 5. Roles, `permissions.py`, `authorize`, the per-route declarations, the management endpoints
    (users, roles, organizations, applications, application keys, application roles, audit)
    and the generated matrix.

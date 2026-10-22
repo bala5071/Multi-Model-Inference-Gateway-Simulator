@@ -52,8 +52,17 @@ def test_no_secret_is_in_the_compose_file_or_the_image() -> None:
 
 def test_the_example_env_file_has_placeholders_only() -> None:
     values = dict(line.split("=", 1) for line in _active_lines(REPO / "gateway.env.example"))
-    assert set(values) == {PEPPER_ENV, "GATEWAY_DATABASE", "GATEWAY_USAGE_RETENTION_DAYS"}
+    assert set(values) == {
+        PEPPER_ENV,
+        "GATEWAY_DATABASE",
+        "GATEWAY_USAGE_RETENTION_DAYS",
+        "GATEWAY_ADMIN_USERNAME",
+        "GATEWAY_ADMIN_PASSWORD",
+        "GATEWAY_AUDIT_RETENTION_DAYS",
+    }
+    # Every secret is a placeholder, never a value.
     assert re.fullmatch(r"<[^>]+>", values[PEPPER_ENV])
+    assert re.fullmatch(r"<[^>]+>", values["GATEWAY_ADMIN_PASSWORD"])
     assert values["GATEWAY_DATABASE"] == "/data/gateway.db"  # on the volume
 
 

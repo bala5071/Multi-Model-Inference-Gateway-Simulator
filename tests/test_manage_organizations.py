@@ -271,7 +271,7 @@ def test_the_dry_run_touches_nothing(
     files = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
     assert manage(["migrate", "--dry-run"], environ) == 1
     err = capsys.readouterr().err
-    assert "database is at version 3; this code knows 4" in err
+    assert "database is at version 3; this code knows 7" in err
     assert "migration 4 organizations (rebuilds a table):" in err
     assert "3 application(s) into 'default'" in err
     assert "CONFLICT: application name 'Shop' is used by a, b" in err
@@ -308,7 +308,7 @@ def test_migrate_backs_up_before_rebuilding_a_table(
     assert check_backup(backup) == 3  # the database as it was
     # Checking it left no -wal or -shm file beside it: only the backup itself.
     assert [p.name for p in tmp_path.glob("gateway.db.before-*")] == [backup.name]
-    assert _version(path) == 4
+    assert _version(path) == 7
     copy = sqlite3.connect(backup)
     assert copy.execute("SELECT id FROM applications ORDER BY rowid").fetchall() == [
         ("acme",),

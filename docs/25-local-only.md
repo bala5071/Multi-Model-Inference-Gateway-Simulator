@@ -21,6 +21,7 @@ this table, the README's and the launcher's warning in step with it):
 | `/v1/control` | Load control: start and stop load, change the speed (when it is on) |
 | `/v1/playground` | Sends requests as an application, with keys the server holds |
 | `/dashboard` | The dashboard, which shows all of the above |
+| `/v1/auth` | Console login, logout and sessions (added in identity step 4, note 27); a password is needed, but logins come only from this machine |
 
 On these, a request is refused when:
 

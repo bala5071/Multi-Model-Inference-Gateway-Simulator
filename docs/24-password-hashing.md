@@ -95,8 +95,21 @@ overrides it, and a hash made with any other setting is upgraded at that user's 
 Tests hash with `CHEAP` parameters injected; one test hashes once at the default, to show it
 reaches the stored hash.
 
-**Not yet measured on the server.** The table above is the benchmark: the hasher and the
-2-thread runner in a process of their own. There is no login endpoint until step 4, so one login
-and a burst of 8 through the running server (`python -m gateway.serve`, over HTTP, with the
-hashing on the server's runner) cannot be timed yet. Step 4 measures them and records them here
-with the hardware.
+## Logins on the running server
+
+Measured in identity step 4, once the login endpoint existed: `uv run python -m
+benchmarks.login`, three runs, on the tree of the commit that added docs/27. It starts the real
+server (`python -m gateway.serve`) on a throwaway database at the default setting (64 MiB, 3
+iterations, 1 lane, the server's 2-thread runner) and logs in over HTTP from the same machine,
+the one above: Intel Core Ultra 7 155H, 22 logical cores, 15.4 GB RAM, Windows 11
+(10.0.26200), Python 3.12.10. Ranges over the three runs; nearest-rank percentiles.
+
+| Through the server | p50 | max |
+|---|---|---|
+| One login (20 one after another) | 112.6 to 113.5 ms | 117.2 to 120.8 ms |
+| 8 logins sent together: each one | 247.6 to 256.6 ms | the last: 487.5 to 499.9 ms |
+
+A login costs the hash and little else (about 110 ms for the hash alone, in the table above):
+the HTTP round trip, the lookups and the session write add a few milliseconds. Eight at once
+are served two at a time, so the last waits for about four hashes, as the benchmark predicted.
+The timing of failed logins, and what it reveals, is in docs/27.

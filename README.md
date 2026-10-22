@@ -206,12 +206,15 @@ The commands below are run, exactly as written, by CI on every push
 (`scripts/readme_quickstart.py`), from the repository root. First a pepper: the secret the
 server checks API keys with. This one is throwaway, for trying things out; for real use keep
 it in a secrets store and back it up, because if it is lost or changed every key stops working
-([docs/20](docs/20-applications-api-keys.md)). `gateway.env` is git-ignored.
+([docs/20](docs/20-applications-api-keys.md)). The server also needs a first console admin
+([docs/27](docs/27-users-and-sessions.md)): it is created from the environment when none
+exists, and must change its password at its first login. `gateway.env` is git-ignored.
 
 <!-- quickstart -->
 ```sh
 uv sync
 uv run python -c "import secrets; print('GATEWAY_KEY_PEPPER=' + secrets.token_urlsafe(32))" > gateway.env
+uv run python -c "import secrets; print('GATEWAY_ADMIN_USERNAME=admin'); print('GATEWAY_ADMIN_PASSWORD=' + secrets.token_urlsafe(24))" >> gateway.env
 set -a; . ./gateway.env; set +a
 ```
 
@@ -296,6 +299,27 @@ The server refuses to start until then, rather than rebuild a table without a ba
 `docker compose up --build` starts the demo of [See it running](#see-it-running), not this
 plain server; the compose file says how to run the plain one, with `gateway.env` and a
 volume for the database.
+
+### Console login
+
+People log in to a console with a username and password ([docs/27](docs/27-users-and-sessions.md)).
+There is no sign-up: the first admin comes from `GATEWAY_ADMIN_USERNAME` and
+`GATEWAY_ADMIN_PASSWORD` (as in the quickstart's `gateway.env`) when none exists, and must
+change that password at its first login; the server refuses to start without an admin.
+Further accounts come from the CLI, which asks for the password and never prints it:
+
+```sh
+uv run python scripts/manage.py create-user --username alice --organization north
+uv run python scripts/manage.py reset-password --username alice   # a temporary one
+uv run python scripts/manage.py unlock-user --username alice      # after 5 failed logins
+uv run python scripts/manage.py disable-user --username alice     # ends every session
+```
+
+`POST /v1/auth/login` with `{"username", "password"}` sets an `HttpOnly`, `SameSite=Strict`
+session cookie and returns a CSRF token, which `POST /v1/auth/logout` and
+`POST /v1/auth/change-password` need in `X-CSRF-Token`; `GET /v1/auth/me` and
+`GET /v1/auth/sessions` read. Until roles arrive in the next identity step, that is all a
+session can do: nothing else in the gateway looks at it.
 
 ### Real-model mode
 
@@ -530,6 +554,7 @@ These are not built, and the server is not ready for a network until they are:
   | `/v1/control` | Load control: start and stop load, change the speed (off by default) |
   | `/v1/playground` | Sends requests as an application, with keys the server holds |
   | `/dashboard` | The dashboard, which shows all of the above |
+  | `/v1/auth` | Console login, logout and sessions ([docs/27](docs/27-users-and-sessions.md)); a password is needed, but logins come only from this machine |
 
   The gateway refuses other peers, forwarded requests, foreign Host names (DNS rebinding) and
   cross-site requests ([docs/25](docs/25-local-only.md)), but any process on this machine can
@@ -548,10 +573,15 @@ These are not built, and the server is not ready for a network until they are:
   ([docs/21](docs/21-persistence.md)).
 - **Rotating the pepper means re-issuing every key.** Rotation without downtime is not built
   ([docs/20](docs/20-applications-api-keys.md)).
-- **Organizations have no members yet.** Users, logins and roles arrive in the next identity
-  step; until then organizations only group applications. An organization has no budget of
-  its own: the most it can be billed in a period is the sum of its applications' budgets
-  ([docs/26](docs/26-organizations.md)).
+- **Console logins are plain HTTP on this machine only, and grant nothing yet.** `/v1/auth`
+  is local-only like monitoring; a password and a session cookie cross the loopback
+  interface in clear text, and the cookie is not `Secure` unless `GATEWAY_COOKIE_SECURE=1`
+  (only behind HTTPS). There are no roles until the next identity step, so a session reaches
+  only its own login endpoints. Failed logins take a few milliseconds longer for a username
+  that exists, which a patient local process could measure; the audit log is not
+  tamper-evident; and logins are not limited per source ([docs/27](docs/27-users-and-sessions.md)).
+- **An organization has no budget of its own.** The most it can be billed in a period is the
+  sum of its applications' budgets ([docs/26](docs/26-organizations.md)).
 
 **Not run.**
 
