@@ -163,6 +163,11 @@ def bearer(key: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {key}"}
 
 
+# The default server's bootstrap admin in tests (tests/conftest.py). Test values, not
+# secrets: nothing outside the test suite uses them.
+TEST_ADMIN_USERNAME = "admin"
+TEST_ADMIN_PASSWORD = "quiet orchard lantern for the suite"
+
 # Well formed, but matches no record: what a test sends for an application with no key.
 UNKNOWN_KEY = "gwk_" + "0" * 16 + "_" + "A" * 43
 

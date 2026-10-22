@@ -6,6 +6,7 @@ CI's docker job builds the image and starts the compose demo.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -52,8 +53,17 @@ def test_no_secret_is_in_the_compose_file_or_the_image() -> None:
 
 def test_the_example_env_file_has_placeholders_only() -> None:
     values = dict(line.split("=", 1) for line in _active_lines(REPO / "gateway.env.example"))
-    assert set(values) == {PEPPER_ENV, "GATEWAY_DATABASE", "GATEWAY_USAGE_RETENTION_DAYS"}
+    assert set(values) == {
+        PEPPER_ENV,
+        "GATEWAY_DATABASE",
+        "GATEWAY_USAGE_RETENTION_DAYS",
+        "GATEWAY_ADMIN_USERNAME",
+        "GATEWAY_ADMIN_PASSWORD",
+        "GATEWAY_AUDIT_RETENTION_DAYS",
+    }
+    # Every secret is a placeholder, never a value.
     assert re.fullmatch(r"<[^>]+>", values[PEPPER_ENV])
+    assert re.fullmatch(r"<[^>]+>", values["GATEWAY_ADMIN_PASSWORD"])
     assert values["GATEWAY_DATABASE"] == "/data/gateway.db"  # on the volume
 
 
@@ -80,3 +90,14 @@ def test_every_launch_command_uses_the_launcher() -> None:
         text = (REPO / name).read_text(encoding="utf-8")
         assert "uvicorn gateway.app:create_default_app" not in text, name
         assert "gateway.serve" in text, name
+
+
+def test_the_readme_makes_its_admin_password_at_run_time_and_keeps_it_out_of_git() -> None:
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    assignments = re.findall(r"GATEWAY_ADMIN_PASSWORD=[^\n]*", readme)
+    # The only one prints a random value when the quickstart runs; no password is written down.
+    assert assignments == ["GATEWAY_ADMIN_PASSWORD=' + secrets.token_urlsafe(24))\" >> gateway.env"]
+    ignored = subprocess.run(
+        ["git", "check-ignore", "--no-index", "-q", "gateway.env"], cwd=REPO, check=False
+    )
+    assert ignored.returncode == 0

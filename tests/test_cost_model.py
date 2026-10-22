@@ -10,7 +10,7 @@ from gateway.profiles import PROFILES, ModelProfile, Tier
 from helpers import TEST_ECONOMY, TEST_PREMIUM, TEST_PROFILES, TEST_STANDARD
 
 ALL_PROFILES = (TEST_ECONOMY, TEST_STANDARD, TEST_PREMIUM)
-PROMPTS = ("", "hello", "Summarise this contract.", "héllo wörld", "a" * 5000)
+PROMPTS = ("", "hello", "Summarise this contract.", "h\u00e9llo w\u00f6rld", "a" * 5000)
 
 
 def _estimate(

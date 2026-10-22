@@ -56,6 +56,7 @@ says so, and the table below points out the main cases.
 | [24 Password hashing](24-password-hashing.md) | argon2id, the inline and thread runners that keep simulated time still and the event loop free, the password policy and blocklist, and what hashing costs on this machine | Identity plan step 1; licenses in [licenses.md](licenses.md) |
 | [25 Local only](25-local-only.md) | The guard that serves monitoring, load control, the Playground and the dashboard only to this machine (peer address, no forwarded headers, Host allowlist, Origin, content type), Docker, and the `gateway.serve` launcher | Identity plan step 2; until A8 adds logins |
 | [26 Organizations](26-organizations.md) | Organizations above applications: migration 4 (a table rebuild, with a backup first and a dry run), names unique per organization, disabled organizations, the per-organization roll-up of usage, the individual rule, the CLI | Identity plan step 3; no members until step 4 |
+| [27 Users and sessions](27-users-and-sessions.md) | Console users, the bootstrap admin, login with one answer for every refusal, lockout and the limiter, sessions and CSRF, the audit log, the leak scan, and what logins cost on the running server | Identity plan step 4; plain HTTP on 127.0.0.1, no roles until step 5 |
 
 ## Which numbers to trust for what
 

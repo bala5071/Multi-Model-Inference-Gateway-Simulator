@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from gateway.apikeys import PEPPER_ENV
-from helpers import TEST_PEPPER
+from gateway.auth import ADMIN_PASSWORD_ENV, ADMIN_USERNAME_ENV
+from gateway.passwords import CHEAP, MEMORY_ENV, PARALLELISM_ENV, TIME_COST_ENV
+from helpers import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME, TEST_PEPPER
 
 REAL_MODELS_ENV = "GATEWAY_REAL_MODELS"
 
@@ -33,10 +35,17 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 @pytest.fixture(autouse=True)
 def default_server_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every test's default server uses a database of its own and the test pepper.
+    """Every test's default server uses a database of its own, the test pepper and a test
+    admin.
 
     So no test writes gateway.db into the working tree, and ``create_default_app`` can start.
     A test of what happens without the pepper removes it with ``monkeypatch.delenv``.
     """
     monkeypatch.setenv("GATEWAY_DATABASE", str(tmp_path / "gateway.db"))
     monkeypatch.setenv(PEPPER_ENV, TEST_PEPPER.decode())
+    # Its bootstrap admin, and argon2 at the lowest cost, so starting it stays fast.
+    monkeypatch.setenv(ADMIN_USERNAME_ENV, TEST_ADMIN_USERNAME)
+    monkeypatch.setenv(ADMIN_PASSWORD_ENV, TEST_ADMIN_PASSWORD)
+    monkeypatch.setenv(MEMORY_ENV, str(CHEAP.memory_cost_kib))
+    monkeypatch.setenv(TIME_COST_ENV, str(CHEAP.time_cost))
+    monkeypatch.setenv(PARALLELISM_ENV, str(CHEAP.parallelism))

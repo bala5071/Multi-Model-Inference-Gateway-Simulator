@@ -7,6 +7,9 @@ from gateway.migrations import (
     m0002_applications,
     m0003_usage_retention,
     m0004_organizations,
+    m0005_users,
+    m0006_sessions,
+    m0007_audit_log,
 )
 from gateway.migrations.runner import (
     Migration,
@@ -22,6 +25,9 @@ MIGRATIONS: tuple[Migration, ...] = (
     m0002_applications.MIGRATION,
     m0003_usage_retention.MIGRATION,
     m0004_organizations.MIGRATION,
+    m0005_users.MIGRATION,
+    m0006_sessions.MIGRATION,
+    m0007_audit_log.MIGRATION,
 )
 
 __all__ = [

@@ -13,6 +13,12 @@ endpoints). See docs/20-applications-api-keys.md and docs/26-organizations.md.
     uv run python scripts/manage.py organization-usage --organization north
     uv run python scripts/manage.py disable-organization --organization north
     uv run python scripts/manage.py enable-organization --organization north
+    uv run python scripts/manage.py create-user --username alice --organization north
+    uv run python scripts/manage.py create-user --username root --platform-admin
+    uv run python scripts/manage.py reset-password --username alice
+    uv run python scripts/manage.py unlock-user --username alice
+    uv run python scripts/manage.py disable-user --username alice
+    uv run python scripts/manage.py enable-user --username alice
     uv run python scripts/manage.py create-key --application shop --label "backend"
     uv run python scripts/manage.py rotate-key --key-id <id> --grace-hours 24
     uv run python scripts/manage.py revoke-key --key-id <id>
@@ -24,19 +30,22 @@ The database is GATEWAY_DATABASE (default: the user's local data folder, outside
 tree), the one the server reads; it is created owner-only and migrated if needed. Before a
 migration that rebuilds a table, the database is backed up next to itself and the backup's
 path printed; if the backup fails, nothing is migrated. Organizations are named by their id.
-Issuing or rotating a key needs GATEWAY_KEY_PEPPER, the same value the server has. A new key
-is printed once, alone, on standard output; it is not stored, logged or shown again.
-Everything else goes to standard error.
+A user's password is read from a prompt, twice, never from the command line, and never
+printed. Issuing or rotating a key needs GATEWAY_KEY_PEPPER, the same value the server has.
+A new key is printed once, alone, on standard output; it is not stored, logged or shown
+again. Everything else goes to standard error.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import io
 import os
+import secrets
 import sqlite3
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from gateway.apikeys import ApiKeyService, load_pepper
@@ -46,6 +55,8 @@ from gateway.applications import (
     application_from_template,
     seed_demo_applications,
 )
+from gateway.audit import AuditLog
+from gateway.auth import AccountService
 from gateway.clock import EpochSource, SystemEpoch, WallClock
 from gateway.database import (
     DatabaseInUseError,
@@ -65,8 +76,17 @@ from gateway.migrations import (
     plan_migrations,
 )
 from gateway.organizations import DEFAULT_ORGANIZATION_ID, OrganizationKind, new_organization
+from gateway.passwords import (
+    PRODUCTION,
+    InlineHashRunner,
+    PasswordHasher,
+    PasswordPolicyError,
+    Passwords,
+    parameters_from,
+)
 from gateway.routing import load_plans
 from gateway.usage import SqliteUsageStore
+from gateway.users import AccountStore
 
 DAY_MS = 24 * 60 * 60 * 1000.0
 HOUR_MS = 60 * 60 * 1000.0
@@ -197,7 +217,39 @@ def _organization_usage(
     )
 
 
-def main(argv: Sequence[str] | None = None, environ: dict[str, str] | None = None) -> int:
+ReadPassword = Callable[[str], str]
+
+
+def _new_password(read_password: ReadPassword) -> str:
+    """A password from the prompt, entered twice. Never echoed or printed."""
+    first = read_password("New password: ")
+    if read_password("Again: ") != first:
+        raise ValueError("the two passwords differ; nothing was changed")
+    return first
+
+
+def _accounts(
+    connection: sqlite3.Connection, store: SqliteApplicationStore, env: dict[str, str]
+) -> AccountService:
+    # The CLI never logs anyone in, so its login limiter needs no lasting secret; hashing
+    # is synchronous here (no event loop, nothing else waiting).
+    hasher = PasswordHasher(parameters_from(env, PRODUCTION))
+    return AccountService(
+        AccountStore(connection),
+        AuditLog(connection),
+        Passwords(hasher, InlineHashRunner()),
+        organizations=store,
+        clock=WallClock(),
+        epoch=SystemEpoch(),
+        secret=secrets.token_bytes(32),
+    )
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    environ: dict[str, str] | None = None,
+    read_password: ReadPassword = getpass.getpass,
+) -> int:
     env = dict(os.environ) if environ is None else environ
     parser = argparse.ArgumentParser(prog="manage.py", description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -227,6 +279,18 @@ def main(argv: Sequence[str] | None = None, environ: dict[str, str] | None = Non
     create.add_argument(
         "--organization", default=DEFAULT_ORGANIZATION_ID, help="an organization id"
     )
+    user = commands.add_parser("create-user", help="a console account; asks for its password")
+    user.add_argument("--username", required=True)
+    user.add_argument("--organization", default=DEFAULT_ORGANIZATION_ID, help="an organization id")
+    user.add_argument("--platform-admin", action="store_true")
+    for name, help_text in (
+        ("disable-user", "it cannot log in; all its sessions are revoked"),
+        ("enable-user", "it can log in again"),
+        ("reset-password", "a temporary password it must change; revokes its sessions"),
+        ("unlock-user", "clear a lockout after failed logins"),
+    ):
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("--username", required=True)
     issue = commands.add_parser("create-key", help="issue a key; it is printed once")
     issue.add_argument("--application", required=True)
     issue.add_argument("--label", required=True)
@@ -322,6 +386,33 @@ def main(argv: Sequence[str] | None = None, environ: dict[str, str] | None = Non
                 raise ValueError(f"no organization {args.organization!r}")
             store.set_organization_disabled(args.organization, disabled)
             _note(f"organization {args.organization!r} {'disabled' if disabled else 'enabled'}")
+        elif args.command == "create-user":
+            accounts = _accounts(connection, store, env)
+            new_user = accounts.create_user(
+                args.username,
+                _new_password(read_password),
+                args.organization,
+                platform_admin=args.platform_admin,
+            )
+            role = " (platform_admin)" if new_user.platform_admin else ""
+            where = new_user.organization_id
+            _note(f"created user {new_user.username!r}{role} in organization {where!r}")
+        elif args.command == "disable-user":
+            revoked = _accounts(connection, store, env).disable_user(args.username)
+            _note(f"disabled user {args.username!r}; revoked {revoked} session(s)")
+        elif args.command == "enable-user":
+            _accounts(connection, store, env).enable_user(args.username)
+            _note(f"enabled user {args.username!r}")
+        elif args.command == "reset-password":
+            accounts = _accounts(connection, store, env)
+            revoked = accounts.reset_password(args.username, _new_password(read_password))
+            _note(
+                f"reset the password of {args.username!r}: it must be changed at the next "
+                f"login; revoked {revoked} session(s)"
+            )
+        elif args.command == "unlock-user":
+            _accounts(connection, store, env).unlock_user(args.username)
+            _note(f"unlocked user {args.username!r}")
         elif args.command == "organization-usage":
             _organization_usage(connection, store, args.organization)
         elif args.command == "list-applications":
@@ -372,7 +463,7 @@ def main(argv: Sequence[str] | None = None, environ: dict[str, str] | None = Non
             if isinstance(sys.stdout, io.TextIOWrapper):
                 sys.stdout.reconfigure(newline="\n")
             print(issued.key)
-    except (ValueError, KeyError, FileExistsError) as exc:
+    except (ValueError, KeyError, FileExistsError, PasswordPolicyError) as exc:
         _note(f"error: {exc}")
         return 1
     finally:

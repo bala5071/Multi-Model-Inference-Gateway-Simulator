@@ -45,6 +45,8 @@ LOCAL_ONLY_PATHS = (
     "/v1/control",
     "/v1/playground",
     "/dashboard",
+    # Console login (docs/27): a session is only ever made on this machine until A8.
+    "/v1/auth",
 )
 FORWARDING_HEADERS = (b"forwarded", b"x-forwarded-for", b"x-real-ip")
 DEFAULT_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]"})

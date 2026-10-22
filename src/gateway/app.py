@@ -12,9 +12,11 @@ import asyncio
 import dataclasses
 import itertools
 import json
+import logging
 import math
 import os
 import secrets
+import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -35,9 +37,31 @@ from gateway.apikeys import (
 )
 from gateway.applications import (
     Application,
+    ApplicationStore,
     InMemoryApplicationStore,
     SqliteApplicationStore,
     seed_demo_applications,
+)
+from gateway.audit import AuditLog
+from gateway.auth import (
+    ADMIN_PASSWORD_ENV,
+    ADMIN_USERNAME_ENV,
+    COOKIE_SECURE_ENV,
+    CSRF_HEADER,
+    LOGIN_FAILED_MESSAGE,
+    SESSION_COOKIE,
+    AccountAccess,
+    AccountService,
+    BootstrapOutcome,
+    CsrfError,
+    CurrentPasswordIncorrectError,
+    LoginFailedError,
+    PasswordUnchangedError,
+    SessionContext,
+    SessionInvalidError,
+    audit_retention_ms,
+    run_account_retention,
+    session_cookie,
 )
 from gateway.backend_config import build_llamacpp_registry, load_backend_config
 from gateway.backends import BackendError
@@ -60,6 +84,15 @@ from gateway.overload import (
     pick_downgrade,
     run_with_timeout,
 )
+from gateway.passwords import (
+    MAX_LENGTH,
+    PRODUCTION,
+    PasswordHasher,
+    PasswordPolicyError,
+    Passwords,
+    ThreadHashRunner,
+    parameters_from,
+)
 from gateway.profiles import PROFILES, Tier, load_calibrated_profiles
 from gateway.ratelimit import RateLimitedError, RequestRateLimiter
 from gateway.registry import ModelRegistry, UnknownModelError
@@ -67,6 +100,7 @@ from gateway.routing import ModelNotAllowedError, Quality, Router, load_plans, p
 from gateway.schema import GenerateRequest, RequestResult
 from gateway.timeseries import TimeSeriesStore
 from gateway.usage import SqliteUsageStore, UsageStore
+from gateway.users import AccountStore
 from gateway.workload import PlannedRequest
 
 # How often /v1/monitor/stream pushes a snapshot, on the injected clock.
@@ -317,6 +351,146 @@ def _error(
     )
 
 
+class LoginBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(max_length=256)
+    password: str = Field(max_length=MAX_LENGTH)
+
+
+class ChangePasswordBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: str = Field(max_length=MAX_LENGTH)
+    new_password: str = Field(max_length=MAX_LENGTH)
+
+
+class PasswordChangeRequiredError(Exception):
+    """A session whose password must be changed first, on any other endpoint."""
+
+
+# Answers carrying a session or its token must not be cached anywhere.
+_NO_STORE = {"Cache-Control": "no-store"}
+
+
+def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
+    """Console login under /v1/auth (docs/27). Added only when ``create_app`` is given
+    accounts; until the roles of step 5, a session reaches nothing else."""
+    service = accounts.service
+
+    def with_cookie(response: JSONResponse, value: str, *, clear: bool = False) -> JSONResponse:
+        response.headers.append(
+            "set-cookie", session_cookie(value, secure=accounts.cookie_secure, clear=clear)
+        )
+        return response
+
+    async def session(request: Request) -> SessionContext:
+        return service.authenticate(request.cookies.get(SESSION_COOKIE))
+
+    async def session_with_csrf(
+        context: SessionContext = Depends(session),
+        csrf: str | None = Header(default=None, alias=CSRF_HEADER),
+    ) -> SessionContext:
+        service.check_csrf(context, csrf)
+        return context
+
+    def user_view(context: SessionContext) -> dict[str, object]:
+        user = context.user
+        return {
+            "user_id": user.id,
+            "username": user.username,
+            "organization_id": user.organization_id,
+            "must_change_password": user.must_change_password,
+        }
+
+    @app.exception_handler(LoginFailedError)
+    async def login_failed(_: Request, exc: LoginFailedError) -> JSONResponse:
+        # One answer, byte for byte, for every refused login (docs/27).
+        return _error(401, "invalid_credentials", LOGIN_FAILED_MESSAGE, headers=_NO_STORE)
+
+    @app.exception_handler(SessionInvalidError)
+    async def session_invalid(_: Request, exc: SessionInvalidError) -> JSONResponse:
+        return _error(401, "session_required", "Log in first.", headers=_NO_STORE)
+
+    @app.exception_handler(CsrfError)
+    async def csrf_failed(_: Request, exc: CsrfError) -> JSONResponse:
+        return _error(
+            403,
+            "csrf_failed",
+            f"Send the session's CSRF token in {CSRF_HEADER} (login and /v1/auth/me give it).",
+        )
+
+    @app.exception_handler(PasswordChangeRequiredError)
+    async def change_required(_: Request, exc: PasswordChangeRequiredError) -> JSONResponse:
+        return _error(
+            403,
+            "password_change_required",
+            "Change the password first: POST /v1/auth/change-password.",
+        )
+
+    @app.exception_handler(CurrentPasswordIncorrectError)
+    async def wrong_current(_: Request, exc: CurrentPasswordIncorrectError) -> JSONResponse:
+        return _error(403, "current_password_incorrect", "The current password is not correct.")
+
+    @app.exception_handler(PasswordPolicyError)
+    async def rejected(_: Request, exc: PasswordPolicyError) -> JSONResponse:
+        return _error(400, "password_rejected", str(exc), problem=exc.problem.value)
+
+    @app.exception_handler(PasswordUnchangedError)
+    async def unchanged(_: Request, exc: PasswordUnchangedError) -> JSONResponse:
+        return _error(400, "password_rejected", str(exc), problem="same_as_current")
+
+    @app.post("/v1/auth/login")
+    async def login(body: LoginBody) -> JSONResponse:
+        # A session cookie sent with the request is ignored: every login makes a new session.
+        result = await service.login(body.username, body.password)
+        context = SessionContext(result.user, result.session, result.session_id)
+        response = JSONResponse(
+            {"user": user_view(context), "csrf_token": result.csrf_token}, headers=_NO_STORE
+        )
+        return with_cookie(response, result.session_id)
+
+    @app.post("/v1/auth/logout")
+    async def logout(context: SessionContext = Depends(session_with_csrf)) -> JSONResponse:
+        service.logout(context)
+        return with_cookie(JSONResponse({"logged_out": True}, headers=_NO_STORE), "", clear=True)
+
+    @app.get("/v1/auth/me")
+    async def me(context: SessionContext = Depends(session)) -> JSONResponse:
+        return JSONResponse(
+            {"user": user_view(context), "csrf_token": service.csrf_token(context)},
+            headers=_NO_STORE,
+        )
+
+    @app.post("/v1/auth/change-password")
+    async def change_password(
+        body: ChangePasswordBody, context: SessionContext = Depends(session_with_csrf)
+    ) -> JSONResponse:
+        revoked = await service.change_password(context, body.current_password, body.new_password)
+        return JSONResponse({"changed": True, "sessions_revoked": revoked}, headers=_NO_STORE)
+
+    @app.get("/v1/auth/sessions")
+    async def sessions(context: SessionContext = Depends(session)) -> JSONResponse:
+        if context.user.must_change_password:
+            raise PasswordChangeRequiredError()
+        live = service.live_sessions(context)
+        return JSONResponse(
+            {
+                "sessions": [
+                    {
+                        "handle": s.handle,
+                        "created_at_ms": s.created_at_ms,
+                        "last_seen_at_ms": s.last_seen_at_ms,
+                        "expires_at_ms": s.expires_at_ms,
+                        "current": s.id_hash == context.session.id_hash,
+                    }
+                    for s in live
+                ]
+            },
+            headers=_NO_STORE,
+        )
+
+
 def create_app(
     registry: ModelRegistry,
     clock: Clock,
@@ -335,6 +509,7 @@ def create_app(
     usage_retention_ms: float | None = None,
     playground_keys: bool = False,
     local_only: LocalOnlyPolicy | None = None,
+    accounts: AccountAccess | None = None,
 ) -> FastAPI:
     """Build the API around an already wired registry.
 
@@ -427,9 +602,16 @@ def create_app(
             if ledger.retention_ms is not None
             else None
         )
+        account_retention = (
+            asyncio.create_task(run_account_retention(accounts.service, clock))
+            if accounts is not None
+            else None
+        )
         yield
         if retention is not None:
             retention.cancel()
+        if account_retention is not None:
+            account_retention.cancel()
         if load is not None:
             await load.stop()
         await registry.aclose()
@@ -439,6 +621,9 @@ def create_app(
     app = FastAPI(title="Cost-aware multi-model inference gateway", lifespan=lifespan)
     if local_only is not None:
         app.add_middleware(LocalOnlyMiddleware, policy=local_only)
+    if accounts is not None:
+        app.state.accounts = accounts
+        _auth_routes(app, accounts)
     app.state.slo_monitor = monitor
     app.state.monitoring = monitoring
     app.state.clock = clock
@@ -1240,6 +1425,42 @@ def create_simulated_live_app(
     )
 
 
+def build_accounts(
+    connection: sqlite3.Connection,
+    organizations: ApplicationStore,
+    clock: Clock,
+    epoch: EpochSource,
+    pepper: bytes,
+    environ: Mapping[str, str],
+) -> AccountAccess:
+    """Console accounts for the default server (docs/27): argon2id at the configured
+    parameters on a 2-thread runner, the audit log and its retention, the bootstrap admin
+    from the environment (or ``BootstrapError`` if there is no admin and no way to make one),
+    and the cookie's ``Secure`` flag from ``GATEWAY_COOKIE_SECURE``."""
+    passwords = Passwords(
+        PasswordHasher(parameters_from(environ, PRODUCTION)), ThreadHashRunner(max_workers=2)
+    )
+    service = AccountService(
+        AccountStore(connection),
+        AuditLog(connection),
+        passwords,
+        organizations=organizations,
+        clock=clock,
+        epoch=epoch,
+        secret=pepper,
+        audit_retention_ms=audit_retention_ms(environ),
+    )
+    if service.bootstrap_admin(environ) is BootstrapOutcome.EXISTS_WITH_VARIABLES:
+        still_set = [name for name in (ADMIN_USERNAME_ENV, ADMIN_PASSWORD_ENV) if name in environ]
+        logging.getLogger("gateway").warning(
+            "A platform_admin exists, so %s %s ignored; remove %s from the environment.",
+            " and ".join(still_set),
+            "is" if len(still_set) == 1 else "are",
+            "it" if len(still_set) == 1 else "them",
+        )
+    return AccountAccess(service, cookie_secure=environ.get(COOKIE_SECURE_ENV) == "1")
+
+
 def create_default_app() -> FastAPI:
     """The production wiring: real time, continuous batching, prefix caches, simulated
     models, chunked prefill, application plans, and overload protection.
@@ -1315,6 +1536,12 @@ def create_default_app() -> FastAPI:
     access = ApplicationAccess(
         ApiKeyService(SqliteApplicationStore(database), pepper, epoch), templates
     )
+    try:
+        accounts = build_accounts(database, access.store, clock, epoch, pepper, os.environ)
+    except BaseException:
+        database.close()
+        lock.release()
+        raise
     retention_ms = usage_retention_ms(os.environ)
     backends_path = os.environ.get("GATEWAY_BACKENDS")
     backends = load_backend_config(
@@ -1336,6 +1563,7 @@ def create_default_app() -> FastAPI:
         registry,
         clock,
         applications=access,
+        accounts=accounts,
         usage_store=SqliteUsageStore(database),
         epoch=epoch,
         usage_retention_ms=retention_ms,

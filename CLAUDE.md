@@ -81,6 +81,19 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `SimClock`: no await, so simulated time cannot move) and `ThreadHashRunner` (for the server:
   a pool of 2, the loop keeps serving), `Passwords`, and `PasswordPolicy` with the bundled
   blocklist in `data/` (public data, MIT, recorded in `docs/licenses.md`) (exists)
+- `users.py` — `normalize_username` (case-folded ASCII, 3 to 64), `User`, `Session` (only
+  digests), `AccountStore` over migrations 5 and 6 (exists)
+- `auth.py` — `AccountService`: creating users (`membership_decision`, the policy), the
+  bootstrap admin from `GATEWAY_ADMIN_USERNAME`/`GATEWAY_ADMIN_PASSWORD`, login with the same
+  steps for every refusal (one lookup, one verify against the stored or a dummy hash), the
+  database lockout and the in-memory `LoginLimiter`, sessions (30 min idle, 12 h, `last_seen`
+  at most once a minute), CSRF (an HMAC of the session id under a derived key), password
+  change, retention;
+  `AccountAccess` is what `create_app` takes for `/v1/auth` (exists)
+- `keyderivation.py` — `derive_key(pepper, KeyPurpose)`: one key per purpose (CSRF tokens, the
+  login limiter), each with its own label; API key HMACs keep the pepper itself (exists)
+- `audit.py` — `AuditEvent` through a field allowlist, `AuditLog` with the per-minute cap on
+  unknown-user rows and retention (exists)
 - `localonly.py` — `LocalOnlyMiddleware`: monitoring, metrics, overload, load control, the
   Playground and the dashboard are served only to loopback peers (and `GATEWAY_LOCAL_NETWORKS`),
   never through forwarding headers, only for allowed Host names, never cross-site; until A8.
@@ -101,7 +114,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `api_keys`, 3 an index for retention, 4 `organizations` and a required
   `applications.organization_id` (a table rebuild: the runner turns foreign keys off around
   it and checks them; `plan_migrations` previews without writing; the server refuses a
-  rebuild on a database with data, `scripts/manage.py migrate` backs up first). The default database is in the user's data folder,
+  rebuild on a database with data, `scripts/manage.py migrate` backs up first); 5 `users`, 6
+  `sessions`, 7 `audit_log`. The default database is in the user's data folder,
   owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
   `restore_database` use SQLite's backup API (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),
@@ -167,6 +181,10 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   together; the numbers in `docs/24-password-hashing.md` (exists)
 - `benchmarks/usage_retention.py` — times pruning old usage events in batches and in one
   go; the numbers in `docs/21-persistence.md` (exists)
+- `benchmarks/login.py` — logins on the running server: one, 8 at once, and failed logins for
+  known and unknown usernames; the numbers in `docs/24` and `docs/27` (exists)
+- `benchmarks/session_checks.py` — a session check with and without the `last_seen_at`
+  write; the numbers in `docs/27` (exists)
 - `benchmarks/key_checks.py` — times a key check, and what writing `last_used_at` per
   request would add; the numbers in `docs/20-applications-api-keys.md` (exists)
 
@@ -213,7 +231,10 @@ the monitoring API (`docs/15`); it has no logic of its own about the gateway.
 `run_local_models.sh`, `manage.py` (creates organizations and applications and issues, rotates
 and revokes API keys: the only way to issue one; prints a new key once, never logs it; also
 `migrate` with `--dry-run` and a backup before a table rebuild, backup and restore), `readme_quickstart.py` (runs the README's quickstart blocks exactly as written and
-checks the result; a CI job, so the README cannot go stale), and `protected_outputs.py`, which checks the outputs that must not
+checks the result; a CI job, so the README cannot go stale), `check_characters.py` (a CI
+gate: tracked source, test, workflow and shell files are printable ASCII, with a short
+allowlist of typographic characters for the dashboard; write anything else as an escape),
+and `protected_outputs.py`, which checks the outputs that must not
 change against the sha256 sums in `scripts/protected_outputs.sha256` (a gate, like
 `perf_gate.py`). Anything that measures or compares results goes in `benchmarks/`.
 Never refresh that baseline to make a failure pass; the README says how to refresh it.
@@ -293,6 +314,7 @@ uv run mypy                  # type check
 uv run pytest                # tests
 uv run python scripts/perf_gate.py   # performance gate
 uv run python scripts/protected_outputs.py  # protected outputs unchanged
+uv run python scripts/check_characters.py   # tracked code is printable ASCII
 uv run python scripts/readme_quickstart.py  # the README quickstart still works (port 8000 free)
 uv run python -m benchmarks.report   # regenerate docs/REPORT.md
 ```

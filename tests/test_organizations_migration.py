@@ -184,7 +184,7 @@ def test_a_realistic_database_keeps_every_key_and_every_event_exactly(
     assert len(before[events]) == 5000
     assert len(before[keys]) == 36
 
-    assert MigrationRunner(v3, MIGRATIONS, _epoch()).migrate() == (4,)
+    assert MigrationRunner(v3, MIGRATIONS, _epoch()).migrate(4) == (4,)
 
     for query, rows in before.items():
         after = _rows(v3, query)
@@ -279,7 +279,7 @@ def test_the_default_organization_is_made_even_with_no_applications(
     connection = open_database(tmp_path / "new.db")
     clock = SimClock()
     runner = MigrationRunner(connection, MIGRATIONS, ClockEpoch(clock, origin_ms=NOW_MS))
-    assert runner.migrate() == (1, 2, 3, 4)
+    assert runner.migrate() == (1, 2, 3, 4, 5, 6, 7)
     assert runner.migrate() == ()  # idempotent
     [(org_id, name, kind, created, disabled)] = _rows(connection, "SELECT * FROM organizations")
     applied = _rows(connection, "SELECT applied_at_ms FROM schema_migrations WHERE version = 4")
@@ -297,7 +297,7 @@ def test_apply_reverse_and_apply_again(v3: sqlite3.Connection) -> None:
     rows = _rows(v3, f"SELECT {V3_APP_COLUMNS} FROM applications ORDER BY rowid")
     runner = MigrationRunner(v3, MIGRATIONS, _epoch())
 
-    assert runner.migrate() == (4,)
+    assert runner.migrate(4) == (4,)
     assert runner.rollback(3) == (4,)
     assert {t: _table_info(v3, t) for t in original} == original
     assert _rows(v3, f"SELECT {V3_APP_COLUMNS} FROM applications ORDER BY rowid") == rows
@@ -307,8 +307,8 @@ def test_apply_reverse_and_apply_again(v3: sqlite3.Connection) -> None:
     tables = {r[0] for r in _rows(v3, "SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert "organizations" not in tables
 
-    assert runner.migrate() == (4,)
-    assert runner.migrate() == ()
+    assert runner.migrate(4) == (4,)
+    assert runner.migrate(4) == ()
     assert _rows(v3, "SELECT id, organization_id FROM applications ORDER BY rowid") == [
         ("initech", "default"),
         ("acme", "default"),
@@ -363,7 +363,7 @@ def test_duplicate_names_make_the_migration_refuse_naming_them(v3: sqlite3.Conne
     # Renaming one of each is the fix.
     v3.execute("UPDATE applications SET name = 'Shop B' WHERE id = 'shop-b'")
     v3.execute("UPDATE applications SET name = 'Tools 2' WHERE id = 't2'")
-    assert runner.migrate() == (4,)
+    assert runner.migrate(4) == (4,)
 
 
 # --- the plan, read-only --------------------------------------------------------------------
@@ -381,9 +381,9 @@ def test_the_plan_reports_changes_and_conflicts_without_writing(tmp_path: Path) 
     plan = plan_migrations(readonly, MIGRATIONS)
     readonly.close()
     assert plan.current_version == 3
-    assert [m.version for m, _ in plan.pending] == [4]
+    assert [m.version for m, _ in plan.pending] == [4, 5, 6, 7]
     assert plan.rebuilds_tables
-    [(_, preview)] = plan.pending
+    preview = plan.pending[0][1]
     assert any("2 application(s) into 'default'" in c for c in preview.changes)
     assert plan.conflicts == (
         "application name 'Shop' is used by a, b: names must be unique within an organization, "
@@ -393,7 +393,7 @@ def test_the_plan_reports_changes_and_conflicts_without_writing(tmp_path: Path) 
 
     empty = sqlite3.connect(":memory:")
     fresh = plan_migrations(empty, MIGRATIONS)
-    assert (fresh.current_version, len(fresh.pending), fresh.conflicts) == (0, 4, ())
+    assert (fresh.current_version, len(fresh.pending), fresh.conflicts) == (0, 7, ())
     assert _rows(empty, "SELECT name FROM sqlite_master") == []  # nothing created
     empty.close()
 
