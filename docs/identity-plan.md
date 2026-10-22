@@ -1,6 +1,7 @@
 # Platform plan, A2: identity and authorization
 
-Status: approved 2026-10-22, with the answers and additions folded in below. No code has
+Status: approved 2026-10-22, with the answers and additions folded in below; amended the same
+day (browser-based attacks, Docker, running uvicorn directly, `docs/licenses.md`). No code has
 changed yet; this note is the plan for the `platform/identity` branch. Each step in section 13
 is its own pull request, ships with tests and a design note (`docs/24-*` onwards), and runs
 ruff, mypy, the full suite, the frontend checks, e2e and the protected outputs.
@@ -28,6 +29,12 @@ the alternative was.
 
 A test reads `importlib.metadata` for every runtime dependency and fails on a license that is
 not on the allowlist in `docs/licenses.md`.
+
+`docs/licenses.md` records, for each library, the exact version pinned, its license, why it is
+needed and the alternative considered (as in the table). For the blocklist it records the
+source URL, the commit it was taken from, the license and the attribution, and marks it as
+**public data under the rule 7 exemption** (CLAUDE.md): a public dataset with its license
+attribution, not request traffic and not user data.
 
 ## 2. Slow hashing without moving simulated time
 
@@ -170,28 +177,75 @@ written. platform_admin reads all of it; org_admin reads their organization's.
 ## 10. Monitoring and load control until A8
 
 They stay without user authentication until the A8 role-based monitoring step. Until then they
-are **local only**, enforced in the gateway and not just by how it is started:
+are **local only**, enforced inside the gateway, not only by how it is started. The endpoints
+concerned: `/v1/monitor/*`, `/metrics`, `/metrics/summary`, `/v1/overload`, `/v1/control/*`
+and the dashboard. The checks are an ASGI middleware in the app itself, so they hold however
+the app is served.
 
-- **The socket peer address only.** A request to `/v1/monitor/*`, `/metrics`,
-  `/metrics/summary`, `/v1/overload`, `/v1/control/*` or the dashboard is refused (403
-  `local_only`) unless its peer address is loopback. Forwarded headers are never trusted:
-  uvicorn, which by default rewrites the client address from `X-Forwarded-For` when the peer
-  is `127.0.0.1`, is run with proxy headers off, and a request that carries any forwarding
-  header (`Forwarded`, `X-Forwarded-For`, `X-Real-IP`) is refused on these endpoints, because
-  its client address may have been rewritten.
-- **An opt-in for the Docker bridge network:** `GATEWAY_LOCAL_NETWORKS` (for example
-  `172.16.0.0/12`) adds networks counted as local. `docker-compose.yml` sets it, because the
-  host's requests reach the container from the bridge gateway, and the compose file publishes
-  on `127.0.0.1` only.
-- **Startup check:** a small launcher, `python -m gateway.serve`, starts uvicorn with proxy
-  headers off and **refuses to bind a non-loopback address** while these endpoints are
-  unauthenticated, unless `GATEWAY_ALLOW_NETWORK_BIND=1` (set in the Docker image, which must
-  bind `0.0.0.0` inside the container), in which case it prints a warning naming the open
-  endpoints. The README, the Makefile and the Dockerfile switch to the launcher.
-- **Both are tested:** loopback allowed, a non-loopback peer refused, forwarding headers
-  refused, the Docker network allowed only when opted in, the launcher refusing and warning;
-  and CI's docker job still serves the dashboard through the published port.
-- Load control stays off by default.
+### The socket peer address
+
+- A request is refused (403 `local_only`) unless its peer address is loopback: `127.0.0.0/8`,
+  `::1`, or IPv4-mapped IPv6 loopback (`::ffff:127.0.0.1`).
+- **Forwarded headers are never trusted.** A request to these endpoints that carries any of
+  `Forwarded`, `X-Forwarded-For` or `X-Real-IP` is refused, because its client address may
+  have been rewritten by a proxy.
+- **Running uvicorn directly stays safe.** By default uvicorn rewrites the client address from
+  `X-Forwarded-For` when the peer is `127.0.0.1`. The launcher turns that off, but the
+  forwarded-header refusal does not depend on it: a test serves the app through uvicorn's own
+  proxy-headers middleware, as plain `uvicorn gateway.app:create_default_app --factory` does,
+  and checks that the peer check and the refusal still hold.
+
+### Browser-based attacks on the localhost server
+
+A page in the user's browser can make requests to `127.0.0.1`, and DNS rebinding can make a
+hostile name resolve there. So, on these endpoints:
+
+- **Host allowlist.** The `Host` header must be `localhost`, `127.0.0.1` or `[::1]` (any port),
+  or a name listed in `GATEWAY_ALLOWED_HOSTS`. Anything else is refused (403
+  `host_not_allowed`): a rebound name such as `attacker.example` never matches.
+- **Origin check.** A state-changing request (POST, PUT, PATCH, DELETE) that carries an
+  `Origin` header is refused unless the origin's host is on the same allowlist.
+- **No `text/plain` bodies.** A state-changing request must send `application/json`;
+  `text/plain`, `application/x-www-form-urlencoded` and `multipart/form-data`, the content
+  types a cross-site page can send without a CORS preflight, are refused (415).
+- Tests: a DNS-rebinding request (allowed peer, `Host: attacker.example`) refused; a
+  cross-site request (`Origin: https://attacker.example`, `text/plain` body) refused; the same
+  request from the dashboard's own origin accepted.
+
+### Docker
+
+- **Behind Docker Desktop or NAT, the peer address cannot tell a local client from a remote
+  one:** every request reaches the container from the bridge gateway's address. Inside the
+  container, the protection is therefore **publishing the port on `127.0.0.1` only**, not the
+  peer check.
+- `GATEWAY_LOCAL_NETWORKS` (for example `172.16.0.0/12`) adds networks counted as local. It is
+  documented as **trusting the published binding**: setting it says "only this machine can
+  reach this network", which holds only while the port is published on loopback.
+  `docker-compose.yml` sets it.
+- **CI asserts the compose service publishes only on loopback**, from
+  `docker compose config` (every published port's `host_ip` is `127.0.0.1`) and from
+  `docker compose port` on the running demo; the docker job still serves the dashboard through
+  the published port.
+
+### Startup check
+
+- A small launcher, `python -m gateway.serve`, starts uvicorn with proxy headers off and
+  **refuses to bind a non-loopback address** while these endpoints are unauthenticated, unless
+  `GATEWAY_ALLOW_NETWORK_BIND=1`; then it starts and prints a warning naming the open
+  endpoints. The Docker image sets the opt-in, because it must bind `0.0.0.0` inside the
+  container, and is published on `127.0.0.1` only.
+- In step 2, the README quickstart, the Makefile and the Dockerfile switch to
+  `python -m gateway.serve`, and the readme-quickstart CI job keeps running the README's
+  commands literally, and passing.
+
+### Tests for this section
+
+Loopback allowed for `127.0.0.1`, another `127.x` address, `::1` and `::ffff:127.0.0.1`; a
+non-loopback peer refused; each of `X-Forwarded-For`, `Forwarded` and `X-Real-IP` refused on
+its own; the same through uvicorn's proxy-headers middleware; the Host allowlist, including
+DNS rebinding; the Origin check and the content-type rule, including a cross-site request; the
+Docker networks allowed only when opted in; the launcher refusing and warning. Load control
+stays off by default.
 
 ## 11. Tests
 
@@ -201,7 +255,8 @@ denied; individual organizations refusing a second member; lockout, unlock and s
 first use; password change revoking other sessions; a new session id at each login; tokens
 rejected when expired, not yet valid, wrongly signed, signed by an unknown `kid`, with
 `alg=none`, or HS256 using the public key as the secret; the route-declaration test; no
-simulated time passing during a login; the local-only guard and the launcher; the license test;
+simulated time passing during a login; the local-only guard, the browser-attack checks and the launcher (section 10); the
+compose file publishing only on loopback (CI); the license test;
 and a scan, with a planted control, proving no password, token, session id or CSRF token
 appears in logs, error bodies, audit entries, the database or test output.
 
@@ -214,7 +269,12 @@ limits per source address; **the lockout can be abused to lock a known username 
 token revocation before expiry (roles and disabling take up to 5 minutes for tokens); secrets
 in the process environment; a stolen database gives argon2 hashes, key HMACs and the audit
 log; timing side channels not measured; one process per database; no breached-password check
-beyond the bundled blocklist.
+beyond the bundled blocklist. For the local-only endpoints it states what the checks of
+section 10 do and do not cover: browser-based attacks (cross-site requests, DNS rebinding) are
+handled by the Host allowlist, the Origin check and the content-type rule, but any process
+running on the same machine can still read monitoring and use load control; and behind Docker
+Desktop or NAT the peer address cannot tell local from remote, so there the only protection is
+publishing on `127.0.0.1`.
 
 ## 13. Order
 
@@ -222,7 +282,9 @@ Each step is its own pull request and stops for review.
 
 1. Dependencies, `docs/licenses.md` and the license test; the hashing module with both
    runners, the password policy and blocklist; the measured hash time.
-2. The local-only guard for monitoring and control, and the launcher (section 10).
+2. The local-only guard for monitoring and control (peer address, forwarded headers, Host
+   allowlist, Origin, content type), the launcher, the README, Makefile and Dockerfile on the
+   launcher, and the CI check that compose publishes only on loopback (section 10).
 3. Organizations: migration 4 and the backfill; individual and business rules.
 4. Users, the one-time bootstrap admin, login, lockout, sessions, CSRF, password change,
    `must_change_password`, the CLI (`create-user`, `reset-password`, `unlock-user`), and the
