@@ -1,0 +1,11 @@
+# Line endings: every text file is stored and checked out with LF, on every platform
+# (Prettier, the protected-output hashes and the shell scripts all expect LF).
+* text=auto eol=lf
+*.sh text eol=lf
+
+# Binary: never converted, never diffed as text.
+*.png binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

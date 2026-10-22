@@ -23,6 +23,12 @@ services:
       - path: gateway.env
         required: false
     environment:
+      # Requests from the host reach the container from the Docker bridge network, which the
+      # gateway's local-only endpoints (monitoring, load control, the dashboard) then count
+      # as local. That is only true because the port is published on 127.0.0.1 above: this
+      # setting trusts that binding (docs/25-local-only.md).
+      GATEWAY_LOCAL_NETWORKS: "172.16.0.0/12"
+
       GATEWAY_SIMULATED_LIVE: "1"
       # Simulated seconds per real second: 1, 5 or 20. The dashboard can change it.
       GATEWAY_SIM_SPEED: "5"

@@ -24,7 +24,7 @@ UPDATE_ENV = "GATEWAY_UPDATE_FIXTURES"
 
 
 def _client(app: Any) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway")
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost")
 
 
 # --- /dashboard ----------------------------------------------------------------------------

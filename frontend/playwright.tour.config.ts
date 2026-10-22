@@ -20,7 +20,7 @@ export default defineConfig({
     trace: "off",
   },
   webServer: {
-    command: `uv run uvicorn gateway.app:create_default_app --factory --port ${PORT} --log-level warning`,
+    command: `uv run python -m gateway.serve --port ${PORT} --log-level warning`,
     cwd: "..",
     env: {
       GATEWAY_SIMULATED_LIVE: "1",

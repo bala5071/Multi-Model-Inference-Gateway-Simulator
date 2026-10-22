@@ -21,6 +21,7 @@ from benchmarks import (
     loadgen,
     metrics_example,
     overload,
+    password_hashing,
     report,
     usage_retention,
     usage_store_writes,
@@ -108,6 +109,19 @@ def test_key_check_benchmark_times_checks_and_last_used_writes(
     ]
     assert "gwk_" not in out  # its throwaway keys are never printed
     assert list(tmp_path.iterdir()) == []
+
+
+def test_password_hashing_benchmark_compares_settings(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    password_hashing.main(
+        ["--repeats", "1", "--together", "2", "--setting", "64,1,1", "--setting", "128,1,1"]
+    )
+    out = capsys.readouterr().out
+    assert out.startswith("MEASURED on this machine")
+    rows = [line.split() for line in out.splitlines() if "|" in line and line.strip()[0].isdigit()]
+    assert [(r[0], r[1], r[2]) for r in rows] == [("0", "1", "1"), ("0", "1", "1")]
+    assert "peak MiB is above the process's use before any hashing" in out
 
 
 def test_retention_benchmark_times_batched_and_unbatched_pruning(

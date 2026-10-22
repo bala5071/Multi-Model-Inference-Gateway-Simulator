@@ -238,6 +238,9 @@ hostile name resolve there. So, on these endpoints:
   `python -m gateway.serve`, and the readme-quickstart CI job keeps running the README's
   commands literally, and passing.
 
+Done in step 2 (note 25). `/v1/playground` is also local-only: it sends requests as an
+application with keys the server holds.
+
 ### Tests for this section
 
 Loopback allowed for `127.0.0.1`, another `127.x` address, `::1` and `::ffff:127.0.0.1`; a
@@ -268,8 +271,11 @@ control (local only, not authenticated, until A8); no TLS; no multi-factor authe
 limits per source address; **the lockout can be abused to lock a known username out**; no
 token revocation before expiry (roles and disabling take up to 5 minutes for tokens); secrets
 in the process environment; a stolen database gives argon2 hashes, key HMACs and the audit
-log; timing side channels not measured; one process per database; no breached-password check
-beyond the bundled blocklist. For the local-only endpoints it states what the checks of
+log; timing side channels not measured; one process per database; **no breached-password
+lookup** (checking a password against Have I Been Pwned or similar would send something
+derived from it to a third party, so only the bundled blocklist is used); **two hashing
+threads bound login throughput**, so a flood of logins can delay legitimate ones (logins are
+limited per username; limits per source address wait for A8). For the local-only endpoints it states what the checks of
 section 10 do and do not cover: browser-based attacks (cross-site requests, DNS rebinding) are
 handled by the Host allowlist, the Origin check and the content-type rule, but any process
 running on the same machine can still read monitoring and use load control; and behind Docker

@@ -47,6 +47,7 @@ from gateway.database import ProcessLock, database_path, open_database
 from gateway.events import EventBus
 from gateway.ledger import BudgetExceededError, CostLedger, ModelUsage, run_retention
 from gateway.loadcontrol import PRESETS, LoadController, UnknownPresetError
+from gateway.localonly import LocalOnlyMiddleware, LocalOnlyPolicy, policy_from
 from gateway.metrics import Distribution, MetricsStore
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.monitoring import Monitor, Snapshot, render_prometheus
@@ -333,6 +334,7 @@ def create_app(
     epoch: EpochSource | None = None,
     usage_retention_ms: float | None = None,
     playground_keys: bool = False,
+    local_only: LocalOnlyPolicy | None = None,
 ) -> FastAPI:
     """Build the API around an already wired registry.
 
@@ -346,6 +348,10 @@ def create_app(
     application's plan, limits and budget, and charged to it. Without ``applications``
     there are no keys and no applications: any model may be used and nothing is charged,
     and the request path has no code for any of it.
+
+    ``local_only`` keeps monitoring, metrics, the overload view, load control, the
+    Playground and the dashboard to this machine (``gateway.localonly``, docs/25). Both server
+    factories always set it; tests that build an app directly set it when they test it.
 
     ``playground_keys`` (simulated live mode only; needs an in-memory application store)
     issues one throwaway key per application at startup, kept in memory, and serves
@@ -431,6 +437,8 @@ def create_app(
             applications.keys.flush_last_used()
 
     app = FastAPI(title="Cost-aware multi-model inference gateway", lifespan=lifespan)
+    if local_only is not None:
+        app.add_middleware(LocalOnlyMiddleware, policy=local_only)
     app.state.slo_monitor = monitor
     app.state.monitoring = monitoring
     app.state.clock = clock
@@ -1192,6 +1200,7 @@ def create_simulated_live_app(
     preset: str = "steady",
     wait: Callable[[float], Awaitable[None]] | None = None,
     dashboard_dir: Path | None = DASHBOARD_DIR,
+    local_only: LocalOnlyPolicy | None = None,
 ) -> FastAPI:
     """Simulated live mode: the default simulated wiring on a paced simulation clock.
 
@@ -1199,6 +1208,7 @@ def create_simulated_live_app(
     started with ``seed`` as the server starts. Every latency, event and timestamp is then
     simulated time: the same seed gives the same sequence on any machine, at any speed.
     Nothing here measures a real model. ``wait`` replaces the real waiting, for tests.
+    ``local_only`` defaults to the plain loopback policy (``gateway.localonly``).
     """
     if preset not in PRESETS:
         raise UnknownPresetError(preset, tuple(PRESETS))
@@ -1221,6 +1231,7 @@ def create_simulated_live_app(
         clock,
         applications=ApplicationAccess(keys, templates),
         playground_keys=True,
+        local_only=local_only if local_only is not None else LocalOnlyPolicy(),
         overload=DEFAULT_OVERLOAD,
         dashboard_dir=dashboard_dir,
         load_control=True,
@@ -1271,7 +1282,10 @@ def create_default_app() -> FastAPI:
         if speed not in SIMULATION_SPEEDS:
             raise ValueError("GATEWAY_SIM_SPEED must be 1, 5 or 20")
         return create_simulated_live_app(
-            seed=seed, speed=speed, preset=os.environ.get("GATEWAY_SIM_PRESET", "steady")
+            seed=seed,
+            speed=speed,
+            preset=os.environ.get("GATEWAY_SIM_PRESET", "steady"),
+            local_only=policy_from(os.environ),
         )
     clock = WallClock()
     # Before anything else: without the pepper no key can be checked.
@@ -1315,6 +1329,7 @@ def create_default_app() -> FastAPI:
         dashboard_dir=DASHBOARD_DIR,
         load_control=os.environ.get("GATEWAY_LOAD_CONTROL") == "1",
         seed=seed,
+        local_only=policy_from(os.environ),
     )
     # Held for the life of the process; released when it exits, however it exits.
     app.state.database_lock = lock

@@ -60,3 +60,23 @@ def test_the_example_env_file_has_placeholders_only() -> None:
 def test_secrets_and_databases_stay_out_of_the_build_context() -> None:
     ignored = set(_active_lines(REPO / ".dockerignore"))
     assert {"gateway.env", "*.db", "*.db-*", "*.sqlite3"} <= ignored
+
+
+def test_the_image_starts_through_the_launcher_with_the_network_bind_opt_in() -> None:
+    active = _active_lines(REPO / "Dockerfile")
+    assert "ENV GATEWAY_ALLOW_NETWORK_BIND=1" in active
+    [command] = [line for line in active if line.startswith("CMD")]
+    assert '"-m", "gateway.serve"' in command
+    assert "uvicorn" not in command
+
+
+def test_compose_counts_only_the_docker_bridge_as_local() -> None:
+    environment = _compose()["services"]["gateway"]["environment"]
+    assert environment["GATEWAY_LOCAL_NETWORKS"] == "172.16.0.0/12"
+
+
+def test_every_launch_command_uses_the_launcher() -> None:
+    for name in ("README.md", "Makefile", "frontend/playwright.config.ts"):
+        text = (REPO / name).read_text(encoding="utf-8")
+        assert "uvicorn gateway.app:create_default_app" not in text, name
+        assert "gateway.serve" in text, name
