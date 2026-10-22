@@ -65,8 +65,14 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   applications), `load_plans`, and the `Router` that picks a model within an application's
   plan, by model name or by quality (exists)
 - `plans.yaml` — the packaged plan templates and demo applications; never keys (exists)
-- `applications.py` — `Application` (its own copy of a template's plan settings and limits),
-  `ApiKeyRecord`, the `ApplicationStore` protocol, in-memory and SQLite stores (exists)
+- `organizations.py` — `Organization`, `OrganizationKind` (`individual`, `business`),
+  `normalize_name` (NFC, exact comparison, no control or zero-width characters, at most 100),
+  and the pure `membership_decision` (an individual organization takes one member) that
+  step 4 wires into user creation (exists)
+- `applications.py` — `Application` (its own copy of a template's plan settings and limits,
+  and its `organization_id`), `ApiKeyRecord`, `KeyLookup` (key, application and organization
+  state in one query), the `ApplicationStore` protocol with organizations, in-memory and
+  SQLite stores; names unique within an organization (exists)
 - `apikeys.py` — `ApiKeyService`: issues keys (`gwk_<id>_<secret>`), stores only an HMAC
   with the pepper from `GATEWAY_KEY_PEPPER`, checks in constant time, rotates with a grace
   period, revokes, and batches `last_used_at`; `ApplicationAccess` is what `create_app`
@@ -92,7 +98,10 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   and `SqliteUsageStore`; store calls are synchronous and never awaited (exists)
 - `database.py` + `migrations/` — `open_database` (WAL, busy timeout, autocommit) and the
   versioned `MigrationRunner`; migration 1 is `usage_events`, 2 `applications` and
-  `api_keys`, 3 an index for retention. The default database is in the user's data folder,
+  `api_keys`, 3 an index for retention, 4 `organizations` and a required
+  `applications.organization_id` (a table rebuild: the runner turns foreign keys off around
+  it and checks them; `plan_migrations` previews without writing; the server refuses a
+  rebuild on a database with data, `scripts/manage.py migrate` backs up first). The default database is in the user's data folder,
   owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
   `restore_database` use SQLite's backup API (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),
@@ -201,9 +210,9 @@ the monitoring API (`docs/15`); it has no logic of its own about the gateway.
 
 `scripts/` holds operational entry points only: `perf_gate.py`, `demo.py`,
 `capture_demo.py` (retakes the dashboard pictures in `docs/img/`),
-`run_local_models.sh`, `manage.py` (creates applications and issues, rotates and revokes
-API keys: the only way to issue one; prints a new key once, never logs it; also backup and
-restore), `readme_quickstart.py` (runs the README's quickstart blocks exactly as written and
+`run_local_models.sh`, `manage.py` (creates organizations and applications and issues, rotates
+and revokes API keys: the only way to issue one; prints a new key once, never logs it; also
+`migrate` with `--dry-run` and a backup before a table rebuild, backup and restore), `readme_quickstart.py` (runs the README's quickstart blocks exactly as written and
 checks the result; a CI job, so the README cannot go stale), and `protected_outputs.py`, which checks the outputs that must not
 change against the sha256 sums in `scripts/protected_outputs.sha256` (a gate, like
 `perf_gate.py`). Anything that measures or compares results goes in `benchmarks/`.

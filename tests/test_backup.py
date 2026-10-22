@@ -79,7 +79,7 @@ def test_a_backup_restores_the_database_exactly_as_it_was(tmp_path: Path) -> Non
     other = ApiKeyService(store, b"a-different-pepper-of-enough-length!", ClockEpoch(SimClock()))
     with pytest.raises(InvalidApiKeyError):
         other.authenticate(key)
-    assert MigrationRunner(restored, MIGRATIONS, ClockEpoch(SimClock())).applied() == (1, 2, 3)
+    assert MigrationRunner(restored, MIGRATIONS, ClockEpoch(SimClock())).applied() == (1, 2, 3, 4)
     restored.close()
 
 

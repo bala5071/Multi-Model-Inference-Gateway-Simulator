@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,11 @@ from gateway.apikeys import PEPPER_ENV
 from helpers import TEST_PEPPER
 
 REAL_MODELS_ENV = "GATEWAY_REAL_MODELS"
+
+
+def pytest_report_header(config: pytest.Config) -> str:
+    """The SQLite the stores and migrations run on (it is whatever Python was built with)."""
+    return f"SQLite {sqlite3.sqlite_version} (Python's sqlite3 module)"
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

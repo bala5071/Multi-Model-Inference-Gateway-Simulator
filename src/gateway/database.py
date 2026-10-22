@@ -154,12 +154,18 @@ def backup_database(source: sqlite3.Connection, target: Path) -> None:
         copy.close()
 
 
+def _immutable_uri(path: Path) -> str:
+    return f"file:{path.as_posix()}?mode=ro&immutable=1"
+
+
 def check_backup(backup: Path) -> int:
     """Raise ``ValueError`` unless ``backup`` is an intact gateway database; return the
     number of migrations it has applied."""
     if not backup.is_file():
         raise ValueError(f"{backup} is not a file")
-    connection = sqlite3.connect(f"file:{backup.as_posix()}?mode=ro", uri=True)
+    # Immutable: a backup is a closed file (its log checkpointed when the copy closed), so
+    # SQLite reads it as it is and creates no -wal or -shm file beside it.
+    connection = sqlite3.connect(_immutable_uri(backup), uri=True)
     try:
         status = connection.execute("PRAGMA integrity_check").fetchone()[0]
         if status != "ok":
@@ -180,12 +186,14 @@ def restore_database(backup: Path, target: Path) -> None:
     Refuses while a gateway process holds ``target`` (its ``ProcessLock``): stop the server
     first. Checks the backup's integrity before touching the target, then copies it in
     through the backup API, so the target is replaced consistently, write-ahead log
-    included. The server migrates the restored database forward when it next starts.
+    included. A restored database that is behind is migrated forward by the server when it
+    next starts, except for a migration that rebuilds a table, which needs
+    ``scripts/manage.py migrate`` first (docs/26-organizations.md).
     """
     check_backup(backup)
     lock = ProcessLock(target)
     try:
-        source = sqlite3.connect(f"file:{backup.as_posix()}?mode=ro", uri=True)
+        source = sqlite3.connect(_immutable_uri(backup), uri=True)
         destination = open_database(target)
         try:
             source.backup(destination)

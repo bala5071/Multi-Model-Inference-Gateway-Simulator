@@ -25,6 +25,7 @@ from gateway.applications import (
     Application,
     ApplicationStore,
     InMemoryApplicationStore,
+    KeyLookup,
     SqliteApplicationStore,
     application_from_template,
     seed_demo_applications,
@@ -32,6 +33,7 @@ from gateway.applications import (
 from gateway.clock import ClockEpoch, SimClock
 from gateway.database import open_database
 from gateway.migrations import MIGRATIONS, MigrationRunner
+from gateway.organizations import new_organization
 from gateway.ratelimit import RateLimitedError, RequestRateLimiter
 from gateway.routing import load_plans
 from helpers import TEST_PEPPER
@@ -67,7 +69,9 @@ def test_applications_round_trip_in_creation_order(store: ApplicationStore) -> N
     assert [a.id for a in made] == ["initech", "globex", "acme"]
     assert store.list_applications() == made
     acme = store.get_application("acme")
-    assert acme == Application("acme", "Acme", templates.plans["enterprise"], None, None, 5.0)
+    assert acme == Application(
+        "acme", "Acme", templates.plans["enterprise"], None, None, 5.0, "default"
+    )
     assert store.get_application("nobody") is None
     # Seeding again creates nothing; a duplicate id is refused.
     assert seed_demo_applications(store, templates, created_at_ms=6.0) == []
@@ -99,14 +103,18 @@ def test_key_records_round_trip_and_change(store: ApplicationStore) -> None:
 
 def test_application_from_template_copies_the_plan_and_its_limits() -> None:
     templates = load_plans()
-    app = application_from_template("shop", "Shop", templates, "pro", created_at_ms=1.0)
+    app = application_from_template(
+        "shop", "Shop", templates, "pro", organization_id="default", created_at_ms=1.0
+    )
     assert (app.plan, app.max_tokens, app.requests_per_minute) == (
         templates.plans["pro"],
         None,
         None,
     )
     with pytest.raises(ValueError, match="unknown plan"):
-        application_from_template("shop", "Shop", templates, "platinum", created_at_ms=1.0)
+        application_from_template(
+            "shop", "Shop", templates, "platinum", organization_id="default", created_at_ms=1.0
+        )
 
 
 # --- issuing and checking keys ---------------------------------------------------------------
@@ -219,9 +227,18 @@ async def test_every_attempt_takes_the_same_steps_whatever_is_wrong_with_the_key
     """Structural, not a timing test: every attempt does one record lookup, one HMAC of the
     presented key and one constant-time comparison of two 64-character digests, in that
     order, whether the key is valid, has a wrong secret, an unknown id, is malformed,
-    revoked or expired. What timing differences remain was not measured (docs/20)."""
+    revoked or expired, or belongs to a disabled organization. What timing differences
+    remain was not measured (docs/20)."""
     clock = SimClock()
     keys = _service(store, clock)
+    store.add_organization(new_organization("north", "North", "business", created_at_ms=0.0))
+    store.add_application(
+        application_from_template(
+            "north-shop", "Shop", load_plans(), "pro", organization_id="north", created_at_ms=0.0
+        )
+    )
+    disabled = keys.issue("north-shop", "disabled organization").key
+    store.set_organization_disabled("north", True)
     valid = keys.issue("acme", "valid").key
     revoked = keys.issue("acme", "revoked")
     keys.revoke(revoked.record.key_id)
@@ -235,14 +252,15 @@ async def test_every_attempt_takes_the_same_steps_whatever_is_wrong_with_the_key
         "empty": "",
         "revoked": revoked.key,
         "expired": expired.key,
+        "disabled organization": disabled,
     }
 
     steps: list[tuple[str, object]] = []
-    real_get_key, real_hmac, real_compare = store.get_key, keys._hmac, hmac.compare_digest
+    real_lookup, real_hmac, real_compare = store.lookup_key, keys._hmac, hmac.compare_digest
 
-    def get_key(key_id: str) -> ApiKeyRecord | None:
+    def lookup_key(key_id: str) -> KeyLookup | None:
         steps.append(("lookup", len(key_id)))
-        return real_get_key(key_id)
+        return real_lookup(key_id)
 
     def digest(key: str) -> str:
         steps.append(("hmac", None))
@@ -252,7 +270,7 @@ async def test_every_attempt_takes_the_same_steps_whatever_is_wrong_with_the_key
         steps.append(("compare", (len(a), len(b))))
         return real_compare(a, b)
 
-    monkeypatch.setattr(store, "get_key", get_key)
+    monkeypatch.setattr(store, "lookup_key", lookup_key)
     monkeypatch.setattr(keys, "_hmac", digest)
     monkeypatch.setattr(hmac, "compare_digest", compare)
 

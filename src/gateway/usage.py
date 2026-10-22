@@ -15,7 +15,7 @@ from __future__ import annotations
 import itertools
 import sqlite3
 from collections import deque
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -118,6 +118,13 @@ class UsageStore(Protocol):
         end_ms``, summed in ``seq`` order."""
         ...
 
+    def usage_by_model_for(
+        self, application_ids: Collection[str], start_ms: float, end_ms: float
+    ) -> dict[str, ModelUsage]:
+        """The same totals over the events of several applications together (an
+        organization's), summed in ``seq`` order. No application ids, no events."""
+        ...
+
     def events(self, application_id: str | None = None) -> list[StoredUsageEvent]:
         """Stored events in ``seq`` order, for one application or all of them."""
         ...
@@ -163,6 +170,17 @@ class InMemoryUsageStore:
             for s in self._events
             if s.event.application_id == application_id
             and start_ms <= s.event.occurred_at_ms < end_ms
+        )
+
+    def usage_by_model_for(
+        self, application_ids: Collection[str], start_ms: float, end_ms: float
+    ) -> dict[str, ModelUsage]:
+        # Only what the ring still holds: the ledger's totals are the ones budgets use.
+        wanted = frozenset(application_ids)
+        return _totals(
+            s.event
+            for s in self._events
+            if s.event.application_id in wanted and start_ms <= s.event.occurred_at_ms < end_ms
         )
 
     def events(self, application_id: str | None = None) -> list[StoredUsageEvent]:
@@ -241,6 +259,23 @@ class SqliteUsageStore:
         )
         # Summed in Python, in seq order, so the floating-point totals are the ones the
         # ledger built up request by request.
+        return _totals(_event(row) for row in rows)
+
+    def usage_by_model_for(
+        self, application_ids: Collection[str], start_ms: float, end_ms: float
+    ) -> dict[str, ModelUsage]:
+        ids = sorted(set(application_ids))
+        if not ids:
+            return {}
+        # One bound parameter per id (an organization has few applications); each is found
+        # through the index on (application_id, occurred_at_ms).
+        placeholders = ", ".join("?" for _ in ids)
+        rows = self._connection.execute(
+            f"SELECT {_COLUMNS} FROM usage_events"
+            f" WHERE application_id IN ({placeholders})"
+            " AND occurred_at_ms >= ? AND occurred_at_ms < ? ORDER BY seq",
+            (*ids, start_ms, end_ms),
+        )
         return _totals(_event(row) for row in rows)
 
     def events(self, application_id: str | None = None) -> list[StoredUsageEvent]:

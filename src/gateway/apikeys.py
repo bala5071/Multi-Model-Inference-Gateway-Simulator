@@ -139,21 +139,23 @@ class ApiKeyService:
         match = KEY_PATTERN.fullmatch(presented)
         # The same steps whatever is wrong with the key: one lookup (a malformed key looks up
         # an id no record can have), one HMAC, and one constant-time comparison (against a
-        # dummy digest when there is no record).
-        record = self._store.get_key(match.group("id") if match else _NO_SUCH_ID)
-        expected = record.key_hmac if record is not None else _NO_RECORD
+        # dummy digest when there is no record). The lookup brings the application and
+        # whether its organization is enabled, so a disabled organization, a revoked or
+        # expired key and a gone application are all decided after the comparison, together.
+        found = self._store.lookup_key(match.group("id") if match else _NO_SUCH_ID)
+        expected = found.record.key_hmac if found is not None else _NO_RECORD
         valid = hmac.compare_digest(self._hmac(presented), expected)
         now_ms = self._epoch.epoch_ms()
         if (
             not valid
-            or record is None
-            or record.revoked
-            or (record.expires_at_ms is not None and now_ms >= record.expires_at_ms)
+            or found is None
+            or found.application is None
+            or not found.organization_enabled
+            or found.record.revoked
+            or (found.record.expires_at_ms is not None and now_ms >= found.record.expires_at_ms)
         ):
             raise InvalidApiKeyError()
-        application = self._store.get_application(record.application_id)
-        if application is None:
-            raise InvalidApiKeyError()
+        record, application = found.record, found.application
         self._pending[record.key_id] = now_ms
         if now_ms - self._last_flush_ms >= self._flush_ms:
             self.flush_last_used()

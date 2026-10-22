@@ -36,7 +36,7 @@ def _add_dollars(c: sqlite3.Connection) -> None:
     c.execute("ALTER TABLE items ADD COLUMN price_usd REAL")
 
 
-def _fill_dollars(c: sqlite3.Connection) -> None:
+def _fill_dollars(c: sqlite3.Connection, applied_at_ms: float) -> None:
     c.execute("UPDATE items SET price_usd = price_cents / 100.0")
 
 
@@ -130,7 +130,7 @@ def test_up_down_up_gives_the_same_schema(db: sqlite3.Connection) -> None:
 
 
 def test_a_failing_backfill_leaves_the_schema_as_it_was(db: sqlite3.Connection) -> None:
-    def broken(c: sqlite3.Connection) -> None:
+    def broken(c: sqlite3.Connection, applied_at_ms: float) -> None:
         c.execute("UPDATE items SET price_usd = 1")
         raise RuntimeError("backfill failed")
 
@@ -221,14 +221,22 @@ def test_the_gateway_migrations_create_exactly_their_tables(tmp_path: Path) -> N
     ]
 
     # Migration 3 adds an index on usage_events by time, and no column.
-    assert runner.migrate() == (3,)
+    assert runner.migrate(3) == (3,)
     indexes = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}
     assert "usage_events_by_time" in indexes
     assert len(_columns(db, "usage_events")) == 10
 
-    assert runner.rollback(1) == (3, 2)
+    # Migration 4 adds organizations and a required applications.organization_id
+    # (docs/26-organizations.md; tests/test_organizations_migration.py covers it in depth).
+    assert runner.migrate() == (4,)
+    every_table = {"schema_migrations", "usage_events", "applications", "api_keys"}
+    assert _tables(db) == every_table | {"organizations"}
+    assert _columns(db, "organizations") == ["id", "name", "kind", "created_at_ms", "disabled"]
+    assert _columns(db, "applications")[-1] == "organization_id"
+
+    assert runner.rollback(1) == (4, 3, 2)
     assert _tables(db) == {"schema_migrations", "usage_events"}
     assert runner.rollback(0) == (1,)
     assert _tables(db) == {"schema_migrations"}
-    assert runner.migrate() == (1, 2, 3)
-    assert _tables(db) == {"schema_migrations", "usage_events", "applications", "api_keys"}
+    assert runner.migrate() == (1, 2, 3, 4)
+    assert _tables(db) == every_table | {"organizations"}

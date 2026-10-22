@@ -3,8 +3,9 @@
 MEASURED on the machine it runs on: real time, real disk. As docs/20-applications-api-keys.md
 quotes. On a SQLite database set up as the server's (WAL, synchronous FULL):
 
-- "check, batched": ``ApiKeyService.authenticate`` as the server runs it. Two indexed reads
-  and one HMAC; last_used_at is only noted in memory (the flush interval is not reached).
+- "check, batched": ``ApiKeyService.authenticate`` as the server runs it. One indexed read
+  (since docs/26: the key, its application and its organization, joined) and one HMAC;
+  last_used_at is only noted in memory (the flush interval is not reached).
 - "check + write per request": the same, plus writing last_used_at for that key at once:
   what the server would pay if it did not batch.
 - "flush of N keys": one batched write of N keys' last_used_at, which the server does at

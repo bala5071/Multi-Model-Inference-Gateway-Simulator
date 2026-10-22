@@ -4,11 +4,13 @@ See docs/09-routing.md. Since docs/19-usage-store.md the ledger is a facade over
 ``UsageStore``: every charge is stored as a usage event, and the ledger keeps the current
 period's totals in memory so that a budget check never has to read the store. Since
 docs/21-persistence.md periods are calendar months in UTC by default, and old events can be
-pruned after a retention period.
+pruned after a retention period. Since docs/26-organizations.md it also rolls the usage of
+an organization's applications up, for reporting only: budgets are enforced per application.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from gateway.clock import Clock, ClockEpoch, EpochSource
@@ -22,10 +24,12 @@ PRUNE_EVERY_MS = 60 * 60 * 1000.0
 PRUNE_BATCH = 1000
 
 __all__ = [
+    "ApplicationShare",
     "ApplicationUsage",
     "BudgetExceededError",
     "CostLedger",
     "ModelUsage",
+    "OrganizationUsage",
 ]
 
 
@@ -38,6 +42,33 @@ class ApplicationUsage:
     period_end_ms: float
     total: ModelUsage
     by_model: dict[str, ModelUsage]
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationShare:
+    """One application's part of an organization's usage this period."""
+
+    application_id: str
+    used_tokens: int
+    budget_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class OrganizationUsage:
+    """An organization's usage in the current budget period: its applications' usage added
+    up. Reporting only: there is no organization budget, and ``budget_tokens`` (the sum of
+    its applications' budgets) is the most it can be billed for in a period."""
+
+    organization_id: str
+    period_start_ms: float
+    period_end_ms: float
+    total: ModelUsage
+    by_model: dict[str, ModelUsage]
+    applications: tuple[ApplicationShare, ...]
+
+    @property
+    def budget_tokens(self) -> int:
+        return sum(a.budget_tokens for a in self.applications)
 
 
 class BudgetExceededError(Exception):
@@ -117,6 +148,27 @@ class CostLedger:
             total=account.total,
             by_model=dict(account.by_model),
         )
+
+    def organization_usage(
+        self, organization_id: str, budgets: Mapping[str, int]
+    ) -> OrganizationUsage:
+        """The usage of an organization's applications, added up. ``budgets`` maps each of
+        its application ids (and only its own: the caller lists them from the application
+        store) to that application's budget. The totals are the ledger's own, the ones its
+        budget checks use, added in application id order."""
+        start_ms, end_ms = self._periods.bounds(self._epoch.epoch_ms())
+        total = ModelUsage()
+        by_model: dict[str, ModelUsage] = {}
+        shares = []
+        for application_id in sorted(budgets):
+            usage = self.usage(application_id)
+            total = _add(total, usage.total)
+            for model, model_usage in usage.by_model.items():
+                by_model[model] = _add(by_model.get(model, ModelUsage()), model_usage)
+            shares.append(
+                ApplicationShare(application_id, usage.total.billed_tokens, budgets[application_id])
+            )
+        return OrganizationUsage(organization_id, start_ms, end_ms, total, by_model, tuple(shares))
 
     @property
     def retention_ms(self) -> float | None:
