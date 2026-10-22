@@ -47,7 +47,7 @@ says so, and the table below points out the main cases.
 | [15 Monitoring API](15-monitoring-api.md) | Per-second time series, the event bus, `/v1/monitor/*` and Prometheus `/metrics`; the snapshot schema | With real models most scheduler metrics are **unavailable, not zero** |
 | [16 Dashboard](16-dashboard.md) | The React dashboard in `frontend/`: how to run and build it, what each tab shows, how it stays in step with the API | Not authenticated: it shows every tenant's spend |
 | [17 Playground, load control, simulated live mode](17-playground-load-replay.md) | Sending one request from the dashboard, starting seeded load from it, and a server mode that replays a simulated workload at 1x, 5x or 20x | **Simulated live mode measures nothing**; load control is off by default |
-| [18 Demo packaging](18-demo.md) | The two-stage Docker image, the compose demo, the browser smoke tests, and how the README's pictures are taken | **The image has never been built**: the development machine has no Docker |
+| [18 Demo packaging](18-demo.md) | The two-stage Docker image, the compose demo, the browser smoke tests, and how the README's pictures are taken | Written before the development machine had Docker; CI builds the image, and note 25 records what has run on Docker Desktop |
 | [19 Usage store](19-usage-store.md) | Usage events, the epoch source, versioned migrations, SQLite settings and how long a write takes | Platform plan step 1; the default server still keeps usage in memory |
 | [20 Applications and API keys](20-applications-api-keys.md) | Applications created from plan templates, API keys (HMAC with a pepper, constant-time check, rotation, revocation), the CLI, limits, batched last-used times and what a key check costs | Platform plan step 2; replaces the `tenant_id` of note 09 |
 | [21 Persistence](21-persistence.md) | Usage in the default server's database, calendar-month budget periods in UTC, retention, the compose volume and env file | Platform plan step 3; one gateway process per database |
@@ -84,8 +84,9 @@ says so, and the table below points out the main cases.
 
 ## What has not been run
 
-- **Docker on the development machine**: it has none. CI builds the image and starts the
-  compose demo on every push (note 18); the plain server in Docker has not been started.
+- **The plain server in Docker** has not been started. CI builds the image and starts the
+  compose demo on every push (note 18); the development machine's Docker Desktop has run only
+  what note 25 records.
 - **CI** runs on GitHub on every push, Linux only: checks on Python 3.11 and 3.12, the
   dashboard, the browser tests, Docker, the README quickstart, the protected outputs and the
   performance gate.

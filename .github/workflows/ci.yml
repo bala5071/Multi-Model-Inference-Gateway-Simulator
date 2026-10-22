@@ -143,7 +143,7 @@ jobs:
           if-no-files-found: ignore
 
   # Builds the image and checks that the compose demo comes up serving the dashboard.
-  # The image cannot be built on the development machine; this job is where it is.
+  # The Linux check of the image; note 25 records what has run on the development machine.
   docker:
     runs-on: ubuntu-latest
     steps:

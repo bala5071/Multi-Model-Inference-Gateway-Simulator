@@ -194,9 +194,10 @@ the monitoring API (`docs/15`); it has no logic of its own about the gateway.
   a picture; retake it. Any caption must say it is simulated.
 - The Dockerfile builds the dashboard in a Node stage and serves it from the Python
   stage; `docker-compose.yml` is the simulated live demo, with a volume and a git-ignored
-  `gateway.env` for the plain server. The development machine has no Docker; CI's `docker`
-  job builds the image and starts the compose demo. Nothing else about Docker (the plain
-  server, the volume, the env file) has been run: do not write that it works.
+  `gateway.env` for the plain server. The development machine has Docker Desktop 29.8.2
+  (Windows); CI's `docker` job builds the image and starts the compose demo on Linux. What
+  has been run locally is recorded in note 25; nothing else about Docker (the plain server,
+  the volume, the env file) has been run: do not write that it works.
 
 `scripts/` holds operational entry points only: `perf_gate.py`, `demo.py`,
 `capture_demo.py` (retakes the dashboard pictures in `docs/img/`),

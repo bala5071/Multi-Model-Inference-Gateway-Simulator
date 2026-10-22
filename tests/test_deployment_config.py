@@ -1,6 +1,6 @@
 """The compose file, the Dockerfile and the example env file: no secret in any of them, the
-database on a volume, and the port on this machine only. Docker itself is not run here (the
-development machine has none); CI's docker job builds the image and starts the compose demo.
+database on a volume, and the port on this machine only. Docker itself is not run by the tests;
+CI's docker job builds the image and starts the compose demo.
 """
 
 from __future__ import annotations

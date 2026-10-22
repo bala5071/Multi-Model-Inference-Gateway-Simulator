@@ -98,7 +98,8 @@ network) can then use monitoring, load control, the Playground and the dashboard
 acceptable only for a local, single-user demo ([docs/25](docs/25-local-only.md#docker), which
 also says how to find the address on Docker Desktop).
 
-**Docker has not been run on the development machine**, which does not have it. CI builds
+**The demo has been built and started in CI, on Linux**; the development machine has Docker
+Desktop, and what has been run on it is in [docs/25](docs/25-local-only.md#docker). CI builds
 the image and starts this compose demo on every push, and checks that it serves the
 dashboard in simulated live mode (the `docker` job). Without Docker, the same thing needs
 Python 3.11+, [uv](https://docs.astral.sh/uv/) and Node 20:
@@ -532,9 +533,9 @@ These are not built, and the server is not ready for a network until they are:
 
 **Not run.**
 
-- **Docker on the development machine.** It has none. CI builds the image and starts the
-  compose demo; the plain server in Docker (with `gateway.env` and the volume) has not been
-  started anywhere.
+- **The plain server in Docker** (with `gateway.env` and the volume) has not been started
+  anywhere. CI builds the image and starts the compose demo on Linux; on the development
+  machine's Docker Desktop, only what note 25 records has been run.
 - **make.** The machine has none either; every Makefile command was run directly instead.
 - **CI** runs on GitHub on every push: the checks on Python 3.11 and 3.12, the dashboard,
   the browser tests (with the Chromium CI downloads), the Docker build and compose demo, the
