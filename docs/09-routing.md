@@ -6,6 +6,10 @@ what each tenant has used, and budget enforcement.
 **Updated by platform step 2 (`docs/20-applications-api-keys.md`).** Tenants are now applications, and a request names its application with an API key (`Authorization: Bearer <key>`), not a `tenant_id` in the body, which is now a 422. Usage moved to `GET /v1/applications/me/usage`. The examples below predate that. Routing, plans, the soft budget and billing still work as described
 here; `tests/test_tenancy_api.py` became `tests/test_applications_api.py`.
 
+**Updated by platform step 3 (`docs/21-persistence.md`).** A budget period is now the calendar
+month in UTC, not 30 days from when the server started, and the default server keeps usage in
+its database, so a restart no longer forgets it. The soft budget is unchanged.
+
 Code: `src/gateway/routing.py`, `src/gateway/ledger.py`, `src/gateway/plans.yaml`, changes
 in `src/gateway/app.py`. Tests: `tests/test_routing.py`, `tests/test_ledger.py`,
 `tests/test_tenancy_api.py`.

@@ -15,7 +15,7 @@ import json
 import math
 import os
 import secrets
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -65,7 +65,7 @@ from gateway.registry import ModelRegistry, UnknownModelError
 from gateway.routing import ModelNotAllowedError, Quality, Router, load_plans, pick_by_quality
 from gateway.schema import GenerateRequest, RequestResult
 from gateway.timeseries import TimeSeriesStore
-from gateway.usage import UsageStore
+from gateway.usage import SqliteUsageStore, UsageStore
 from gateway.workload import PlannedRequest
 
 # How often /v1/monitor/stream pushes a snapshot, on the injected clock.
@@ -331,6 +331,7 @@ def create_app(
     autostart_load: str | None = None,
     usage_store: UsageStore | None = None,
     epoch: EpochSource | None = None,
+    usage_retention_ms: float | None = None,
     playground_keys: bool = False,
 ) -> FastAPI:
     """Build the API around an already wired registry.
@@ -356,8 +357,10 @@ def create_app(
     Queue limits are a property of the workers in ``registry``.
 
     ``usage_store`` is where the ledger stores a usage event for every charged request
-    (default: in memory), and ``epoch`` dates those events (default: the clock read as
-    epoch time). See docs/19-usage-store.md.
+    (default: in memory), and ``epoch`` dates those events and decides the budget periods,
+    calendar months in UTC (default: the clock read as epoch time). With
+    ``usage_retention_ms`` older events are pruned. See docs/19-usage-store.md and
+    docs/21-persistence.md.
 
     ``metrics`` replaces the default ``MetricsStore``, for a different window or ring size.
     ``series`` and ``events`` do the same for the monitoring time series and event log.
@@ -385,7 +388,7 @@ def create_app(
         for application in applications.store.list_applications():
             Router.check_plan(application.plan, registry)
     rate_limiter = RequestRateLimiter(clock) if applications is not None else None
-    ledger = CostLedger(clock, store=usage_store, epoch=epoch)
+    ledger = CostLedger(clock, store=usage_store, epoch=epoch, retention_ms=usage_retention_ms)
     timeout_ms = overload.request_timeout_ms if overload is not None else None
     slo_policy = overload.slo if overload is not None else None
     # Monitoring only watches: it is told what happened and decides nothing.
@@ -1146,6 +1149,20 @@ def create_app(
     return app
 
 
+# How long the default server keeps usage events, unless GATEWAY_USAGE_RETENTION_DAYS says
+# otherwise: the current month and a little over a year before it, for invoices.
+DEFAULT_USAGE_RETENTION_DAYS = 400.0
+DAY_MS = 86_400_000.0
+
+
+def usage_retention_ms(environ: Mapping[str, str]) -> float:
+    raw = environ.get("GATEWAY_USAGE_RETENTION_DAYS")
+    days = DEFAULT_USAGE_RETENTION_DAYS if raw is None else float(raw)
+    if not days > 0:
+        raise ValueError("GATEWAY_USAGE_RETENTION_DAYS must be a positive number of days")
+    return days * DAY_MS
+
+
 # Operator settings for the default server, not measurements: queue limits, chunk size and
 # SLOs were chosen, not measured.
 DEFAULT_MAX_QUEUE_LEN = {Tier.ECONOMY: 256, Tier.STANDARD: 128, Tier.PREMIUM: 64}
@@ -1218,7 +1235,9 @@ def create_default_app() -> FastAPI:
 
     Applications and API keys are read from the SQLite database ``GATEWAY_DATABASE``
     (default: the user's local data folder, outside the working tree; see
-    ``gateway.database``), created owner-only and migrated if needed; ``scripts/manage.py`` creates
+    ``gateway.database``), created owner-only and migrated if needed. Usage events are
+    stored there too, kept for ``GATEWAY_USAGE_RETENTION_DAYS`` (default 400), and budget
+    periods are calendar months in UTC; ``scripts/manage.py`` creates
     applications and issues keys. ``GATEWAY_KEY_PEPPER`` is required: without it the server
     refuses to start (docs/20-applications-api-keys.md).
 
@@ -1253,6 +1272,7 @@ def create_default_app() -> FastAPI:
     access = ApplicationAccess(
         ApiKeyService(SqliteApplicationStore(database), pepper, epoch), templates
     )
+    retention_ms = usage_retention_ms(os.environ)
     backends_path = os.environ.get("GATEWAY_BACKENDS")
     backends = load_backend_config(
         Path(backends_path) if backends_path else None,
@@ -1273,6 +1293,9 @@ def create_default_app() -> FastAPI:
         registry,
         clock,
         applications=access,
+        usage_store=SqliteUsageStore(database),
+        epoch=epoch,
+        usage_retention_ms=retention_ms,
         overload=DEFAULT_OVERLOAD,
         dashboard_dir=DASHBOARD_DIR,
         load_control=os.environ.get("GATEWAY_LOAD_CONTROL") == "1",

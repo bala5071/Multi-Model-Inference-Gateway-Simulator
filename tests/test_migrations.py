@@ -195,7 +195,7 @@ def test_the_gateway_migrations_create_exactly_their_tables(tmp_path: Path) -> N
         "occurred_at_ms",
     ]
 
-    assert runner.migrate() == (2,)
+    assert runner.migrate(2) == (2,)
     assert _tables(db) == {"schema_migrations", "usage_events", "applications", "api_keys"}
     # No organization column: organizations arrive in A3 with their own migration.
     assert _columns(db, "applications") == [
@@ -220,9 +220,15 @@ def test_the_gateway_migrations_create_exactly_their_tables(tmp_path: Path) -> N
         "last_used_at_ms",
     ]
 
-    assert runner.rollback(1) == (2,)
+    # Migration 3 adds an index on usage_events by time, and no column.
+    assert runner.migrate() == (3,)
+    indexes = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "usage_events_by_time" in indexes
+    assert len(_columns(db, "usage_events")) == 10
+
+    assert runner.rollback(1) == (3, 2)
     assert _tables(db) == {"schema_migrations", "usage_events"}
     assert runner.rollback(0) == (1,)
     assert _tables(db) == {"schema_migrations"}
-    assert runner.migrate() == (1, 2)
+    assert runner.migrate() == (1, 2, 3)
     assert _tables(db) == {"schema_migrations", "usage_events", "applications", "api_keys"}

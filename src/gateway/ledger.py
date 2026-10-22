@@ -2,7 +2,9 @@
 
 See docs/09-routing.md. Since docs/19-usage-store.md the ledger is a facade over a
 ``UsageStore``: every charge is stored as a usage event, and the ledger keeps the current
-period's totals in memory so that a budget check never has to read the store.
+period's totals in memory so that a budget check never has to read the store. Since
+docs/21-persistence.md periods are calendar months in UTC by default, and old events can be
+pruned after a retention period.
 """
 
 from __future__ import annotations
@@ -10,13 +12,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from gateway.clock import Clock, ClockEpoch, EpochSource
+from gateway.periods import BudgetPeriods, CalendarMonthsUTC
 from gateway.schema import RequestResult
 from gateway.usage import InMemoryUsageStore, ModelUsage, UsageEvent, UsageStore
 
-THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000.0
+# How often the ledger prunes events older than its retention, at most.
+PRUNE_EVERY_MS = 60 * 60 * 1000.0
 
 __all__ = [
-    "THIRTY_DAYS_MS",
     "BudgetExceededError",
     "CostLedger",
     "ModelUsage",
@@ -51,7 +54,8 @@ class BudgetExceededError(Exception):
 
 @dataclass(slots=True)
 class _Account:
-    period: int
+    period_start_ms: float
+    period_end_ms: float
     total: ModelUsage = field(default_factory=ModelUsage)
     by_model: dict[str, ModelUsage] = field(default_factory=dict)
 
@@ -59,65 +63,69 @@ class _Account:
 class CostLedger:
     """Tracks what each tenant has used in the current budget period.
 
-    Periods are fixed windows of ``period_ms`` of epoch time, counted from
-    ``period_anchor_ms`` (default: when the ledger was created). They are not calendar
-    months. A tenant's usage starts again from zero in each new period.
+    ``periods`` decides the periods (default: calendar months in UTC), read on ``epoch``
+    (default: the ledger's clock read as epoch time, exact and deterministic on a
+    ``SimClock``). A tenant's usage starts again from zero in each new period.
 
     Every charge is appended to ``store`` (default: an in-memory store). The first time the
     ledger sees a tenant in a period it reads that period's totals from the store, which is
     how usage stored by an earlier process is picked up; after that the totals are kept in
-    memory. ``epoch`` dates the events (default: the ledger's clock read as epoch time,
-    which is exact and deterministic on a ``SimClock``).
+    memory.
+
+    With ``retention_ms``, events older than that are deleted from the store, at most once
+    per ``PRUNE_EVERY_MS``, by the first charge after it is due; events of the current
+    period are always kept, whatever the retention.
     """
 
     def __init__(
         self,
         clock: Clock,
         *,
-        period_ms: float = THIRTY_DAYS_MS,
+        periods: BudgetPeriods | None = None,
         store: UsageStore | None = None,
         epoch: EpochSource | None = None,
-        period_anchor_ms: float | None = None,
+        retention_ms: float | None = None,
     ) -> None:
-        if period_ms <= 0:
-            raise ValueError("period_ms must be positive")
+        if retention_ms is not None and retention_ms <= 0:
+            raise ValueError("retention_ms must be positive")
         self._epoch = epoch if epoch is not None else ClockEpoch(clock)
         self._store = store if store is not None else InMemoryUsageStore()
-        self._period_ms = period_ms
-        self._started_ms = (
-            period_anchor_ms if period_anchor_ms is not None else self._epoch.epoch_ms()
-        )
+        self._periods = periods if periods is not None else CalendarMonthsUTC()
+        self._retention_ms = retention_ms
+        self._next_prune_ms = self._epoch.epoch_ms()
         self._accounts: dict[str, _Account] = {}
 
-    def _current_period(self) -> int:
-        return int((self._epoch.epoch_ms() - self._started_ms) // self._period_ms)
-
-    def _period_start_ms(self, period: int) -> float:
-        return self._started_ms + period * self._period_ms
-
     def _account(self, tenant_id: str) -> _Account:
-        period = self._current_period()
+        start_ms, end_ms = self._periods.bounds(self._epoch.epoch_ms())
         account = self._accounts.get(tenant_id)
-        if account is None or account.period != period:
-            start_ms = self._period_start_ms(period)
-            by_model = self._store.usage_by_model(tenant_id, start_ms, start_ms + self._period_ms)
+        if account is None or account.period_start_ms != start_ms:
+            by_model = self._store.usage_by_model(tenant_id, start_ms, end_ms)
             total = ModelUsage()
             for usage in by_model.values():
                 total = _add(total, usage)
-            account = _Account(period, total, by_model)
+            account = _Account(start_ms, end_ms, total, by_model)
             self._accounts[tenant_id] = account
         return account
 
     def usage(self, tenant_id: str) -> TenantUsage:
         account = self._account(tenant_id)
-        start_ms = self._period_start_ms(account.period)
         return TenantUsage(
             tenant_id=tenant_id,
-            period_start_ms=start_ms,
-            period_end_ms=start_ms + self._period_ms,
+            period_start_ms=account.period_start_ms,
+            period_end_ms=account.period_end_ms,
             total=account.total,
             by_model=dict(account.by_model),
         )
+
+    def prune(self) -> int:
+        """Delete events older than the retention (never the current period's). Returns how
+        many; 0 without a retention."""
+        if self._retention_ms is None:
+            return 0
+        now_ms = self._epoch.epoch_ms()
+        self._next_prune_ms = now_ms + PRUNE_EVERY_MS
+        period_start_ms, _ = self._periods.bounds(now_ms)
+        return self._store.prune(min(now_ms - self._retention_ms, period_start_ms))
 
     def check_budget(self, tenant_id: str, budget_tokens: int) -> None:
         """Raise ``BudgetExceededError`` if the tenant has no budget left this period.
@@ -144,6 +152,8 @@ class CostLedger:
         """
         billed_cost_usd = result.cost_usd * price_multiplier
         account = self._account(tenant_id)
+        if self._retention_ms is not None and self._epoch.epoch_ms() >= self._next_prune_ms:
+            self.prune()
         self._store.append(
             UsageEvent.of(
                 tenant_id,

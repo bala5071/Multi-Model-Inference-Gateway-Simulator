@@ -19,12 +19,13 @@ from gateway.app import create_app
 from gateway.clock import SimClock
 from gateway.continuous import build_continuous_registry
 from gateway.cost_model import estimate_cost
-from gateway.ledger import THIRTY_DAYS_MS
 from gateway.profiles import PROFILES, Tier
 from gateway.routing import Plan, PlansConfig, load_plans
 from helpers import application_access, bearer
 
 ALL_MODELS = ("economy", "standard", "premium")
+# January 1970: epoch time 0 is where a SimClock's ClockEpoch starts.
+JANUARY_1970_MS = 31 * 24 * 60 * 60 * 1000.0
 # application -> (plan, allowed models, price multiplier), as in the packaged demo
 TENANTS: dict[str, tuple[str, tuple[str, ...], float]] = {
     "initech": ("free", ("economy",), 0.0),
@@ -315,7 +316,7 @@ async def test_usage_endpoint_describes_the_plan_and_the_period(gateway: Gateway
     assert usage["plan"] == "pro"
     assert usage["allowed_models"] == ["economy", "standard"]
     assert usage["price_multiplier"] == 1.0
-    assert usage["period"] == {"start_ms": 0.0, "end_ms": THIRTY_DAYS_MS}
+    assert usage["period"] == {"start_ms": 0.0, "end_ms": JANUARY_1970_MS}
     assert usage["budget_tokens"] == 5_000_000
     assert usage["used_tokens"] == 15
     assert usage["remaining_tokens"] == 5_000_000 - 15
@@ -345,9 +346,10 @@ async def test_requests_are_rejected_with_429_once_the_budget_is_used_up(tight: 
     assert (error["used_tokens"], error["budget_tokens"]) == (30, 30)
     assert "used 30 of its 30 token budget" in error["message"]
     assert "resets in" in error["message"]
-    # Thirty days, less the few milliseconds already elapsed, rounded up to whole seconds.
-    assert error["retry_after_s"] == 30 * 24 * 60 * 60
-    assert third.headers["Retry-After"] == str(30 * 24 * 60 * 60)
+    # To the end of January (calendar months in UTC), less the few milliseconds already
+    # elapsed, rounded up to whole seconds.
+    assert error["retry_after_s"] == 31 * 24 * 60 * 60
+    assert third.headers["Retry-After"] == str(31 * 24 * 60 * 60)
     assert "X-Cost-USD" not in third.headers
     # The rejected request did not run and was not charged.
     assert tight.clock.now_ms() == time_after_two
@@ -369,12 +371,12 @@ async def test_budget_is_available_again_in_the_next_period(tight: Gateway) -> N
         await tight.generate(app="small", model="economy")
     assert (await tight.generate(app="small", model="economy")).status_code == 429
 
-    await tight.clock.sleep_ms(THIRTY_DAYS_MS)
+    await tight.clock.sleep_ms(JANUARY_1970_MS)  # into February
 
     assert (await tight.generate(app="small", model="economy")).status_code == 200
     usage = await tight.usage("small")
     assert usage["used_tokens"] == 15
-    assert usage["period"]["start_ms"] == THIRTY_DAYS_MS
+    assert usage["period"]["start_ms"] == JANUARY_1970_MS
 
 
 async def test_the_request_that_crosses_the_budget_is_served_in_full(tight: Gateway) -> None:

@@ -592,7 +592,7 @@ async def test_tenants_show_spend_tokens_against_budget_and_rejections() -> None
             "t1": {
                 "plan": "basic",
                 "period_start_ms": 0.0,
-                "period_end_ms": 30 * 24 * 60 * 60 * 1000.0,
+                "period_end_ms": 31 * 24 * 60 * 60 * 1000.0,  # January 1970
                 "budget_tokens": 30,
                 "used_tokens": 39,
                 "remaining_tokens": 0,
@@ -618,7 +618,7 @@ async def test_tenants_show_spend_tokens_against_budget_and_rejections() -> None
             "t2": {
                 "plan": "basic",
                 "period_start_ms": 0.0,
-                "period_end_ms": 30 * 24 * 60 * 60 * 1000.0,
+                "period_end_ms": 31 * 24 * 60 * 60 * 1000.0,  # January 1970
                 "budget_tokens": 30,
                 "used_tokens": 0,
                 "remaining_tokens": 30,

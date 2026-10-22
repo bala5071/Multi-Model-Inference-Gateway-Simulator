@@ -204,8 +204,8 @@ sending as anyone, and is off by default).
   nothing about which keys or applications exist.
 - **The key id is visible in the key** so a record is found by an indexed lookup, not by
   hashing against every record; the id alone is useless without the secret.
-- **Usage events are still in memory** (note 19); the default server stores them in step 3.
-  Budget periods still count from when the process started until then.
+- **Usage events** were still in memory at this step; since note 21 the default server
+  stores them in its database, and budget periods are calendar months in UTC.
 - **Not authenticated yet:** monitoring, Prometheus metrics, load control and the dashboard
   (plan section 9). The server binds to `127.0.0.1` and must not be exposed to a network
   until A8. Keys travel in a header over plain HTTP: also a reason to keep it local.

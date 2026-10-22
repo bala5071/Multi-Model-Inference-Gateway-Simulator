@@ -53,6 +53,9 @@ image.
 
 - **`docker run` on the image alone is the plain simulator**, as it was. Simulated live mode
   is chosen by the compose file's environment, not baked into the image.
+- **Updated by platform step 3 (`docs/21-persistence.md`):** the compose file also mounts
+  the volume `gateway-data` at `/data` for the database and reads secrets from a git-ignored
+  `gateway.env` (optional for the demo); the image carries `scripts/manage.py`.
 - **The port is published on `127.0.0.1` only** (`-p 127.0.0.1:8000:8000`, and the same in
   the compose file). Inside the container the server must bind `0.0.0.0` to be reachable at
   all; a plain `-p 8000:8000` would then publish it on every interface of the host, and

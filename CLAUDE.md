@@ -71,12 +71,17 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   takes (exists)
 - `ratelimit.py` — `RequestRateLimiter`: per-application requests per minute, a sliding
   window on the injected clock (exists)
-- `ledger.py` — `CostLedger`: per-tenant tokens and spend per 30-day period of epoch time,
-  and the budget check; a facade over a `UsageStore` (exists)
+- `ledger.py` — `CostLedger`: per-application tokens and spend per budget period (calendar
+  months in UTC by default), the budget check, and retention pruning; a facade over a
+  `UsageStore` (exists)
+- `periods.py` — `BudgetPeriods`, `CalendarMonthsUTC` (from whole days since the epoch),
+  `FixedPeriods` for tests (exists)
 - `usage.py` — `UsageEvent`, the `UsageStore` protocol, `InMemoryUsageStore` (bounded ring)
   and `SqliteUsageStore`; store calls are synchronous and never awaited (exists)
 - `database.py` + `migrations/` — `open_database` (WAL, busy timeout, autocommit) and the
-  versioned `MigrationRunner`; migration 1 is `usage_events` (exists)
+  versioned `MigrationRunner`; migration 1 is `usage_events`, 2 `applications` and
+  `api_keys`, 3 an index for retention. The default database is in the user's data folder,
+  owner-only (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),
   `pick_downgrade`, `QueueFullError`; the queue limit itself is in the worker (exists)
 - `metrics.py` — nearest-rank `percentile` and `MetricsStore`: per-model metrics in bounded

@@ -611,7 +611,7 @@
       "initech": {
         "plan": "free",
         "period_start_ms": 0.0,
-        "period_end_ms": 2592000000.0,
+        "period_end_ms": 2678400000.0,
         "budget_tokens": 100000,
         "used_tokens": 42,
         "remaining_tokens": 99958,
@@ -659,7 +659,7 @@
       "globex": {
         "plan": "pro",
         "period_start_ms": 0.0,
-        "period_end_ms": 2592000000.0,
+        "period_end_ms": 2678400000.0,
         "budget_tokens": 5000000,
         "used_tokens": 54,
         "remaining_tokens": 4999946,
@@ -707,7 +707,7 @@
       "acme": {
         "plan": "enterprise",
         "period_start_ms": 0.0,
-        "period_end_ms": 2592000000.0,
+        "period_end_ms": 2678400000.0,
         "budget_tokens": 100000000,
         "used_tokens": 691,
         "remaining_tokens": 99999309,

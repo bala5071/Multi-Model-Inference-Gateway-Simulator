@@ -13,6 +13,7 @@ from gateway.clock import ClockEpoch, SimClock, SystemEpoch
 from gateway.database import BUSY_TIMEOUT_MS, open_database
 from gateway.ledger import CostLedger
 from gateway.migrations import MIGRATIONS, MigrationRunner
+from gateway.periods import FixedPeriods
 from gateway.schema import RequestResult
 from gateway.usage import (
     InMemoryUsageStore,
@@ -193,16 +194,14 @@ def test_a_new_ledger_on_the_same_database_sees_the_stored_usage(tmp_path: Path)
     clock = SimClock()
     epoch = ClockEpoch(clock, origin_ms=1e12)
     first = _migrated(path)
-    ledger = CostLedger(clock, store=SqliteUsageStore(first), epoch=epoch, period_anchor_ms=1e12)
+    ledger = CostLedger(clock, store=SqliteUsageStore(first), epoch=epoch)
     for i in range(3):
         ledger.record("t1", _result(f"req-{i}", 10, 5, 0.1), model="economy", price_multiplier=1.0)
     before = ledger.usage("t1")
     first.close()
 
     second = _migrated(path)
-    restarted = CostLedger(
-        clock, store=SqliteUsageStore(second), epoch=epoch, period_anchor_ms=1e12
-    )
+    restarted = CostLedger(clock, store=SqliteUsageStore(second), epoch=epoch)
 
     assert restarted.usage("t1") == before
     assert restarted.usage("t1").total.billed_tokens == 45
@@ -214,7 +213,7 @@ def test_stored_usage_from_an_earlier_period_does_not_count(tmp_path: Path) -> N
     store = SqliteUsageStore(connection)
     store.append(_event("t1", at=999.0))  # the period before
     clock = SimClock(start_ms=1500.0)
-    ledger = CostLedger(clock, period_ms=1000.0, store=store, period_anchor_ms=0.0)
+    ledger = CostLedger(clock, periods=FixedPeriods(0.0, 1000.0), store=store)
     usage = ledger.usage("t1")
     assert (usage.period_start_ms, usage.total) == (1000.0, ModelUsage())
     connection.close()
