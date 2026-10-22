@@ -51,7 +51,7 @@ describe("useMonitorStream", () => {
       at_ms: 7000,
       type: "timeout",
       model: "premium",
-      tenant_id: null,
+      application_id: null,
       data: { timeout_ms: 100 },
     });
     FakeEventSource.latest.push("events_missed", { missed: 2 });

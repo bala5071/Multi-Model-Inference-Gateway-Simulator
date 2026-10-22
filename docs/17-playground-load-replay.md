@@ -48,6 +48,10 @@ GATEWAY_LOAD_CONTROL=1 uv run uvicorn gateway.app:create_default_app --factory
 The tab sends one streaming request to `POST /v1/generate` and shows it arriving. It adds
 nothing to the API; `EventSource` cannot POST, so it reads the stream with `fetch`.
 
+- **Updated by platform steps 2 and 4 (notes 20 and 22):** the form picks an
+  *application*, and only in simulated live mode, where the server sends the request with that
+  application's throwaway in-memory key (`POST /v1/playground/generate`); load control sends
+  for applications it has already resolved. What follows predates that.
 - **Form**: tenant (from the plans; absent on a gateway without plans), model or quality,
   `allow_downgrade`, `max_tokens`, prompt.
 - **Shown as it streams**: each token, time to first token, and one bar per token after the

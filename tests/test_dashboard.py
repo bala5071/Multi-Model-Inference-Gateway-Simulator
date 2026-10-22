@@ -16,7 +16,7 @@ from gateway.clock import SimClock
 from gateway.continuous import build_continuous_registry
 from gateway.overload import OverloadPolicy, SloPolicy
 from gateway.profiles import Tier
-from helpers import TEST_PROFILES, application_access, tenant_headers
+from helpers import TEST_PROFILES, application_access, application_headers
 from mock_llama import MockLlamaServer
 
 FIXTURES = Path(__file__).resolve().parent.parent / "frontend" / "src" / "test" / "fixtures"
@@ -94,22 +94,22 @@ async def _simulated_snapshot() -> dict[str, Any]:
             nonlocal counter
             counter += 1
             body.setdefault("prompt", " ".join(f"p{counter}w{i}" for i in range(10)))
-            headers = tenant_headers(body, keys)
+            headers = application_headers(body, keys)
             return await client.post("/v1/generate", json=body, headers=headers)
 
         for second in range(3):
             await asyncio.gather(
-                generate(tenant_id="acme", model="economy", max_tokens=8),
-                generate(tenant_id="globex", model="standard", max_tokens=8),
-                generate(tenant_id="initech", model="economy", max_tokens=4),
+                generate(application_id="acme", model="economy", max_tokens=8),
+                generate(application_id="globex", model="standard", max_tokens=8),
+                generate(application_id="initech", model="economy", max_tokens=4),
             )
             await clock.sleep_ms((second + 1) * 1000.0 - clock.now_ms())
         # Twelve premium requests at once: eight are seated, two wait, two are refused,
         # and the slowest take long enough to put premium over its SLO.
         await asyncio.gather(
-            *(generate(tenant_id="acme", model="premium", max_tokens=60) for _ in range(12))
+            *(generate(application_id="acme", model="premium", max_tokens=60) for _ in range(12))
         )
-        await generate(tenant_id="acme", model="premium", max_tokens=4, allow_downgrade=True)
+        await generate(application_id="acme", model="premium", max_tokens=4, allow_downgrade=True)
         snapshot: dict[str, Any] = (
             await client.get("/v1/monitor/snapshot?history_s=900&events=50")
         ).json()
@@ -188,12 +188,12 @@ async def test_frontend_fixtures_are_what_the_gateway_produces() -> None:
         "state_change",
         "downgrade",
     }
-    assert simulated["tenants"]["available"] is True
+    assert simulated["applications"]["available"] is True
     assert produced["control-simulated.json"]["simulation"]["active"] is True
     assert produced["control-simulated.json"]["load"]["status"]["running"] is True
     assert produced["control-off.json"]["load"]["available"] is False
     passthrough = produced["snapshot-passthrough.json"]
-    assert passthrough["tenants"]["available"] is False
+    assert passthrough["applications"]["available"] is False
     for model in passthrough["models"].values():
         assert not any(model[group]["available"] for group in ("queue", "batch", "kv", "cache"))
         assert model["slo"]["available"] is False

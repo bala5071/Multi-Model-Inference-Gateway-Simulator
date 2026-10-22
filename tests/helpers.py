@@ -160,13 +160,13 @@ def bearer(key: str) -> dict[str, str]:
 UNKNOWN_KEY = "gwk_" + "0" * 16 + "_" + "A" * 43
 
 
-def tenant_headers(body: dict[str, Any], keys: Mapping[str, str]) -> dict[str, str]:
-    """Remove a test's ``tenant_id`` from a request body and return the Authorization header
+def application_headers(body: dict[str, Any], keys: Mapping[str, str]) -> dict[str, str]:
+    """Remove a test's ``application_id`` from a request body and return the Authorization header
     of that application's key instead (``UNKNOWN_KEY`` for an application that has none)."""
-    tenant = body.pop("tenant_id", None)
-    if tenant is None:
+    application = body.pop("application_id", None)
+    if application is None:
         return {}
-    return bearer(keys.get(tenant, UNKNOWN_KEY))
+    return bearer(keys.get(application, UNKNOWN_KEY))
 
 
 def default_server_key(application_id: str = "acme") -> str:

@@ -56,7 +56,7 @@ docker compose up --build
 
 Then open <http://localhost:8000/dashboard/>.
 
-![A tour of the dashboard in simulated live mode: the Overview and Latency tabs under steady load, one request streamed from the Playground, then the overload preset taking hold, with the Overview, Capacity, Events and Tenants tabs](docs/img/demo.gif)
+![A tour of the dashboard in simulated live mode: the Overview and Latency tabs under steady load, one request streamed from the Playground, then the overload preset taking hold, with the Overview, Capacity, Events and Applications tabs](docs/img/demo.gif)
 
 *A silent tour of every tab, about 36 seconds: steady load, one streamed request, then the
 `overload` preset until premium and standard are marked degraded and requests move to

@@ -9,6 +9,8 @@ Tests: `frontend/src/**/*.test.ts(x)` (Vitest), `tests/test_dashboard.py`.
 
 ## Read this first
 
+**Updated by platform step 4 (`docs/22-monitoring-rename.md`):** the Tenants tab is the Applications tab, with a third rejection column (rate limit); events are filtered by application; the snapshot field names changed accordingly (note 15).
+
 - **There is no authentication.** Anyone who can reach the gateway sees every tenant's spend,
   as with the API underneath.
 - **The build is not tracked.** `/dashboard` answers 404 `dashboard_not_built` until

@@ -180,7 +180,7 @@ it gets new recorded sums.
 | 1 | sha256 baseline. Migration runner. Epoch time source. `UsageStore` (in-memory, SQLite). `CostLedger`'s API kept as a façade over it, its tests passing unchanged. `test_no_content_stored.py` against the ledger and events as they are. No API change | own PR |
 | 2 (done, note 20) | Applications and API keys **together**: `ApplicationStore`, per-application plan settings, templates, `Router` on `Application`, HMAC keys, the pepper, the issuance CLI, the auth dependency; `tenant_id` leaves the body; `/v1/applications/me/usage` | **one PR**. An application id taken on trust from the body is insecure and must never be merged on its own |
 | 3 (done, note 21) | Persistence in the default server: database path and pepper from the environment, refusal to start without the pepper, the restart test, default bind confirmed as `127.0.0.1` | own PR |
-| 4 | Monitoring rename (snapshot, Prometheus, events, time series); fixtures regenerated; the dashboard follows (rename only) | own PR |
+| 4 (done, note 22) | Monitoring rename (snapshot, Prometheus, events, time series); fixtures regenerated; the dashboard follows (rename only) | own PR |
 | 5 | Load control, simulated live mode, demo and Playground with in-memory throwaway keys; loadgen live mode; e2e; pictures retaken | own PR |
 | 6 | Docs, CLAUDE.md architecture list, README; report prose regenerated (wording-only diff) | own PR |
 

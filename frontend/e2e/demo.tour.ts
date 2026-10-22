@@ -103,8 +103,8 @@ test("capture the dashboard tour", async ({ page }) => {
   await openTab(page, "Events");
   await frames(page, 8);
 
-  // 5. What each tenant used, and the Overview again.
-  await openTab(page, "Tenants");
+  // 5. What each application used, and the Overview again.
+  await openTab(page, "Applications");
   await frames(page, 6);
   await openTab(page, "Overview");
   await frames(page, 8);

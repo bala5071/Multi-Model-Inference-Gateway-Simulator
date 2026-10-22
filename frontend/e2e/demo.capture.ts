@@ -71,8 +71,8 @@ test("capture the README pictures", async ({ page }) => {
   const premium = page.getByRole("region", { name: "premium capacity" });
   await expect(premium.locator("canvas").first()).toBeVisible();
   await still(page, "capacity", true);
-  await openTab(page, "Tenants");
-  await still(page, "tenants");
+  await openTab(page, "Applications");
+  await still(page, "applications");
 
   // The Playground, after one streamed request to the economy model.
   await openTab(page, "Playground");

@@ -31,7 +31,7 @@ class Plan:
     name: str
     # Registered model ids this plan may use, cheapest first.
     models: tuple[str, ...]
-    # The tenant is billed the model's base cost times this.
+    # The application is billed the model's base cost times this.
     price_multiplier: float
     # Billed tokens (uncached prompt + completion) allowed per budget period.
     monthly_token_budget: int

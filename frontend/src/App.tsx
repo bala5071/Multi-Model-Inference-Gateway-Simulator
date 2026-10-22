@@ -10,13 +10,13 @@ import { Events } from "./tabs/Events";
 import { Latency } from "./tabs/Latency";
 import { Overview } from "./tabs/Overview";
 import { Playground } from "./tabs/Playground";
-import { Tenants } from "./tabs/Tenants";
+import { Applications } from "./tabs/Applications";
 
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "latency", label: "Latency" },
   { id: "capacity", label: "Capacity" },
-  { id: "tenants", label: "Tenants" },
+  { id: "applications", label: "Applications" },
   { id: "events", label: "Events" },
   { id: "playground", label: "Playground" },
 ] as const;
@@ -50,7 +50,7 @@ export function App({ stream: options }: { stream?: StreamOptions }) {
         {tab === "overview" && <Overview state={state} />}
         {tab === "latency" && <Latency state={state} />}
         {tab === "capacity" && <Capacity state={state} />}
-        {tab === "tenants" && <Tenants state={state} />}
+        {tab === "applications" && <Applications state={state} />}
         {tab === "events" && <Events state={state} />}
         {tab === "playground" && <Playground state={state} control={control} />}
       </main>

@@ -211,7 +211,18 @@ async def test_requests_per_minute_limit_answers_429_with_retry_after(tmp_path: 
         elsewhere = await gw.generate(acme)  # enterprise has no limit
         await gw.clock.sleep_ms(60_000.0)
         later = await gw.generate(globex)
+        snapshot = (await gw.client.get("/v1/monitor/snapshot?history_s=120")).json()
+        prometheus = (await gw.client.get("/metrics")).text
 
+    # The refusal is a rejection of the application, with its own reason, in the snapshot
+    # and in Prometheus; it never reached a model.
+    rejections = snapshot["applications"]["applications"]["globex"]["rejections_total"]
+    assert rejections == {"budget_exhausted": 0, "queue_full": 0, "rate_limited": 1}
+    assert (
+        'gateway_application_rejections_total{application="globex",reason="rate_limited"} 1'
+        in prometheus
+    )
+    assert sum(m["traffic"]["arrived_total"] for m in snapshot["models"].values()) == 4
     assert first == [200, 200]
     assert limited.status_code == 429
     error = limited.json()["error"]

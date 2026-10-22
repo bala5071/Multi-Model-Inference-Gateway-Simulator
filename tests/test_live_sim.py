@@ -70,9 +70,9 @@ async def test_the_same_seed_gives_the_same_event_sequence() -> None:
     assert len(first.events) > 20
     assert first.events[0]["seq"] == 1
     assert {"queue_full", "state_change", "downgrade"} <= {e["type"] for e in first.events}
-    # Every event: its number, its simulated time, its model, tenant and details.
+    # Every event: its number, its simulated time, its model, application and details.
     assert first.events == again.events
-    # And everything else the dashboard is shown: every series point, total and tenant.
+    # And everything else the dashboard is shown: every series point, total and application.
     assert first.snapshot == again.snapshot
     assert first.control == again.control
 
@@ -112,7 +112,7 @@ async def test_replay_times_are_simulated_times() -> None:
     assert 45 <= status["sent"] <= 80
     assert status["sent"] == status["served"] + status["refused"] + status["in_progress"]
     arrived = sum(m["traffic"]["arrived_total"] for m in replay.snapshot["models"].values())
-    # A request refused for its tenant's budget never reaches a model; the rest all do.
+    # A request refused for its application's budget never reaches a model; the rest all do.
     assert arrived <= status["sent"]
     assert replay.control["simulation"] == {"active": True, "speed": 20.0, "speeds": [1, 5, 20]}
     assert replay.control["seed"] == 7
@@ -176,11 +176,14 @@ async def test_load_can_be_started_and_stopped_through_the_api() -> None:
     assert started.json()["load"]["status"]["seed"] == 42
     status = running["load"]["status"]
     # About 0.8 requests a second for 50 seconds, through the ordinary request path: the
-    # models saw them and the tenants were charged.
+    # models saw them and the applications were charged.
     assert 20 <= status["sent"] <= 70
     assert status["served"] > 0
     assert sum(m["traffic"]["arrived_total"] for m in snapshot["models"].values()) > 0
-    assert sum(t["requests"] for t in snapshot["tenants"]["tenants"].values()) == status["served"]
+    assert (
+        sum(t["requests"] for t in snapshot["applications"]["applications"].values())
+        == status["served"]
+    )
     assert with_seed.json()["load"]["status"]["seed"] == 9
     assert (unknown.status_code, unknown.json()["error"]["code"]) == (404, "unknown_preset")
     assert unknown.json()["error"]["valid_presets"] == [

@@ -58,7 +58,7 @@ describe("layout", () => {
       "Overview",
       "Latency",
       "Capacity",
-      "Tenants",
+      "Applications",
       "Events",
       "Playground",
     ]);
@@ -73,10 +73,13 @@ describe("layout", () => {
   it("switches tabs, keeps the choice in the URL, and moves with the arrow keys", async () => {
     const user = open();
 
-    await go(user, "Tenants");
-    expect(window.location.hash).toBe("#/tenants");
-    expect(screen.getByRole("tab", { name: "Tenants" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "tab-tenants");
+    await go(user, "Applications");
+    expect(window.location.hash).toBe("#/applications");
+    expect(screen.getByRole("tab", { name: "Applications" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "tab-applications");
     expect(screen.queryByRole("article")).not.toBeInTheDocument();
 
     await user.keyboard("{ArrowRight}");
@@ -228,10 +231,10 @@ describe("Capacity tab", () => {
   });
 });
 
-describe("Tenants tab", () => {
-  it("lists each tenant's plan, spend, budget use, rejections and downgrades", async () => {
+describe("Applications tab", () => {
+  it("lists each application's plan, spend, budget use, rejections and downgrades", async () => {
     const user = open();
-    await go(user, "Tenants");
+    await go(user, "Applications");
 
     const row = screen.getByRole("row", { name: /^acme/ });
     const cells = within(row)
@@ -244,6 +247,7 @@ describe("Tenants tab", () => {
       "14",
       "0",
       "2",
+      "0", // rejected by the rate limit
       "0",
       "1",
     ]);
@@ -258,18 +262,21 @@ describe("Tenants tab", () => {
     ]);
   });
 
-  it("flags a tenant that has used up its budget", async () => {
-    const tenants = simulated.tenants.tenants ?? {};
-    const initech = tenants.initech;
-    if (initech === undefined) throw new Error("fixture has no tenant initech");
+  it("flags an application that has used up its budget", async () => {
+    const applications = simulated.applications.applications ?? {};
+    const initech = applications.initech;
+    if (initech === undefined) throw new Error("fixture has no application initech");
     const user = open({
       ...simulated,
-      tenants: {
+      applications: {
         available: true,
-        tenants: { ...tenants, initech: { ...initech, used_tokens: 100_012, remaining_tokens: 0 } },
+        applications: {
+          ...applications,
+          initech: { ...initech, used_tokens: 100_012, remaining_tokens: 0 },
+        },
       },
     });
-    await go(user, "Tenants");
+    await go(user, "Applications");
 
     const row = screen.getByRole("row", { name: /^initech/ });
     expect(within(row).getByText("Budget used up")).toBeInTheDocument();
@@ -277,9 +284,9 @@ describe("Tenants tab", () => {
     expect(within(row).getByRole("meter")).toHaveAttribute("aria-valuenow", "100");
   });
 
-  it("says tenants are not available when the gateway has no plans", async () => {
+  it("says applications are not available when the gateway has no plans", async () => {
     const user = open(passthrough);
-    await go(user, "Tenants");
+    await go(user, "Applications");
 
     expect(screen.getByRole("note")).toHaveTextContent("Not available in this backend");
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
@@ -306,7 +313,7 @@ describe("Events tab", () => {
     expect(screen.getByText(/Showing 4 of 4 events held/)).toBeInTheDocument();
   });
 
-  it("filters by type and tenant", async () => {
+  it("filters by type and application", async () => {
     const user = open();
     await go(user, "Events");
 
@@ -315,7 +322,7 @@ describe("Events tab", () => {
     expect(screen.getByText(/Showing 2 of 4 events held/)).toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText("Type"), "state_change");
-    await user.selectOptions(screen.getByLabelText("Tenant"), "acme");
+    await user.selectOptions(screen.getByLabelText("Application"), "acme");
     expect(screen.getByText("No events match.")).toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText("Type"), "");
@@ -330,7 +337,7 @@ describe("Events tab", () => {
       at_ms: 6800,
       type: "timeout",
       model: "economy",
-      tenant_id: null,
+      application_id: null,
       data: { timeout_ms: 120_000 },
     };
 
@@ -369,7 +376,7 @@ describe("simulated live mode", () => {
       "true",
     );
 
-    for (const tab of ["Latency", "Capacity", "Tenants", "Events", "Playground"]) {
+    for (const tab of ["Latency", "Capacity", "Applications", "Events", "Playground"]) {
       await go(user, tab);
       expect(screen.getByRole("status", { name: "Simulated live mode" })).toBeInTheDocument();
     }

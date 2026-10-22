@@ -87,7 +87,7 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `pick_downgrade`, `QueueFullError`; the queue limit itself is in the worker (exists)
 - `metrics.py` — nearest-rank `percentile` and `MetricsStore`: per-model metrics in bounded
   memory, a sliding time window over a fixed-size ring (exists)
-- `timeseries.py` — `TimeSeriesStore`: per-model and per-tenant series at 1 s resolution
+- `timeseries.py` — `TimeSeriesStore`: per-model and per-application series at 1 s resolution
   over a 15-minute window, in bounded memory; buckets are filled by events and reads, with
   no background task (exists)
 - `events.py` — `EventBus`: in-process events with a bounded log, read with a cursor (exists)

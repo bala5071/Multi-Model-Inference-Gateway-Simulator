@@ -187,7 +187,7 @@ describe("response", () => {
         Promise.resolve(
           new Response(
             JSON.stringify({
-              error: { code: "model_not_in_plan", message: "Tenant 'initech' is on 'free'." },
+              error: { code: "model_not_in_plan", message: "Application 'initech' is on 'free'." },
             }),
             { status: 403 },
           ),
@@ -199,7 +199,9 @@ describe("response", () => {
     await user.click(screen.getByRole("button", { name: "Send" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("HTTP 403 model_not_in_plan: Tenant 'initech' is on 'free'.");
+    expect(alert).toHaveTextContent(
+      "HTTP 403 model_not_in_plan: Application 'initech' is on 'free'.",
+    );
     expect(screen.getByText("Failed.")).toBeInTheDocument();
     expect(screen.queryByRole("table", { name: "Response headers" })).not.toBeInTheDocument();
   });

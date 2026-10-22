@@ -9,10 +9,10 @@ import pytest
 from gateway.prefix_cache import CacheStats
 from gateway.schema import RequestResult
 from gateway.timeseries import (
+    ApplicationPoint,
+    ApplicationTotals,
     GaugeSample,
     ModelTotals,
-    TenantPoint,
-    TenantTotals,
     TimeSeriesStore,
 )
 
@@ -87,9 +87,9 @@ def test_a_model_never_recorded_has_no_points_and_zero_totals() -> None:
 
     assert store.model_series("never", 60_000.0) == ()
     assert store.model_totals("never") == ModelTotals(0, 0, 0, 0, 0, 0, 0)
-    assert store.tenant_series("nobody", 60_000.0) == ()
-    assert store.tenant_totals("nobody") == TenantTotals(
-        0, 0, 0.0, {"budget_exhausted": 0, "queue_full": 0}, 0, 0
+    assert store.application_series("nobody", 60_000.0) == ()
+    assert store.application_totals("nobody") == ApplicationTotals(
+        0, 0, 0.0, {"budget_exhausted": 0, "queue_full": 0, "rate_limited": 0}, 0, 0
     )
     assert store.observed_ms("never") is None
     assert store.retained_buckets() == 0
@@ -335,24 +335,24 @@ def test_a_window_that_is_not_a_whole_number_of_steps_rounds_up() -> None:
     assert TimeSeriesStore(ManualClock()).capacity == 900  # 15 minutes at 1 s
 
 
-# --- tenants -------------------------------------------------------------------------------
+# --- applications -------------------------------------------------------------------------------
 
 
-def test_tenant_series_and_totals() -> None:
+def test_application_series_and_totals() -> None:
     clock = ManualClock()
     store = TimeSeriesStore(clock)
-    store.tenant_completed("acme", billed_tokens=13, spend_usd=0.25)
-    store.tenant_completed("acme", billed_tokens=7, spend_usd=0.5)
-    store.tenant_rejected("acme", "queue_full")
+    store.application_completed("acme", billed_tokens=13, spend_usd=0.25)
+    store.application_completed("acme", billed_tokens=7, spend_usd=0.5)
+    store.application_rejected("acme", "queue_full")
     clock.t_ms = 2000.0
-    store.tenant_rejected("acme", "budget_exhausted")
-    store.tenant_rejected("acme", "budget_exhausted")
-    store.tenant_timed_out("acme")
-    store.tenant_downgraded("acme")
-    store.tenant_completed("globex", billed_tokens=1, spend_usd=2.0)
+    store.application_rejected("acme", "budget_exhausted")
+    store.application_rejected("acme", "budget_exhausted")
+    store.application_timed_out("acme")
+    store.application_downgraded("acme")
+    store.application_completed("globex", billed_tokens=1, spend_usd=2.0)
 
-    assert store.tenant_series("acme", 5000.0) == (
-        TenantPoint(
+    assert store.application_series("acme", 5000.0) == (
+        ApplicationPoint(
             t_ms=0.0,
             final=True,
             requests=2,
@@ -362,7 +362,7 @@ def test_tenant_series_and_totals() -> None:
             timeouts=0,
             downgrades=0,
         ),
-        TenantPoint(
+        ApplicationPoint(
             t_ms=2000.0,
             final=False,
             requests=0,
@@ -373,17 +373,17 @@ def test_tenant_series_and_totals() -> None:
             downgrades=1,
         ),
     )
-    assert store.tenant_totals("acme") == TenantTotals(
+    assert store.application_totals("acme") == ApplicationTotals(
         requests=2,
         billed_tokens=20,
         spend_usd=0.75,
-        rejections={"budget_exhausted": 2, "queue_full": 1},
+        rejections={"budget_exhausted": 2, "queue_full": 1, "rate_limited": 0},
         timeouts=1,
         downgrades=1,
     )
-    assert [p.requests for p in store.tenant_series("globex")] == [1]
+    assert [p.requests for p in store.application_series("globex")] == [1]
     with pytest.raises(ValueError, match="unknown rejection reason"):
-        store.tenant_rejected("acme", "bad_mood")
+        store.application_rejected("acme", "bad_mood")
 
 
 # --- bounded memory ------------------------------------------------------------------------
@@ -402,18 +402,18 @@ def test_memory_stays_bounded_over_many_windows_of_traffic() -> None:
     for i in range(300_000):
         clock.t_ms += 1.0
         model = "economy" if i % 2 else "premium"
-        tenant = "acme" if i % 3 else "globex"
+        application = "acme" if i % 3 else "globex"
         store.request_started(model)
         store.tokens(model, 3)
         store.observe(model, GaugeSample(queue_len=i % 7, batch_size=4, kv_used_tokens=i % 900))
         store.request_completed(model, result)
         store.request_ended(model)
-        store.tenant_completed(tenant, billed_tokens=13, spend_usd=0.001)
+        store.application_completed(application, billed_tokens=13, spend_usd=0.001)
         if i % 997 == 0:
             most_buckets = max(most_buckets, store.retained_buckets())
             most_samples = max(most_samples, store.retained_samples())
 
-    # Two models and two tenants, 60 one-second buckets each, however long it runs.
+    # Two models and two applications, 60 one-second buckets each, however long it runs.
     assert most_buckets == 4 * 60
     assert store.retained_buckets() == 4 * 60
     # Raw samples exist only in each model's open bucket: at most 100 TTFTs, 100 totals
@@ -422,7 +422,7 @@ def test_memory_stays_bounded_over_many_windows_of_traffic() -> None:
     assert len(store.model_series("economy", 10**9)) == 60
     assert store.model_totals("economy").completed == 150_000
     assert store.model_totals("economy").output_tokens == 450_000
-    assert store.tenant_totals("acme").requests == 200_000
+    assert store.application_totals("acme").requests == 200_000
     full = store.model_series("economy", 10**9)[-2]
     assert (full.final, full.arrived, full.completed, full.req_per_s) == (True, 500, 500, 500.0)
     assert (full.latency_truncated, full.total_p50_ms, full.itl_p99_ms) == (True, 30.0, 10.0)

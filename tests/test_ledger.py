@@ -28,7 +28,7 @@ def _result(
     )
 
 
-def test_new_tenant_has_no_usage() -> None:
+def test_new_application_has_no_usage() -> None:
     usage = CostLedger(SimClock()).usage("t1")
     assert usage.total == ModelUsage()
     assert usage.by_model == {}
@@ -68,7 +68,7 @@ def test_zero_multiplier_tracks_tokens_and_base_cost_but_bills_nothing() -> None
     assert (total.billed_tokens, total.base_cost_usd, total.billed_cost_usd) == (15, 0.3, 0.0)
 
 
-def test_tenants_are_accounted_separately() -> None:
+def test_applications_are_accounted_separately() -> None:
     ledger = CostLedger(SimClock())
     ledger.record("t1", _result(10, 5, 0.1), model="economy", price_multiplier=1.0)
     ledger.record("t2", _result(7, 3, 0.2), model="economy", price_multiplier=1.0)
@@ -89,11 +89,11 @@ def test_budget_check_passes_until_the_budget_is_used_up() -> None:
         ledger.check_budget("t1", 30)  # 30 of 30
 
     error = excinfo.value
-    assert (error.tenant_id, error.used_tokens, error.budget_tokens) == ("t1", 30, 30)
+    assert (error.application_id, error.used_tokens, error.budget_tokens) == ("t1", 30, 30)
     assert error.retry_after_ms == JANUARY_1970_MS
     assert "used 30 of its 30 token budget" in str(error)
     ledger.check_budget("t1", 31)
-    ledger.check_budget("t2", 30)  # another tenant is unaffected
+    ledger.check_budget("t2", 30)  # another application is unaffected
 
 
 def test_zero_budget_is_exhausted_from_the_start() -> None:
@@ -122,7 +122,7 @@ async def test_usage_resets_when_the_period_rolls_over() -> None:
     ledger.check_budget("t1", 15)
 
 
-async def test_a_tenant_first_seen_in_a_later_period_gets_that_period() -> None:
+async def test_a_application_first_seen_in_a_later_period_gets_that_period() -> None:
     clock = SimClock()
     ledger = CostLedger(clock, periods=FixedPeriods(0.0, 1000.0))
     await clock.sleep_ms(2500.0)

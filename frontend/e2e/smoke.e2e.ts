@@ -26,7 +26,7 @@ test("the page loads, is live, and says it is simulated", async ({ page }) => {
   await expect(banner.getByRole("button", { name: "20×" })).toHaveAttribute("aria-pressed", "true");
 
   // Every tab opens, keeps the label, and draws its charts.
-  for (const tab of ["Latency", "Capacity", "Tenants", "Events", "Playground"]) {
+  for (const tab of ["Latency", "Capacity", "Applications", "Events", "Playground"]) {
     await openTab(page, tab);
     await expect(banner).toBeVisible();
   }

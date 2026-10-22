@@ -1,6 +1,6 @@
 // What the tabs show, worked out from the API's values. Pure functions.
 
-import type { BatchGroup, GatewayEvent, ModelPoint, SloGroup, TenantSnapshot } from "./types";
+import type { BatchGroup, GatewayEvent, ModelPoint, SloGroup, ApplicationSnapshot } from "./types";
 
 export type Health = "healthy" | "degraded" | "no-slo";
 
@@ -69,19 +69,20 @@ export interface BudgetUse {
   level: BudgetLevel;
 }
 
-export function budgetUse(tenant: TenantSnapshot): BudgetUse {
-  const ratio = tenant.budget_tokens === 0 ? 1 : tenant.used_tokens / tenant.budget_tokens;
+export function budgetUse(application: ApplicationSnapshot): BudgetUse {
+  const ratio =
+    application.budget_tokens === 0 ? 1 : application.used_tokens / application.budget_tokens;
   return { ratio, level: ratio >= 1 ? "exhausted" : ratio >= 0.8 ? "warning" : "ok" };
 }
 
 export interface EventFilter {
   type: string;
   model: string;
-  tenant: string;
+  application: string;
 }
 
 /** "" in a field means any. */
-export const ANY_EVENT: EventFilter = { type: "", model: "", tenant: "" };
+export const ANY_EVENT: EventFilter = { type: "", model: "", application: "" };
 
 /** The events that match, newest first. */
 export function filterEvents(events: readonly GatewayEvent[], filter: EventFilter): GatewayEvent[] {
@@ -90,7 +91,7 @@ export function filterEvents(events: readonly GatewayEvent[], filter: EventFilte
       (event) =>
         (filter.type === "" || event.type === filter.type) &&
         (filter.model === "" || event.model === filter.model) &&
-        (filter.tenant === "" || event.tenant_id === filter.tenant),
+        (filter.application === "" || event.application_id === filter.application),
     )
     .reverse();
 }
@@ -98,7 +99,7 @@ export function filterEvents(events: readonly GatewayEvent[], filter: EventFilte
 /** The distinct values of one field among the events, sorted, for a filter's choices. */
 export function distinct(
   events: readonly GatewayEvent[],
-  field: "type" | "model" | "tenant_id",
+  field: "type" | "model" | "application_id",
 ): string[] {
   const values = new Set<string>();
   for (const event of events) {

@@ -138,10 +138,10 @@ function Output({ run }: { run: Run }) {
 export function Playground({ state, control }: { state: MonitorState; control: Control }) {
   const snapshot = state.snapshot;
   const models = Object.keys(snapshot?.models ?? {});
-  // The gateway's applications (reported as tenants until the monitoring rename).
+  // The gateway's applications, offered only when the gateway serves the Playground.
   const viaPlayground = control.status?.playground.available ?? false;
-  const applications = viaPlayground ? Object.keys(snapshot?.tenants.tenants ?? {}) : [];
-  const hasApplications = snapshot?.tenants.available ?? false;
+  const applications = viaPlayground ? Object.keys(snapshot?.applications.applications ?? {}) : [];
+  const hasApplications = snapshot?.applications.available ?? false;
   const [edited, setEdited] = useState<Partial<PlaygroundForm>>({});
   const [run, dispatch] = useReducer(reduceRun, IDLE_RUN);
   const abort = useRef<AbortController | null>(null);
@@ -206,7 +206,7 @@ export function Playground({ state, control }: { state: MonitorState; control: C
                 >
                   {applications.map((application) => (
                     <option key={application} value={application}>
-                      {application} ({snapshot?.tenants.tenants?.[application]?.plan})
+                      {application} ({snapshot?.applications.applications?.[application]?.plan})
                     </option>
                   ))}
                 </select>

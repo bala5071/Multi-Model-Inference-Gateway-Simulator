@@ -605,9 +605,9 @@
       ]
     }
   },
-  "tenants": {
+  "applications": {
     "available": true,
-    "tenants": {
+    "applications": {
       "initech": {
         "plan": "free",
         "period_start_ms": 0.0,
@@ -619,7 +619,8 @@
         "requests": 3,
         "rejections_total": {
           "budget_exhausted": 0,
-          "queue_full": 0
+          "queue_full": 0,
+          "rate_limited": 0
         },
         "timeout_total": 0,
         "downgrade_total": 0,
@@ -667,7 +668,8 @@
         "requests": 3,
         "rejections_total": {
           "budget_exhausted": 0,
-          "queue_full": 0
+          "queue_full": 0,
+          "rate_limited": 0
         },
         "timeout_total": 0,
         "downgrade_total": 0,
@@ -715,7 +717,8 @@
         "requests": 14,
         "rejections_total": {
           "budget_exhausted": 0,
-          "queue_full": 2
+          "queue_full": 2,
+          "rate_limited": 0
         },
         "timeout_total": 0,
         "downgrade_total": 1,
@@ -802,7 +805,7 @@
         "at_ms": 3000.0,
         "type": "queue_full",
         "model": "premium",
-        "tenant_id": "acme",
+        "application_id": "acme",
         "data": {
           "waiting": 2,
           "limit": 2
@@ -813,7 +816,7 @@
         "at_ms": 3000.0,
         "type": "queue_full",
         "model": "premium",
-        "tenant_id": "acme",
+        "application_id": "acme",
         "data": {
           "waiting": 2,
           "limit": 2
@@ -824,7 +827,7 @@
         "at_ms": 5910.0,
         "type": "state_change",
         "model": "premium",
-        "tenant_id": null,
+        "application_id": null,
         "data": {
           "degraded": true,
           "p99_ms": 2910.0
@@ -835,7 +838,7 @@
         "at_ms": 6732.5,
         "type": "downgrade",
         "model": "premium",
-        "tenant_id": "acme",
+        "application_id": "acme",
         "data": {
           "to_model": "standard"
         }

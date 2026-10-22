@@ -524,11 +524,11 @@ def create_app(
         )
 
     def failure(
-        exc: QueueFullError | RequestTimeoutError, model: str, tenant_id: str | None
+        exc: QueueFullError | RequestTimeoutError, model: str, application_id: str | None
     ) -> tuple[int, dict[str, object], dict[str, str] | None]:
         """Status, error body and headers for a request the model could not serve."""
         if isinstance(exc, QueueFullError):
-            monitoring.queue_full(model, tenant_id, exc)
+            monitoring.queue_full(model, application_id, exc)
             retry_after_s = max(1, math.ceil(exc.retry_after_ms / 1000))
             return (
                 429,
@@ -548,7 +548,7 @@ def create_app(
             # A request that timed out took at least this long; without this the monitor
             # would only ever see the requests that made it.
             monitor.record(model, exc.timeout_ms)
-        monitoring.timed_out(model, tenant_id, exc.timeout_ms)
+        monitoring.timed_out(model, application_id, exc.timeout_ms)
         return (
             504,
             {
@@ -566,7 +566,7 @@ def create_app(
         *,
         request_id: str,
         model: str,
-        tenant_id: str | None,
+        application_id: str | None,
         price_multiplier: float,
         live_tokens: int,
     ) -> GenerateResponse:
@@ -575,12 +575,12 @@ def create_app(
         if monitor is not None:
             monitor.record(model, result.latency_ms)
         cost_usd = result.cost_usd
-        if tenant_id is not None:
+        if application_id is not None:
             cost_usd = ledger.record(
-                tenant_id, result, model=model, price_multiplier=price_multiplier
+                application_id, result, model=model, price_multiplier=price_multiplier
             )
         monitoring.completed(
-            model, tenant_id, result, billed_cost_usd=cost_usd, live_tokens=live_tokens
+            model, application_id, result, billed_cost_usd=cost_usd, live_tokens=live_tokens
         )
         return GenerateResponse(
             id=request_id,
@@ -638,7 +638,11 @@ def create_app(
                         f"At most {caller.max_tokens} on this application's plan.", "max_tokens"
                     )
                 max_tokens = max_tokens or caller.max_tokens
-            rate_limiter.admit(caller.id, caller.requests_per_minute)
+            try:
+                rate_limiter.admit(caller.id, caller.requests_per_minute)
+            except RateLimitedError:
+                monitoring.rate_limited(caller.id)
+                raise
             route = router.route(caller, model=body.model, quality=body.quality)
             try:
                 ledger.check_budget(caller.id, route.plan.monthly_token_budget)
@@ -657,11 +661,11 @@ def create_app(
                 downgraded_from, model = model, healthier
 
         request_id = f"req-{next(request_numbers)}"
-        tenant_id = caller.id if caller is not None else None
+        application_id = caller.id if caller is not None else None
         headers = {"X-Model-Used": model}
         if downgraded_from is not None:
             headers["X-Downgraded-From"] = downgraded_from
-            monitoring.downgraded(tenant_id, downgraded_from, model)
+            monitoring.downgraded(application_id, downgraded_from, model)
 
         # Token events for a streaming response; None marks the end of the request.
         tokens: asyncio.Queue[tuple[int, float, str] | None] = asyncio.Queue()
@@ -692,13 +696,13 @@ def create_app(
             try:
                 result = await guarded
             except (QueueFullError, RequestTimeoutError) as exc:
-                status, error, error_headers = failure(exc, model, tenant_id)
+                status, error, error_headers = failure(exc, model, application_id)
                 return JSONResponse({"error": error}, status_code=status, headers=error_headers)
             payload = settle(
                 result,
                 request_id=request_id,
                 model=model,
-                tenant_id=tenant_id,
+                application_id=application_id,
                 price_multiplier=price_multiplier,
                 live_tokens=live_tokens,
             )
@@ -718,7 +722,7 @@ def create_app(
             # answer exactly as a non-streaming request would.
             failed = task.exception()
             if isinstance(failed, QueueFullError | RequestTimeoutError):
-                status, error, error_headers = failure(failed, model, tenant_id)
+                status, error, error_headers = failure(failed, model, application_id)
                 return JSONResponse({"error": error}, status_code=status, headers=error_headers)
             task.result()
             raise AssertionError("a request finished without producing a token")
@@ -738,13 +742,13 @@ def create_app(
                         task.result(),
                         request_id=request_id,
                         model=model,
-                        tenant_id=tenant_id,
+                        application_id=application_id,
                         price_multiplier=price_multiplier,
                         live_tokens=live_tokens,
                     )
                     yield _sse("done", payload.model_dump())
                 elif isinstance(failed, RequestTimeoutError):
-                    yield _sse("error", failure(failed, model, tenant_id)[1])
+                    yield _sse("error", failure(failed, model, application_id)[1])
                 elif isinstance(failed, BackendError):
                     yield _sse("error", _backend_failure(failed))
                 else:
@@ -1227,7 +1231,7 @@ def create_simulated_live_app(
 
 def create_default_app() -> FastAPI:
     """The production wiring: real time, continuous batching, prefix caches, simulated
-    models, chunked prefill, tenant plans, and overload protection.
+    models, chunked prefill, application plans, and overload protection.
 
     ``GATEWAY_BACKEND=llamacpp`` (or a backends file named by ``GATEWAY_BACKENDS``) swaps
     the simulated models for real ones behind llama.cpp servers. The model server then

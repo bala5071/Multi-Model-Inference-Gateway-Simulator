@@ -271,9 +271,9 @@
       ]
     }
   },
-  "tenants": {
+  "applications": {
     "available": false,
-    "tenants": null
+    "applications": null
   },
   "events": {
     "available": true,

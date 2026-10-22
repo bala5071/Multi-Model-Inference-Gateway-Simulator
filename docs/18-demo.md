@@ -104,7 +104,8 @@ uv run python scripts/capture_demo.py     # add PLAYWRIGHT_CHANNEL=chrome to use
 ```
 
 It runs `frontend/e2e/demo.capture.ts` against the same simulated gateway (seed 7) and
-writes `docs/img/`: `overview.png`, `latency.png`, `capacity.png`, `tenants.png`,
+writes `docs/img/`: `overview.png`, `latency.png`, `capacity.png`, `applications.png`
+(`tenants.png` before platform step 4),
 `events.png`, `playground.png`, and `overload.gif`, thirty frames of the Overview at speed 5
 while the `overload` preset takes hold. The GIFs are assembled with Pillow, scaled to 960
 pixels wide with 64 colours.
@@ -115,7 +116,7 @@ preset and seed 7, and writes `docs/img/demo.gif`: a silent tour of every tab, 9
 taken 400 ms apart (Pillow merges identical neighbours). Steady load on the Overview and
 Latency tabs at 5x; one request of up to 128 tokens to the standard model, streamed at 1x
 so the tokens can be seen arriving; then the `overload` preset at 20x until premium is
-marked degraded, through the Overview, Capacity, Events and Tenants tabs. Every frame is
+marked degraded, through the Overview, Capacity, Events and Applications tabs. Every frame is
 the top 1280 x 720 of the page, so the simulated-mode banner is in all of them. The tour
 has a gateway of its own so that it always starts from the same calm state and does not
 change what the stills see.

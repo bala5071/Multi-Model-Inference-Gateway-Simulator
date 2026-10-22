@@ -20,7 +20,7 @@ from gateway.prefix_cache import PrefixCache
 from gateway.profiles import ModelProfile
 from gateway.registry import ModelRegistry
 from gateway.schema import RequestResult
-from gateway.timeseries import GaugeSample, ModelPoint, TenantPoint, TimeSeriesStore
+from gateway.timeseries import ApplicationPoint, GaugeSample, ModelPoint, TimeSeriesStore
 
 
 @runtime_checkable
@@ -140,7 +140,7 @@ class ModelSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class TenantSnapshot:
+class ApplicationSnapshot:
     plan: str
     # The budget period these four belong to; they start again from zero in the next one.
     period_start_ms: float
@@ -154,13 +154,13 @@ class TenantSnapshot:
     rejections_total: dict[str, int]
     timeout_total: int
     downgrade_total: int
-    series: tuple[TenantPoint, ...]
+    series: tuple[ApplicationPoint, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class TenantsGroup:
+class ApplicationsGroup:
     available: bool
-    tenants: dict[str, TenantSnapshot] | None
+    applications: dict[str, ApplicationSnapshot] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,7 +179,7 @@ class Snapshot:
     resolution_ms: float
     window_ms: float
     models: dict[str, ModelSnapshot]
-    tenants: TenantsGroup
+    applications: ApplicationsGroup
     events: EventsGroup
 
 
@@ -193,10 +193,9 @@ class Monitor:
     """Feeds the time-series store and the event bus, and builds snapshots from them.
 
     ``slo_models`` are the models that have an SLO; only they have a degraded flag.
-    ``ledger`` and ``applications`` go together: without them there are no tenants to
-    report. Each application is reported as a tenant (the snapshot's names change in step 4
-    of docs/platform-plan.md). Only registered models and authenticated applications are
-    ever recorded, which is what bounds the number of series.
+    ``ledger`` and ``applications`` go together: without them there are no applications to
+    report. Only registered models and authenticated applications are ever recorded, which
+    is what bounds the number of series.
     """
 
     def __init__(
@@ -216,7 +215,7 @@ class Monitor:
         self._series = series
         self._events = events
         self._ledger = ledger
-        self._applications = applications
+        self._application_store = applications
         # Looked up once: checking a worker against the protocol reads its properties.
         self._views: dict[str, SchedulerView | None] = {}
         for name in registry.names:
@@ -254,7 +253,7 @@ class Monitor:
     def completed(
         self,
         model: str,
-        tenant_id: str | None,
+        application_id: str | None,
         result: RequestResult,
         *,
         billed_cost_usd: float,
@@ -264,42 +263,55 @@ class Monitor:
         if result.tokens_out > live_tokens:
             self._series.tokens(model, result.tokens_out - live_tokens)
         self._series.request_completed(model, result)
-        if tenant_id is not None:
-            self._series.tenant_completed(
-                tenant_id,
+        if application_id is not None:
+            self._series.application_completed(
+                application_id,
                 billed_tokens=result.tokens_in - result.cached_tokens + result.tokens_out,
                 spend_usd=billed_cost_usd,
             )
 
-    def queue_full(self, model: str, tenant_id: str | None, exc: QueueFullError) -> None:
+    def queue_full(self, model: str, application_id: str | None, exc: QueueFullError) -> None:
         self._series.queue_full(model)
-        if tenant_id is not None:
-            self._series.tenant_rejected(tenant_id, "queue_full")
+        if application_id is not None:
+            self._series.application_rejected(application_id, "queue_full")
         self._events.publish(
-            "queue_full", model=model, tenant_id=tenant_id, waiting=exc.waiting, limit=exc.limit
+            "queue_full",
+            model=model,
+            application_id=application_id,
+            waiting=exc.waiting,
+            limit=exc.limit,
         )
 
-    def timed_out(self, model: str, tenant_id: str | None, timeout_ms: float) -> None:
+    def timed_out(self, model: str, application_id: str | None, timeout_ms: float) -> None:
         self._series.timed_out(model)
-        if tenant_id is not None:
-            self._series.tenant_timed_out(tenant_id)
-        self._events.publish("timeout", model=model, tenant_id=tenant_id, timeout_ms=timeout_ms)
+        if application_id is not None:
+            self._series.application_timed_out(application_id)
+        self._events.publish(
+            "timeout", model=model, application_id=application_id, timeout_ms=timeout_ms
+        )
 
-    def downgraded(self, tenant_id: str | None, from_model: str, to_model: str) -> None:
+    def downgraded(self, application_id: str | None, from_model: str, to_model: str) -> None:
         self._series.downgraded(from_model)
-        if tenant_id is not None:
-            self._series.tenant_downgraded(tenant_id)
-        self._events.publish("downgrade", model=from_model, tenant_id=tenant_id, to_model=to_model)
+        if application_id is not None:
+            self._series.application_downgraded(application_id)
+        self._events.publish(
+            "downgrade", model=from_model, application_id=application_id, to_model=to_model
+        )
 
     def budget_exhausted(self, model: str, exc: BudgetExceededError) -> None:
-        self._series.tenant_rejected(exc.tenant_id, "budget_exhausted")
+        self._series.application_rejected(exc.application_id, "budget_exhausted")
         self._events.publish(
             "budget_exhausted",
             model=model,
-            tenant_id=exc.tenant_id,
+            application_id=exc.application_id,
             used_tokens=exc.used_tokens,
             budget_tokens=exc.budget_tokens,
         )
+
+    def rate_limited(self, application_id: str) -> None:
+        """A request refused by its application's requests-per-minute limit. Counted as a
+        rejection; it never reached a model, so no model series and no event."""
+        self._series.application_rejected(application_id, "rate_limited")
 
     def slo_transition(self, transition: Transition) -> None:
         """For ``SloMonitor(on_transition=...)``."""
@@ -330,7 +342,7 @@ class Monitor:
             resolution_ms=self._series.resolution_ms,
             window_ms=self._series.window_ms,
             models=models,
-            tenants=self._tenants(history_ms),
+            applications=self._applications(history_ms),
             events=EventsGroup(
                 available=True,
                 capacity=self._events.capacity,
@@ -430,15 +442,15 @@ class Monitor:
             series=self._series.model_series(name, history_ms),
         )
 
-    def _tenants(self, history_ms: float) -> TenantsGroup:
-        if self._applications is None or self._ledger is None:
-            return TenantsGroup(False, None)
-        tenants: dict[str, TenantSnapshot] = {}
-        for application in self._applications.list_applications():
-            tenant_id, plan = application.id, application.plan
-            usage = self._ledger.usage(tenant_id)
-            totals = self._series.tenant_totals(tenant_id)
-            tenants[tenant_id] = TenantSnapshot(
+    def _applications(self, history_ms: float) -> ApplicationsGroup:
+        if self._application_store is None or self._ledger is None:
+            return ApplicationsGroup(False, None)
+        applications: dict[str, ApplicationSnapshot] = {}
+        for application in self._application_store.list_applications():
+            application_id, plan = application.id, application.plan
+            usage = self._ledger.usage(application_id)
+            totals = self._series.application_totals(application_id)
+            applications[application_id] = ApplicationSnapshot(
                 plan=plan.name,
                 period_start_ms=usage.period_start_ms,
                 period_end_ms=usage.period_end_ms,
@@ -450,9 +462,9 @@ class Monitor:
                 rejections_total=totals.rejections,
                 timeout_total=totals.timeouts,
                 downgrade_total=totals.downgrades,
-                series=self._series.tenant_series(tenant_id, history_ms),
+                series=self._series.application_series(application_id, history_ms),
             )
-        return TenantsGroup(True, tenants)
+        return ApplicationsGroup(True, applications)
 
 
 # --- Prometheus text format ----------------------------------------------------------------
@@ -638,57 +650,59 @@ def render_prometheus(snapshot: Snapshot) -> str:
         ),
     ]
 
-    tenants = snapshot.tenants.tenants or {}
+    applications = snapshot.applications.applications or {}
 
-    def per_tenant(value_of: Mapping[str, float | None]) -> list[_Sample]:
-        return [({"tenant": tenant_id}, value) for tenant_id, value in value_of.items()]
+    def per_application(value_of: Mapping[str, float | None]) -> list[_Sample]:
+        return [
+            ({"application": application_id}, value) for application_id, value in value_of.items()
+        ]
 
     families += [
         (
-            "gateway_tenant_spend_usd",
+            "gateway_application_spend_usd",
             "gauge",
-            "Billed to the tenant in its current budget period.",
-            per_tenant({t: s.spend_usd for t, s in tenants.items()}),
+            "Billed to the application in its current budget period.",
+            per_application({t: s.spend_usd for t, s in applications.items()}),
         ),
         (
-            "gateway_tenant_used_tokens",
+            "gateway_application_used_tokens",
             "gauge",
-            "Billed tokens the tenant has used in its current budget period.",
-            per_tenant({t: s.used_tokens for t, s in tenants.items()}),
+            "Billed tokens the application has used in its current budget period.",
+            per_application({t: s.used_tokens for t, s in applications.items()}),
         ),
         (
-            "gateway_tenant_budget_tokens",
+            "gateway_application_budget_tokens",
             "gauge",
-            "Billed tokens the tenant's plan allows per budget period.",
-            per_tenant({t: s.budget_tokens for t, s in tenants.items()}),
+            "Billed tokens the application's plan allows per budget period.",
+            per_application({t: s.budget_tokens for t, s in applications.items()}),
         ),
         (
-            "gateway_tenant_requests",
+            "gateway_application_requests",
             "gauge",
-            "Requests the tenant completed in its current budget period.",
-            per_tenant({t: s.requests for t, s in tenants.items()}),
+            "Requests the application completed in its current budget period.",
+            per_application({t: s.requests for t, s in applications.items()}),
         ),
         (
-            "gateway_tenant_rejections_total",
+            "gateway_application_rejections_total",
             "counter",
-            "Requests of the tenant refused with 429, by reason.",
+            "Requests of the application refused with 429, by reason.",
             [
-                ({"tenant": tenant_id, "reason": reason}, count)
-                for tenant_id, tenant in tenants.items()
-                for reason, count in tenant.rejections_total.items()
+                ({"application": application_id, "reason": reason}, count)
+                for application_id, application in applications.items()
+                for reason, count in application.rejections_total.items()
             ],
         ),
         (
-            "gateway_tenant_timeouts_total",
+            "gateway_application_timeouts_total",
             "counter",
-            "Requests of the tenant cancelled at the request timeout.",
-            per_tenant({t: s.timeout_total for t, s in tenants.items()}),
+            "Requests of the application cancelled at the request timeout.",
+            per_application({t: s.timeout_total for t, s in applications.items()}),
         ),
         (
-            "gateway_tenant_downgrades_total",
+            "gateway_application_downgrades_total",
             "counter",
-            "Requests of the tenant moved to a cheaper model.",
-            per_tenant({t: s.downgrade_total for t, s in tenants.items()}),
+            "Requests of the application moved to a cheaper model.",
+            per_application({t: s.downgrade_total for t, s in applications.items()}),
         ),
         (
             "gateway_events_total",

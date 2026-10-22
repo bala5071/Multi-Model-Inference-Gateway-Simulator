@@ -29,7 +29,7 @@ from gateway.registry import ModelRegistry
 from gateway.routing import Plan, PlansConfig, load_plans
 from gateway.schema import RequestResult
 from gateway.timeseries import TimeSeriesStore
-from helpers import EXACT, application_access, default_server_key, tenant_headers
+from helpers import EXACT, application_access, application_headers, default_server_key
 from mock_llama import MockLlamaServer
 
 # Ten words: 10 prompt tokens, so 5 ms of prefill on the EXACT profile. With three output
@@ -109,7 +109,7 @@ class Gateway:
 
     async def generate(self, **body: Any) -> httpx.Response:
         body.setdefault("max_tokens", 3)
-        headers = tenant_headers(body, self.keys)
+        headers = application_headers(body, self.keys)
         return await self.client.post("/v1/generate", json=body, headers=headers)
 
     async def snapshot(self, **params: Any) -> dict[str, Any]:
@@ -251,7 +251,7 @@ async def test_snapshot_of_one_request_has_exact_values() -> None:
                 "series": [_point()],
             }
         },
-        "tenants": {"available": False, "tenants": None},
+        "applications": {"available": False, "applications": None},
         "events": {
             "available": True,
             "capacity": 1000,
@@ -422,7 +422,7 @@ async def test_a_burst_shows_queue_batch_kv_and_the_rejected_request() -> None:
                 "at_ms": 0.0,
                 "type": "queue_full",
                 "model": "standard",
-                "tenant_id": None,
+                "application_id": None,
                 "data": {"waiting": 1, "limit": 1},
             }
         ],
@@ -505,7 +505,7 @@ async def test_passthrough_models_report_scheduler_metrics_unavailable_not_zero(
 
     async with _gateway(registry, clock, plans=load_plans()) as gateway:
         response = await gateway.generate(
-            tenant_id="acme", model="premium", prompt="Say hello to the world"
+            application_id="acme", model="premium", prompt="Say hello to the world"
         )
         snapshot = await gateway.snapshot()
         text = await gateway.metrics()
@@ -561,7 +561,7 @@ def test_only_a_worker_with_its_own_scheduler_matches_the_view() -> None:
     )
 
 
-# --- tenants -------------------------------------------------------------------------------
+# --- applications -------------------------------------------------------------------------------
 
 PLANS = (
     PlansConfig(plans={"basic": Plan("basic", ("standard",), 2.0, 30)}),
@@ -569,15 +569,17 @@ PLANS = (
 )
 
 
-async def test_tenants_show_spend_tokens_against_budget_and_rejections() -> None:
+async def test_applications_show_spend_tokens_against_budget_and_rejections() -> None:
     clock = SimClock()
     async with _gateway(_single(clock), clock, plans=PLANS) as gateway:
         served = [
-            await gateway.generate(tenant_id="t1", model="standard", prompt=_prompt(word))
+            await gateway.generate(application_id="t1", model="standard", prompt=_prompt(word))
             for word in "abc"
         ]
-        rejected = await gateway.generate(tenant_id="t1", model="standard", prompt=_prompt("d"))
-        unknown = await gateway.generate(tenant_id="nobody", model="standard", prompt=PROMPT)
+        rejected = await gateway.generate(
+            application_id="t1", model="standard", prompt=_prompt("d")
+        )
+        unknown = await gateway.generate(application_id="nobody", model="standard", prompt=PROMPT)
         snapshot = await gateway.snapshot()
 
     # Each request bills 13 tokens against a budget of 30: the check passes at 0, 13 and
@@ -586,9 +588,9 @@ async def test_tenants_show_spend_tokens_against_budget_and_rejections() -> None
     assert (rejected.status_code, rejected.json()["error"]["code"]) == (429, "budget_exhausted")
     assert unknown.status_code == 401  # a key that matches no application
     billed = COST * 2.0
-    assert snapshot["tenants"] == {
+    assert snapshot["applications"] == {
         "available": True,
-        "tenants": {
+        "applications": {
             "t1": {
                 "plan": "basic",
                 "period_start_ms": 0.0,
@@ -598,7 +600,7 @@ async def test_tenants_show_spend_tokens_against_budget_and_rejections() -> None
                 "remaining_tokens": 0,
                 "spend_usd": billed + billed + billed,
                 "requests": 3,
-                "rejections_total": {"budget_exhausted": 1, "queue_full": 0},
+                "rejections_total": {"budget_exhausted": 1, "queue_full": 0, "rate_limited": 0},
                 "timeout_total": 0,
                 "downgrade_total": 0,
                 "series": [
@@ -614,7 +616,7 @@ async def test_tenants_show_spend_tokens_against_budget_and_rejections() -> None
                     }
                 ],
             },
-            # Configured, so listed; unused, so empty. The unknown tenant is not listed.
+            # Configured, so listed; unused, so empty. The unknown application is not listed.
             "t2": {
                 "plan": "basic",
                 "period_start_ms": 0.0,
@@ -624,7 +626,7 @@ async def test_tenants_show_spend_tokens_against_budget_and_rejections() -> None
                 "remaining_tokens": 30,
                 "spend_usd": 0.0,
                 "requests": 0,
-                "rejections_total": {"budget_exhausted": 0, "queue_full": 0},
+                "rejections_total": {"budget_exhausted": 0, "queue_full": 0, "rate_limited": 0},
                 "timeout_total": 0,
                 "downgrade_total": 0,
                 "series": [],
@@ -638,7 +640,7 @@ async def test_tenants_show_spend_tokens_against_budget_and_rejections() -> None
             "at_ms": 51.0,
             "type": "budget_exhausted",
             "model": "standard",
-            "tenant_id": "t1",
+            "application_id": "t1",
             "data": {"used_tokens": 39, "budget_tokens": 30},
         }
     ]
@@ -646,22 +648,22 @@ async def test_tenants_show_spend_tokens_against_budget_and_rejections() -> None
     assert snapshot["models"]["standard"]["traffic"]["arrived_total"] == 3
 
 
-async def test_a_full_queue_counts_against_the_tenant_that_was_refused() -> None:
+async def test_a_full_queue_counts_against_the_application_that_was_refused() -> None:
     clock = SimClock()
     async with _gateway(_single(clock, max_queue_len=0), clock, plans=PLANS) as gateway:
         responses = await asyncio.gather(
             *(
-                gateway.generate(tenant_id="t1", model="standard", prompt=_prompt(f"p{i}"))
+                gateway.generate(application_id="t1", model="standard", prompt=_prompt(f"p{i}"))
                 for i in range(5)
             )
         )
         snapshot = await gateway.snapshot()
 
     assert [r.status_code for r in responses] == [200, 200, 200, 200, 429]
-    t1 = snapshot["tenants"]["tenants"]["t1"]
-    assert t1["rejections_total"] == {"budget_exhausted": 0, "queue_full": 1}
+    t1 = snapshot["applications"]["applications"]["t1"]
+    assert t1["rejections_total"] == {"budget_exhausted": 0, "queue_full": 1, "rate_limited": 0}
     assert (t1["series"][0]["requests"], t1["series"][0]["rejections"]) == (4, 1)
-    assert snapshot["events"]["recent"][0]["tenant_id"] == "t1"
+    assert snapshot["events"]["recent"][0]["application_id"] == "t1"
 
 
 # --- timeouts, downgrades, state changes ---------------------------------------------------
@@ -703,7 +705,7 @@ async def test_a_timeout_is_counted_and_published_with_the_tokens_it_produced() 
             "at_ms": 14.0,
             "type": "timeout",
             "model": "standard",
-            "tenant_id": None,
+            "application_id": None,
             "data": {"timeout_ms": 14.0},
         }
     ]
@@ -764,7 +766,7 @@ async def test_degradation_downgrade_and_recovery_show_in_flags_counters_and_eve
             "at_ms": 17.0,
             "type": "state_change",
             "model": "big",
-            "tenant_id": None,
+            "application_id": None,
             "data": {"degraded": True, "p99_ms": 17.0},
         },
         {
@@ -772,7 +774,7 @@ async def test_degradation_downgrade_and_recovery_show_in_flags_counters_and_eve
             "at_ms": 17.0,
             "type": "downgrade",
             "model": "big",
-            "tenant_id": None,
+            "application_id": None,
             "data": {"to_model": "small"},
         },
     ]
@@ -790,7 +792,7 @@ async def test_degradation_downgrade_and_recovery_show_in_flags_counters_and_eve
         "at_ms": 10_034.0,
         "type": "state_change",
         "model": "big",
-        "tenant_id": None,
+        "application_id": None,
         "data": {"degraded": False, "p99_ms": None},
     }
 
@@ -829,7 +831,7 @@ async def test_stream_pushes_a_snapshot_every_second_and_the_events_in_between()
         "at_ms": 500.0,
         "type": "queue_full",
         "model": "standard",
-        "tenant_id": None,
+        "application_id": None,
         "data": {"waiting": 1, "limit": 1},
     }
     assert first[1]["models"]["standard"]["series"] == [_point()]
@@ -1012,11 +1014,11 @@ async def test_metrics_endpoint_is_exact_prometheus_text_for_one_request() -> No
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "text/plain; version=0.0.4; charset=utf-8"
-    # No SLO and no tenants here, so gateway_degraded and gateway_tenant_* are absent.
+    # No SLO and no applications here, so gateway_degraded and gateway_application_* are absent.
     assert response.text == EXPECTED_METRICS
 
 
-async def test_metrics_endpoint_covers_tenants_slo_and_every_line_is_well_formed() -> None:
+async def test_metrics_endpoint_covers_applications_slo_and_every_line_is_well_formed() -> None:
     clock = SimClock()
     policy = OverloadPolicy(slo=SloPolicy(p99_ms={"standard": 10.0}, min_samples=1))
     async with _gateway(
@@ -1024,7 +1026,7 @@ async def test_metrics_endpoint_covers_tenants_slo_and_every_line_is_well_formed
     ) as gateway:
         await asyncio.gather(
             *(
-                gateway.generate(tenant_id="t1", model="standard", prompt=_prompt(f"p{i}"))
+                gateway.generate(application_id="t1", model="standard", prompt=_prompt(f"p{i}"))
                 for i in range(5)
             )
         )
@@ -1042,13 +1044,16 @@ async def test_metrics_endpoint_covers_tenants_slo_and_every_line_is_well_formed
     # Four requests of 13 billed tokens at twice the base cost; the fifth was refused.
     assert 'gateway_degraded{model="standard"} 1' in samples
     assert 'gateway_metric_group_available{model="standard",group="slo"} 1' in samples
-    assert 'gateway_tenant_used_tokens{tenant="t1"} 52' in samples
-    assert 'gateway_tenant_budget_tokens{tenant="t1"} 30' in samples
-    assert 'gateway_tenant_requests{tenant="t1"} 4' in samples
-    assert f'gateway_tenant_spend_usd{{tenant="t1"}} {COST * 2 * 4!r}' in samples
-    assert 'gateway_tenant_rejections_total{tenant="t1",reason="queue_full"} 1' in samples
-    assert 'gateway_tenant_rejections_total{tenant="t1",reason="budget_exhausted"} 0' in samples
-    assert 'gateway_tenant_requests{tenant="t2"} 0' in samples
+    assert 'gateway_application_used_tokens{application="t1"} 52' in samples
+    assert 'gateway_application_budget_tokens{application="t1"} 30' in samples
+    assert 'gateway_application_requests{application="t1"} 4' in samples
+    assert f'gateway_application_spend_usd{{application="t1"}} {COST * 2 * 4!r}' in samples
+    assert 'gateway_application_rejections_total{application="t1",reason="queue_full"} 1' in samples
+    assert (
+        'gateway_application_rejections_total{application="t1",reason="budget_exhausted"} 0'
+        in samples
+    )
+    assert 'gateway_application_requests{application="t2"} 0' in samples
     assert 'gateway_queue_full_total{model="standard"} 1' in samples
     assert 'gateway_events_total{type="queue_full"} 1' in samples
     assert 'gateway_events_total{type="state_change"} 1' in samples
@@ -1092,14 +1097,16 @@ async def test_memory_stays_bounded_through_the_api() -> None:
             await asyncio.gather(
                 *(
                     gateway.generate(
-                        tenant_id="t1", model="standard", prompt=_prompt(f"s{second}p{i}")
+                        application_id="t1", model="standard", prompt=_prompt(f"s{second}p{i}")
                     )
                     for i in range(5)
                 )
             )
             # Names nobody configured must not create series.
-            await gateway.generate(tenant_id=f"stranger{second}", model="standard", prompt=PROMPT)
-            await gateway.generate(tenant_id="t1", model=f"model{second}", prompt=PROMPT)
+            await gateway.generate(
+                application_id=f"stranger{second}", model="standard", prompt=PROMPT
+            )
+            await gateway.generate(application_id="t1", model=f"model{second}", prompt=PROMPT)
             # A dashboard looking once a second, which gives the idle model its points.
             await gateway.snapshot()
             most_buckets = max(most_buckets, series.retained_buckets())
@@ -1107,7 +1114,7 @@ async def test_memory_stays_bounded_through_the_api() -> None:
         snapshot = await gateway.snapshot(history_s=3600, events=1000)
 
     assert gateway.app.state.monitoring.series is series
-    # Two models and the one tenant that did anything, five one-second buckets each.
+    # Two models and the one application that did anything, five one-second buckets each.
     assert most_buckets == 3 * 5
     assert series.retained_samples() <= 2 * (2 * 1024 + 8192)
     assert snapshot["at_ms"] == 40_000.0
@@ -1118,8 +1125,8 @@ async def test_memory_stays_bounded_through_the_api() -> None:
     assert [p["arrived"] for p in standard] == [5, 5, 5, 5, 0]
     assert snapshot["models"]["standard"]["traffic"]["arrived_total"] == 200
     assert set(snapshot["models"]) == {"standard", "other"}
-    assert set(snapshot["tenants"]["tenants"]) == {"t1", "t2"}
-    assert len(snapshot["tenants"]["tenants"]["t1"]["series"]) == 4
+    assert set(snapshot["applications"]["applications"]) == {"t1", "t2"}
+    assert len(snapshot["applications"]["applications"]["t1"]["series"]) == 4
     assert len(snapshot["models"]["other"]["series"]) == 5
     # Forty refusals were published; the log holds the last three and still counts all.
     assert snapshot["events"]["capacity"] == 3
@@ -1194,7 +1201,7 @@ async def test_default_app_reports_every_group_for_the_three_simulated_models() 
             for group in ("traffic", "queue", "batch", "kv", "cache", "latency", "slo")
         )
         assert model["slo"]["degraded"] is False
-    assert snapshot["tenants"]["available"] is True
-    assert set(snapshot["tenants"]["tenants"]) == {"initech", "globex", "acme"}
+    assert snapshot["applications"]["available"] is True
+    assert set(snapshot["applications"]["applications"]) == {"initech", "globex", "acme"}
     assert (snapshot["resolution_ms"], snapshot["window_ms"]) == (1000.0, 900_000.0)
     assert metrics.status_code == 200

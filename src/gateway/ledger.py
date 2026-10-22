@@ -1,4 +1,4 @@
-"""Per-tenant spend and token accounting, and budget enforcement.
+"""Per-application spend and token accounting, and budget enforcement.
 
 See docs/09-routing.md. Since docs/19-usage-store.md the ledger is a facade over a
 ``UsageStore``: every charge is stored as a usage event, and the ledger keeps the current
@@ -22,18 +22,18 @@ PRUNE_EVERY_MS = 60 * 60 * 1000.0
 PRUNE_BATCH = 1000
 
 __all__ = [
+    "ApplicationUsage",
     "BudgetExceededError",
     "CostLedger",
     "ModelUsage",
-    "TenantUsage",
 ]
 
 
 @dataclass(frozen=True, slots=True)
-class TenantUsage:
-    """One tenant's usage in the current budget period."""
+class ApplicationUsage:
+    """One application's usage in the current budget period."""
 
-    tenant_id: str
+    application_id: str
     period_start_ms: float
     period_end_ms: float
     total: ModelUsage
@@ -42,14 +42,14 @@ class TenantUsage:
 
 class BudgetExceededError(Exception):
     def __init__(
-        self, tenant_id: str, used_tokens: int, budget_tokens: int, retry_after_ms: float
+        self, application_id: str, used_tokens: int, budget_tokens: int, retry_after_ms: float
     ) -> None:
-        self.tenant_id = tenant_id
+        self.application_id = application_id
         self.used_tokens = used_tokens
         self.budget_tokens = budget_tokens
         self.retry_after_ms = retry_after_ms
         super().__init__(
-            f"Tenant {tenant_id!r} has used {used_tokens} of its {budget_tokens} token "
+            f"Application {application_id!r} has used {used_tokens} of its {budget_tokens} token "
             f"budget for this period."
         )
 
@@ -63,14 +63,14 @@ class _Account:
 
 
 class CostLedger:
-    """Tracks what each tenant has used in the current budget period.
+    """Tracks what each application has used in the current budget period.
 
     ``periods`` decides the periods (default: calendar months in UTC), read on ``epoch``
     (default: the ledger's clock read as epoch time, exact and deterministic on a
-    ``SimClock``). A tenant's usage starts again from zero in each new period.
+    ``SimClock``). An application's usage starts again from zero in each new period.
 
     Every charge is appended to ``store`` (default: an in-memory store). The first time the
-    ledger sees a tenant in a period it reads that period's totals from the store, which is
+    ledger sees an application in a period it reads that period's totals from the store, which is
     how usage stored by an earlier process is picked up; after that the totals are kept in
     memory.
 
@@ -96,22 +96,22 @@ class CostLedger:
         self._retention_ms = retention_ms
         self._accounts: dict[str, _Account] = {}
 
-    def _account(self, tenant_id: str) -> _Account:
+    def _account(self, application_id: str) -> _Account:
         start_ms, end_ms = self._periods.bounds(self._epoch.epoch_ms())
-        account = self._accounts.get(tenant_id)
+        account = self._accounts.get(application_id)
         if account is None or account.period_start_ms != start_ms:
-            by_model = self._store.usage_by_model(tenant_id, start_ms, end_ms)
+            by_model = self._store.usage_by_model(application_id, start_ms, end_ms)
             total = ModelUsage()
             for usage in by_model.values():
                 total = _add(total, usage)
             account = _Account(start_ms, end_ms, total, by_model)
-            self._accounts[tenant_id] = account
+            self._accounts[application_id] = account
         return account
 
-    def usage(self, tenant_id: str) -> TenantUsage:
-        account = self._account(tenant_id)
-        return TenantUsage(
-            tenant_id=tenant_id,
+    def usage(self, application_id: str) -> ApplicationUsage:
+        account = self._account(application_id)
+        return ApplicationUsage(
+            application_id=application_id,
             period_start_ms=account.period_start_ms,
             period_end_ms=account.period_end_ms,
             total=account.total,
@@ -131,34 +131,34 @@ class CostLedger:
         period_start_ms, _ = self._periods.bounds(now_ms)
         return self._store.prune(min(now_ms - self._retention_ms, period_start_ms), limit)
 
-    def check_budget(self, tenant_id: str, budget_tokens: int) -> None:
-        """Raise ``BudgetExceededError`` if the tenant has no budget left this period.
+    def check_budget(self, application_id: str, budget_tokens: int) -> None:
+        """Raise ``BudgetExceededError`` if the application has no budget left this period.
 
         The check is made before a request runs and the charge after it finishes, so the
         last request admitted, and any others in flight with it, can take usage past the
         budget.
         """
-        usage = self.usage(tenant_id)
+        usage = self.usage(application_id)
         if usage.total.billed_tokens >= budget_tokens:
             raise BudgetExceededError(
-                tenant_id,
+                application_id,
                 usage.total.billed_tokens,
                 budget_tokens,
                 retry_after_ms=usage.period_end_ms - self._epoch.epoch_ms(),
             )
 
     def record(
-        self, tenant_id: str, result: RequestResult, *, model: str, price_multiplier: float
+        self, application_id: str, result: RequestResult, *, model: str, price_multiplier: float
     ) -> float:
-        """Charge a finished request to a tenant. Returns the amount billed in USD.
+        """Charge a finished request to an application. Returns the amount billed in USD.
 
         The event is stored first, so a failed write leaves the totals unchanged.
         """
         billed_cost_usd = result.cost_usd * price_multiplier
-        account = self._account(tenant_id)
+        account = self._account(application_id)
         self._store.append(
             UsageEvent.of(
-                tenant_id,
+                application_id,
                 result,
                 model=model,
                 billed_cost_usd=billed_cost_usd,

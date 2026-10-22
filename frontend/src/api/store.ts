@@ -1,14 +1,14 @@
 // What the dashboard remembers between pushes: the newest snapshot, the series it has
 // accumulated from all of them, and the events it has seen.
 
-import type { GatewayEvent, ModelPoint, Snapshot, TenantPoint } from "./types";
+import type { GatewayEvent, ModelPoint, Snapshot, ApplicationPoint } from "./types";
 
 export const MAX_EVENTS = 1000;
 
 export interface MonitorState {
   snapshot: Snapshot | null;
   modelSeries: Record<string, ModelPoint[]>;
-  tenantSeries: Record<string, TenantPoint[]>;
+  applicationSeries: Record<string, ApplicationPoint[]>;
   /** Oldest first. */
   events: GatewayEvent[];
   /** Events the gateway said it had already dropped before this client could read them. */
@@ -18,7 +18,7 @@ export interface MonitorState {
 export const EMPTY_STATE: MonitorState = {
   snapshot: null,
   modelSeries: {},
-  tenantSeries: {},
+  applicationSeries: {},
   events: [],
   missedEvents: 0,
 };
@@ -67,13 +67,17 @@ function applySnapshot(state: MonitorState, snapshot: Snapshot): MonitorState {
   for (const [name, model] of Object.entries(snapshot.models)) {
     modelSeries[name] = mergePoints(base.modelSeries[name] ?? [], model.series, oldestMs);
   }
-  const tenantSeries: Record<string, TenantPoint[]> = {};
-  for (const [id, tenant] of Object.entries(snapshot.tenants.tenants ?? {})) {
-    tenantSeries[id] = mergePoints(base.tenantSeries[id] ?? [], tenant.series, oldestMs);
+  const applicationSeries: Record<string, ApplicationPoint[]> = {};
+  for (const [id, application] of Object.entries(snapshot.applications.applications ?? {})) {
+    applicationSeries[id] = mergePoints(
+      base.applicationSeries[id] ?? [],
+      application.series,
+      oldestMs,
+    );
   }
   let events = base.events;
   for (const event of snapshot.events.recent) events = addEvent(events, event);
-  return { ...base, snapshot, modelSeries, tenantSeries, events };
+  return { ...base, snapshot, modelSeries, applicationSeries, events };
 }
 
 /** Add an event, keeping them in order, without duplicates, and at most MAX_EVENTS. */
