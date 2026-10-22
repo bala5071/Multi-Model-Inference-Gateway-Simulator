@@ -35,8 +35,38 @@ jobs:
       - name: Mypy
         run: uv run mypy
 
+      # -ra lists every skipped test with its reason (it is also in pyproject's addopts); the
+      # JUnit file records each test's outcome, to see which ran (e.g. the POSIX-only ones).
       - name: Pytest
-        run: uv run pytest
+        run: uv run pytest -ra --junitxml=junit-${{ matrix.python-version }}.xml
+
+      - name: Report skipped tests
+        if: always()
+        shell: bash
+        run: |
+          uv run python - junit-${{ matrix.python-version }}.xml <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          suite = ET.parse(sys.argv[1]).getroot()
+          cases = suite.iter("testcase")
+          skipped = [
+              f"{c.get('classname')}.{c.get('name')}" for c in cases if c.find("skipped") is not None
+          ]
+          totals = {k: suite.find("testsuite").get(k) for k in ("tests", "skipped", "failures", "errors")}
+          print(totals)
+          print("\n".join(skipped))
+          names = ", ".join(s.rsplit(".", 1)[1] for s in skipped) or "none"
+          print(f"::notice title=Skipped tests ({len(skipped)})::{names}")
+          PY
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.python-version }}
+          path: junit-${{ matrix.python-version }}.xml
+          if-no-files-found: warn
 
   # The dashboard in frontend/: lint, formatting, types, component tests, and a build.
   frontend:
