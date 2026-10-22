@@ -664,7 +664,7 @@ batching and the prefix cache.
 
 {_verdict_table(checks)}
 
-**Cost and routing by plan are not reported.** The gateway routes each tenant to the models
+**Cost and routing by plan are not reported.** The gateway routes each application to the models
 its plan includes and meters the tokens each request uses (docs/09); what that costs depends on
 prices, which were never measured. The prices in `gateway.profiles` are placeholders,
 operator-supplied, not data, so no cost, saving or ratio between plans is given here. The
@@ -680,7 +680,7 @@ async def overload_section() -> Section:
 
 The mechanism is described in `docs/10-overload.md`: a queue limit per model (429 when full),
 a request timeout (504), and SLO-aware downgrade, which moves requests that opt in from a model
-whose recent p99 is over its SLO to a cheaper one in the tenant's plan. Its tests run on
+whose recent p99 is over its SLO to a cheaper one in the application's plan. Its tests run on
 hand-made test profiles and pin the behaviour, not a performance figure.
 
 Why there are no numbers: the earlier results came from invented model profiles and have been
@@ -1076,8 +1076,8 @@ async def quality() -> Section:
     command = "uv run python -m benchmarks.quality_eval --backends <file>"
     if not QUALITY_RESULTS.exists():
         body = f"""**No quality evaluation has been run.** There is no
-`benchmarks/quality/results.json`, so nothing here says what a tenant gives up by being served by
-a smaller model.
+`benchmarks/quality/results.json`, so nothing here says what an application gives up by being
+served by a smaller model.
 
 To produce it, start the real models (`docs/12-real-models.md`) and run:
 
@@ -1281,7 +1281,7 @@ No cost is shown: prices were never measured.
     }
 
 The accuracy given up is an estimate from {asked["count"]} questions of one kind.
-Multiple-choice recall is not what tenants send, and a plan is worth what its model does on
+Multiple-choice recall is not what applications send, and a plan is worth what its model does on
 their own requests. See `docs/14-quality-eval.md`. To measure again:
 
 ```sh
