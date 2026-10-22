@@ -4,9 +4,10 @@ In-process on simulated time (deterministic; the default):
 
     uv run python -m benchmarks.loadgen --seed 7 --requests 300 --rate 8
 
-Against a running server on real time:
+Against a running server on real time, with an application's API key in the environment
+(read from GATEWAY_API_KEY, never printed):
 
-    uv run python -m benchmarks.loadgen --url http://127.0.0.1:8000 --tenant acme \
+    GATEWAY_API_KEY=... uv run python -m benchmarks.loadgen --url http://127.0.0.1:8000 \
         --requests 50 --rate 5
 
 See docs/07-load.md. In-process results are simulated on the calibrated model profiles;
@@ -18,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
@@ -41,6 +43,9 @@ from gateway.workload import (
     PlannedRequest,
     build_workload,
 )
+
+# Live runs read the application's API key from here, so it is never on a command line.
+API_KEY_ENV = "GATEWAY_API_KEY"
 
 __all__ = [
     "DEFAULT_LENGTHS",
@@ -132,7 +137,6 @@ async def run_workload(
     client: httpx.AsyncClient,
     clock: Clock,
     *,
-    tenant_id: str | None = None,
     allow_downgrade: bool = False,
 ) -> list[RequestOutcome]:
     """Send every planned request at its arrival time, concurrently, and collect outcomes.
@@ -146,8 +150,6 @@ async def run_workload(
         body: dict[str, object] = {"model": request.model, "prompt": request.prompt}
         if request.max_tokens is not None:
             body["max_tokens"] = request.max_tokens
-        if tenant_id is not None:
-            body["tenant_id"] = tenant_id
         if allow_downgrade:
             body["allow_downgrade"] = True
         response = await client.post("/v1/generate", json=body)
@@ -230,10 +232,8 @@ async def run_load(
     config: LoadConfig,
     client: httpx.AsyncClient,
     clock: Clock,
-    *,
-    tenant_id: str | None = None,
 ) -> LoadReport:
-    outcomes = await run_workload(build_workload(config), client, clock, tenant_id=tenant_id)
+    outcomes = await run_workload(build_workload(config), client, clock)
     return build_report(config, outcomes)
 
 
@@ -263,14 +263,15 @@ async def run_in_process(
         return await run_load(config, client, clock)
 
 
-async def run_live(config: LoadConfig, url: str, *, tenant_id: str | None = None) -> LoadReport:
+async def run_live(config: LoadConfig, url: str, *, api_key: str | None = None) -> LoadReport:
     """Run on real time against a server that is already running at ``url``.
 
-    A server with plans configured needs a ``tenant_id`` whose plan allows every model in
-    the config's weights.
+    A server with applications needs ``api_key``, of an application whose plan allows
+    every model in the config's weights.
     """
-    async with httpx.AsyncClient(base_url=url, timeout=None) as client:
-        return await run_load(config, client, WallClock(), tenant_id=tenant_id)
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    async with httpx.AsyncClient(base_url=url, timeout=None, headers=headers) as client:
+        return await run_load(config, client, WallClock())
 
 
 def _parse_weights(text: str) -> dict[str, float]:
@@ -310,7 +311,6 @@ def main() -> None:
         help="MIN-MAX words for each prompt's own part, e.g. 20-80 (default: a mix)",
     )
     parser.add_argument("--url", help="run against a live server instead of in-process")
-    parser.add_argument("--tenant", help="tenant_id to send with every request (live runs)")
     parser.add_argument("--json", action="store_true", help="print the report as JSON")
     args = parser.parse_args()
 
@@ -325,7 +325,7 @@ def main() -> None:
         max_tokens=args.max_tokens,
     )
     if args.url:
-        report = asyncio.run(run_live(config, args.url, tenant_id=args.tenant))
+        report = asyncio.run(run_live(config, args.url, api_key=os.environ.get(API_KEY_ENV)))
         mode = f"LIVE against {args.url} on wall-clock time"
     else:
         report = asyncio.run(run_in_process(config))

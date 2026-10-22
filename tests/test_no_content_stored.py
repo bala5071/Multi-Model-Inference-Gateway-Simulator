@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -28,9 +29,9 @@ from gateway.database import open_database
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.monitoring import Monitor
 from gateway.registry import ModelRegistry
-from gateway.routing import load_plans
 from gateway.tokenizer import WordTokenizer
 from gateway.usage import SqliteUsageStore
+from helpers import application_access, bearer, default_server, default_server_key
 from mock_llama import MockLlamaServer
 from test_real_backend_api import CONFIG
 
@@ -73,10 +74,11 @@ async def _exercise(
     connection = open_database(db_path)
     MigrationRunner(connection, MIGRATIONS, ClockEpoch(clock)).migrate()
     store = SqliteUsageStore(connection)
+    access, keys = application_access(clock)
     app = create_app(
         registry,
         clock,
-        plans=load_plans(),
+        applications=access,
         usage_store=store,
         epoch=ClockEpoch(clock, origin_ms=1.7e12),
     )
@@ -85,7 +87,8 @@ async def _exercise(
     reported = []
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
-        body = {"tenant_id": "acme", "model": "economy", "prompt": PROMPT, "max_tokens": 4}
+        client.headers.update(bearer(keys["acme"]))
+        body = {"model": "economy", "prompt": PROMPT, "max_tokens": 4}
         for _ in range(2):  # the second is served from the prefix cache in simulator mode
             response = await client.post("/v1/generate", json=body)
             assert response.status_code == 200
@@ -96,7 +99,7 @@ async def _exercise(
             "/v1/monitor/snapshot?history_s=900&events=1000",
             "/metrics",
             "/metrics/summary",
-            "/v1/tenants/acme/usage",
+            "/v1/applications/me/usage",
         ):
             reported.append((await client.get(path)).content)
     await registry.aclose()
@@ -151,6 +154,33 @@ async def test_real_backend_mode_stores_no_prompt_or_response_text(
 
     assert answers[0]["text"] == "".join(RESPONSE_PIECES)
     _assert_absent(places, _needles(PROMPT, list(RESPONSE_PIECES)))
+
+
+async def test_the_default_server_stores_no_prompt_response_or_token_ids(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The default server's own SQLite file, with usage, applications and keys all in it."""
+    caplog.set_level(logging.DEBUG)
+    key = default_server_key("acme")
+    with default_server() as app:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://gateway", headers=bearer(key)
+        ) as client:
+            body = {"model": "economy", "prompt": PROMPT, "max_tokens": 2}
+            answers = [(await client.post("/v1/generate", json=body)).json() for _ in range(2)]
+            await client.post("/v1/generate", json={**body, "stream": True})
+    path = Path(os.environ["GATEWAY_DATABASE"])
+    connection = open_database(path)
+    rows = connection.execute("SELECT count(*) FROM usage_events").fetchone()[0]
+    places = {"default server database": _database_bytes(path, connection)}
+    connection.close()
+    records = [f"{r.name} {r.getMessage()} {r.args!r}" for r in caplog.records]
+    places["log records"] = repr(records).encode()
+
+    assert rows == 3  # the usage really went to the database
+    assert answers[1]["usage"]["cached_tokens"] == len(PROMPT.split())
+    _assert_absent(places, _needles(PROMPT, [a["text"] for a in answers]))
 
 
 def test_the_search_finds_what_it_looks_for() -> None:

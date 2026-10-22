@@ -30,6 +30,13 @@ export interface ControlStatus {
     presets: LoadPreset[] | null;
     status: LoadStatus | null;
   };
+  playground: {
+    /**
+     * True in simulated live mode: the gateway holds a throwaway key per application and
+     * serves POST /v1/playground/generate with it. Elsewhere requests need an API key.
+     */
+    available: boolean;
+  };
   simulation: {
     /** True in simulated live mode: no model runs and every time shown is simulated. */
     active: boolean;

@@ -1,0 +1,62 @@
+"""The compose file, the Dockerfile and the example env file: no secret in any of them, the
+database on a volume, and the port on this machine only. Docker itself is not run here (the
+development machine has none); CI's docker job builds the image and starts the compose demo.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from gateway.apikeys import PEPPER_ENV
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+def _compose() -> dict[str, Any]:
+    data: dict[str, Any] = yaml.safe_load((REPO / "docker-compose.yml").read_text("utf-8"))
+    return data
+
+
+def _active_lines(path: Path) -> list[str]:
+    """Lines that are not comments or blank."""
+    return [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def test_compose_publishes_on_this_machine_only_and_keeps_the_database_on_a_volume() -> None:
+    gateway = _compose()["services"]["gateway"]
+    assert gateway["ports"] == ["127.0.0.1:8000:8000"]
+    assert "gateway-data:/data" in gateway["volumes"]
+    assert "gateway-data" in _compose()["volumes"]
+    assert gateway["env_file"] == [{"path": "gateway.env", "required": False}]
+
+
+def test_no_secret_is_in_the_compose_file_or_the_image() -> None:
+    environment = _compose()["services"]["gateway"].get("environment", {})
+    assert PEPPER_ENV not in environment
+    for path in (REPO / "docker-compose.yml", REPO / "Dockerfile"):
+        active = "\n".join(_active_lines(path))
+        assert PEPPER_ENV not in active, path.name
+        assert "gwk_" not in active, path.name
+    # The Dockerfile sets no environment variable that could hold a secret.
+    env_lines = [line for line in _active_lines(REPO / "Dockerfile") if line.startswith("ENV")]
+    assert all("PEPPER" not in line and "KEY" not in line for line in env_lines)
+
+
+def test_the_example_env_file_has_placeholders_only() -> None:
+    values = dict(line.split("=", 1) for line in _active_lines(REPO / "gateway.env.example"))
+    assert set(values) == {PEPPER_ENV, "GATEWAY_DATABASE", "GATEWAY_USAGE_RETENTION_DAYS"}
+    assert re.fullmatch(r"<[^>]+>", values[PEPPER_ENV])
+    assert values["GATEWAY_DATABASE"] == "/data/gateway.db"  # on the volume
+
+
+def test_secrets_and_databases_stay_out_of_the_build_context() -> None:
+    ignored = set(_active_lines(REPO / ".dockerignore"))
+    assert {"gateway.env", "*.db", "*.db-*", "*.sqlite3"} <= ignored

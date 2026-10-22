@@ -235,3 +235,10 @@ src/gateway/dashboard/
 frontend/e2e/results/
 frontend/test-results/
 frontend/playwright-report/
+
+# The gateway's database (applications, key HMACs, usage) if pointed into the tree, and the
+# env file holding the pepper: never committed.
+gateway.db
+gateway.db-*
+*.sqlite3
+gateway.env

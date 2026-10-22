@@ -4,6 +4,9 @@ This step lets the gateway serve real models. `LlamaCppBackend` calls a local ll
 `llama-server` over its OpenAI-compatible streaming API, one server per tier, and the
 gateway measures time to first token and total latency from the stream as it arrives.
 
+**Updated by platform step 2 (`docs/20-applications-api-keys.md`).** Requests carry an application's API key (`Authorization: Bearer <key>`) instead of a `tenant_id` in the body, which is now a 422. The curl examples below predate that; the README's Curl demo is current. The server also needs `GATEWAY_KEY_PEPPER` set and a key from
+`scripts/manage.py`, as in the README's Quickstart.
+
 Code: `src/gateway/backends/llamacpp.py`, `src/gateway/passthrough.py`,
 `src/gateway/backend_config.py`, `src/gateway/backends.yaml`,
 `scripts/run_local_models.sh`, `examples/backends.ollama.yaml`.

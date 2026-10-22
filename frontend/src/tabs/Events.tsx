@@ -70,11 +70,11 @@ export function Events({ state }: { state: MonitorState }) {
           }}
         />
         <Choice
-          label="Tenant"
-          value={filter.tenant}
-          options={distinct(shown.events, "tenant_id")}
-          onChange={(tenant) => {
-            setFilter({ ...filter, tenant });
+          label="Application"
+          value={filter.application}
+          options={distinct(shown.events, "application_id")}
+          onChange={(application) => {
+            setFilter({ ...filter, application });
           }}
         />
         <button
@@ -104,7 +104,7 @@ export function Events({ state }: { state: MonitorState }) {
               <span className="event-type">{eventTitle(event.type)}</span>
               <span className="event-text">{describeEvent(event)}</span>
               <span className="muted">
-                {event.tenant_id !== null && `${event.tenant_id} · `}
+                {event.application_id !== null && `${event.application_id} · `}
                 {ago(event.at_ms, shown.nowMs)} · #{event.seq}
               </span>
             </li>

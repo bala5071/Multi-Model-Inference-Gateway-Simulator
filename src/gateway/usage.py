@@ -122,6 +122,11 @@ class UsageStore(Protocol):
         """Stored events in ``seq`` order, for one application or all of them."""
         ...
 
+    def prune(self, before_ms: float, limit: int | None = None) -> int:
+        """Delete events with ``occurred_at_ms < before_ms``, oldest first, at most ``limit``
+        of them (all if None). Returns how many."""
+        ...
+
 
 def _totals(events: Iterable[UsageEvent]) -> dict[str, ModelUsage]:
     by_model: dict[str, ModelUsage] = {}
@@ -166,6 +171,17 @@ class InMemoryUsageStore:
             for s in self._events
             if application_id is None or s.event.application_id == application_id
         ]
+
+    def prune(self, before_ms: float, limit: int | None = None) -> int:
+        old = sorted(
+            (e for e in self._events if e.event.occurred_at_ms < before_ms),
+            key=lambda e: (e.event.occurred_at_ms, e.seq),
+        )
+        doomed = {e.seq for e in (old if limit is None else old[:limit])}
+        kept = [e for e in self._events if e.seq not in doomed]
+        self._events.clear()
+        self._events.extend(kept)
+        return len(doomed)
 
 
 # In the order of UsageEvent's fields.
@@ -235,3 +251,17 @@ class SqliteUsageStore:
             params = (application_id,)
         rows = self._connection.execute(query + " ORDER BY seq", params).fetchall()
         return [StoredUsageEvent(int(row[0]), _event(row[1:])) for row in rows]
+
+    def prune(self, before_ms: float, limit: int | None = None) -> int:
+        if limit is None:
+            cursor = self._connection.execute(
+                "DELETE FROM usage_events WHERE occurred_at_ms < ?", (before_ms,)
+            )
+        else:
+            # One short transaction per batch, found through the index on occurred_at_ms.
+            cursor = self._connection.execute(
+                "DELETE FROM usage_events WHERE seq IN (SELECT seq FROM usage_events"
+                " WHERE occurred_at_ms < ? ORDER BY occurred_at_ms LIMIT ?)",
+                (before_ms, limit),
+            )
+        return cursor.rowcount

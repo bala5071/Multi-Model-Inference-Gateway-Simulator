@@ -41,6 +41,10 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF", "TID", "ASYNC", "PT"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency markers are meant to be argument defaults.
+extend-immutable-calls = ["fastapi.Depends"]
+
 [tool.ruff.lint.per-file-ignores]
 # The Clock implementations are the only place allowed to touch real time.
 "src/gateway/clock.py" = ["TID251"]

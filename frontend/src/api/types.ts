@@ -115,7 +115,7 @@ export interface ModelSnapshot {
   series: ModelPoint[];
 }
 
-export interface TenantPoint {
+export interface ApplicationPoint {
   t_ms: number;
   final: boolean;
   requests: number;
@@ -126,7 +126,7 @@ export interface TenantPoint {
   downgrades: number;
 }
 
-export interface TenantSnapshot {
+export interface ApplicationSnapshot {
   plan: string;
   period_start_ms: number;
   period_end_ms: number;
@@ -135,15 +135,16 @@ export interface TenantSnapshot {
   remaining_tokens: number;
   spend_usd: number;
   requests: number;
-  rejections_total: { budget_exhausted: number; queue_full: number };
+  /** Requests refused with 429, by reason, since the gateway started. */
+  rejections_total: { budget_exhausted: number; queue_full: number; rate_limited: number };
   timeout_total: number;
   downgrade_total: number;
-  series: TenantPoint[];
+  series: ApplicationPoint[];
 }
 
-export interface TenantsGroup {
+export interface ApplicationsGroup {
   available: boolean;
-  tenants: Record<string, TenantSnapshot> | null;
+  applications: Record<string, ApplicationSnapshot> | null;
 }
 
 export const EVENT_TYPES = [
@@ -162,7 +163,7 @@ export interface GatewayEvent {
   // A string, not EventType: a newer gateway may publish types this build does not know.
   type: string;
   model: string | null;
-  tenant_id: string | null;
+  application_id: string | null;
   data: Record<string, unknown>;
 }
 
@@ -180,6 +181,6 @@ export interface Snapshot {
   resolution_ms: number;
   window_ms: number;
   models: Record<string, ModelSnapshot>;
-  tenants: TenantsGroup;
+  applications: ApplicationsGroup;
   events: EventsGroup;
 }

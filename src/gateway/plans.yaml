@@ -1,10 +1,17 @@
-# Plans and tenants for the default server. Multipliers and budgets are PLACEHOLDER values:
+# Plan templates and demo applications. Multipliers and budgets are PLACEHOLDER values:
 # operator-supplied, not data. So are the model prices they multiply (gateway.profiles).
+#
+# An application is created from a plan and keeps its own copy of the plan's settings
+# (docs/20-applications-api-keys.md): changing a plan here does not change applications
+# that already exist.
 #
 # models: the registered model ids a plan may use, cheapest first. The order matters:
 #   quality "cheapest" picks the first, "best" the last, "balanced" the middle one.
-# price_multiplier: what the tenant is billed, as a multiple of the model's base cost.
+# price_multiplier: what the application is billed, as a multiple of the model's base cost.
 # monthly_token_budget: billed tokens (uncached prompt + completion) per 30-day period.
+# max_tokens (optional): the largest max_tokens a request may ask for, and the one used
+#   when it asks for none. requests_per_minute (optional): a sliding-window rate limit.
+#   Neither is set in the packaged plans, so the demo runs exactly as it did before them.
 
 plans:
   free:
@@ -20,8 +27,16 @@ plans:
     price_multiplier: 0.8
     monthly_token_budget: 100000000
 
-# tenant id -> plan. Demo tenants; a real deployment would load these from its own store.
-tenants:
-  initech: free
-  globex: pro
-  acme: enterprise
+# Demo applications: application id -> name and plan. Simulated live mode creates them in
+# memory; `uv run python scripts/manage.py seed-demo` creates them in a database. No keys
+# here, ever: keys are issued by scripts/manage.py and stored only as an HMAC.
+applications:
+  initech:
+    name: Initech
+    plan: free
+  globex:
+    name: Globex
+    plan: pro
+  acme:
+    name: Acme
+    plan: enterprise

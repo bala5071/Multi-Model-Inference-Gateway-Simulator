@@ -18,16 +18,16 @@ from gateway.metrics import percentile
 from gateway.overload import OverloadPolicy, SloMonitor, SloPolicy
 from gateway.profiles import Tier
 from gateway.routing import Plan, PlansConfig
-from helpers import TEST_PROFILES
+from helpers import TEST_PROFILES, application_access, application_headers, bearer
 
 PLANS = PlansConfig(
     plans={
         "enterprise": Plan("enterprise", ("economy", "standard", "premium"), 1.0, 10**9),
         "pro": Plan("pro", ("economy", "standard"), 1.0, 10**9),
         "premium_only": Plan("premium_only", ("premium",), 1.0, 10**9),
-    },
-    tenants={"acme": "enterprise", "globex": "pro", "solo": "premium_only"},
+    }
 )
+APPS = {"acme": "enterprise", "globex": "pro", "solo": "premium_only"}
 # Premium's SLO is 2 s; it counts as recovered under 1 s.
 SLO = SloPolicy(
     p99_ms={"premium": 2000.0, "standard": 2000.0},
@@ -43,6 +43,7 @@ class Gateway:
     client: httpx.AsyncClient
     clock: SimClock
     monitor: SloMonitor | None
+    keys: dict[str, str]
     counter: int = 0
 
     async def generate(self, **body: Any) -> httpx.Response:
@@ -50,7 +51,15 @@ class Gateway:
         self.counter += 1
         body.setdefault("prompt", " ".join(f"p{self.counter}w{i}" for i in range(10)))
         body.setdefault("max_tokens", 2)
-        return await self.client.post("/v1/generate", json=body)
+        headers = application_headers(body, self.keys)
+        return await self.client.post("/v1/generate", json=body, headers=headers)
+
+    async def usage(self, application: str) -> dict[str, Any]:
+        response = await self.client.get(
+            "/v1/applications/me/usage", headers=bearer(self.keys[application])
+        )
+        data: dict[str, Any] = response.json()
+        return data
 
     async def status(self) -> dict[str, Any]:
         data: dict[str, Any] = (await self.client.get("/v1/overload")).json()
@@ -68,10 +77,11 @@ async def _gateway(
     registry = build_continuous_registry(
         clock, seed=7, max_queue_len=max_queue_len, profiles=TEST_PROFILES
     )
-    app = create_app(registry, clock, plans=plans, overload=overload)
+    access, keys = (None, {}) if plans is None else application_access(clock, plans, apps=APPS)
+    app = create_app(registry, clock, applications=access, overload=overload)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
-        yield Gateway(client, clock, app.state.slo_monitor)
+        yield Gateway(client, clock, app.state.slo_monitor, keys)
     await registry.aclose()
 
 
@@ -95,10 +105,10 @@ async def test_requests_beyond_the_queue_limit_get_429_with_retry_after() -> Non
     async with _gateway(plans=PLANS, max_queue_len={Tier.PREMIUM: 2}) as gateway:
         # Premium seats 8 at a time and may queue 2 more: 10 of these 12 are accepted.
         responses = await asyncio.gather(
-            *(gateway.generate(tenant_id="acme", model="premium") for _ in range(12)),
-            gateway.generate(tenant_id="acme", model="economy"),
+            *(gateway.generate(application_id="acme", model="premium") for _ in range(12)),
+            gateway.generate(application_id="acme", model="economy"),
         )
-        usage = (await gateway.client.get("/v1/tenants/acme/usage")).json()
+        usage = await gateway.usage("acme")
         metrics = (await gateway.client.get("/metrics/summary")).json()["models"]
 
     *premium, economy = responses
@@ -141,10 +151,10 @@ async def test_request_over_the_timeout_gets_504_and_frees_its_capacity() -> Non
     policy = OverloadPolicy(request_timeout_ms=200.0)
     async with _gateway(plans=PLANS, overload=policy) as gateway:
         # At least 16 decode steps of 30 ms each: far over the 200 ms timeout.
-        slow = await gateway.generate(tenant_id="acme", model="premium", max_tokens=50)
+        slow = await gateway.generate(application_id="acme", model="premium", max_tokens=50)
         timed_out_at = gateway.clock.now_ms()
-        quick = await gateway.generate(tenant_id="acme", model="premium", max_tokens=2)
-        usage = (await gateway.client.get("/v1/tenants/acme/usage")).json()
+        quick = await gateway.generate(application_id="acme", model="premium", max_tokens=2)
+        usage = await gateway.usage("acme")
         metrics = (await gateway.client.get("/metrics/summary")).json()["models"]
         status = await gateway.status()
 
@@ -203,7 +213,7 @@ async def test_downgrade_engages_under_overload_and_recovers_afterwards() -> Non
         assert gateway.monitor is not None
 
         # Phase 1: overload. The model is healthy when these arrive, so none is moved.
-        surge = await _overload_premium(gateway, tenant_id="acme", allow_downgrade=True)
+        surge = await _overload_premium(gateway, application_id="acme", allow_downgrade=True)
         assert [r.status_code for r in surge] == [200] * 8
         assert all("X-Downgraded-From" not in r.headers for r in surge)
         latencies = sorted(r.json()["timing"]["total_ms"] for r in surge)
@@ -222,19 +232,21 @@ async def test_downgrade_engages_under_overload_and_recovers_afterwards() -> Non
         }
         assert status["models"]["standard"]["degraded"] is False
 
-        moved = await gateway.generate(tenant_id="acme", model="premium", allow_downgrade=True)
+        moved = await gateway.generate(application_id="acme", model="premium", allow_downgrade=True)
         assert moved.status_code == 200
         assert moved.headers["X-Downgraded-From"] == "premium"
         assert moved.headers["X-Model-Used"] == "standard"
         assert moved.json()["model"] == "standard"
 
-        by_quality = await gateway.generate(tenant_id="acme", quality="best", allow_downgrade=True)
+        by_quality = await gateway.generate(
+            application_id="acme", quality="best", allow_downgrade=True
+        )
         assert by_quality.headers["X-Downgraded-From"] == "premium"
         assert by_quality.headers["X-Model-Used"] == "standard"
 
         # A request that did not opt in stays on premium, degraded or not.
         for extra in ({}, {"allow_downgrade": False}):
-            stayed = await gateway.generate(tenant_id="acme", model="premium", **extra)
+            stayed = await gateway.generate(application_id="acme", model="premium", **extra)
             assert stayed.headers["X-Model-Used"] == "premium"
             assert "X-Downgraded-From" not in stayed.headers
 
@@ -243,15 +255,19 @@ async def test_downgrade_engages_under_overload_and_recovers_afterwards() -> Non
         assert (await gateway.status())["models"]["premium"]["degraded"] is True
 
         # A healthy model is not downgraded, and a downgrade never leaves the plan.
-        healthy = await gateway.generate(tenant_id="globex", model="standard", allow_downgrade=True)
+        healthy = await gateway.generate(
+            application_id="globex", model="standard", allow_downgrade=True
+        )
         assert healthy.headers["X-Model-Used"] == "standard"
         assert "X-Downgraded-From" not in healthy.headers
-        no_cheaper = await gateway.generate(tenant_id="solo", model="premium", allow_downgrade=True)
+        no_cheaper = await gateway.generate(
+            application_id="solo", model="premium", allow_downgrade=True
+        )
         assert no_cheaper.headers["X-Model-Used"] == "premium"
         assert "X-Downgraded-From" not in no_cheaper.headers
 
         # The downgraded requests were billed as standard requests.
-        usage = (await gateway.client.get("/v1/tenants/acme/usage")).json()
+        usage = await gateway.usage("acme")
         assert {m: u["requests"] for m, u in usage["by_model"].items()} == {
             "premium": 10,
             "standard": 2,
@@ -260,7 +276,7 @@ async def test_downgrade_engages_under_overload_and_recovers_afterwards() -> Non
         # Phase 3: the load is gone. Once the slow requests leave the 10 s window, premium
         # recovers and opted-in requests go back to it.
         await gateway.clock.sleep_ms(11_000.0)
-        back = await gateway.generate(tenant_id="acme", model="premium", allow_downgrade=True)
+        back = await gateway.generate(application_id="acme", model="premium", allow_downgrade=True)
         assert back.headers["X-Model-Used"] == "premium"
         assert "X-Downgraded-From" not in back.headers
         assert (await gateway.status())["models"]["premium"]["degraded"] is False
@@ -279,17 +295,17 @@ async def test_downgrade_engages_under_overload_and_recovers_afterwards() -> Non
 
 async def test_downgrade_skips_past_a_cheaper_model_that_is_also_degraded() -> None:
     async with _gateway(plans=PLANS, overload=OverloadPolicy(slo=SLO)) as gateway:
-        await _overload_premium(gateway, tenant_id="acme")
+        await _overload_premium(gateway, application_id="acme")
         # Sixteen standard requests of up to 150 tokens fill its batch; the slowest take
         # more than its 2 s SLO as well.
         await asyncio.gather(
             *(
-                gateway.generate(tenant_id="acme", model="standard", max_tokens=150)
+                gateway.generate(application_id="acme", model="standard", max_tokens=150)
                 for _ in range(16)
             )
         )
         status = await gateway.status()
-        moved = await gateway.generate(tenant_id="acme", model="premium", allow_downgrade=True)
+        moved = await gateway.generate(application_id="acme", model="premium", allow_downgrade=True)
 
     assert status["models"]["premium"]["degraded"] is True
     assert status["models"]["standard"]["degraded"] is True

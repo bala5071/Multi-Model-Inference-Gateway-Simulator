@@ -3,6 +3,13 @@
 This step adds the data layer a monitoring dashboard reads: a bounded time series per model
 and per tenant, an event bus with a bounded log, and three endpoints. It adds no dashboard.
 
+**Updated by platform step 4 (`docs/22-monitoring-rename.md`).** Tenants are applications
+(note 20), and the schema says so: the snapshot's `tenants` group is `applications` (with
+`applications.applications`), events carry `application_id`, the Prometheus families are
+`gateway_application_*` with an `application` label, and `rejections_total` has a third
+reason, `rate_limited`. The schema sections below are current; the walkthroughs elsewhere in
+this note predate the rename.
+
 Code: `src/gateway/timeseries.py` (`TimeSeriesStore`), `src/gateway/events.py` (`EventBus`),
 `src/gateway/monitoring.py` (`Monitor`, `render_prometheus`), wiring in `src/gateway/app.py`.
 Tests: `tests/test_timeseries.py`, `tests/test_events.py`, `tests/test_monitoring_api.py`.
@@ -48,7 +55,7 @@ data: {"at_ms": 0.0, ...}
 id: 1
 event: event
 data: {"seq": 1, "at_ms": 500.0, "type": "queue_full", "model": "standard",
-       "tenant_id": null, "data": {"waiting": 1, "limit": 1}}
+       "application_id": null, "data": {"waiting": 1, "limit": 1}}
 
 event: snapshot
 data: {"at_ms": 1000.0, ...}
@@ -76,7 +83,7 @@ one line in the real stream.)
   "window_ms": 900000.0,
   "models": {"standard": {"traffic": {}, "queue": {}, "batch": {}, "kv": {}, "cache": {},
                           "latency": {}, "slo": {}, "series": []}},
-  "tenants": {"available": false, "tenants": null},
+  "applications": {"available": false, "applications": null},
   "events": {"available": true, "capacity": 1000, "retained": 0, "last_seq": 0,
              "counts": {"state_change": 0, "queue_full": 0, "timeout": 0, "downgrade": 0,
                         "budget_exhausted": 0},
@@ -214,22 +221,22 @@ Things to know:
   covers the metrics window. Percentiles of different seconds cannot be averaged.
 - **ITL gaps are booked to the second the request finished in**, as in the metrics store.
 
-### Tenants
+### Applications
 
-`tenants.available` is `false` when the gateway has no plans. Otherwise `tenants.tenants`
-has every tenant in the plans file, used or not.
+`applications.available` is `false` when the gateway has no applications. Otherwise
+`applications.applications` has every application in its store, used or not.
 
 | Field | Meaning |
 |---|---|
-| `plan`, `budget_tokens` | From the plans file. |
-| `period_start_ms`, `period_end_ms` | The current 30-day budget period (note 09). |
+| `plan`, `budget_tokens` | The application's own plan settings (note 20). |
+| `period_start_ms`, `period_end_ms` | The current budget period: the calendar month in UTC (note 21). |
 | `used_tokens`, `remaining_tokens`, `spend_usd`, `requests` | From the cost ledger, **for the current period**. `spend_usd` is what was billed, after the plan's multiplier. |
-| `rejections_total` | `{"budget_exhausted": n, "queue_full": n}`, **since the gateway started**. |
+| `rejections_total` | `{"budget_exhausted": n, "queue_full": n, "rate_limited": n}`, **since the gateway started**. `rate_limited` counts requests refused by the application's requests-per-minute limit; they never reach a model. |
 | `timeout_total`, `downgrade_total` | Since the gateway started. |
-| `series` | Points of `t_ms`, `final`, `requests`, `billed_tokens`, `spend_usd`, `rejections`, `timeouts`, `downgrades`, for the seconds in which the tenant did something. |
+| `series` | Points of `t_ms`, `final`, `requests`, `billed_tokens`, `spend_usd`, `rejections`, `timeouts`, `downgrades`, for the seconds in which the application did something. `rejections` includes rate-limit refusals. |
 
-A request with an unknown tenant id is refused before anything is recorded, so it creates no
-series (`test_tenants_show_spend_tokens_against_budget_and_rejections`).
+A request with a key that matches no application is refused before anything is recorded, so
+it creates no series (`test_applications_show_spend_tokens_against_budget_and_rejections`).
 
 ### Events
 
@@ -241,17 +248,18 @@ series (`test_tenants_show_spend_tokens_against_budget_and_rejections`).
 | `downgrade` | A request was moved to a cheaper model | `to_model` (`model` is the one it left) |
 | `budget_exhausted` | A request was refused with 429 `budget_exhausted` | `used_tokens`, `budget_tokens` |
 
-Every event has `seq`, `at_ms`, `type`, `model` and `tenant_id` (`null` without plans).
+Every event has `seq`, `at_ms`, `type`, `model` and `application_id` (`null` without
+applications). A rate-limit refusal is a rejection, not an event: it never reached a model.
 `seq` counts from 1 with no gaps. `events.counts` has every type, counted since the start.
 
 ## Bounded memory
 
 | What | Bound | Default |
 |---|---|---|
-| Buckets per model and per tenant | `ceil(window_ms / resolution_ms)` | 900 (15 min at 1 s) |
+| Buckets per model and per application | `ceil(window_ms / resolution_ms)` | 900 (15 min at 1 s) |
 | Raw latency samples per model | one open bucket: `2 * max_bucket_samples + max_bucket_itl_samples` | 2 x 1,024 + 8,192 |
 | Event log | `max_events` | 1,000 |
-| Number of series | registered models + tenants in the plans file | |
+| Number of series | registered models + applications | |
 
 - **Buckets are created on first use and dropped by age.** A bucket older than the window is
   removed on the next write or read of that series.
@@ -259,7 +267,8 @@ Every event has `seq`, `at_ms`, `type`, `model` and `tenant_id` (`null` without 
   are reduced to six percentiles and freed. A second with more finished requests or gaps
   than the caps keeps the first ones and sets `latency_truncated`.
 - **The store does not limit the number of series itself.** `Monitor` only records
-  registered models and configured tenants; unknown names are refused by the router first.
+  registered models and authenticated applications; a request with an unknown key is
+  refused before anything is recorded.
 - **A flood of one event type pushes the others out of the log.** The counters still count
   them. A separate log per type would be the fix.
 - `create_app(..., series=TimeSeriesStore(clock, window_ms=...), events=EventBus(clock,
@@ -286,7 +295,7 @@ gateway_ttft_ms{model="premium",quantile="0.99"} 50.0
   show a real model with a queue of 0.
 - The latency quantiles are gauges over the metrics window, not a Prometheus summary: there
   is no lifetime `_sum` to go with them.
-- Tenant usage (`gateway_tenant_used_tokens` and the like) is exported as gauges, since it
+- Application usage (`gateway_application_used_tokens` and the like) is exported as gauges, since it
   starts again from zero each budget period.
 - The full output for one request is asserted in
   `test_metrics_endpoint_is_exact_prometheus_text_for_one_request`.

@@ -3,7 +3,7 @@ import { addEvent, EMPTY_STATE, isRestart, MAX_EVENTS, mergePoints, reduce } fro
 import type { GatewayEvent, ModelPoint, Snapshot } from "./types";
 
 function event(seq: number): GatewayEvent {
-  return { seq, at_ms: seq * 10, type: "timeout", model: "m", tenant_id: null, data: {} };
+  return { seq, at_ms: seq * 10, type: "timeout", model: "m", application_id: null, data: {} };
 }
 
 describe("mergePoints", () => {
@@ -55,7 +55,9 @@ describe("snapshots", () => {
     const state = reduce(EMPTY_STATE, { kind: "snapshot", snapshot: simulated });
     expect(state.snapshot).toBe(simulated);
     expect(state.modelSeries.premium?.map((p) => p.t_ms)).toEqual([0, 3000, 4000, 5000, 6000]);
-    expect(state.tenantSeries.acme?.length).toBe(simulated.tenants.tenants?.acme?.series.length);
+    expect(state.applicationSeries.acme?.length).toBe(
+      simulated.applications.applications?.acme?.series.length,
+    );
     expect(state.events.map((e) => e.seq)).toEqual([1, 2, 3, 4]);
   });
 
@@ -78,9 +80,9 @@ describe("snapshots", () => {
     expect(state.modelSeries.premium?.map((p) => p.t_ms)).toEqual([5000, 6000, 904_000]);
   });
 
-  it("handles a gateway with no tenants", () => {
+  it("handles a gateway with no applications", () => {
     const state = reduce(EMPTY_STATE, { kind: "snapshot", snapshot: passthrough });
-    expect(state.tenantSeries).toEqual({});
+    expect(state.applicationSeries).toEqual({});
     expect(Object.keys(state.modelSeries)).toEqual(["economy", "standard", "premium"]);
   });
 

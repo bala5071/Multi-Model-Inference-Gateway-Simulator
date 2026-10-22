@@ -30,8 +30,12 @@ The gateway enforces that, and tries to serve everyone efficiently while doing i
 - **Routing by plan.** A client names a model, or just asks for `cheapest`, `balanced` or
   `best`, and gets the right model for its plan. Asking for more than the plan includes is a
   403 that says what the plan does include.
-- **Metering and budgets.** Every request is charged to its tenant. A monthly token budget
-  stops a tenant when it is used up.
+- **Applications and API keys.** Each client is an application with its own copy of a plan's
+  settings, and every request carries the application's API key (`Authorization: Bearer`).
+  Keys are stored only as an HMAC with a secret pepper.
+- **Metering and budgets.** Every request is charged to its application, in a SQLite database
+  that survives restarts. A monthly token budget (calendar months in UTC) stops an
+  application when it is used up; an optional rate limit and `max_tokens` ceiling apply too.
 - **Continuous batching** per model, so one model serves many requests at once.
 - **Prefix reuse**, so a system prompt shared by many requests is processed once.
 - **Overload protection**: queue limits, timeouts, and an opt-in downgrade to a cheaper model
@@ -56,7 +60,7 @@ docker compose up --build
 
 Then open <http://localhost:8000/dashboard/>.
 
-![A tour of the dashboard in simulated live mode: the Overview and Latency tabs under steady load, one request streamed from the Playground, then the overload preset taking hold, with the Overview, Capacity, Events and Tenants tabs](docs/img/demo.gif)
+![A tour of the dashboard in simulated live mode: the Overview and Latency tabs under steady load, one request streamed from the Playground, then the overload preset taking hold, with the Overview, Capacity, Events and Applications tabs](docs/img/demo.gif)
 
 *A silent tour of every tab, about 36 seconds: steady load, one streamed request, then the
 `overload` preset until premium and standard are marked degraded and requests move to
@@ -84,11 +88,12 @@ above and the Events picture below show that.
 | ![Latency tab](docs/img/latency.png) p50 and p99 per second, with the SLO where it is in range | ![Playground tab](docs/img/playground.png) One streamed request, token by token, and the load controls |
 
 The pictures and both GIFs were taken with `uv run python scripts/capture_demo.py`, seed
-7, with `PLAYWRIGHT_CHANNEL=chrome`, on the tree of the commit that added the tour (parent
-commit `879ee2f`).
+7, with `PLAYWRIGHT_CHANNEL=chrome`, on the tree of the commit that renamed tenants to
+applications (`613ca7a`, parent `0815dc9`).
 
-**Docker has not been run for this project**: the development machine does not have it
-([Limitations](#limitations)). What was run is the same thing without it, which needs
+**Docker has not been run on the development machine**, which does not have it. CI builds
+the image and starts this compose demo on every push, and checks that it serves the
+dashboard in simulated live mode (the `docker` job). Without Docker, the same thing needs
 Python 3.11+, [uv](https://docs.astral.sh/uv/) and Node 20:
 
 ```sh
@@ -110,7 +115,7 @@ flowchart TD
 
     subgraph gateway["Gateway process"]
         app["HTTP API (FastAPI)<br/>validation, streaming, errors"]
-        router["Router<br/>tenant → plan → model<br/>model name or quality"]
+        router["Router<br/>API key → application → plan → model<br/>model name or quality"]
         ledger["Cost ledger<br/>spend, tokens, budgets"]
         overload["Overload protection<br/>timeout, SLO monitor, downgrade"]
         registry["Model registry<br/>names and aliases → worker"]
@@ -173,40 +178,107 @@ Rules the code holds itself to (details in [CLAUDE.md](CLAUDE.md)):
 
 ## Quickstart
 
-Needs Python 3.11+ and [uv](https://docs.astral.sh/uv/). Nothing else.
+Needs Python 3.11+, [uv](https://docs.astral.sh/uv/), bash and curl. No model, no GPU.
 
-### Simulator mode (zero setup)
+### The demo, in one process
 
 ```sh
 uv sync
 make demo        # or: uv run python scripts/demo.py
 ```
 
-The demo runs the gateway in-process and walks through three tenants on three plans, a
-request outside a plan, a prefix-cache hit, a streamed answer and the usage ledger. It takes
-a couple of seconds and needs no server.
+The demo runs the gateway in-process and walks through three applications on three plans, a
+request outside a plan, a prefix-cache hit, a streamed answer, a key that matches nothing and
+the usage ledger. It takes a couple of seconds, needs no server, and keeps its throwaway keys
+in memory.
 
-To run it as a server:
+### The server
 
+The commands below are run, exactly as written, by CI on every push
+(`scripts/readme_quickstart.py`), from the repository root. First a pepper: the secret the
+server checks API keys with. This one is throwaway, for trying things out; for real use keep
+it in a secrets store and back it up, because if it is lost or changed every key stops working
+([docs/20](docs/20-applications-api-keys.md)). `gateway.env` is git-ignored.
+
+<!-- quickstart -->
 ```sh
-make serve       # or: uv run uvicorn gateway.app:create_default_app --factory --port 8000
+uv sync
+uv run python -c "import secrets; print('GATEWAY_KEY_PEPPER=' + secrets.token_urlsafe(32))" > gateway.env
+set -a; . ./gateway.env; set +a
+```
+
+Applications and keys live in a SQLite database in your user data folder (outside the
+repository; `GATEWAY_DATABASE` names another file). Create the three demo applications
+(Initech on free, Globex on pro, Acme on enterprise) and issue a key for Acme. A key is
+printed once and never stored; here it goes straight into a variable.
+
+<!-- quickstart -->
+```sh
+uv run python scripts/manage.py seed-demo
+export GATEWAY_API_KEY=$(uv run python scripts/manage.py create-key --application acme --label quickstart)
+```
+
+Start the server (it binds to `127.0.0.1`; do not expose it to a network, see
+[Known gaps](#known-gaps)) and wait until it answers:
+
+<!-- quickstart -->
+```sh
+uv run uvicorn gateway.app:create_default_app --factory --port 8000 &
+SERVER=$!
+until curl -sf http://127.0.0.1:8000/healthz > /dev/null; do sleep 1; done
+```
+
+Send a request as Acme: the best model its plan includes.
+
+<!-- quickstart -->
+```sh
+curl -sf -X POST http://127.0.0.1:8000/v1/generate \
+  -H "Authorization: Bearer $GATEWAY_API_KEY" -H "Content-Type: application/json" \
+  -d '{"quality": "best", "prompt": "What is a radix tree?", "max_tokens": 16}'
+```
+
+```json
+{"id":"req-1","text":"[simulated output, 16 tokens]","model":"premium",
+ "usage":{"prompt_tokens":5,"cached_tokens":0,"completion_tokens":16,"total_tokens":21},
+ "timing":{...},"cost":{"usd":...}}
+```
+
+Usage is kept in the database: stop the server, start it again, and Acme's request is still
+counted against its monthly budget.
+
+<!-- quickstart -->
+```sh
+kill $SERVER; wait $SERVER || true
+uv run uvicorn gateway.app:create_default_app --factory --port 8000 &
+SERVER=$!
+until curl -sf http://127.0.0.1:8000/healthz > /dev/null; do sleep 1; done
+curl -sf http://127.0.0.1:8000/v1/applications/me/usage -H "Authorization: Bearer $GATEWAY_API_KEY"
+```
+
+```json
+{"application_id":"acme","name":"Acme","plan":"enterprise",...,
+ "period":{"start_ms":...,"end_ms":...},"budget_tokens":100000000,"used_tokens":21,
+ "total":{"requests":1,...},"by_model":{"premium":{"requests":1,...}}}
 ```
 
 Then open <http://127.0.0.1:8000/docs>. The dashboard is at `/dashboard/` once it has
 been built (`cd frontend && npm ci && npm run build`, Node 20;
-[docs/16-dashboard.md](docs/16-dashboard.md)).
+[docs/16-dashboard.md](docs/16-dashboard.md)). More keys, rotation, revocation, backup and
+restore: `uv run python scripts/manage.py --help` and [docs/21](docs/21-persistence.md).
 
 `docker compose up --build` starts the demo of [See it running](#see-it-running), not this
-plain server; the compose file says which lines to remove for a plain one.
+plain server; the compose file says how to run the plain one, with `gateway.env` and a
+volume for the database.
 
 ### Real-model mode
 
 1. Get three models running, either as three llama.cpp servers
    (`scripts/run_local_models.sh start`) or through Ollama
    (`ollama pull llama3.2:1b-instruct-q4_K_M && ollama pull llama3.2:3b && ollama pull llama3.1:8b`).
-2. Start the gateway pointing at them:
+2. Start the gateway pointing at them, with the pepper and keys of the quickstart above:
 
    ```sh
+   set -a; . ./gateway.env; set +a
    GATEWAY_BACKEND=llamacpp make serve                                # llama-server
    GATEWAY_BACKENDS=examples/backends.ollama.yaml make serve          # Ollama
    ```
@@ -217,42 +289,53 @@ license, which is not an open-source license.
 
 ## Curl demo
 
-With the server running (simulator mode shown; the three demo tenants are `initech` on free,
-`globex` on pro and `acme` on enterprise):
+With the server running and `GATEWAY_API_KEY` set as in the [Quickstart](#the-server)
+(simulator mode shown). Every request carries an application's key; there is no
+`tenant_id` (sending one is a 422). Each application has its own keys.
 
 ```sh
-# The best model the tenant's plan includes.
-curl -s -i -X POST http://127.0.0.1:8000/v1/generate -H "Content-Type: application/json" \
-  -d '{"tenant_id": "acme", "quality": "best", "prompt": "What is a radix tree?", "max_tokens": 32}'
+KEY="Authorization: Bearer $GATEWAY_API_KEY"
+INITECH_KEY=$(uv run python scripts/manage.py create-key --application initech --label demo)
+
+# The best model the application's plan includes, with the model used and the cost.
+curl -s -i -X POST http://127.0.0.1:8000/v1/generate -H "$KEY" -H "Content-Type: application/json" \
+  -d '{"quality": "best", "prompt": "What is a radix tree?", "max_tokens": 32}'
 # HTTP/1.1 200 OK
 # x-model-used: premium
-# x-cost-usd: 0.0000552000
+# x-cost-usd: ...
 
-# A model outside the plan.
+# A model outside the plan (with a key of Initech, on the free plan).
+curl -s -X POST http://127.0.0.1:8000/v1/generate -H "Authorization: Bearer $INITECH_KEY" \
+  -H "Content-Type: application/json" -d '{"model": "premium", "prompt": "hello"}'
+# {"error": {"code": "model_not_in_plan", "message": "Application 'initech' is on the 'free'
+#   plan, which does not include model 'premium'. Models on this plan: economy. Plans that
+#   include 'premium': enterprise.", ...}}
+
+# No key, or a bad one: 401. Every bad key gets the same answer.
 curl -s -X POST http://127.0.0.1:8000/v1/generate -H "Content-Type: application/json" \
-  -d '{"tenant_id": "initech", "model": "premium", "prompt": "hello"}'
-# {"error": {"code": "model_not_in_plan", "message": "Tenant 'initech' is on the 'free' plan,
-#   which does not include model 'premium'. Models on this plan: economy. Plans that include
-#   'premium': enterprise.", ...}}
+  -d '{"model": "economy", "prompt": "hello"}'
+# {"error": {"code": "api_key_required", ...}}
 
 # Streaming, one event per token.
-curl -s -N -X POST http://127.0.0.1:8000/v1/generate -H "Content-Type: application/json" \
-  -d '{"tenant_id": "acme", "model": "economy", "prompt": "hello", "max_tokens": 4, "stream": true}'
+curl -s -N -X POST http://127.0.0.1:8000/v1/generate -H "$KEY" -H "Content-Type: application/json" \
+  -d '{"model": "economy", "prompt": "hello", "max_tokens": 4, "stream": true}'
 
-# What a tenant has used, and the gateway's own view of latency and load.
-curl -s http://127.0.0.1:8000/v1/tenants/acme/usage
+# What this application has used this month, and the gateway's own view of latency and load.
+curl -s http://127.0.0.1:8000/v1/applications/me/usage -H "$KEY"
 curl -s http://127.0.0.1:8000/metrics/summary
 curl -s http://127.0.0.1:8000/v1/overload
 
 # For a dashboard: everything now with the last minute per second, the same as a live
-# stream, and Prometheus text. Schema in docs/15-monitoring-api.md.
+# stream, and Prometheus text. Schema in docs/15-monitoring-api.md. Not authenticated yet:
+# see Known gaps.
 curl -s "http://127.0.0.1:8000/v1/monitor/snapshot?history_s=60"
 curl -s -N http://127.0.0.1:8000/v1/monitor/stream
 curl -s http://127.0.0.1:8000/metrics
 ```
 
 In simulator mode the `text` field is a placeholder; in real-model mode it is the model's
-answer. The full API is in [docs/06-api.md](docs/06-api.md) and the notes after it.
+answer. The full API is in [docs/06-api.md](docs/06-api.md) and the notes after it; keys and
+applications in [docs/20](docs/20-applications-api-keys.md).
 
 ## Headline results
 
@@ -337,7 +420,7 @@ Details and caveats: [docs/13-calibration.md](docs/13-calibration.md).
 | Decision | Why | What it costs |
 |---|---|---|
 | Simulate first, on an injected clock | Every experiment is exact and repeatable, so tests can assert timings to the millisecond and the CI gate cannot flake | The numbers are only as good as the cost model, and it is simple |
-| One worker, queue and cache per model | A flooded model cannot slow another; with separate workers the light model's latency is identical with and without the heavy load | No sharing of capacity between models, and no fairness between tenants on the same model |
+| One worker, queue and cache per model | A flooded model cannot slow another; with separate workers the light model's latency is identical with and without the heavy load | No sharing of capacity between models, and no fairness between applications on the same model |
 | Backend says what, worker says when | The same simulated backend serves the baseline and the batching scheduler, so they are compared on identical work | A real model server cannot be driven step by step, so real-model mode bypasses the scheduler |
 | Prefix cache as a radix tree sharing the model's KV budget with running requests | Cached prefixes are the idle part of the KV memory, not a second budget; in-use prefixes are pinned | A prefix is only reusable once its first request finishes, so a cold burst gets no sharing |
 | Strict first-come-first-served admission | Predictable, and a large request cannot starve | Leaves capacity unused when the head of the queue does not fit |
@@ -390,8 +473,8 @@ in this README are of three different kinds.
   tier's timings are of that laptop's limits as much as of the model.
 - **Answer quality is 100 multiple-choice questions, asked once.** Each accuracy has a 95%
   interval 18 to 19 points wide; the 3B and 8B models cannot be told apart at that size. It
-  measures picking a letter on exam questions, not how good an answer to a tenant's own
-  request is, and the simulator does not model quality at all.
+  measures picking a letter on exam questions, not how good an answer to an application's
+  own request is, and the simulator does not model quality at all.
 
 **The model and the system.**
 
@@ -401,24 +484,38 @@ in this README are of three different kinds.
   17% to 49% off when four requests arrive together.
 - **One token is one word** in the simulator; output length is known at admission.
 - **Prices and budgets are placeholders**, operator-supplied, not data.
-- **No authentication.** A tenant id is taken on trust; anyone who can reach the gateway can
-  read any tenant's usage, open the dashboard, and, where load control is enabled, start
-  load. Load control is off by default for that reason. The server binds to `127.0.0.1`;
-  **do not expose it to a network.** API keys and persistent usage are being added
-  ([platform plan](docs/platform-plan.md)); monitoring and load control stay
-  unauthenticated until a later phase protects them with roles.
-- **State is in memory and per process**: ledger, metrics, monitoring history, cache and
-  overload state are lost on restart and not shared between instances.
+- **Usage, applications and keys persist; the rest does not.** Usage events, applications
+  and key records are in SQLite and survive a restart. Metrics, monitoring history, the
+  prefix cache and overload state are in memory and start again empty.
+
+### Known gaps
+
+These are not built, and the server is not ready for a network until they are:
+
+- **Monitoring and load control are not authenticated.** `/v1/monitor/*`, `/metrics`,
+  `/metrics/summary`, `/v1/overload`, `/v1/control/*` and the dashboard are open to anyone
+  who can reach the server, and show every application's usage and spend; load control
+  (off by default) lets them start load. A later role-based monitoring step protects them.
+  Generating text and reading an application's own usage do need a key.
+- **The server binds to `127.0.0.1` and must not be exposed to a network.** That includes
+  the Docker image (published on `127.0.0.1` only) and any reverse proxy in front of it.
+  Keys also travel over plain HTTP, and failed key checks are not rate-limited per source
+  ([docs/20](docs/20-applications-api-keys.md)).
+- **SQLite supports one gateway process per database.** Budgets are enforced per process, so
+  a second server on the same database refuses to start; scaling out needs a shared store
+  ([docs/21](docs/21-persistence.md)).
+- **Rotating the pepper means re-issuing every key.** Rotation without downtime is not built
+  ([docs/20](docs/20-applications-api-keys.md)).
 
 **Not run.**
 
-- **Docker.** The Dockerfile and the compose file, including the one-command demo at the top
-  of this page, were written but never built or run: the development machine has no Docker.
+- **Docker on the development machine.** It has none. CI builds the image and starts the
+  compose demo; the plain server in Docker (with `gateway.env` and the volume) has not been
+  started anywhere.
 - **make.** The machine has none either; every Makefile command was run directly instead.
-- **CI.** Nothing has been pushed, so no workflow has run and the badge above has no status.
-  That includes the jobs that would build the image and run the browser tests.
-- **The browser tests** were run with an installed Chrome on that one Windows laptop, not
-  with the Chromium CI would download.
+- **CI** runs on GitHub on every push: the checks on Python 3.11 and 3.12, the dashboard,
+  the browser tests (with the Chromium CI downloads), the Docker build and compose demo, the
+  README quickstart, the protected outputs and the performance gate.
 
 ## What I would do next
 
@@ -430,11 +527,14 @@ in this README are of three different kinds.
 3. **Measure what is now a placeholder or missing**: real prices, KV capacity, a server's
    prefix-cache hits, and long prompts, so overload and chunked prefill can have results.
 4. **Make prefixes reusable as soon as they are prefilled**, so a cold burst shares them.
-5. **Fairness between tenants on the same model**; today isolation is only between models.
+5. **Fairness between applications on the same model**; today isolation is only between
+   models.
 6. **Detect overload from queue age**, not only from finished requests, so downgrade engages
    before the first slow request completes.
 7. **Hard budgets**, by reserving `max_tokens` up front.
-8. **Authentication and a durable ledger**, the two things a real deployment needs first.
+8. **Close the known gaps**: roles for monitoring and load control, per-source limits on
+   failed key checks, pepper rotation without downtime, and a shared store for more than
+   one process.
 9. **A backend that exposes single decode steps**, so this scheduler can drive a real model
    and be compared with llama-server's own.
 
@@ -453,6 +553,40 @@ The dashboard has its own checks, run in `frontend/` (Node 20):
 npm run check    # eslint, prettier, tsc, component tests
 npm run e2e      # browser smoke tests against the gateway in simulated live mode
 ```
+
+### Protected outputs
+
+The performance gate results, the load generator's output, the report and the tracked
+benchmark data must not change unless a change means them to
+([plan, section 5](docs/platform-plan.md)). Their sha256 sums are committed in
+[scripts/protected_outputs.sha256](scripts/protected_outputs.sha256), and CI fails the build
+if any differs:
+
+```sh
+uv run python scripts/protected_outputs.py                   # regenerate, compare; exit 1 on change
+uv run python scripts/protected_outputs.py --include-images  # also the report figures (same platform)
+```
+
+**The report's figures (`docs/report/*.png`) are not in that baseline.** The same numbers
+drawn on Linux and on Windows give different PNG bytes (font rendering), so a cross-platform
+sum cannot hold. The figures are drawn from data the baseline already protects: sections 1
+and 2 plot the results of the same runs that fill the tables of `docs/REPORT.md`, and section
+7 plots `benchmarks/quality/results.json`, a tracked file. What the baseline does not catch
+is a change to how a figure is drawn alone. `--include-images` checks the figures against a
+baseline for the platform it runs on, `scripts/protected_outputs.images-<platform>.sha256`
+(only `windows` exists, recorded on the development machine): a local check, not run in CI.
+
+A changed sum is a failure to explain, not a file to refresh. Refresh the baseline only
+when a change to one of those outputs is intended and understood:
+
+1. Run the check and note exactly which sums changed and why.
+2. Run `uv run python scripts/protected_outputs.py --update`, which rewrites the baseline
+   (with `--include-images`, this platform's figure baseline too).
+3. Commit the new baseline file(s) on their own, with the reason and the list of changed
+   files in the commit message and the pull request.
+
+Text files are hashed with Windows line endings read as Unix ones, so a checkout on either
+system gives the same sums. `docs/REPORT.md` is hashed without the line naming its commit.
 
 Without `make`, run the commands from the [Makefile](Makefile) directly. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the rules and [docs/README.md](docs/README.md) for the

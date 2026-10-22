@@ -6,8 +6,8 @@ export const QUALITIES = ["cheapest", "balanced", "best"] as const;
 export type Quality = (typeof QUALITIES)[number];
 
 export interface PlaygroundForm {
-  /** "" when the gateway has no tenants. */
-  tenant: string;
+  /** The application to send as; "" when the gateway does not offer the Playground. */
+  application: string;
   choose: "model" | "quality";
   model: string;
   quality: Quality;
@@ -17,12 +17,17 @@ export interface PlaygroundForm {
   prompt: string;
 }
 
+/** Where the Playground sends: its own endpoint when the gateway offers it. */
+export function requestPath(playgroundAvailable: boolean): string {
+  return playgroundAvailable ? "/v1/playground/generate" : "/v1/generate";
+}
+
 /** The JSON body for a form. Exactly one of model and quality is sent. */
 export function requestBody(form: PlaygroundForm): Record<string, unknown> {
   const body: Record<string, unknown> = { prompt: form.prompt, stream: true };
   if (form.choose === "model") body.model = form.model;
   else body.quality = form.quality;
-  if (form.tenant !== "") body.tenant_id = form.tenant;
+  if (form.application !== "") body.application_id = form.application;
   if (form.allowDowngrade) body.allow_downgrade = true;
   const maxTokens = Number.parseInt(form.maxTokens, 10);
   if (Number.isFinite(maxTokens)) body.max_tokens = maxTokens;
@@ -128,10 +133,11 @@ export async function streamGenerate(
   body: Record<string, unknown>,
   dispatch: (action: RunAction) => void,
   signal: AbortSignal,
+  path = "/v1/generate",
 ): Promise<void> {
   dispatch({ kind: "sent" });
   try {
-    const response = await fetch("/v1/generate", {
+    const response = await fetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

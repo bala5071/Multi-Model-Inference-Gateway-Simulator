@@ -6,6 +6,10 @@
 # No model runs. A seeded load is replayed on simulated time, and every number the
 # dashboard shows is simulated on the calibrated model profiles, with placeholder prices:
 # nothing here is a measurement. See docs/18-demo.md and docs/17-playground-load-replay.md.
+#
+# Secrets never go in this file or in the image. The plain server reads its pepper and its
+# database path from gateway.env (git-ignored; copy gateway.env.example and fill it in), and
+# keeps its database on the gateway-data volume. See docs/21-persistence.md.
 services:
   gateway:
     build: .
@@ -13,6 +17,11 @@ services:
       # This machine only. Monitoring and load control are not authenticated; do not publish
       # on other interfaces (docs/platform-plan.md, section 9).
       - "127.0.0.1:8000:8000"
+    # GATEWAY_KEY_PEPPER, GATEWAY_DATABASE and the retention, for the plain server. Optional
+    # so that the demo, which keeps everything in memory, runs without it.
+    env_file:
+      - path: gateway.env
+        required: false
     environment:
       GATEWAY_SIMULATED_LIVE: "1"
       # Simulated seconds per real second: 1, 5 or 20. The dashboard can change it.
@@ -21,18 +30,28 @@ services:
       GATEWAY_SIM_PRESET: steady
       GATEWAY_SEED: "7"
 
-      # A plain simulator server instead (wall-clock time, no load until a client sends
-      # some): remove the four lines above. Add the next line to let the dashboard start
-      # load; leave it out on anything others can reach, since there is no authentication.
+      # A plain simulator server instead (wall-clock time, applications and API keys in the
+      # database on the volume): remove the four lines above and create gateway.env. Then
+      # issue keys inside the container:
+      #   docker compose exec gateway /app/.venv/bin/python scripts/manage.py seed-demo
+      #   docker compose exec gateway /app/.venv/bin/python scripts/manage.py \
+      #       create-key --application acme --label me
+      # Add the next line to let the dashboard start load; leave it out on anything others
+      # can reach, since monitoring and load control are not authenticated.
       # GATEWAY_LOAD_CONTROL: "1"
 
-      # Real models instead: remove the four lines above, run the model servers on the
-      # host (docs/12-real-models.md), mount a backends file whose URLs use
+      # Real models instead: as for the plain server, run the model servers on the host
+      # (docs/12-real-models.md), mount a backends file whose URLs use
       # host.docker.internal instead of 127.0.0.1, and switch the two lines below on.
       # GATEWAY_BACKEND: llamacpp
       # GATEWAY_BACKENDS: /config/backends.yaml
-    # volumes:
+    volumes:
+      # Applications, key HMACs and usage (GATEWAY_DATABASE=/data/gateway.db in gateway.env).
+      - gateway-data:/data
     #   - ./my-backends.yaml:/config/backends.yaml:ro
     # extra_hosts:
     #   - "host.docker.internal:host-gateway"   # needed on Linux
     restart: unless-stopped
+
+volumes:
+  gateway-data:

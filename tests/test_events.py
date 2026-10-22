@@ -12,7 +12,7 @@ async def test_publish_stamps_the_clock_and_numbers_events_from_one() -> None:
     clock = SimClock()
     bus = EventBus(clock)
 
-    first = bus.publish("queue_full", model="premium", tenant_id="acme", waiting=2, limit=2)
+    first = bus.publish("queue_full", model="premium", application_id="acme", waiting=2, limit=2)
     await clock.sleep_ms(250.0)
     second = bus.publish("state_change", model="premium", degraded=True, p99_ms=31.5)
 

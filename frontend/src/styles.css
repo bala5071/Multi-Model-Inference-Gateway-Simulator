@@ -396,7 +396,7 @@ button[aria-pressed="true"] {
   font-weight: 600;
 }
 
-.tenants .budget {
+.applications .budget {
   min-width: 260px;
   white-space: normal;
 }

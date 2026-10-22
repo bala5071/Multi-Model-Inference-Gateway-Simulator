@@ -9,6 +9,8 @@ replaced `MetricsRecorder`. `/metrics/summary` keeps the shape shown below; its 
 now cover the last five minutes (at most 10,000 requests per model) instead of every
 request since the process started, and `GET /metrics/detail` has the fuller figures.
 
+**Updated by platform step 2 (`docs/20-applications-api-keys.md`).** Tenants are now applications, and a request names its application with an API key (`Authorization: Bearer <key>`), not a `tenant_id` in the body, which is now a 422. Usage moved to `GET /v1/applications/me/usage`. The examples below predate that.
+
 **Updated by the routing step (`docs/09-routing.md`).** The default server now loads tenant
 plans, so every `/v1/generate` call to it needs a `tenant_id` (`initech`, `globex` or `acme`
 in the packaged plans); without one it returns 401. Requests may give a `quality` in place

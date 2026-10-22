@@ -22,6 +22,10 @@ jobs:
       - name: Install
         run: uv sync --locked
 
+      # The usage store and migrations run on whatever SQLite this Python was built with.
+      - name: SQLite version
+        run: uv run python -c "import sqlite3; print('SQLite', sqlite3.sqlite_version)"
+
       - name: Ruff lint
         run: uv run ruff check .
 
@@ -31,8 +35,38 @@ jobs:
       - name: Mypy
         run: uv run mypy
 
+      # -ra lists every skipped test with its reason (it is also in pyproject's addopts); the
+      # JUnit file records each test's outcome, to see which ran (e.g. the POSIX-only ones).
       - name: Pytest
-        run: uv run pytest
+        run: uv run pytest -ra --junitxml=junit-${{ matrix.python-version }}.xml
+
+      - name: Report skipped tests
+        if: always()
+        shell: bash
+        run: |
+          uv run python - junit-${{ matrix.python-version }}.xml <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          suite = ET.parse(sys.argv[1]).getroot()
+          cases = suite.iter("testcase")
+          skipped = [
+              f"{c.get('classname')}.{c.get('name')}" for c in cases if c.find("skipped") is not None
+          ]
+          totals = {k: suite.find("testsuite").get(k) for k in ("tests", "skipped", "failures", "errors")}
+          print(totals)
+          print("\n".join(skipped))
+          names = ", ".join(s.rsplit(".", 1)[1] for s in skipped) or "none"
+          print(f"::notice title=Skipped tests ({len(skipped)})::{names}")
+          PY
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.python-version }}
+          path: junit-${{ matrix.python-version }}.xml
+          if-no-files-found: warn
 
   # The dashboard in frontend/: lint, formatting, types, component tests, and a build.
   frontend:
@@ -135,6 +169,70 @@ jobs:
       - name: Stop
         if: always()
         run: docker compose down
+
+  # Runs the README's quickstart exactly as written (the shell blocks marked
+  # <!-- quickstart -->): a throwaway pepper, the demo applications, a key, the server, one
+  # request, a restart, and the usage read back. Fails if the README's commands stop working.
+  readme-quickstart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: README quickstart
+        run: uv run python scripts/readme_quickstart.py
+
+  # Fails the build if any protected output (docs/platform-plan.md, section 5) differs from
+  # the cross-platform baseline in scripts/protected_outputs.sha256: the gate results, the
+  # load generator's JSON, REPORT.md and the tracked benchmark data. The report's figures are
+  # not in it (their pixels depend on the platform). Each differing file is also raised as an
+  # annotation; the full output is an artifact.
+  protected-outputs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: Protected outputs
+        id: check
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run python scripts/protected_outputs.py --keep protected-outputs \
+            | tee protected-outputs.txt
+
+      - name: Report differences
+        if: always()
+        shell: bash
+        run: |
+          echo "protected outputs check: ${{ steps.check.outcome }}"
+          grep -E '^(changed|missing|new) ' protected-outputs.txt | while read -r line; do
+            echo "::error title=Protected output differs::$line"
+          done || true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: protected-outputs
+          path: |
+            protected-outputs.txt
+            protected-outputs/
+          if-no-files-found: warn
 
   # Fails the build if any model's simulated p99 total latency is over its budget in
   # benchmarks/budgets.json. See docs/08-ci-gate.md.

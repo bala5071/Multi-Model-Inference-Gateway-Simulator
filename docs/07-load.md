@@ -3,6 +3,11 @@
 Step 7 adds a load generator that drives the HTTP API, and uses it to show that one model's
 overload does not slow another model down.
 
+**Updated by platform step 2 (`docs/20-applications-api-keys.md`).** Live runs no longer take
+`--tenant`: they read an application's API key from `GATEWAY_API_KEY` and send it as
+`Authorization: Bearer`, e.g. `GATEWAY_API_KEY=... uv run python -m benchmarks.loadgen --url
+http://127.0.0.1:8000 --requests 20 --rate 0.8`. In-process runs are unchanged, byte for byte.
+
 Code: `benchmarks/loadgen.py`, `benchmarks/fairness.py`. Tests: `tests/test_loadgen.py`.
 
 ## Running it

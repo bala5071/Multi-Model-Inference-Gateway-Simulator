@@ -10,10 +10,11 @@ Pictures: `docs/img/`.
 
 ## Read this first
 
-- **The Docker image and the compose file have not been built or run.** The development
-  machine has no Docker. They were written from the commands that were run directly, and
-  the `docker` CI job is the first place they will be exercised. CI itself has not run:
-  nothing has been pushed.
+- **The Docker image and the compose file have not been run on the development machine**,
+  which has no Docker. **Updated since:** the `docker` CI job builds the image and starts the
+  compose demo on every push, and checks that it serves the dashboard in simulated live mode;
+  it has passed on every run since the first push. The plain server in Docker (with
+  `gateway.env` and the volume, note 21) has not been started anywhere.
 - **The demo is simulated live mode** (note 17). No model runs; everything in it, and in the
   pictures, is simulated time on the calibrated profiles (note 01), with placeholder prices.
   Nothing in it is a measurement.
@@ -53,6 +54,9 @@ image.
 
 - **`docker run` on the image alone is the plain simulator**, as it was. Simulated live mode
   is chosen by the compose file's environment, not baked into the image.
+- **Updated by platform step 3 (`docs/21-persistence.md`):** the compose file also mounts
+  the volume `gateway-data` at `/data` for the database and reads secrets from a git-ignored
+  `gateway.env` (optional for the demo); the image carries `scripts/manage.py`.
 - **The port is published on `127.0.0.1` only** (`-p 127.0.0.1:8000:8000`, and the same in
   the compose file). Inside the container the server must bind `0.0.0.0` to be reachable at
   all; a plain `-p 8000:8000` would then publish it on every interface of the host, and
@@ -74,6 +78,7 @@ simulated live mode at speed 20 on port 8177 and stops it afterwards.
 | The page loads | The three model cards arrive over the stream, the page says "Live" and carries the simulated-mode banner with its seed and speed, every tab opens, a chart is drawn, and the page raised no error |
 | A load preset changes the queue chart | With load stopped the premium queue chart's newest points are all 0; after starting `overload` from the Playground they exceed 10, and the Overview card shows the batch full (4 of 4 seats) |
 | A downgrade event appears under overload | With `overload` running, the Events tab filtered to downgrades lists "A request for premium was served by …", a state change says premium is degraded, and the Overview card says Degraded |
+| The Playground sends a request as an application (added in platform step 6) | With load stopped, choosing `acme` and sending posts to `/v1/playground/generate` with `application_id: "acme"` and no `Authorization` header (the key stays on the server), and the page shows "Finished." |
 
 Things to know:
 
@@ -101,7 +106,8 @@ uv run python scripts/capture_demo.py     # add PLAYWRIGHT_CHANNEL=chrome to use
 ```
 
 It runs `frontend/e2e/demo.capture.ts` against the same simulated gateway (seed 7) and
-writes `docs/img/`: `overview.png`, `latency.png`, `capacity.png`, `tenants.png`,
+writes `docs/img/`: `overview.png`, `latency.png`, `capacity.png`, `applications.png`
+(`tenants.png` before platform step 4),
 `events.png`, `playground.png`, and `overload.gif`, thirty frames of the Overview at speed 5
 while the `overload` preset takes hold. The GIFs are assembled with Pillow, scaled to 960
 pixels wide with 64 colours.
@@ -112,7 +118,7 @@ preset and seed 7, and writes `docs/img/demo.gif`: a silent tour of every tab, 9
 taken 400 ms apart (Pillow merges identical neighbours). Steady load on the Overview and
 Latency tabs at 5x; one request of up to 128 tokens to the standard model, streamed at 1x
 so the tokens can be seen arriving; then the `overload` preset at 20x until premium is
-marked degraded, through the Overview, Capacity, Events and Tenants tabs. Every frame is
+marked degraded, through the Overview, Capacity, Events and Applications tabs. Every frame is
 the top 1280 x 720 of the page, so the simulated-mode banner is in all of them. The tour
 has a gateway of its own so that it always starts from the same calm state and does not
 change what the stills see.

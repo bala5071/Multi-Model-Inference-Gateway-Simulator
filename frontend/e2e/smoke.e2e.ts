@@ -26,7 +26,7 @@ test("the page loads, is live, and says it is simulated", async ({ page }) => {
   await expect(banner.getByRole("button", { name: "20×" })).toHaveAttribute("aria-pressed", "true");
 
   // Every tab opens, keeps the label, and draws its charts.
-  for (const tab of ["Latency", "Capacity", "Tenants", "Events", "Playground"]) {
+  for (const tab of ["Latency", "Capacity", "Applications", "Events", "Playground"]) {
     await openTab(page, tab);
     await expect(banner).toBeVisible();
   }
@@ -77,4 +77,28 @@ test("a downgrade event appears under overload", async ({ page }) => {
 
   await openTab(page, "Overview");
   await expect(page.getByRole("article", { name: "premium" })).toContainText("Degraded");
+});
+
+test("the Playground sends a request as an application and shows the answer", async ({ page }) => {
+  await page.goto("/dashboard/");
+  await stopLoad(page);
+  await openTab(page, "Playground");
+
+  // In simulated live mode the gateway holds a throwaway key per application; the page
+  // names the application and the key never reaches the browser.
+  const form = page.locator("form.request-form");
+  const application = form.locator("label", { hasText: /^Application/ }).locator("select");
+  await expect(application).toBeVisible();
+  await application.selectOption("acme");
+  await form
+    .locator("label", { hasText: /^Max tokens/ })
+    .locator("input")
+    .fill("4");
+  const sent = page.waitForRequest((request) => request.url().endsWith("/v1/playground/generate"));
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await sent;
+  expect(request.headers()["authorization"]).toBeUndefined();
+  expect(request.postDataJSON()).toMatchObject({ application_id: "acme", max_tokens: 4 });
+  await expect(page.getByText("Finished.")).toBeVisible({ timeout: 30_000 });
 });

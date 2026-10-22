@@ -12,7 +12,7 @@ import {
   occupancy,
   sloStanding,
 } from "./derive";
-import type { GatewayEvent, ModelSnapshot, TenantSnapshot } from "./types";
+import type { GatewayEvent, ModelSnapshot, ApplicationSnapshot } from "./types";
 
 function model(snapshot: typeof simulated, name: string): ModelSnapshot {
   const found = snapshot.models[name];
@@ -91,24 +91,24 @@ describe("occupancy", () => {
 });
 
 describe("budgetUse", () => {
-  const tenant = (used_tokens: number, budget_tokens: number): TenantSnapshot => {
-    const acme = simulated.tenants.tenants?.acme;
-    if (acme === undefined) throw new Error("fixture has no tenant acme");
+  const application = (used_tokens: number, budget_tokens: number): ApplicationSnapshot => {
+    const acme = simulated.applications.applications?.acme;
+    if (acme === undefined) throw new Error("fixture has no application acme");
     return { ...acme, used_tokens, budget_tokens };
   };
 
   it("grades the share of the budget used", () => {
-    expect(budgetUse(tenant(10, 100))).toEqual({ ratio: 0.1, level: "ok" });
-    expect(budgetUse(tenant(80, 100))).toEqual({ ratio: 0.8, level: "warning" });
-    expect(budgetUse(tenant(100, 100))).toEqual({ ratio: 1, level: "exhausted" });
+    expect(budgetUse(application(10, 100))).toEqual({ ratio: 0.1, level: "ok" });
+    expect(budgetUse(application(80, 100))).toEqual({ ratio: 0.8, level: "warning" });
+    expect(budgetUse(application(100, 100))).toEqual({ ratio: 1, level: "exhausted" });
   });
 
   it("can pass the whole budget, since the last request admitted may overshoot", () => {
-    expect(budgetUse(tenant(39, 30))).toEqual({ ratio: 1.3, level: "exhausted" });
+    expect(budgetUse(application(39, 30))).toEqual({ ratio: 1.3, level: "exhausted" });
   });
 
   it("treats a budget of nothing as used up", () => {
-    expect(budgetUse(tenant(0, 0)).level).toBe("exhausted");
+    expect(budgetUse(application(0, 0)).level).toBe("exhausted");
   });
 });
 
@@ -117,30 +117,32 @@ describe("filterEvents", () => {
     expect(filterEvents(events, ANY_EVENT).map((e) => e.seq)).toEqual([4, 3, 2, 1]);
   });
 
-  it("filters by type, model and tenant together", () => {
+  it("filters by type, model and application together", () => {
     expect(filterEvents(events, { ...ANY_EVENT, type: "queue_full" }).map((e) => e.seq)).toEqual([
       2, 1,
     ]);
-    expect(filterEvents(events, { ...ANY_EVENT, tenant: "acme" }).map((e) => e.seq)).toEqual([
+    expect(filterEvents(events, { ...ANY_EVENT, application: "acme" }).map((e) => e.seq)).toEqual([
       4, 2, 1,
     ]);
     expect(
-      filterEvents(events, { type: "downgrade", model: "premium", tenant: "acme" }).map(
+      filterEvents(events, { type: "downgrade", model: "premium", application: "acme" }).map(
         (e) => e.seq,
       ),
     ).toEqual([4]);
     expect(filterEvents(events, { ...ANY_EVENT, model: "economy" })).toEqual([]);
   });
 
-  it("does not match an event with no tenant when a tenant is asked for", () => {
-    // The state change has tenant_id null.
-    expect(filterEvents(events, { type: "state_change", model: "", tenant: "acme" })).toEqual([]);
+  it("does not match an event with no application when an application is asked for", () => {
+    // The state change has application_id null.
+    expect(filterEvents(events, { type: "state_change", model: "", application: "acme" })).toEqual(
+      [],
+    );
   });
 
   it("lists the distinct values present, without nulls", () => {
     expect(distinct(events, "type")).toEqual(["downgrade", "queue_full", "state_change"]);
     expect(distinct(events, "model")).toEqual(["premium"]);
-    expect(distinct(events, "tenant_id")).toEqual(["acme"]);
+    expect(distinct(events, "application_id")).toEqual(["acme"]);
   });
 });
 
@@ -150,7 +152,7 @@ describe("describeEvent", () => {
     at_ms: 0,
     type,
     model: "premium",
-    tenant_id: null,
+    application_id: null,
     data,
   });
 

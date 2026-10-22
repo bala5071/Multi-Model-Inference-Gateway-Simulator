@@ -1,8 +1,8 @@
 # Platform plan, A1: applications, API keys and persistent usage
 
-Status: approved 2026-10-21. No code has changed yet; this note is the plan for the
-`platform/foundation` branch. Steps 1 to 6 each ship with tests and their own design note
-(`docs/19-*` onwards), as every step in this repo does.
+Status: approved 2026-10-21; steps 1 to 6 done on the `platform/foundation` branch, each
+with tests and its own design note (notes 19 to 23). Section 10 lists what A1 leaves
+unbuilt.
 
 A1 turns the simulator's trust-based tenants into applications that identify themselves
 with an API key, and the in-memory ledger into usage events that survive a restart. Later
@@ -77,11 +77,11 @@ is added now; A3 adds it with its own migration.
   in an event.
 - **The default server refuses to start without the pepper.** `create_app` with plans in
   tests receives its stores and pepper by injection.
-- **Pepper rotation** (documented in the step's design note): each stored hash records
-  the pepper version it was made with; the server accepts `GATEWAY_KEY_PEPPER` (current)
-  and `GATEWAY_KEY_PEPPER_PREVIOUS` (optional); a key verified under the previous pepper is
-  re-hashed under the current one; once no row uses the old version, the previous variable
-  is removed. Keys themselves do not change.
+- **Pepper rotation**: as built in step 2, rotating the pepper means re-issuing every key
+  (note 20 gives the procedure); clients are refused until they have their new key.
+  **Deferred:** rotation without that gap, where each stored hash records the pepper
+  version that made it and the server also accepts `GATEWAY_KEY_PEPPER_PREVIOUS` for a
+  while, re-hashing keys verified under it. Keys themselves would not change.
 - **Issuance is a CLI under `scripts/`**, a bootstrap only: it creates an application or a
   key in the database and prints the new key once to the terminal. It never writes it to a
   log or file. There is no admin token endpoint; A2 replaces the CLI with authenticated
@@ -162,6 +162,12 @@ no new code on the request path: no store, no auth, no extra awaits.
 
 The first action of step 1 records the sha256 of each on the tree this plan is committed
 on. After every step they are produced again and compared; any difference stops the step.
+The check is `uv run python scripts/protected_outputs.py`, against the sums committed in
+`scripts/protected_outputs.sha256` (recorded at `d1ad230`; identical in content to the
+`4a35700` outputs, with line endings normalised so any checkout gives the same sums). CI runs
+it on Linux and fails on any difference. The report's three PNGs were removed from it after
+the first Linux runs showed their bytes differ by platform while every number matched; they
+are checked locally with `--include-images` against a per-platform baseline (README).
 The one planned exception is step 6: `report.py` says "tenant" in four sentences, and
 renaming them changes `REPORT.md`. That diff must contain those words and nothing else, and
 it gets new recorded sums.
@@ -172,11 +178,24 @@ it gets new recorded sums.
 |---|---|---|
 | 0 | This plan; CLAUDE.md rules; README security note | this commit |
 | 1 | sha256 baseline. Migration runner. Epoch time source. `UsageStore` (in-memory, SQLite). `CostLedger`'s API kept as a façade over it, its tests passing unchanged. `test_no_content_stored.py` against the ledger and events as they are. No API change | own PR |
-| 2 | Applications and API keys **together**: `ApplicationStore`, per-application plan settings, templates, `Router` on `Application`, HMAC keys, the pepper, the issuance CLI, the auth dependency; `tenant_id` leaves the body; `/v1/applications/me/usage` | **one PR**. An application id taken on trust from the body is insecure and must never be merged on its own |
-| 3 | Persistence in the default server: database path and pepper from the environment, refusal to start without the pepper, the restart test, default bind confirmed as `127.0.0.1` | own PR |
-| 4 | Monitoring rename (snapshot, Prometheus, events, time series); fixtures regenerated; the dashboard follows (rename only) | own PR |
-| 5 | Load control, simulated live mode, demo and Playground with in-memory throwaway keys; loadgen live mode; e2e; pictures retaken | own PR |
-| 6 | Docs, CLAUDE.md architecture list, README; report prose regenerated (wording-only diff) | own PR |
+| 2 (done, note 20) | Applications and API keys **together**: `ApplicationStore`, per-application plan settings, templates, `Router` on `Application`, HMAC keys, the pepper, the issuance CLI, the auth dependency; `tenant_id` leaves the body; `/v1/applications/me/usage` | **one PR**. An application id taken on trust from the body is insecure and must never be merged on its own |
+| 3 (done, note 21) | Persistence in the default server: database path and pepper from the environment, refusal to start without the pepper, the restart test, default bind confirmed as `127.0.0.1` | own PR |
+| 4 (done, note 22) | Monitoring rename (snapshot, Prometheus, events, time series); fixtures regenerated; the dashboard follows (rename only) | own PR |
+| 5 (folded into 6) | Load control, simulated live mode, demo and Playground with in-memory throwaway keys; loadgen live mode; e2e; pictures retaken | Nothing substantive was left: step 2 did load control, simulated live mode, the demo, the Playground and the load generator; step 4 did the e2e specs and the pictures. The one gap, no CI browser test sending from the Playground, is closed in step 6 |
+| 6 (done) | Docs, CLAUDE.md architecture list, README; report prose regenerated (wording-only diff); a CI job that runs the README quickstart as written | with step 5 |
+
+### What step 2 pulled forward
+
+Done in step 2 because leaving it for later would have left the branch broken in between:
+
+- **The default server opens its database** (`GATEWAY_DATABASE`) and refuses to start
+  without the pepper: keys are issued into a database by the CLI, so the server must read
+  the same one. Usage events stay in memory until step 3.
+- **The Playground, the demo and live load runs** use keys now (planned for step 5): the
+  Playground through throwaway in-memory keys in simulated live mode, the demo with its
+  own, the load generator with `GATEWAY_API_KEY`.
+- Still for step 4: rate-limit refusals in the monitoring snapshot (its rejection reasons
+  are a fixed part of the schema) and the tenant to application rename there.
 
 ## 7. Riskiest steps
 
@@ -229,4 +248,19 @@ A2 and A8 protect them with roles. Until then:
 - `GATEWAY_LOAD_CONTROL` stays off by default;
 - **the server must not be exposed to a network until A8.** The Docker image binds
   `0.0.0.0` inside the container, as it must to be reachable at all; `docker-compose.yml`
-  will publish the port on `127.0.0.1` only (step 3).
+  publishes the port on `127.0.0.1` only.
+
+## 10. Known gaps at the end of A1
+
+What A1 leaves unbuilt, stated the same way in the README's "Known gaps":
+
+- **Monitoring and load control are unauthenticated** (section 9) until the role-based
+  monitoring step (A2 and A8). Generating text and reading an application's own usage need a
+  key; everything under `/v1/monitor`, `/metrics`, `/v1/overload`, `/v1/control` and the
+  dashboard does not.
+- **The server binds to `127.0.0.1` and must not be exposed to a network.** Keys travel over
+  plain HTTP, and failed key checks are not rate-limited per source (note 20).
+- **SQLite supports one gateway process per database** (note 21): budgets are enforced per
+  process, so a second server on the same database refuses to start.
+- **Pepper rotation without downtime is not built** (section 3, note 20): rotating the pepper
+  means re-issuing every key.

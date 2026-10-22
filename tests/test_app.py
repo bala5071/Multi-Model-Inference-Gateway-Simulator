@@ -66,9 +66,7 @@ async def gateway() -> AsyncIterator[Gateway]:
 
 
 async def test_generate_happy_path(gateway: Gateway) -> None:
-    response = await gateway.generate(
-        model="standard", prompt=PROMPT, max_tokens=3, tenant_id="acme"
-    )
+    response = await gateway.generate(model="standard", prompt=PROMPT, max_tokens=3)
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/json"
@@ -225,7 +223,8 @@ async def test_root_points_a_visitor_at_the_real_endpoints(gateway: Gateway) -> 
     # Every GET endpoint it lists (without a path parameter) really answers.
     for entry in body["endpoints"]:
         method, path = entry.split()
-        if method == "GET" and "{" not in path:
+        # The usage endpoint needs an API key; it is tested in test_auth_api.py.
+        if method == "GET" and "{" not in path and path != "/v1/applications/me/usage":
             # The monitoring stream never ends by itself; ask it for a single push.
             url = f"{path}?count=1" if path == "/v1/monitor/stream" else path
             assert (await gateway.client.get(url)).status_code == 200, path

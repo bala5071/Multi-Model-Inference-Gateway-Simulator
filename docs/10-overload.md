@@ -4,6 +4,8 @@ This step adds three defences for when a model gets more work than it can serve:
 limit, request timeouts, and an opt-in downgrade to a cheaper model while the requested one
 is missing its SLO.
 
+**Updated by platform step 2 (`docs/20-applications-api-keys.md`).** Requests carry an application's API key (`Authorization: Bearer <key>`) instead of a `tenant_id` in the body, which is now a 422. The curl examples below predate that; the README's Curl demo is current.
+
 Code: `src/gateway/overload.py`, changes in `src/gateway/continuous.py` and
 `src/gateway/app.py`. Benchmark: `benchmarks/overload.py`.
 Tests: `tests/test_overload.py`, `tests/test_overload_api.py`.

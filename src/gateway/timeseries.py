@@ -17,7 +17,8 @@ DEFAULT_RESOLUTION_MS = 1000.0
 DEFAULT_MAX_BUCKET_SAMPLES = 1024
 DEFAULT_MAX_BUCKET_ITL_SAMPLES = 8192
 
-REJECTION_REASONS = ("budget_exhausted", "queue_full")
+# Why a request of an application was refused with 429.
+REJECTION_REASONS = ("budget_exhausted", "queue_full", "rate_limited")
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +92,7 @@ class ModelTotals:
 
 
 @dataclass(frozen=True, slots=True)
-class TenantPoint:
+class ApplicationPoint:
     t_ms: float
     final: bool
     requests: int
@@ -103,7 +104,7 @@ class TenantPoint:
 
 
 @dataclass(frozen=True, slots=True)
-class TenantTotals:
+class ApplicationTotals:
     requests: int
     billed_tokens: int
     spend_usd: float
@@ -170,7 +171,7 @@ class _ModelState:
 
 
 @dataclass(slots=True)
-class _TenantBucket:
+class _ApplicationBucket:
     index: int
     requests: int = 0
     billed_tokens: int = 0
@@ -181,8 +182,8 @@ class _TenantBucket:
 
 
 @dataclass(slots=True)
-class _TenantState:
-    buckets: deque[_TenantBucket] = field(default_factory=deque)
+class _ApplicationState:
+    buckets: deque[_ApplicationBucket] = field(default_factory=deque)
     requests: int = 0
     billed_tokens: int = 0
     spend_usd: float = 0.0
@@ -223,18 +224,18 @@ def _larger(current: int | None, value: int) -> int:
 
 
 class TimeSeriesStore:
-    """Rolling per-model and per-tenant series at a fixed resolution, in bounded memory.
+    """Rolling per-model and per-application series at a fixed resolution, in bounded memory.
 
     Time on the injected clock is cut into steps of ``resolution_ms``. A step gets a
     bucket the first time something is recorded in it; a step in which nothing happened
     has none, and readers see a gap. A bucket is dropped once it is ``window_ms`` old, so
-    each model or tenant holds at most ``ceil(window_ms / resolution_ms)`` of them.
+    each model or application holds at most ``ceil(window_ms / resolution_ms)`` of them.
 
     Only the newest bucket of a model holds raw latency samples, at most
     ``max_bucket_samples`` requests and ``max_bucket_itl_samples`` token gaps. When the
     clock moves into a later step they are reduced to p50 and p99 and dropped.
 
-    The store does not bound the number of models or tenants; callers must only name ones
+    The store does not bound the number of models or applications; callers must only name ones
     that are configured. Nothing here awaits, so each call is atomic on an event loop. Not
     safe to share between threads.
     """
@@ -261,7 +262,7 @@ class TimeSeriesStore:
         self._max_samples = max_bucket_samples
         self._max_itl_samples = max_bucket_itl_samples
         self._models: dict[str, _ModelState] = {}
-        self._tenants: dict[str, _TenantState] = {}
+        self._applications: dict[str, _ApplicationState] = {}
 
     @property
     def window_ms(self) -> float:
@@ -273,7 +274,7 @@ class TimeSeriesStore:
 
     @property
     def capacity(self) -> int:
-        """The most buckets one model or tenant can hold."""
+        """The most buckets one model or application can hold."""
         return self._capacity
 
     # --- models: writes --------------------------------------------------------------------
@@ -430,10 +431,12 @@ class TimeSeriesStore:
             degraded=b.degraded,
         )
 
-    # --- tenants ---------------------------------------------------------------------------
+    # --- applications ---------------------------------------------------------------------------
 
-    def tenant_completed(self, tenant_id: str, *, billed_tokens: int, spend_usd: float) -> None:
-        state, bucket = self._tenant(tenant_id)
+    def application_completed(
+        self, application_id: str, *, billed_tokens: int, spend_usd: float
+    ) -> None:
+        state, bucket = self._application(application_id)
         state.requests += 1
         state.billed_tokens += billed_tokens
         state.spend_usd += spend_usd
@@ -441,28 +444,28 @@ class TimeSeriesStore:
         bucket.billed_tokens += billed_tokens
         bucket.spend_usd += spend_usd
 
-    def tenant_rejected(self, tenant_id: str, reason: str) -> None:
-        state, bucket = self._tenant(tenant_id)
+    def application_rejected(self, application_id: str, reason: str) -> None:
+        state, bucket = self._application(application_id)
         if reason not in state.rejections:
             raise ValueError(f"unknown rejection reason {reason!r}")
         state.rejections[reason] += 1
         bucket.rejections += 1
 
-    def tenant_timed_out(self, tenant_id: str) -> None:
-        state, bucket = self._tenant(tenant_id)
+    def application_timed_out(self, application_id: str) -> None:
+        state, bucket = self._application(application_id)
         state.timeouts += 1
         bucket.timeouts += 1
 
-    def tenant_downgraded(self, tenant_id: str) -> None:
-        state, bucket = self._tenant(tenant_id)
+    def application_downgraded(self, application_id: str) -> None:
+        state, bucket = self._application(application_id)
         state.downgrades += 1
         bucket.downgrades += 1
 
-    def tenant_totals(self, tenant_id: str) -> TenantTotals:
-        state = self._tenants.get(tenant_id)
+    def application_totals(self, application_id: str) -> ApplicationTotals:
+        state = self._applications.get(application_id)
         if state is None:
-            return TenantTotals(0, 0, 0.0, dict.fromkeys(REJECTION_REASONS, 0), 0, 0)
-        return TenantTotals(
+            return ApplicationTotals(0, 0, 0.0, dict.fromkeys(REJECTION_REASONS, 0), 0, 0)
+        return ApplicationTotals(
             requests=state.requests,
             billed_tokens=state.billed_tokens,
             spend_usd=state.spend_usd,
@@ -471,14 +474,16 @@ class TimeSeriesStore:
             downgrades=state.downgrades,
         )
 
-    def tenant_series(self, tenant_id: str, history_ms: float = 0.0) -> tuple[TenantPoint, ...]:
-        state = self._tenants.get(tenant_id)
+    def application_series(
+        self, application_id: str, history_ms: float = 0.0
+    ) -> tuple[ApplicationPoint, ...]:
+        state = self._applications.get(application_id)
         if state is None:
             return ()
         now_index = self._index()
         self._expire(state.buckets, now_index)
         return tuple(
-            TenantPoint(
+            ApplicationPoint(
                 t_ms=b.index * self._resolution_ms,
                 final=b.index < now_index,
                 requests=b.requests,
@@ -494,9 +499,9 @@ class TimeSeriesStore:
     # --- memory ----------------------------------------------------------------------------
 
     def retained_buckets(self) -> int:
-        """Buckets held right now, over all models and tenants."""
+        """Buckets held right now, over all models and applications."""
         return sum(len(s.buckets) for s in self._models.values()) + sum(
-            len(s.buckets) for s in self._tenants.values()
+            len(s.buckets) for s in self._applications.values()
         )
 
     def retained_samples(self) -> int:
@@ -544,13 +549,13 @@ class TimeSeriesStore:
         bucket.in_flight = value
         bucket.in_flight_max = max(bucket.in_flight_max, value)
 
-    def _tenant(self, tenant_id: str) -> tuple[_TenantState, _TenantBucket]:
-        state = self._tenants.get(tenant_id)
+    def _application(self, application_id: str) -> tuple[_ApplicationState, _ApplicationBucket]:
+        state = self._applications.get(application_id)
         if state is None:
-            state = self._tenants[tenant_id] = _TenantState()
+            state = self._applications[application_id] = _ApplicationState()
         index = self._index()
         buckets = state.buckets
         if not buckets or buckets[-1].index != index:
-            buckets.append(_TenantBucket(index))
+            buckets.append(_ApplicationBucket(index))
             self._expire(buckets, index)
         return state, buckets[-1]

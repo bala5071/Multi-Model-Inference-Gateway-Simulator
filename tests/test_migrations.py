@@ -41,7 +41,11 @@ def _fill_dollars(c: sqlite3.Connection) -> None:
 
 
 def _drop_dollars(c: sqlite3.Connection) -> None:
-    c.execute("ALTER TABLE items DROP COLUMN price_usd")
+    # A rebuild, not ALTER TABLE ... DROP COLUMN, which needs SQLite 3.35 or later.
+    c.execute("CREATE TABLE items_new (id INTEGER PRIMARY KEY, price_cents INTEGER NOT NULL)")
+    c.execute("INSERT INTO items_new (id, price_cents) SELECT id, price_cents FROM items")
+    c.execute("DROP TABLE items")
+    c.execute("ALTER TABLE items_new RENAME TO items")
 
 
 ITEMS = Migration(1, "items", _create_items, _drop_items)
@@ -172,12 +176,11 @@ def test_the_runner_needs_an_autocommit_connection() -> None:
 # --- the gateway's own migrations ---------------------------------------------------------
 
 
-def test_the_gateway_migrations_create_only_the_usage_table(tmp_path: Path) -> None:
+def test_the_gateway_migrations_create_exactly_their_tables(tmp_path: Path) -> None:
     db = open_database(tmp_path / "gateway.db")
     runner = MigrationRunner(db, MIGRATIONS, ClockEpoch(SimClock()))
 
-    runner.migrate()
-
+    assert runner.migrate(1) == (1,)
     assert _tables(db) == {"schema_migrations", "usage_events"}
     assert _columns(db, "usage_events") == [
         "seq",
@@ -191,7 +194,41 @@ def test_the_gateway_migrations_create_only_the_usage_table(tmp_path: Path) -> N
         "billed_cost_usd",
         "occurred_at_ms",
     ]
-    runner.rollback(0)
-    assert _tables(db) == {"schema_migrations"}
-    runner.migrate()
+
+    assert runner.migrate(2) == (2,)
+    assert _tables(db) == {"schema_migrations", "usage_events", "applications", "api_keys"}
+    # No organization column: organizations arrive in A3 with their own migration.
+    assert _columns(db, "applications") == [
+        "id",
+        "name",
+        "plan_name",
+        "models",
+        "price_multiplier",
+        "monthly_token_budget",
+        "max_tokens",
+        "requests_per_minute",
+        "created_at_ms",
+    ]
+    assert _columns(db, "api_keys") == [
+        "key_id",
+        "application_id",
+        "label",
+        "key_hmac",
+        "created_at_ms",
+        "expires_at_ms",
+        "revoked",
+        "last_used_at_ms",
+    ]
+
+    # Migration 3 adds an index on usage_events by time, and no column.
+    assert runner.migrate() == (3,)
+    indexes = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "usage_events_by_time" in indexes
+    assert len(_columns(db, "usage_events")) == 10
+
+    assert runner.rollback(1) == (3, 2)
     assert _tables(db) == {"schema_migrations", "usage_events"}
+    assert runner.rollback(0) == (1,)
+    assert _tables(db) == {"schema_migrations"}
+    assert runner.migrate() == (1, 2, 3)
+    assert _tables(db) == {"schema_migrations", "usage_events", "applications", "api_keys"}

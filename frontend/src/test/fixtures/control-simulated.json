@@ -33,6 +33,9 @@
       "in_progress": 0
     }
   },
+  "playground": {
+    "available": true
+  },
   "simulation": {
     "active": true,
     "speed": 5.0,

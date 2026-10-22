@@ -45,8 +45,14 @@ COPY src ./src
 COPY --from=dashboard /build/src/gateway/dashboard ./src/gateway/dashboard
 RUN uv sync --locked --no-dev
 
-# Do not run as root.
-RUN useradd --create-home gateway
+# The CLI that creates applications and issues keys, for use inside the container
+# (docker compose exec gateway /app/.venv/bin/python scripts/manage.py ...).
+COPY scripts/manage.py ./scripts/manage.py
+
+# Do not run as root. /data holds the database (a volume in docker-compose.yml), readable by
+# the gateway user only. No secret is set here: the pepper comes from the environment.
+RUN useradd --create-home gateway \
+    && mkdir /data && chown gateway:gateway /data && chmod 700 /data
 USER gateway
 
 EXPOSE 8000

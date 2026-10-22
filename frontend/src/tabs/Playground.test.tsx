@@ -62,16 +62,16 @@ function sentBody(fetchMock: ReturnType<typeof stubStream>): unknown {
 }
 
 describe("request form", () => {
-  it("offers the gateway's tenants and models, and sends what was chosen", async () => {
+  it("in simulated live mode, offers the applications and sends as the one chosen", async () => {
     const fetchMock = stubStream({ "X-Model-Used": "premium" });
-    const { user } = open();
+    const { user } = open(simulated, controlSimulated);
 
     expect(
-      within(screen.getByLabelText("Tenant"))
+      within(screen.getByLabelText("Application"))
         .getAllByRole("option")
         .map((o) => o.textContent),
     ).toEqual(["initech (free)", "globex (pro)", "acme (enterprise)"]);
-    await user.selectOptions(screen.getByLabelText("Tenant"), "acme");
+    await user.selectOptions(screen.getByLabelText("Application"), "acme");
     await user.selectOptions(screen.getByLabelText("Model"), "premium");
     await user.clear(screen.getByLabelText("Max tokens"));
     await user.type(screen.getByLabelText("Max tokens"), "4");
@@ -81,12 +81,13 @@ describe("request form", () => {
     await user.click(screen.getByRole("button", { name: "Send" }));
 
     await screen.findByText("Finished.");
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/v1/generate");
+    // The Playground's own endpoint: the key stays on the server.
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/v1/playground/generate");
     expect(sentBody(fetchMock)).toEqual({
       prompt: "hello",
       stream: true,
       model: "premium",
-      tenant_id: "acme",
+      application_id: "acme",
       allow_downgrade: true,
       max_tokens: 4,
     });
@@ -107,15 +108,23 @@ describe("request form", () => {
     expect(body).not.toHaveProperty("model");
   });
 
-  it("has no tenant to choose on a gateway without plans, and sends none", async () => {
+  it("has no application to choose on a gateway without applications, and sends none", async () => {
     const fetchMock = stubStream({});
     const { user } = open(passthrough);
 
-    expect(screen.queryByLabelText("Tenant")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Application")).not.toBeInTheDocument();
+    expect(screen.queryByText(/needs an API key/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Send" }));
 
     await screen.findByText("Finished.");
-    expect(sentBody(fetchMock)).not.toHaveProperty("tenant_id");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/v1/generate");
+    expect(sentBody(fetchMock)).not.toHaveProperty("application_id");
+  });
+
+  it("says a gateway with applications needs a key when the Playground is not offered", () => {
+    open(simulated, controlOff);
+    expect(screen.queryByLabelText("Application")).not.toBeInTheDocument();
+    expect(screen.getByText(/needs an API key on every request/)).toBeInTheDocument();
   });
 
   it("cannot send an empty prompt", async () => {
@@ -178,7 +187,7 @@ describe("response", () => {
         Promise.resolve(
           new Response(
             JSON.stringify({
-              error: { code: "model_not_in_plan", message: "Tenant 'initech' is on 'free'." },
+              error: { code: "model_not_in_plan", message: "Application 'initech' is on 'free'." },
             }),
             { status: 403 },
           ),
@@ -190,7 +199,9 @@ describe("response", () => {
     await user.click(screen.getByRole("button", { name: "Send" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("HTTP 403 model_not_in_plan: Tenant 'initech' is on 'free'.");
+    expect(alert).toHaveTextContent(
+      "HTTP 403 model_not_in_plan: Application 'initech' is on 'free'.",
+    );
     expect(screen.getByText("Failed.")).toBeInTheDocument();
     expect(screen.queryByRole("table", { name: "Response headers" })).not.toBeInTheDocument();
   });

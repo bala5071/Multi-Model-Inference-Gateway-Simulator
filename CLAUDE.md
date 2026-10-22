@@ -59,20 +59,35 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   with LRU leaf eviction and ref-counted leases; one per model, sharing the model's
   `kv_capacity_tokens` with running requests (exists)
 - `tokenizer.py` — `Tokenizer` protocol and the `WordTokenizer` stand-in (exists)
-- `routing.py` — `Plan`, `PlansConfig`, `load_plans`, and the `Router` that picks a model
-  within a tenant's plan, by model name or by quality (exists)
-- `plans.yaml` — the packaged plans and demo tenants (exists)
-- `ledger.py` — `CostLedger`: per-tenant tokens and spend per 30-day period of epoch time,
-  and the budget check; a facade over a `UsageStore` (exists)
+- `routing.py` — `Plan`, `PlanLimits`, `PlansConfig` (plan templates and demo
+  applications), `load_plans`, and the `Router` that picks a model within an application's
+  plan, by model name or by quality (exists)
+- `plans.yaml` — the packaged plan templates and demo applications; never keys (exists)
+- `applications.py` — `Application` (its own copy of a template's plan settings and limits),
+  `ApiKeyRecord`, the `ApplicationStore` protocol, in-memory and SQLite stores (exists)
+- `apikeys.py` — `ApiKeyService`: issues keys (`gwk_<id>_<secret>`), stores only an HMAC
+  with the pepper from `GATEWAY_KEY_PEPPER`, checks in constant time, rotates with a grace
+  period, revokes, and batches `last_used_at`; `ApplicationAccess` is what `create_app`
+  takes (exists)
+- `ratelimit.py` — `RequestRateLimiter`: per-application requests per minute, a sliding
+  window on the injected clock (exists)
+- `ledger.py` — `CostLedger`: per-application tokens and spend per budget period (calendar
+  months in UTC by default), the budget check, and retention pruning; a facade over a
+  `UsageStore` (exists)
+- `periods.py` — `BudgetPeriods`, `CalendarMonthsUTC` (from whole days since the epoch),
+  `FixedPeriods` for tests (exists)
 - `usage.py` — `UsageEvent`, the `UsageStore` protocol, `InMemoryUsageStore` (bounded ring)
   and `SqliteUsageStore`; store calls are synchronous and never awaited (exists)
 - `database.py` + `migrations/` — `open_database` (WAL, busy timeout, autocommit) and the
-  versioned `MigrationRunner`; migration 1 is `usage_events` (exists)
+  versioned `MigrationRunner`; migration 1 is `usage_events`, 2 `applications` and
+  `api_keys`, 3 an index for retention. The default database is in the user's data folder,
+  owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
+  `restore_database` use SQLite's backup API (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),
   `pick_downgrade`, `QueueFullError`; the queue limit itself is in the worker (exists)
 - `metrics.py` — nearest-rank `percentile` and `MetricsStore`: per-model metrics in bounded
   memory, a sliding time window over a fixed-size ring (exists)
-- `timeseries.py` — `TimeSeriesStore`: per-model and per-tenant series at 1 s resolution
+- `timeseries.py` — `TimeSeriesStore`: per-model and per-application series at 1 s resolution
   over a 15-minute window, in bounded memory; buckets are filled by events and reads, with
   no background task (exists)
 - `events.py` — `EventBus`: in-process events with a bounded log, read with a cursor (exists)
@@ -86,17 +101,20 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `loadcontrol.py` — `LoadController` and the load presets: runs that schedule inside
   the server for the dashboard, through the same handler an HTTP request reaches. Off
   unless `GATEWAY_LOAD_CONTROL=1` or simulated live mode (exists)
-- `app.py` — FastAPI app: `create_app(registry, clock)` for tests, `create_default_app()`
-  for the server, `create_simulated_live_app()` for simulated live mode
-  (`GATEWAY_SIMULATED_LIVE=1`); JSON or server-sent-event responses; serves the built
-  dashboard at `/dashboard` (exists)
+- `app.py` — FastAPI app: `create_app(registry, clock)` for tests (with `applications=` for
+  API keys, usage store, epoch and retention), `create_default_app()` for the server (needs
+  `GATEWAY_KEY_PEPPER`; SQLite at `GATEWAY_DATABASE`; one process per database), and
+  `create_simulated_live_app()` for simulated live mode (`GATEWAY_SIMULATED_LIVE=1`,
+  everything in memory, Playground with throwaway keys); JSON or server-sent-event
+  responses; serves the built dashboard at `/dashboard` (exists)
 
 Outside the package, `benchmarks/` is a package run with `python -m`:
 
 - `benchmarks/baseline_limits.py`, `benchmarks/compare_batching.py` — the step 2 and step 3
   comparisons (exist)
 - `benchmarks/loadgen.py` — seeded load generator over the HTTP API, in-process on
-  `SimClock` or against a live URL; same config gives byte-identical JSON (exists)
+  `SimClock` or against a live URL (key from `GATEWAY_API_KEY`); same config gives
+  byte-identical JSON (exists)
 - `benchmarks/fairness.py` — per-model isolation demo (exists)
 - `benchmarks/overload.py` — p99 with and without SLO-aware downgrade (exists)
 - `benchmarks/chunked_prefill.py` — ITL and TTFT tails with chunked prefill off and on (exists)
@@ -124,6 +142,10 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   reported (exists)
 - `benchmarks/usage_store_writes.py` — times one usage-event write on the local disk; the
   numbers in `docs/19-usage-store.md` (exists)
+- `benchmarks/usage_retention.py` — times pruning old usage events in batches and in one
+  go; the numbers in `docs/21-persistence.md` (exists)
+- `benchmarks/key_checks.py` — times a key check, and what writing `last_used_at` per
+  request would add; the numbers in `docs/20-applications-api-keys.md` (exists)
 
 - `benchmarks/report.py` — generates `docs/REPORT.md` and `docs/report/*.png` from the
   benchmarks above (`make report`). Sections 1 to 3 run on the calibrated profiles
@@ -157,12 +179,20 @@ the monitoring API (`docs/15`); it has no logic of its own about the gateway.
 - `docs/img/` is taken by `scripts/capture_demo.py` in simulated live mode. Never edit
   a picture; retake it. Any caption must say it is simulated.
 - The Dockerfile builds the dashboard in a Node stage and serves it from the Python
-  stage; `docker-compose.yml` is the simulated live demo. Neither has been run on the
-  development machine (no Docker): do not write that they work until CI has built them.
+  stage; `docker-compose.yml` is the simulated live demo, with a volume and a git-ignored
+  `gateway.env` for the plain server. The development machine has no Docker; CI's `docker`
+  job builds the image and starts the compose demo. Nothing else about Docker (the plain
+  server, the volume, the env file) has been run: do not write that it works.
 
 `scripts/` holds operational entry points only: `perf_gate.py`, `demo.py`,
-`capture_demo.py` (retakes the dashboard pictures in `docs/img/`) and
-`run_local_models.sh`. Anything that measures or compares goes in `benchmarks/`.
+`capture_demo.py` (retakes the dashboard pictures in `docs/img/`),
+`run_local_models.sh`, `manage.py` (creates applications and issues, rotates and revokes
+API keys: the only way to issue one; prints a new key once, never logs it; also backup and
+restore), `readme_quickstart.py` (runs the README's quickstart blocks exactly as written and
+checks the result; a CI job, so the README cannot go stale), and `protected_outputs.py`, which checks the outputs that must not
+change against the sha256 sums in `scripts/protected_outputs.sha256` (a gate, like
+`perf_gate.py`). Anything that measures or compares results goes in `benchmarks/`.
+Never refresh that baseline to make a failure pass; the README says how to refresh it.
 
 Rules:
 
@@ -238,6 +268,8 @@ uv run ruff format --check . # formatting (drop --check to apply)
 uv run mypy                  # type check
 uv run pytest                # tests
 uv run python scripts/perf_gate.py   # performance gate
+uv run python scripts/protected_outputs.py  # protected outputs unchanged
+uv run python scripts/readme_quickstart.py  # the README quickstart still works (port 8000 free)
 uv run python -m benchmarks.report   # regenerate docs/REPORT.md
 ```
 

@@ -71,15 +71,15 @@ test("capture the README pictures", async ({ page }) => {
   const premium = page.getByRole("region", { name: "premium capacity" });
   await expect(premium.locator("canvas").first()).toBeVisible();
   await still(page, "capacity", true);
-  await openTab(page, "Tenants");
-  await still(page, "tenants");
+  await openTab(page, "Applications");
+  await still(page, "applications");
 
   // The Playground, after one streamed request to the economy model.
   await openTab(page, "Playground");
   // By the start of the label's text: "Model" is also one of the choices of "Choose by".
   const form = page.locator("form.request-form");
   await form
-    .locator("label", { hasText: /^Tenant/ })
+    .locator("label", { hasText: /^Application/ })
     .locator("select")
     .selectOption("acme");
   await form

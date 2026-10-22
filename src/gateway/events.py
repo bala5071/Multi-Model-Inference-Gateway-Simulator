@@ -22,7 +22,7 @@ class Event:
     at_ms: float
     type: str
     model: str | None
-    tenant_id: str | None
+    application_id: str | None
     data: Mapping[str, object]
 
 
@@ -78,13 +78,13 @@ class EventBus:
         type: str,
         *,
         model: str | None = None,
-        tenant_id: str | None = None,
+        application_id: str | None = None,
         **data: object,
     ) -> Event:
         if type not in self._counts:
             raise ValueError(f"unknown event type {type!r}; types are: {', '.join(EVENT_TYPES)}")
         self._last_seq += 1
-        event = Event(self._last_seq, self._clock.now_ms(), type, model, tenant_id, data)
+        event = Event(self._last_seq, self._clock.now_ms(), type, model, application_id, data)
         self._log.append(event)
         self._counts[type] += 1
         for listener in tuple(self._listeners):

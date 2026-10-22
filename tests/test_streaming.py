@@ -20,8 +20,7 @@ from gateway.cost_model import estimate_cost
 from gateway.overload import OverloadPolicy
 from gateway.profiles import PREMIUM
 from gateway.registry import ModelRegistry
-from gateway.routing import PlansConfig, load_plans
-from helpers import EXACT
+from helpers import EXACT, application_access, bearer
 
 # Ten words: 10 prompt tokens, so 5 ms of prefill on the EXACT profile.
 PROMPT = "one two three four five six seven eight nine ten"
@@ -275,13 +274,13 @@ async def test_timeout_after_the_stream_has_started_ends_it_with_an_error_event(
 async def test_streamed_request_is_routed_billed_and_charged_like_any_other() -> None:
     clock = SimClock()
     registry = build_continuous_registry(clock, seed=7)
-    plans: PlansConfig = load_plans()
-    transport = httpx.ASGITransport(app=create_app(registry, clock, plans=plans))
+    access, keys = application_access(clock)
+    transport = httpx.ASGITransport(app=create_app(registry, clock, applications=access))
     async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
         response = await client.post(
             "/v1/generate",
+            headers=bearer(keys["acme"]),
             json={
-                "tenant_id": "acme",
                 "quality": "best",
                 "prompt": PROMPT,
                 "max_tokens": 4,
@@ -290,9 +289,10 @@ async def test_streamed_request_is_routed_billed_and_charged_like_any_other() ->
         )
         forbidden = await client.post(
             "/v1/generate",
-            json={"tenant_id": "initech", "model": "premium", "prompt": PROMPT, "stream": True},
+            headers=bearer(keys["initech"]),
+            json={"model": "premium", "prompt": PROMPT, "stream": True},
         )
-        usage = (await client.get("/v1/tenants/acme/usage")).json()
+        usage = (await client.get("/v1/applications/me/usage", headers=bearer(keys["acme"]))).json()
     await registry.aclose()
 
     *tokens, (name, done) = _events(response)
