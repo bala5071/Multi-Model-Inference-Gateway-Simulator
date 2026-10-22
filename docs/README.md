@@ -33,7 +33,7 @@ says so, and the table below points out the main cases.
 | [03 Continuous batching](03-continuous-batching.md) | The iteration-level batching scheduler | Prefill behaviour is extended in note 11 |
 | [04 Prefix cache](04-prefix-cache.md) | Radix-tree KV-cache stand-in, tokenizer | |
 | [05 Metrics](05-metrics.md) | The bounded metrics store, the percentile method, what small samples mean | Written after note 13; it replaces the recorder that notes 03, 06 and 11 mention |
-| [06 API](06-api.md) | The HTTP endpoints | Its examples predate tenants: add a `tenant_id` (note 09) |
+| [06 API](06-api.md) | The HTTP endpoints | Its examples predate API keys: send `Authorization: Bearer <key>` (note 20), never a `tenant_id` |
 | [07 Load generator](07-load.md) | Seeded load, byte-identical results, isolation between models | |
 | [08 CI gate](08-ci-gate.md) | p99 budgets, why the gate is not flaky | |
 | [09 Routing](09-routing.md) | Tenants, plans, budgets, the cost ledger | |
@@ -50,6 +50,7 @@ says so, and the table below points out the main cases.
 | [20 Applications and API keys](20-applications-api-keys.md) | Applications created from plan templates, API keys (HMAC with a pepper, constant-time check, rotation, revocation), the CLI, limits, batched last-used times and what a key check costs | Platform plan step 2; replaces the `tenant_id` of note 09 |
 | [21 Persistence](21-persistence.md) | Usage in the default server's database, calendar-month budget periods in UTC, retention, the compose volume and env file | Platform plan step 3; one gateway process per database |
 | [22 Monitoring rename](22-monitoring-rename.md) | Tenants become applications in the snapshot, Prometheus, events and the dashboard; rate-limit refusals become a rejection reason | Platform plan step 4; rename only, plus that one addition |
+| [23 Docs and quickstart](23-docs-and-quickstart.md) | The README rewritten for keys and persistence, its quickstart run by CI exactly as written, the report's wording, the known gaps | Platform plan steps 5 and 6 |
 
 ## Which numbers to trust for what
 
@@ -79,9 +80,11 @@ says so, and the table below points out the main cases.
 
 ## What has not been run
 
-- **Docker**: the image and the compose file have never been built. The development machine
-  has no Docker (note 18).
-- **CI**: nothing has been pushed, so no workflow has run.
+- **Docker on the development machine**: it has none. CI builds the image and starts the
+  compose demo on every push (note 18); the plain server in Docker has not been started.
+- **CI** runs on GitHub on every push, Linux only: checks on Python 3.11 and 3.12, the
+  dashboard, the browser tests, Docker, the README quickstart, the protected outputs and the
+  performance gate.
 - **llama-server**: every measurement went through Ollama (notes 12 to 14).
 - **Any second machine**: the measurements, the browser tests and the pictures are all from
   one laptop.

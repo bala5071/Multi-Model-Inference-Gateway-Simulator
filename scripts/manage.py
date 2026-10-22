@@ -22,6 +22,7 @@ goes to standard error.
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import sqlite3
 import sys
@@ -165,6 +166,10 @@ def main(argv: Sequence[str] | None = None, environ: dict[str, str] | None = Non
                 f"key id {issued.record.key_id} for application {issued.record.application_id!r}. "
                 "The key is printed below, once; store it now, it cannot be shown again."
             )
+            # A bare "\n" even on Windows, so `KEY=$(... create-key ...)` in bash gets the key
+            # without a trailing carriage return.
+            if isinstance(sys.stdout, io.TextIOWrapper):
+                sys.stdout.reconfigure(newline="\n")
             print(issued.key)
     except (ValueError, KeyError, FileExistsError) as exc:
         _note(f"error: {exc}")

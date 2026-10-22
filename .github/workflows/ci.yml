@@ -170,6 +170,25 @@ jobs:
         if: always()
         run: docker compose down
 
+  # Runs the README's quickstart exactly as written (the shell blocks marked
+  # <!-- quickstart -->): a throwaway pepper, the demo applications, a key, the server, one
+  # request, a restart, and the usage read back. Fails if the README's commands stop working.
+  readme-quickstart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: README quickstart
+        run: uv run python scripts/readme_quickstart.py
+
   # Fails the build if any protected output (docs/platform-plan.md, section 5) differs from
   # the cross-platform baseline in scripts/protected_outputs.sha256: the gate results, the
   # load generator's JSON, REPORT.md and the tracked benchmark data. The report's figures are

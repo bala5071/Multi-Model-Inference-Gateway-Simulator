@@ -1,8 +1,8 @@
 # Platform plan, A1: applications, API keys and persistent usage
 
-Status: approved 2026-10-21. No code has changed yet; this note is the plan for the
-`platform/foundation` branch. Steps 1 to 6 each ship with tests and their own design note
-(`docs/19-*` onwards), as every step in this repo does.
+Status: approved 2026-10-21; steps 1 to 6 done on the `platform/foundation` branch, each
+with tests and its own design note (notes 19 to 23). Section 10 lists what A1 leaves
+unbuilt.
 
 A1 turns the simulator's trust-based tenants into applications that identify themselves
 with an API key, and the in-memory ledger into usage events that survive a restart. Later
@@ -181,8 +181,8 @@ it gets new recorded sums.
 | 2 (done, note 20) | Applications and API keys **together**: `ApplicationStore`, per-application plan settings, templates, `Router` on `Application`, HMAC keys, the pepper, the issuance CLI, the auth dependency; `tenant_id` leaves the body; `/v1/applications/me/usage` | **one PR**. An application id taken on trust from the body is insecure and must never be merged on its own |
 | 3 (done, note 21) | Persistence in the default server: database path and pepper from the environment, refusal to start without the pepper, the restart test, default bind confirmed as `127.0.0.1` | own PR |
 | 4 (done, note 22) | Monitoring rename (snapshot, Prometheus, events, time series); fixtures regenerated; the dashboard follows (rename only) | own PR |
-| 5 | Load control, simulated live mode, demo and Playground with in-memory throwaway keys; loadgen live mode; e2e; pictures retaken | own PR |
-| 6 | Docs, CLAUDE.md architecture list, README; report prose regenerated (wording-only diff) | own PR |
+| 5 (folded into 6) | Load control, simulated live mode, demo and Playground with in-memory throwaway keys; loadgen live mode; e2e; pictures retaken | Nothing substantive was left: step 2 did load control, simulated live mode, the demo, the Playground and the load generator; step 4 did the e2e specs and the pictures. The one gap, no CI browser test sending from the Playground, is closed in step 6 |
+| 6 (done) | Docs, CLAUDE.md architecture list, README; report prose regenerated (wording-only diff); a CI job that runs the README quickstart as written | with step 5 |
 
 ### What step 2 pulled forward
 
@@ -248,4 +248,19 @@ A2 and A8 protect them with roles. Until then:
 - `GATEWAY_LOAD_CONTROL` stays off by default;
 - **the server must not be exposed to a network until A8.** The Docker image binds
   `0.0.0.0` inside the container, as it must to be reachable at all; `docker-compose.yml`
-  will publish the port on `127.0.0.1` only (step 3).
+  publishes the port on `127.0.0.1` only.
+
+## 10. Known gaps at the end of A1
+
+What A1 leaves unbuilt, stated the same way in the README's "Known gaps":
+
+- **Monitoring and load control are unauthenticated** (section 9) until the role-based
+  monitoring step (A2 and A8). Generating text and reading an application's own usage need a
+  key; everything under `/v1/monitor`, `/metrics`, `/v1/overload`, `/v1/control` and the
+  dashboard does not.
+- **The server binds to `127.0.0.1` and must not be exposed to a network.** Keys travel over
+  plain HTTP, and failed key checks are not rate-limited per source (note 20).
+- **SQLite supports one gateway process per database** (note 21): budgets are enforced per
+  process, so a second server on the same database refuses to start.
+- **Pepper rotation without downtime is not built** (section 3, note 20): rotating the pepper
+  means re-issuing every key.

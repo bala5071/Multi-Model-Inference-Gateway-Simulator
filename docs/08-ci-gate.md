@@ -176,8 +176,9 @@ step 7.
 `perf-gate.txt`, and uploads both as the `perf-gate-results` artifact whether the gate
 passes or fails. The JSON contains the verdicts and the full load report.
 
-**Not yet verified:** the workflow has not run on GitHub, because nothing has been pushed.
-Locally the gate was run with `CI=true` set and passed. The current budgets were recorded on
+**Verified since:** the workflow runs on GitHub on every push, and the gate, with these
+budgets recorded on Windows, has passed on Linux in every run (first on `7ff9c0c`, and on
+every commit of the platform work). Locally the gate was run with `CI=true` set and passed. The current budgets were recorded on
 Windows with Python 3.12; the first CI run on Linux is the real check that the numbers match across
 platforms (see below).
 

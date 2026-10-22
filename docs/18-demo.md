@@ -10,10 +10,11 @@ Pictures: `docs/img/`.
 
 ## Read this first
 
-- **The Docker image and the compose file have not been built or run.** The development
-  machine has no Docker. They were written from the commands that were run directly, and
-  the `docker` CI job is the first place they will be exercised. CI itself has not run:
-  nothing has been pushed.
+- **The Docker image and the compose file have not been run on the development machine**,
+  which has no Docker. **Updated since:** the `docker` CI job builds the image and starts the
+  compose demo on every push, and checks that it serves the dashboard in simulated live mode;
+  it has passed on every run since the first push. The plain server in Docker (with
+  `gateway.env` and the volume, note 21) has not been started anywhere.
 - **The demo is simulated live mode** (note 17). No model runs; everything in it, and in the
   pictures, is simulated time on the calibrated profiles (note 01), with placeholder prices.
   Nothing in it is a measurement.
@@ -77,6 +78,7 @@ simulated live mode at speed 20 on port 8177 and stops it afterwards.
 | The page loads | The three model cards arrive over the stream, the page says "Live" and carries the simulated-mode banner with its seed and speed, every tab opens, a chart is drawn, and the page raised no error |
 | A load preset changes the queue chart | With load stopped the premium queue chart's newest points are all 0; after starting `overload` from the Playground they exceed 10, and the Overview card shows the batch full (4 of 4 seats) |
 | A downgrade event appears under overload | With `overload` running, the Events tab filtered to downgrades lists "A request for premium was served by …", a state change says premium is degraded, and the Overview card says Degraded |
+| The Playground sends a request as an application (added in platform step 6) | With load stopped, choosing `acme` and sending posts to `/v1/playground/generate` with `application_id: "acme"` and no `Authorization` header (the key stays on the server), and the page shows "Finished." |
 
 Things to know:
 

@@ -101,17 +101,20 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `loadcontrol.py` — `LoadController` and the load presets: runs that schedule inside
   the server for the dashboard, through the same handler an HTTP request reaches. Off
   unless `GATEWAY_LOAD_CONTROL=1` or simulated live mode (exists)
-- `app.py` — FastAPI app: `create_app(registry, clock)` for tests, `create_default_app()`
-  for the server, `create_simulated_live_app()` for simulated live mode
-  (`GATEWAY_SIMULATED_LIVE=1`); JSON or server-sent-event responses; serves the built
-  dashboard at `/dashboard` (exists)
+- `app.py` — FastAPI app: `create_app(registry, clock)` for tests (with `applications=` for
+  API keys, usage store, epoch and retention), `create_default_app()` for the server (needs
+  `GATEWAY_KEY_PEPPER`; SQLite at `GATEWAY_DATABASE`; one process per database), and
+  `create_simulated_live_app()` for simulated live mode (`GATEWAY_SIMULATED_LIVE=1`,
+  everything in memory, Playground with throwaway keys); JSON or server-sent-event
+  responses; serves the built dashboard at `/dashboard` (exists)
 
 Outside the package, `benchmarks/` is a package run with `python -m`:
 
 - `benchmarks/baseline_limits.py`, `benchmarks/compare_batching.py` — the step 2 and step 3
   comparisons (exist)
 - `benchmarks/loadgen.py` — seeded load generator over the HTTP API, in-process on
-  `SimClock` or against a live URL; same config gives byte-identical JSON (exists)
+  `SimClock` or against a live URL (key from `GATEWAY_API_KEY`); same config gives
+  byte-identical JSON (exists)
 - `benchmarks/fairness.py` — per-model isolation demo (exists)
 - `benchmarks/overload.py` — p99 with and without SLO-aware downgrade (exists)
 - `benchmarks/chunked_prefill.py` — ITL and TTFT tails with chunked prefill off and on (exists)
@@ -176,14 +179,17 @@ the monitoring API (`docs/15`); it has no logic of its own about the gateway.
 - `docs/img/` is taken by `scripts/capture_demo.py` in simulated live mode. Never edit
   a picture; retake it. Any caption must say it is simulated.
 - The Dockerfile builds the dashboard in a Node stage and serves it from the Python
-  stage; `docker-compose.yml` is the simulated live demo. Neither has been run on the
-  development machine (no Docker): do not write that they work until CI has built them.
+  stage; `docker-compose.yml` is the simulated live demo, with a volume and a git-ignored
+  `gateway.env` for the plain server. The development machine has no Docker; CI's `docker`
+  job builds the image and starts the compose demo. Nothing else about Docker (the plain
+  server, the volume, the env file) has been run: do not write that it works.
 
 `scripts/` holds operational entry points only: `perf_gate.py`, `demo.py`,
 `capture_demo.py` (retakes the dashboard pictures in `docs/img/`),
 `run_local_models.sh`, `manage.py` (creates applications and issues, rotates and revokes
-API keys: the only way to issue one; prints a new key once, never logs it), and
-`protected_outputs.py`, which checks the outputs that must not
+API keys: the only way to issue one; prints a new key once, never logs it; also backup and
+restore), `readme_quickstart.py` (runs the README's quickstart blocks exactly as written and
+checks the result; a CI job, so the README cannot go stale), and `protected_outputs.py`, which checks the outputs that must not
 change against the sha256 sums in `scripts/protected_outputs.sha256` (a gate, like
 `perf_gate.py`). Anything that measures or compares results goes in `benchmarks/`.
 Never refresh that baseline to make a failure pass; the README says how to refresh it.
@@ -262,7 +268,8 @@ uv run ruff format --check . # formatting (drop --check to apply)
 uv run mypy                  # type check
 uv run pytest                # tests
 uv run python scripts/perf_gate.py   # performance gate
-uv run python scripts/protected_outputs.py  # protected outputs unchanged (platform work)
+uv run python scripts/protected_outputs.py  # protected outputs unchanged
+uv run python scripts/readme_quickstart.py  # the README quickstart still works (port 8000 free)
 uv run python -m benchmarks.report   # regenerate docs/REPORT.md
 ```
 

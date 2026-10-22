@@ -4,6 +4,8 @@ This step adds two things that belong together: streaming responses with per-tok
 timestamps, which make gaps between tokens visible, and chunked prefill, which removes the
 largest of those gaps.
 
+**Updated by platform step 2 (`docs/20-applications-api-keys.md`).** Requests carry an application's API key (`Authorization: Bearer <key>`) instead of a `tenant_id` in the body, which is now a 422. The curl examples below predate that; the README's Curl demo is current.
+
 Code: `src/gateway/app.py` (streaming), `src/gateway/continuous.py` (chunked prefill,
 per-token times), `src/gateway/schema.py`, `src/gateway/metrics.py`.
 Benchmark: `benchmarks/chunked_prefill.py`.
