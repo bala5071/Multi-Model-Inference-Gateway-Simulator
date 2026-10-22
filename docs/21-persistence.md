@@ -155,7 +155,8 @@ existing target) and the CLI round trip.
 - The image creates `/data` owned by the `gateway` user, mode `0700`, and carries
   `scripts/manage.py`, so keys are issued inside the container:
   `docker compose exec gateway /app/.venv/bin/python scripts/manage.py create-key ...`.
-- **None of this has been run here**: the development machine has no Docker (note 18). CI's
+- **None of this has been run here**: when this note was written the development machine had
+  no Docker (it has Docker Desktop now; note 25 records what has been run on it). CI's
   docker job builds the image and starts the compose demo; the plain server with an env file
   and the volume has not been started anywhere.
 

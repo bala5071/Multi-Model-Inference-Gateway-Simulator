@@ -143,7 +143,7 @@ jobs:
           if-no-files-found: ignore
 
   # Builds the image and checks that the compose demo comes up serving the dashboard.
-  # The image cannot be built on the development machine; this job is where it is.
+  # The Linux check of the image; note 25 records what has run on the development machine.
   docker:
     runs-on: ubuntu-latest
     steps:
@@ -179,6 +179,13 @@ jobs:
           published=$(docker compose port gateway 8000)
           echo "$published"
           case "$published" in 127.0.0.1:*) ;; *) echo "not loopback: $published"; exit 1;; esac
+
+      # The address the host's requests reach the container from, as the access log names it
+      # (docs/25-local-only.md says how to find it on Docker Desktop).
+      - name: Where the host's requests arrive from
+        run: |
+          curl --silent http://127.0.0.1:8000/v1/control > /dev/null
+          docker compose logs gateway | grep '"GET /v1/control' | tail -n 1
 
       - name: The dashboard is served and the gateway is in simulated live mode
         run: |

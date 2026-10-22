@@ -13,8 +13,9 @@ Pictures: `docs/img/`.
 - **The Docker image and the compose file have not been run on the development machine**,
   which has no Docker. **Updated since:** the `docker` CI job builds the image and starts the
   compose demo on every push, and checks that it serves the dashboard in simulated live mode;
-  it has passed on every run since the first push. The plain server in Docker (with
-  `gateway.env` and the volume, note 21) has not been started anywhere.
+  it has passed on every run since the first push. **Updated again:** the development machine
+  now has Docker Desktop 29.8.2 (Windows); what has been run on it is in note 25. The plain
+  server in Docker (with `gateway.env` and the volume, note 21) has not been started anywhere.
 - **The demo is simulated live mode** (note 17). No model runs; everything in it, and in the
   pictures, is simulated time on the calibrated profiles (note 01), with placeholder prices.
   Nothing in it is a measurement.

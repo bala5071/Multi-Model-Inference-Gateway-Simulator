@@ -11,9 +11,11 @@ Tests: `tests/test_passwords.py`, `tests/test_licenses.py`. Benchmark:
 
 ## What was decided
 
-- **argon2id at OWASP's first configuration:** 19 MiB of memory, 2 iterations, 1 lane, a
-  16-byte random salt per hash, 32-byte output, stored in the standard PHC string
-  (`$argon2id$v=19$m=19456,t=2,p=1$...`). `needs_rehash` tells a later login step when a hash
+- **argon2id at 64 MiB of memory, 3 iterations, 1 lane** (RFC 9106's second recommended
+  setting, with one lane; chosen from the measurements below, see "The setting"), a 16-byte
+  random salt per hash, 32-byte output, stored in the standard PHC string
+  (`$argon2id$v=19$m=65536,t=3,p=1$...`). Step 1 shipped OWASP's first configuration, 19 MiB,
+  2 iterations, 1 lane. `needs_rehash` tells a later login step when a hash
   was made with other parameters. Verification is argon2-cffi's; a wrong password, an empty
   string or an unreadable hash is `False`, never an exception that could carry the password.
 - **Two runners, chosen by the wiring** (plan section 2):
@@ -67,9 +69,9 @@ over the three runs. One laptop, one day.
 
 | Setting (memory, iterations, lanes) | One hash, p50 | One hash, max | 8 logins at once: p50 | 8 at once: the last | Peak memory, 2 threads |
 |---|---|---|---|---|---|
-| 19 MiB, 2, 1 (current; OWASP's first) | 18.9 to 19.9 ms | 21.1 to 22.3 ms | 45.5 to 50.3 ms | 90.0 to 99.8 ms | 37.6 to 37.7 MiB |
+| 19 MiB, 2, 1 (step 1's default; OWASP's first) | 18.9 to 19.9 ms | 21.1 to 22.3 ms | 45.5 to 50.3 ms | 90.0 to 99.8 ms | 37.6 to 37.7 MiB |
 | 46 MiB, 1, 1 (OWASP's equivalent) | 31.3 to 31.7 ms | 33.4 to 33.8 ms | 72.9 to 74.9 ms | 143.3 to 148.7 ms | 91.5 to 91.6 MiB |
-| 64 MiB, 3, 1 (RFC 9106's second recommendation, one lane) | 107.3 to 108.1 ms | 109.7 to 111.5 ms | 237.8 to 249.6 ms | 477.4 to 494.5 ms | 126.5 to 126.8 MiB |
+| 64 MiB, 3, 1 (**the default**; RFC 9106's second recommendation, one lane) | 107.3 to 108.1 ms | 109.7 to 111.5 ms | 237.8 to 249.6 ms | 477.4 to 494.5 ms | 126.5 to 126.8 MiB |
 | 128 MiB, 3, 1 | 227.2 to 232.9 ms | 230.9 to 242.8 ms | 531.1 to 552.2 ms | 1,064 to 1,093 ms | 254.3 to 254.5 MiB |
 
 - **Memory is two hashes' worth:** with 2 threads, the peak is twice the setting, as expected.
@@ -79,12 +81,22 @@ over the three runs. One laptop, one day.
   17 ms, the Windows timer's resolution (note 06); so no stall was longer than that, which is
   less than one hash at any setting.
 
-**Recommendation: 64 MiB, 3 iterations, 1 lane.** It is RFC 9106's second recommended setting
+## The setting
+
+**64 MiB, 3 iterations, 1 lane: recommended in step 1, accepted, and the default since step 2.**
+It is RFC 9106's second recommended setting
 (with one lane instead of four, since the pool already runs two hashes in parallel), about five
 times the work and over three times the memory of the current setting, so an offline attack on
 a stolen hash costs that much more. A login takes about 110 ms here, 8 logins at once finish
 within half a second, and the two threads need about 127 MiB at peak. 128 MiB doubles all of
-that again (a burst of 8 takes over a second) for a smaller gain. **The default is not changed
-in this commit:** it stays at 19 MiB, 2, 1 until the recommendation is accepted, and setting
-`GATEWAY_ARGON2_*` changes it now; existing hashes are upgraded at each user's next login
-either way.
+that again (a burst of 8 takes over a second) for a smaller gain. `GATEWAY_ARGON2_*` still
+overrides it, and a hash made with any other setting is upgraded at that user's next login.
+
+Tests hash with `CHEAP` parameters injected; one test hashes once at the default, to show it
+reaches the stored hash.
+
+**Not yet measured on the server.** The table above is the benchmark: the hasher and the
+2-thread runner in a process of their own. There is no login endpoint until step 4, so one login
+and a burst of 8 through the running server (`python -m gateway.serve`, over HTTP, with the
+hashing on the server's runner) cannot be timed yet. Step 4 measures them and records them here
+with the hardware.

@@ -40,7 +40,8 @@ from gateway.passwords import (
 )
 
 PASSWORD = "a benchmark passphrase, not anyone's password"
-# The current setting, OWASP's alternative at the same strength, and two stronger ones.
+# The previous default (OWASP's first), OWASP's alternative at the same strength, the current
+# default (RFC 9106's second, one lane) and a stronger one.
 DEFAULT_SETTINGS = ("19456,2,1", "47104,1,1", "65536,3,1", "131072,3,1")
 
 

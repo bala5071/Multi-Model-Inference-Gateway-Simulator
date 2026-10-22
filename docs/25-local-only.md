@@ -10,8 +10,19 @@ launcher), wiring in `app.py`. Tests: `tests/test_local_only.py`, `tests/test_de
 
 ## The guard
 
-On `/v1/monitor`, `/metrics`, `/v1/overload`, `/v1/control`, `/v1/playground` and `/dashboard`
-(each path and everything under it), a request is refused when:
+The local-only endpoints, each path and everything under it (`LOCAL_ONLY_PATHS`; a test keeps
+this table, the README's and the launcher's warning in step with it):
+
+| Endpoint | What it gives whoever can reach it |
+|---|---|
+| `/v1/monitor` | The snapshot and live stream: every application's usage and spend |
+| `/metrics` | Prometheus text, and the summary and detail views |
+| `/v1/overload` | Each model's overload state |
+| `/v1/control` | Load control: start and stop load, change the speed (when it is on) |
+| `/v1/playground` | Sends requests as an application, with keys the server holds |
+| `/dashboard` | The dashboard, which shows all of the above |
+
+On these, a request is refused when:
 
 | Check | Refused with |
 |---|---|
@@ -44,9 +55,9 @@ Every other endpoint (generate, models, health, an application's own usage) is u
 
 ## Docker
 
-Behind Docker (and Docker Desktop's NAT), every request from the host reaches the container
-from the bridge network's gateway, so the peer address cannot tell a local client from a
-remote one. There, **the protection is publishing the port on `127.0.0.1` only**:
+Behind Docker, a request from the host reaches the container from the Docker network, not from
+loopback, so the peer address cannot tell a local client from a remote one. There, **the
+protection is publishing the port on `127.0.0.1` only**:
 
 - `docker-compose.yml` publishes `127.0.0.1:8000:8000` and sets
   `GATEWAY_LOCAL_NETWORKS=172.16.0.0/12`, so the guard counts the bridge network as local.
@@ -55,9 +66,38 @@ remote one. There, **the protection is publishing the port on `127.0.0.1` only**
 - CI checks it twice: `docker compose config` must show every published port with
   `host_ip` `127.0.0.1`, and `docker compose port gateway 8000` on the running demo must
   answer `127.0.0.1:…`; then the dashboard must still be served through the published port.
-- Only Linux Docker in CI has run this. Docker Desktop on Windows or macOS may present the
-  host's requests from another range (for example `192.168.65.0/24`); if the dashboard
-  answers `local_only` there, add that network to `GATEWAY_LOCAL_NETWORKS`. Not tested.
+
+**What `172.16.0.0/12` lets in.** It is the range Docker takes its bridge networks from, and
+the guard cannot tell the host's requests from a container's. So with this setting, **any
+container whose address is in that range and that can connect to the gateway container** (every
+container on the demo's compose network can, by the service name) can use every endpoint in the
+table above: read every application's usage and spend, start load when load control is on,
+and send requests through the Playground as an application. **That is acceptable only for a
+local, single-user demo**, on a machine with no container you do not trust. Do not use the
+setting anywhere else.
+
+**Finding where the host's requests arrive from.** Only Linux Docker in CI has run the demo;
+Docker Desktop on Windows or macOS may present the host's requests from another address. The
+gateway's access log names the peer of every request. With the demo running:
+
+```sh
+curl -s http://127.0.0.1:8000/v1/control
+docker compose logs gateway | grep '"GET /v1/control'
+```
+
+The first field of the last line is that address and port (uvicorn's format:
+`INFO:     ADDRESS:PORT - "GET /v1/control HTTP/1.1" 200 OK`; `403` if the address is not
+counted as local). The container's own network and the bridge's gateway:
+
+```sh
+docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}/{{.IPPrefixLen}} via {{.Gateway}}{{end}}' "$(docker compose ps -q gateway)"
+```
+
+If the address is outside `172.16.0.0/12`, add that one address, not a range:
+`GATEWAY_LOCAL_NETWORKS: "172.16.0.0/12,ADDRESS/32"`. The narrowest setting of all would be
+that one address in place of the range; the compose file uses the range because Docker
+chooses the bridge network's addresses when it creates it. None of these commands has been
+run on Docker Desktop; CI's `docker` job prints the log line on Linux.
 
 ## The launcher
 

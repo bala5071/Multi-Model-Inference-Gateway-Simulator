@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -107,6 +108,15 @@ def test_which_paths_are_local_only() -> None:
     for path in ("/v1/generate", "/v1/models", "/healthz", "/", "/v1/applications/me/usage"):
         assert not is_local_only(path)
     assert not is_local_only("/metricsx")  # whole path segments only
+    assert is_local_only("/v1/playground/generate")
+
+
+@pytest.mark.parametrize("document", ["README.md", "docs/25-local-only.md"])
+def test_the_documented_local_only_endpoints_are_the_guarded_ones(document: str) -> None:
+    # Each document has one table of the local-only endpoints, one row per path.
+    text = (REPO / document).read_text(encoding="utf-8")
+    rows = re.findall(r"^\s*\| `(/[^`]*)` \|", text, flags=re.MULTILINE)
+    assert sorted(rows) == sorted(LOCAL_ONLY_PATHS)
 
 
 # --- through the app -----------------------------------------------------------------------
@@ -360,6 +370,7 @@ def test_with_the_opt_in_it_starts_and_warns_naming_the_open_endpoints(
     assert err.startswith("WARNING: binding 0.0.0.0")
     for path in LOCAL_ONLY_PATHS:
         assert path in err
+    assert "/v1/playground" in err
 
 
 def test_a_loopback_bind_starts_silently_with_proxy_headers_off(
