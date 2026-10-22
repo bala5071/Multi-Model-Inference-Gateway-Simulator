@@ -21,6 +21,7 @@ from benchmarks import (
     loadgen,
     metrics_example,
     overload,
+    password_hashing,
     report,
     usage_retention,
     usage_store_writes,
@@ -108,6 +109,20 @@ def test_key_check_benchmark_times_checks_and_last_used_writes(
     ]
     assert "gwk_" not in out  # its throwaway keys are never printed
     assert list(tmp_path.iterdir()) == []
+
+
+def test_password_hashing_benchmark_times_hash_verify_and_logins_together(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    password_hashing.main(["--repeats", "2", "--together", "3"])
+    out = capsys.readouterr().out
+    assert out.startswith("MEASURED on this machine")
+    assert "argon2id m=19456 KiB, t=2, p=1" in out
+    names = [
+        line.split()[0] for line in out.splitlines() if line[:6] in ("hash  ", "verify", "login,")
+    ]
+    assert names == ["hash", "verify", "login,"]
+    assert "longest event-loop stall during the logins" in out
 
 
 def test_retention_benchmark_times_batched_and_unbatched_pruning(
