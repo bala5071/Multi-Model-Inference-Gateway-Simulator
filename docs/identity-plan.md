@@ -64,10 +64,10 @@ New migrations only; the A1 tables are unchanged except for the one column in mi
 | Migration | Adds |
 |---|---|
 | 4 | `organizations (id, name unique, kind, created_at, disabled)`, `kind` being `individual` or `business`; a required `applications.organization_id`, backfilled: every existing application goes into one organization named `default` with kind `business`; application names unique within an organization. Done in step 3 (note 26) |
-| 5 | `users (id, username unique, password_hash, organization_id, created_at, disabled, must_change_password, bootstrap, failed_logins, first_failure_at, locked_until)` |
-| 6 | `role_assignments (user_id, role, scope_type, scope_id, granted_by, granted_at)`; `app_roles (application_id, name)` for application-defined roles such as `clinic_staff` |
-| 7 | `sessions (id_hash, user_id, csrf_hash, created_at, last_seen_at, expires_at, step_up_until, revoked)`; session ids and CSRF tokens are stored only as SHA-256 |
-| 8 | `audit_log (seq, at, actor_user_id, action, target_type, target_id, outcome, details)`; `details` is written through an allowlist of fields |
+| 5 | `users (id, username unique, password_hash, organization_id, created_at, disabled, must_change_password, bootstrap, failed_logins, first_failure_at, locked_until, platform_admin)`. Step 4 |
+| 6 | `sessions (id_hash, handle, user_id, csrf_hash, created_at, last_seen_at, expires_at, revoked)`; session ids and CSRF tokens are stored only as SHA-256; `handle` is a random public id for the session list. Step 4 (step 6 adds `step_up_until`) |
+| 7 | `audit_log (seq, at, actor_user_id, action, target_type, target_id, outcome, details)`; `details` is written through an allowlist of fields. Step 4 |
+| 8 | `role_assignments (user_id, role, scope_type, scope_id, granted_by, granted_at)`; `app_roles (application_id, name)` for application-defined roles such as `clinic_staff`. Step 5: moves `users.platform_admin` into `role_assignments` and drops the column |
 
 **Organizations.** An `individual` organization has exactly one member, its `org_admin`, and
 refuses to add anyone else. A `business` organization has any number of members and allows
@@ -82,6 +82,16 @@ own: its limit is the sum of its applications' budgets.
 
 ## 4. Users, passwords and login
 
+Step 4 builds this section and sections 5 and 9 for logins (note 27). Until step 5 there
+are no roles: whether a user is a platform_admin is the column `users.platform_admin`,
+and a session reaches only login, logout, `/me`, change-password and the session list.
+
+- **Usernames:** case-folded on input, then 3 to 64 characters of `a-z`, `0-9`, `.`, `-` and
+  `_`. A user belongs to one organization; creating one calls `membership_decision`, so an
+  individual organization refuses a second member.
+- **The CLI** (`create-user [--platform-admin]`, `disable-user`, `enable-user`,
+  `reset-password`, `unlock-user`) reads passwords from a prompt, entered twice, never from
+  the command line, and never prints them.
 - **No self-signup.** A platform_admin, or an org_admin within their own business
   organization, creates accounts (an endpoint, and the CLI).
 - **The bootstrap admin.** `GATEWAY_ADMIN_USERNAME` and `GATEWAY_ADMIN_PASSWORD` create the
@@ -90,7 +100,10 @@ own: its limit is the sum of its applications' budgets.
   account is marked `must_change_password`, and the environment value stops working after the
   first successful login (that session can only change the password; if it is lost before
   then, `manage.py reset-password` recovers the account). An existing platform_admin is never
-  overwritten from the environment.
+  overwritten from the environment. The bootstrap admin is in the `default` organization, and
+  its password must pass the policy (including not containing the username) or the server
+  refuses to start. If an admin exists and either variable is still set, the server logs a
+  warning naming the variables, never their values.
 - **`must_change_password`.** Until the password is changed, the account can only call
   `GET /v1/auth/me`, change its password and log out; everything else is 403
   `password_change_required`.
@@ -100,16 +113,30 @@ own: its limit is the sum of its applications' budgets.
   bundled blocklist of very common passwords, and no composition rules.
 - **Lockout:** 5 failures within 15 minutes locks the account for 15 minutes, on the injected
   clock and epoch, kept in the database so a restart does not clear it. `manage.py unlock-user`
-  unlocks one early. Login attempts are also rate-limited per username in memory. Limits per
-  source address wait for A8, when there is a trustworthy client address.
-- **No enumeration:** an unknown or disabled username runs a dummy verify against a fixed hash
-  and gets the same answer through the same steps (a structural test, as for API keys).
+  unlocks one early. Login attempts are also counted per username in memory, for known and
+  unknown usernames alike (keyed by an HMAC of the name, bounded in size), so an unknown
+  username "locks" exactly like a real one and lockout cannot reveal which names exist. The
+  login response never says an account is locked. Limits per source address wait for A8,
+  when there is a trustworthy client address.
+- **Re-hashing on login:** a successful login whose stored hash used other argon2 parameters
+  stores the hash made with the current ones.
+- **No enumeration:** an unknown, disabled or locked username, a wrong password and a used
+  bootstrap credential all get the same response, byte for byte, through the same steps: one
+  lookup and one verify against the stored hash or a dummy one made at startup with the
+  current parameters (a structural test, as for API keys, shown failing on an early return).
+  What the writes after that step add to the time (a database update for a known username,
+  memory for an unknown one) is measured on the running server and recorded in note 27; no
+  mitigation is built.
 
 ## 5. Console sessions and CSRF
 
 - `POST /v1/auth/login` sets `gw_session`: 256 random bits, `HttpOnly`, `SameSite=Strict`,
   `Path=/`, and `Secure` when `GATEWAY_COOKIE_SECURE=1` (off by default, because localhost is
-  plain HTTP). Sessions expire after 30 minutes idle and 12 hours in all.
+  plain HTTP). Sessions expire after 30 minutes idle and 12 hours in all. `last_seen_at` is
+  written at most once a minute per session. `/v1/auth` is local-only until A8 (section 10),
+  so login gets the Origin, content-type and Host checks. `GET /v1/auth/sessions` lists the
+  user's own sessions by handle; there is no endpoint to revoke one (a password change
+  revokes all the others). Expired and revoked sessions are pruned.
 - **Session hygiene:** a new session id at every login (no fixation); disabling a user or
   changing a password revokes all of that user's sessions; logout revokes the session.
 - **CSRF:** a synchronizer token, random per session and stored as a hash, returned at login
@@ -145,6 +172,10 @@ own: its limit is the sum of its applications' budgets.
   and viewer of every application in it); `app_admin` (its application, and viewer of it);
   `viewer`. A user is assigned roles only within their own organization (platform_admin
   excepted).
+- **Existing users at step 5:** the role migration gives each user with
+  `users.platform_admin` the `platform_admin` role, and every other existing user no role at
+  all: membership of an organization alone grants nothing. The one exception is required: the
+  sole member of an individual organization is given `org_admin` of it.
 - **Application-defined roles** (for example `clinic_staff`) are defined by an app_admin,
   carried in tokens for the application to interpret, and grant nothing inside the gateway.
 - **One permission table**, `permissions.py`: each action, the roles and scope relation that
@@ -178,6 +209,12 @@ Logins, failures, lockouts, unlocks, password changes and resets, user creation 
 role changes, key changes, and (from A5) mode changes: who, when, what, and the outcome. Fields
 pass through an allowlist, so a password, token, key, session id or CSRF token cannot be
 written. platform_admin reads all of it; org_admin reads their organization's.
+
+Step 4 writes the login entries. A failure for an unknown username is recorded with no
+identifier at all (one row per attempt, nothing of what was typed). Rows for unknown-user
+failures are capped per minute, and the number dropped is written to the log itself, so a
+flood cannot grow the table without bound. Entries older than the audit retention are
+pruned in batches, like usage events.
 
 ## 10. Monitoring and load control until A8
 
@@ -278,7 +315,12 @@ token revocation before expiry (roles and disabling take up to 5 minutes for tok
 in the process environment; a stolen database gives argon2 hashes, key HMACs and the audit
 log; timing side channels not measured; one process per database; **no breached-password
 lookup** (checking a password against Have I Been Pwned or similar would send something
-derived from it to a third party, so only the bundled blocklist is used); **two hashing
+derived from it to a third party, so only the bundled blocklist is used); **the audit log is
+not tamper-evident** (anyone who can write the database can change it); **the in-memory
+login limiter can be flushed** by trying many unique usernames, while the database lockout
+still protects real accounts; **the `__Host-` cookie prefix cannot be used** until the server
+runs over HTTPS (it requires `Secure`); the measured timing difference between a failed
+login for a known and an unknown username (note 27); **two hashing
 threads bound login throughput**, so a flood of logins can delay legitimate ones (logins are
 limited per username; limits per source address wait for A8). For the local-only endpoints it states what the checks of
 section 10 do and do not cover: browser-based attacks (cross-site requests, DNS rebinding) are
@@ -297,10 +339,13 @@ Each step is its own pull request and stops for review.
    allowlist, Origin, content type), the launcher, the README, Makefile and Dockerfile on the
    launcher, and the CI check that compose publishes only on loopback (section 10).
 3. Organizations: migration 4 and the backfill; individual and business rules. Done (note 26).
-4. Users, the one-time bootstrap admin, login, lockout, sessions, CSRF, password change,
-   `must_change_password`, the CLI (`create-user`, `reset-password`, `unlock-user`), and the
-   audit log for these. One login and a burst of 8 timed through the running server at the
-   default argon2 setting (64 MiB, 3, 1, accepted in step 2), with the hardware, in note 24.
+4. Users (migrations 5 to 7), the one-time bootstrap admin, login, lockout and the
+   in-memory limiter, sessions, CSRF, password change, `must_change_password`, the CLI
+   (`create-user`, `disable-user`, `enable-user`, `reset-password`, `unlock-user`), and the
+   audit log for these, with retention, the unknown-user cap and session pruning. One login
+   and a burst of 8 timed through the running server at the default argon2 setting (64 MiB,
+   3, 1), with the hardware, in note 24; the known-versus-unknown failure timing and the
+   cost of writing `last_seen_at`, in note 27.
 5. Roles, `permissions.py`, `authorize`, the per-route declarations, the management endpoints
    (users, roles, organizations, applications, application keys, application roles, audit)
    and the generated matrix.
