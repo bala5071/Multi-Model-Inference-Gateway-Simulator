@@ -1,13 +1,19 @@
 """Check that the protected outputs of docs/platform-plan.md (section 5) have not changed.
 
-    uv run python scripts/protected_outputs.py            # regenerate, compare, exit 1 on change
-    uv run python scripts/protected_outputs.py --update   # deliberately record a new baseline
-    uv run python scripts/protected_outputs.py --keep out # also keep the regenerated files
+    uv run python scripts/protected_outputs.py                   # regenerate, compare
+    uv run python scripts/protected_outputs.py --include-images  # and the report figures
+    uv run python scripts/protected_outputs.py --update          # record a new baseline
+    uv run python scripts/protected_outputs.py --keep out        # keep the regenerated files
 
 It regenerates the performance gate results, the load generator's JSON for the gate's
-workload and for the default one, and the report with its figures, then hashes them
-together with the tracked benchmark data, and compares every sha256 with
-``scripts/protected_outputs.sha256``.
+workload and for the default one, and the report, then hashes them together with the
+tracked benchmark data, and compares every sha256 with ``scripts/protected_outputs.sha256``.
+That baseline holds on every platform; CI checks it on Linux and fails on any difference.
+
+The report's figures (``docs/report/*.png``) are not in it: their pixels depend on the
+platform's font rendering, so a PNG made on Linux differs from one made on Windows from the
+same numbers. ``--include-images`` also checks them, against a baseline for this platform
+only, ``scripts/protected_outputs.images-<platform>.sha256``: a local, same-platform check.
 
 - Text is hashed with ``\\r\\n`` read as ``\\n``, the way Git stores it, so a Windows
   checkout and a Linux one hash alike. A file is binary, and hashed as it is, if its first
@@ -21,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import platform
 import shutil
 import subprocess
 import sys
@@ -30,6 +37,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 BASELINE = REPO / "scripts" / "protected_outputs.sha256"
+PLATFORM = platform.system().lower() or sys.platform
 REPORT = REPO / "docs" / "REPORT.md"
 FIGURES = REPO / "docs" / "report"
 TRACKED = ("benchmarks/budgets.json", "benchmarks/calibration", "benchmarks/quality")
@@ -52,6 +60,11 @@ def without_commit_line(report: bytes) -> bytes:
     return b"".join(
         line for line in report.splitlines(keepends=True) if not line.startswith(COMMIT_LINE)
     )
+
+
+def images_baseline(platform_name: str = PLATFORM) -> Path:
+    """The figures' baseline for one platform: only comparable with figures made there."""
+    return REPO / "scripts" / f"protected_outputs.images-{platform_name}.sha256"
 
 
 def sha256(data: bytes) -> str:
@@ -88,8 +101,8 @@ def _run(*args: str, stdout: Path) -> None:
         subprocess.run([sys.executable, *args], cwd=REPO, check=True, stdout=out)
 
 
-def _regenerate(out: Path) -> dict[str, bytes]:
-    """Every generated output, by the name it is listed under."""
+def _regenerate(out: Path) -> tuple[dict[str, bytes], dict[str, bytes]]:
+    """Every generated output by the name it is listed under: text, then figures."""
     _run("scripts/perf_gate.py", "--output", str(out / "gate.json"), stdout=out / "gate.txt")
     _run("-m", "benchmarks.loadgen", "--json", *GATE_WORKLOAD, stdout=out / "loadgen-gate.json")
     _run("-m", "benchmarks.loadgen", "--json", stdout=out / "loadgen-default.json")
@@ -111,13 +124,13 @@ def _regenerate(out: Path) -> dict[str, bytes]:
         for path, data in saved.items():
             path.write_bytes(data)
 
-    return {
+    text = {
         "gate.json": (out / "gate.json").read_bytes(),
         "loadgen-gate.json": (out / "loadgen-gate.json").read_bytes(),
         "loadgen-default.json": (out / "loadgen-default.json").read_bytes(),
         "docs/REPORT.md (without its commit line)": without_commit_line(report),
-        **figures,
     }
+    return text, figures
 
 
 def _tracked() -> dict[str, bytes]:
@@ -127,9 +140,18 @@ def _tracked() -> dict[str, bytes]:
     return {name: (REPO / name).read_bytes() for name in sorted(filter(None, listed.split("\0")))}
 
 
-def current_sums(out: Path) -> dict[str, str]:
-    outputs = {**_regenerate(out), **_tracked()}
-    return {name: sha256(data) for name, data in outputs.items()}
+def current_sums(out: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """The cross-platform sums (generated text and tracked data) and the figures' sums."""
+    text, figures = _regenerate(out)
+    outputs = {**text, **_tracked()}
+    return (
+        {name: sha256(data) for name, data in outputs.items()},
+        {name: sha256(data) for name, data in figures.items()},
+    )
+
+
+def _compare(baseline: Path, sums: dict[str, str]) -> list[str]:
+    return differences(parse_sums(baseline.read_text(encoding="utf-8")), sums)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -143,25 +165,49 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="record the current sums as the new baseline instead of checking them",
     )
     parser.add_argument("--keep", type=Path, help="keep the regenerated files in this folder")
+    parser.add_argument(
+        "--include-images",
+        action="store_true",
+        help="also check the report's figures, against this platform's own baseline",
+    )
     args = parser.parse_args(argv)
 
     if args.keep:
         args.keep.mkdir(parents=True, exist_ok=True)
-        sums = current_sums(args.keep.resolve())
+        sums, images = current_sums(args.keep.resolve())
     else:
         with tempfile.TemporaryDirectory() as folder:
-            sums = current_sums(Path(folder))
+            sums, images = current_sums(Path(folder))
     print(format_sums(sums), end="")
+    if args.include_images:
+        print(f"-- figures, {PLATFORM} only --")
+        print(format_sums(images), end="")
+    image_file = images_baseline()
 
     if args.update:
+        written = [BASELINE]
         BASELINE.write_text(format_sums(sums), encoding="utf-8", newline="\n")
-        print(f"\nWrote {BASELINE.relative_to(REPO).as_posix()}. Review the diff and commit it.")
+        if args.include_images:
+            image_file.write_text(format_sums(images), encoding="utf-8", newline="\n")
+            written.append(image_file)
+        names = ", ".join(path.relative_to(REPO).as_posix() for path in written)
+        print(f"\nWrote {names}. Review the diff and commit it.")
         return 0
-    found = differences(parse_sums(BASELINE.read_text(encoding="utf-8")), sums)
+
+    found = _compare(BASELINE, sums)
+    if args.include_images:
+        if not image_file.exists():
+            found.append(
+                f"no figure baseline for {PLATFORM}: {image_file.relative_to(REPO).as_posix()} "
+                "does not exist (record one deliberately with --update --include-images)"
+            )
+        else:
+            found += _compare(image_file, images)
     if found:
         print("\nPROTECTED OUTPUTS CHANGED:\n" + "\n".join(found))
         return 1
-    print(f"\nAll {len(sums)} protected outputs match {BASELINE.relative_to(REPO).as_posix()}.")
+    checked = len(sums) + (len(images) if args.include_images else 0)
+    print(f"\nAll {checked} protected outputs match.")
     return 0
 
 

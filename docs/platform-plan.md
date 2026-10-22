@@ -164,7 +164,10 @@ The first action of step 1 records the sha256 of each on the tree this plan is c
 on. After every step they are produced again and compared; any difference stops the step.
 The check is `uv run python scripts/protected_outputs.py`, against the sums committed in
 `scripts/protected_outputs.sha256` (recorded at `d1ad230`; identical in content to the
-`4a35700` outputs, with line endings normalised so any checkout gives the same sums).
+`4a35700` outputs, with line endings normalised so any checkout gives the same sums). CI runs
+it on Linux and fails on any difference. The report's three PNGs were removed from it after
+the first Linux runs showed their bytes differ by platform while every number matched; they
+are checked locally with `--include-images` against a per-platform baseline (README).
 The one planned exception is step 6: `report.py` says "tenant" in four sentences, and
 renaming them changes `REPORT.md`. That diff must contain those words and nothing else, and
 it gets new recorded sums.

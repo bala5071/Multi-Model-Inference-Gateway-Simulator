@@ -140,10 +140,11 @@ jobs:
         if: always()
         run: docker compose down
 
-  # Whether the protected outputs (docs/platform-plan.md, section 5) hash the same on Linux
-  # as the Windows baseline in scripts/protected_outputs.sha256. NOT blocking yet: the
-  # baseline was recorded on Windows and the report's PNGs may differ by platform. Each
-  # differing file is raised as a warning annotation; the full output is an artifact.
+  # Fails the build if any protected output (docs/platform-plan.md, section 5) differs from
+  # the cross-platform baseline in scripts/protected_outputs.sha256: the gate results, the
+  # load generator's JSON, REPORT.md and the tracked benchmark data. The report's figures are
+  # not in it (their pixels depend on the platform). Each differing file is also raised as an
+  # annotation; the full output is an artifact.
   protected-outputs:
     runs-on: ubuntu-latest
     steps:
@@ -159,7 +160,6 @@ jobs:
 
       - name: Protected outputs
         id: check
-        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
@@ -172,7 +172,7 @@ jobs:
         run: |
           echo "protected outputs check: ${{ steps.check.outcome }}"
           grep -E '^(changed|missing|new) ' protected-outputs.txt | while read -r line; do
-            echo "::warning title=Protected output differs on Linux::$line"
+            echo "::error title=Protected output differs::$line"
           done || true
 
       - name: Upload results

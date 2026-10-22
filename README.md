@@ -466,19 +466,31 @@ npm run e2e      # browser smoke tests against the gateway in simulated live mod
 The performance gate results, the load generator's output, the report and the tracked
 benchmark data must not change while the platform work goes on
 ([plan, section 5](docs/platform-plan.md)). Their sha256 sums are committed in
-[scripts/protected_outputs.sha256](scripts/protected_outputs.sha256):
+[scripts/protected_outputs.sha256](scripts/protected_outputs.sha256), and CI fails the build
+if any differs:
 
 ```sh
-uv run python scripts/protected_outputs.py    # regenerate, compare; exits 1 on any change
+uv run python scripts/protected_outputs.py                   # regenerate, compare; exit 1 on change
+uv run python scripts/protected_outputs.py --include-images  # also the report figures (same platform)
 ```
+
+**The report's figures (`docs/report/*.png`) are not in that baseline.** The same numbers
+drawn on Linux and on Windows give different PNG bytes (font rendering), so a cross-platform
+sum cannot hold. The figures are drawn from data the baseline already protects: sections 1
+and 2 plot the results of the same runs that fill the tables of `docs/REPORT.md`, and section
+7 plots `benchmarks/quality/results.json`, a tracked file. What the baseline does not catch
+is a change to how a figure is drawn alone. `--include-images` checks the figures against a
+baseline for the platform it runs on, `scripts/protected_outputs.images-<platform>.sha256`
+(only `windows` exists, recorded on the development machine): a local check, not run in CI.
 
 A changed sum is a failure to explain, not a file to refresh. Refresh the baseline only
 when a change to one of those outputs is intended and understood:
 
 1. Run the check and note exactly which sums changed and why.
-2. Run `uv run python scripts/protected_outputs.py --update`, which rewrites the baseline.
-3. Commit the new `scripts/protected_outputs.sha256` on its own, with the reason and the
-   list of changed files in the commit message and the pull request.
+2. Run `uv run python scripts/protected_outputs.py --update`, which rewrites the baseline
+   (with `--include-images`, this platform's figure baseline too).
+3. Commit the new baseline file(s) on their own, with the reason and the list of changed
+   files in the commit message and the pull request.
 
 Text files are hashed with Windows line endings read as Unix ones, so a checkout on either
 system gives the same sums. `docs/REPORT.md` is hashed without the line naming its commit.

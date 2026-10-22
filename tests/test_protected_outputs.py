@@ -41,8 +41,24 @@ def test_sums_round_trip_and_every_kind_of_difference_is_reported() -> None:
 def test_the_committed_baseline_lists_full_sums_and_relative_paths() -> None:
     text = po.BASELINE.read_text(encoding="utf-8")
     sums = po.parse_sums(text)
-    assert len(sums) == 27
+    assert len(sums) == 24
+    # The cross-platform baseline has no generated figure: their pixels depend on the platform.
+    assert not any(name.startswith("docs/report/") for name in sums)
     assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in sums.values())
     # Relative paths only: nothing that names a machine, a drive or a home folder.
     assert not any(re.match(r"/|[A-Za-z]:|~", name) or "\\" in name for name in sums)
     assert "\r" not in text
+
+
+def test_figure_baselines_are_per_platform_and_hold_only_the_report_figures() -> None:
+    assert po.images_baseline("linux").name == "protected_outputs.images-linux.sha256"
+    files = sorted(po.REPO.joinpath("scripts").glob("protected_outputs.images-*.sha256"))
+    assert files, "no figure baseline for any platform"
+    for path in files:
+        sums = po.parse_sums(path.read_text(encoding="utf-8"))
+        assert set(sums) == {
+            "docs/report/1-batching.png",
+            "docs/report/2-prefix-cache.png",
+            "docs/report/7-quality.png",
+        }, path.name
+        assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in sums.values())
