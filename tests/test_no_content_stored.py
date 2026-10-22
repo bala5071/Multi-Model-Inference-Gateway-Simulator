@@ -28,9 +28,9 @@ from gateway.database import open_database
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.monitoring import Monitor
 from gateway.registry import ModelRegistry
-from gateway.routing import load_plans
 from gateway.tokenizer import WordTokenizer
 from gateway.usage import SqliteUsageStore
+from helpers import application_access, bearer
 from mock_llama import MockLlamaServer
 from test_real_backend_api import CONFIG
 
@@ -73,10 +73,11 @@ async def _exercise(
     connection = open_database(db_path)
     MigrationRunner(connection, MIGRATIONS, ClockEpoch(clock)).migrate()
     store = SqliteUsageStore(connection)
+    access, keys = application_access(clock)
     app = create_app(
         registry,
         clock,
-        plans=load_plans(),
+        applications=access,
         usage_store=store,
         epoch=ClockEpoch(clock, origin_ms=1.7e12),
     )
@@ -85,7 +86,8 @@ async def _exercise(
     reported = []
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
-        body = {"tenant_id": "acme", "model": "economy", "prompt": PROMPT, "max_tokens": 4}
+        client.headers.update(bearer(keys["acme"]))
+        body = {"model": "economy", "prompt": PROMPT, "max_tokens": 4}
         for _ in range(2):  # the second is served from the prefix cache in simulator mode
             response = await client.post("/v1/generate", json=body)
             assert response.status_code == 200
@@ -96,7 +98,7 @@ async def _exercise(
             "/v1/monitor/snapshot?history_s=900&events=1000",
             "/metrics",
             "/metrics/summary",
-            "/v1/tenants/acme/usage",
+            "/v1/applications/me/usage",
         ):
             reported.append((await client.get(path)).content)
     await registry.aclose()

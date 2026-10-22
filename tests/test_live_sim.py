@@ -14,7 +14,7 @@ from gateway.app import create_app, create_default_app, create_simulated_live_ap
 from gateway.clock import PacedSimClock, SimClock
 from gateway.continuous import build_continuous_registry
 from gateway.loadcontrol import UnknownPresetError
-from gateway.routing import load_plans
+from helpers import application_access
 
 
 class Waits:
@@ -124,7 +124,8 @@ async def test_replay_times_are_simulated_times() -> None:
 async def test_control_is_off_by_default_and_says_so() -> None:
     clock = SimClock()
     registry = build_continuous_registry(clock, seed=7)
-    async with _running(create_app(registry, clock, plans=load_plans())) as client:
+    access, _ = application_access(clock)
+    async with _running(create_app(registry, clock, applications=access)) as client:
         status = (await client.get("/v1/control")).json()
         start = await client.post("/v1/control/load/start", json={"preset": "steady"})
         stop = await client.post("/v1/control/load/stop")
@@ -133,6 +134,7 @@ async def test_control_is_off_by_default_and_says_so() -> None:
     assert status == {
         "seed": 0,
         "load": {"available": False, "presets": None, "status": None},
+        "playground": {"available": False},
         "simulation": {"active": False, "speed": None, "speeds": None},
     }
     for response in (start, stop):
@@ -144,7 +146,8 @@ async def test_control_is_off_by_default_and_says_so() -> None:
 async def test_load_can_be_started_and_stopped_through_the_api() -> None:
     clock = SimClock()
     registry = build_continuous_registry(clock, seed=7)
-    app = create_app(registry, clock, plans=load_plans(), load_control=True, seed=42)
+    access, _ = application_access(clock)
+    app = create_app(registry, clock, applications=access, load_control=True, seed=42)
     async with _running(app) as client:
         idle = (await client.get("/v1/control")).json()
         started = await client.post("/v1/control/load/start", json={"preset": "steady"})

@@ -59,9 +59,18 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   with LRU leaf eviction and ref-counted leases; one per model, sharing the model's
   `kv_capacity_tokens` with running requests (exists)
 - `tokenizer.py` — `Tokenizer` protocol and the `WordTokenizer` stand-in (exists)
-- `routing.py` — `Plan`, `PlansConfig`, `load_plans`, and the `Router` that picks a model
-  within a tenant's plan, by model name or by quality (exists)
-- `plans.yaml` — the packaged plans and demo tenants (exists)
+- `routing.py` — `Plan`, `PlanLimits`, `PlansConfig` (plan templates and demo
+  applications), `load_plans`, and the `Router` that picks a model within an application's
+  plan, by model name or by quality (exists)
+- `plans.yaml` — the packaged plan templates and demo applications; never keys (exists)
+- `applications.py` — `Application` (its own copy of a template's plan settings and limits),
+  `ApiKeyRecord`, the `ApplicationStore` protocol, in-memory and SQLite stores (exists)
+- `apikeys.py` — `ApiKeyService`: issues keys (`gwk_<id>_<secret>`), stores only an HMAC
+  with the pepper from `GATEWAY_KEY_PEPPER`, checks in constant time, rotates with a grace
+  period, revokes, and batches `last_used_at`; `ApplicationAccess` is what `create_app`
+  takes (exists)
+- `ratelimit.py` — `RequestRateLimiter`: per-application requests per minute, a sliding
+  window on the injected clock (exists)
 - `ledger.py` — `CostLedger`: per-tenant tokens and spend per 30-day period of epoch time,
   and the budget check; a facade over a `UsageStore` (exists)
 - `usage.py` — `UsageEvent`, the `UsageStore` protocol, `InMemoryUsageStore` (bounded ring)
@@ -124,6 +133,8 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   reported (exists)
 - `benchmarks/usage_store_writes.py` — times one usage-event write on the local disk; the
   numbers in `docs/19-usage-store.md` (exists)
+- `benchmarks/key_checks.py` — times a key check, and what writing `last_used_at` per
+  request would add; the numbers in `docs/20-applications-api-keys.md` (exists)
 
 - `benchmarks/report.py` — generates `docs/REPORT.md` and `docs/report/*.png` from the
   benchmarks above (`make report`). Sections 1 to 3 run on the calibrated profiles
@@ -162,7 +173,9 @@ the monitoring API (`docs/15`); it has no logic of its own about the gateway.
 
 `scripts/` holds operational entry points only: `perf_gate.py`, `demo.py`,
 `capture_demo.py` (retakes the dashboard pictures in `docs/img/`),
-`run_local_models.sh`, and `protected_outputs.py`, which checks the outputs that must not
+`run_local_models.sh`, `manage.py` (creates applications and issues, rotates and revokes
+API keys: the only way to issue one; prints a new key once, never logs it), and
+`protected_outputs.py`, which checks the outputs that must not
 change against the sha256 sums in `scripts/protected_outputs.sha256` (a gate, like
 `perf_gate.py`). Anything that measures or compares results goes in `benchmarks/`.
 Never refresh that baseline to make a failure pass; the README says how to refresh it.

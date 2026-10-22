@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
+import os
+import random
 import zlib
 from collections.abc import Mapping
+from dataclasses import replace
 from types import MappingProxyType
+from typing import Any
 
+from gateway.apikeys import ApiKeyService, ApplicationAccess
+from gateway.applications import (
+    InMemoryApplicationStore,
+    SqliteApplicationStore,
+    application_from_template,
+    seed_demo_applications,
+)
 from gateway.backends import Backend, BackendTokenCallback, Generation
+from gateway.clock import Clock, ClockEpoch, SystemEpoch
+from gateway.database import open_database
+from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.profiles import ModelProfile, Tier
+from gateway.routing import PlansConfig, load_plans
 from gateway.schema import GenerateRequest
 
 # Every value is a power of two (or a small multiple), so expected times computed by hand
@@ -90,3 +105,74 @@ def unique_tokens(request_id: str, count: int) -> tuple[int, ...]:
     """``count`` token ids that no other request id shares, so nothing is a cache hit."""
     base = zlib.crc32(request_id.encode()) * 1_000_000
     return tuple(base + i for i in range(count))
+
+
+# --- applications and keys -----------------------------------------------------------------
+
+# A test pepper: not a secret, and never used outside tests.
+TEST_PEPPER = b"test-pepper-not-a-secret-0123456789abcdef"
+
+
+def application_access(
+    clock: Clock,
+    templates: PlansConfig | None = None,
+    *,
+    apps: Mapping[str, str] | None = None,
+    limits: Mapping[str, tuple[int | None, int | None]] | None = None,
+    seed: int = 0,
+) -> tuple[ApplicationAccess, dict[str, str]]:
+    """In-memory applications with one key each, as ``create_app`` takes them.
+
+    ``apps`` maps application id to template plan; without it the templates' demo
+    applications are created. ``limits`` gives (max_tokens, requests_per_minute) per
+    application. Returns the access and each application's key. Key material comes from a
+    seeded ``random.Random``, so tests are repeatable.
+    """
+    templates = templates if templates is not None else load_plans()
+    store = InMemoryApplicationStore()
+    epoch = ClockEpoch(clock)
+    if apps is None:
+        seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms())
+    else:
+        for app_id, plan in apps.items():
+            application = application_from_template(
+                app_id, app_id, templates, plan, created_at_ms=epoch.epoch_ms()
+            )
+            if limits and app_id in limits:
+                max_tokens, rpm = limits[app_id]
+                application = replace(application, max_tokens=max_tokens, requests_per_minute=rpm)
+            store.add_application(application)
+    rng = random.Random(seed)
+    keys = ApiKeyService(store, TEST_PEPPER, epoch, random_bytes=rng.randbytes)
+    issued = {a.id: keys.issue(a.id, "test").key for a in store.list_applications()}
+    return ApplicationAccess(keys, templates), issued
+
+
+def bearer(key: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {key}"}
+
+
+# Well formed, but matches no record: what a test sends for an application with no key.
+UNKNOWN_KEY = "gwk_" + "0" * 16 + "_" + "A" * 43
+
+
+def tenant_headers(body: dict[str, Any], keys: Mapping[str, str]) -> dict[str, str]:
+    """Remove a test's ``tenant_id`` from a request body and return the Authorization header
+    of that application's key instead (``UNKNOWN_KEY`` for an application that has none)."""
+    tenant = body.pop("tenant_id", None)
+    if tenant is None:
+        return {}
+    return bearer(keys.get(tenant, UNKNOWN_KEY))
+
+
+def default_server_key(application_id: str = "acme") -> str:
+    """Create the demo applications in the default server's database (GATEWAY_DATABASE,
+    set by conftest) and issue a key for one of them, as scripts/manage.py would."""
+    connection = open_database(os.environ["GATEWAY_DATABASE"])
+    epoch = SystemEpoch()
+    MigrationRunner(connection, MIGRATIONS, epoch).migrate()
+    store = SqliteApplicationStore(connection)
+    seed_demo_applications(store, load_plans(), created_at_ms=epoch.epoch_ms())
+    key = ApiKeyService(store, TEST_PEPPER, epoch).issue(application_id, "test").key
+    connection.close()
+    return key

@@ -10,6 +10,7 @@ from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from gateway.applications import ApplicationStore
 from gateway.clock import Clock
 from gateway.events import Event, EventBus
 from gateway.ledger import BudgetExceededError, CostLedger
@@ -18,7 +19,6 @@ from gateway.overload import ModelHealth, QueueFullError, Transition
 from gateway.prefix_cache import PrefixCache
 from gateway.profiles import ModelProfile
 from gateway.registry import ModelRegistry
-from gateway.routing import PlansConfig
 from gateway.schema import RequestResult
 from gateway.timeseries import GaugeSample, ModelPoint, TenantPoint, TimeSeriesStore
 
@@ -193,9 +193,10 @@ class Monitor:
     """Feeds the time-series store and the event bus, and builds snapshots from them.
 
     ``slo_models`` are the models that have an SLO; only they have a degraded flag.
-    ``ledger`` and ``plans`` go together: without them there are no tenants to report.
-    Only registered models and configured tenants are ever recorded, which is what bounds
-    the number of series.
+    ``ledger`` and ``applications`` go together: without them there are no tenants to
+    report. Each application is reported as a tenant (the snapshot's names change in step 4
+    of docs/platform-plan.md). Only registered models and authenticated applications are
+    ever recorded, which is what bounds the number of series.
     """
 
     def __init__(
@@ -207,7 +208,7 @@ class Monitor:
         series: TimeSeriesStore,
         events: EventBus,
         ledger: CostLedger | None = None,
-        plans: PlansConfig | None = None,
+        applications: ApplicationStore | None = None,
         slo_models: Collection[str] = (),
     ) -> None:
         self._clock = clock
@@ -215,7 +216,7 @@ class Monitor:
         self._series = series
         self._events = events
         self._ledger = ledger
-        self._plans = plans
+        self._applications = applications
         # Looked up once: checking a worker against the protocol reads its properties.
         self._views: dict[str, SchedulerView | None] = {}
         for name in registry.names:
@@ -430,11 +431,11 @@ class Monitor:
         )
 
     def _tenants(self, history_ms: float) -> TenantsGroup:
-        if self._plans is None or self._ledger is None:
+        if self._applications is None or self._ledger is None:
             return TenantsGroup(False, None)
         tenants: dict[str, TenantSnapshot] = {}
-        for tenant_id, plan_name in self._plans.tenants.items():
-            plan = self._plans.plans[plan_name]
+        for application in self._applications.list_applications():
+            tenant_id, plan = application.id, application.plan
             usage = self._ledger.usage(tenant_id)
             totals = self._series.tenant_totals(tenant_id)
             tenants[tenant_id] = TenantSnapshot(

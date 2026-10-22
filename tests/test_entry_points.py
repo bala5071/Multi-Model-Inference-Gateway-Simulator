@@ -17,6 +17,7 @@ from benchmarks import (
     chunked_prefill,
     compare_batching,
     fairness,
+    key_checks,
     loadgen,
     metrics_example,
     overload,
@@ -88,6 +89,24 @@ async def test_chunked_prefill_benchmark_prints_a_row_per_chunk_size(
     lines = capsys.readouterr().out.splitlines()
     assert lines[0].startswith(MECHANISM_DEMO)
     assert [line.split()[0] for line in lines[3:]] == ["off", "4096", "1024", "256", "64", "16"]
+
+
+def test_key_check_benchmark_times_checks_and_last_used_writes(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    key_checks.main(["--checks", "20", "--dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert out.startswith("MEASURED on this machine")
+    names = [" ".join(line.split()[:-5]) for line in out.splitlines()[-5:]]
+    assert names == [
+        "check, batched",
+        "check + write per request",
+        "flush of 1 keys",
+        "flush of 100 keys",
+        "flush of 1000 keys",
+    ]
+    assert "gwk_" not in out  # its throwaway keys are never printed
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_usage_store_write_benchmark_times_every_store(
@@ -175,7 +194,9 @@ def test_demo_script_runs_end_to_end() -> None:
     assert "model_not_in_plan" in out
     assert "(cached 108)" in out
     assert out.count("   token ") == 4
-    assert "unknown_tenant" in out
+    assert "invalid_api_key: The API key is not valid." in out
+    # The demo's keys never reach its output.
+    assert "gwk_" not in out
     assert "plan=enterprise  requests=4" in out
 
 

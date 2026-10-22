@@ -5,6 +5,9 @@
     "presets": null,
     "status": null
   },
+  "playground": {
+    "available": false
+  },
   "simulation": {
     "active": false,
     "speed": null,

@@ -77,11 +77,11 @@ is added now; A3 adds it with its own migration.
   in an event.
 - **The default server refuses to start without the pepper.** `create_app` with plans in
   tests receives its stores and pepper by injection.
-- **Pepper rotation** (documented in the step's design note): each stored hash records
-  the pepper version it was made with; the server accepts `GATEWAY_KEY_PEPPER` (current)
-  and `GATEWAY_KEY_PEPPER_PREVIOUS` (optional); a key verified under the previous pepper is
-  re-hashed under the current one; once no row uses the old version, the previous variable
-  is removed. Keys themselves do not change.
+- **Pepper rotation**: as built in step 2, rotating the pepper means re-issuing every key
+  (note 20 gives the procedure); clients are refused until they have their new key.
+  **Deferred:** rotation without that gap, where each stored hash records the pepper
+  version that made it and the server also accepts `GATEWAY_KEY_PEPPER_PREVIOUS` for a
+  while, re-hashing keys verified under it. Keys themselves would not change.
 - **Issuance is a CLI under `scripts/`**, a bootstrap only: it creates an application or a
   key in the database and prints the new key once to the terminal. It never writes it to a
   log or file. There is no admin token endpoint; A2 replaces the CLI with authenticated
@@ -175,11 +175,24 @@ it gets new recorded sums.
 |---|---|---|
 | 0 | This plan; CLAUDE.md rules; README security note | this commit |
 | 1 | sha256 baseline. Migration runner. Epoch time source. `UsageStore` (in-memory, SQLite). `CostLedger`'s API kept as a façade over it, its tests passing unchanged. `test_no_content_stored.py` against the ledger and events as they are. No API change | own PR |
-| 2 | Applications and API keys **together**: `ApplicationStore`, per-application plan settings, templates, `Router` on `Application`, HMAC keys, the pepper, the issuance CLI, the auth dependency; `tenant_id` leaves the body; `/v1/applications/me/usage` | **one PR**. An application id taken on trust from the body is insecure and must never be merged on its own |
+| 2 (done, note 20) | Applications and API keys **together**: `ApplicationStore`, per-application plan settings, templates, `Router` on `Application`, HMAC keys, the pepper, the issuance CLI, the auth dependency; `tenant_id` leaves the body; `/v1/applications/me/usage` | **one PR**. An application id taken on trust from the body is insecure and must never be merged on its own |
 | 3 | Persistence in the default server: database path and pepper from the environment, refusal to start without the pepper, the restart test, default bind confirmed as `127.0.0.1` | own PR |
 | 4 | Monitoring rename (snapshot, Prometheus, events, time series); fixtures regenerated; the dashboard follows (rename only) | own PR |
 | 5 | Load control, simulated live mode, demo and Playground with in-memory throwaway keys; loadgen live mode; e2e; pictures retaken | own PR |
 | 6 | Docs, CLAUDE.md architecture list, README; report prose regenerated (wording-only diff) | own PR |
+
+### What step 2 pulled forward
+
+Done in step 2 because leaving it for later would have left the branch broken in between:
+
+- **The default server opens its database** (`GATEWAY_DATABASE`) and refuses to start
+  without the pepper: keys are issued into a database by the CLI, so the server must read
+  the same one. Usage events stay in memory until step 3.
+- **The Playground, the demo and live load runs** use keys now (planned for step 5): the
+  Playground through throwaway in-memory keys in simulated live mode, the demo with its
+  own, the load generator with `GATEWAY_API_KEY`.
+- Still for step 4: rate-limit refusals in the monitoring snapshot (its rejection reasons
+  are a fixed part of the schema) and the tenant to application rename there.
 
 ## 7. Riskiest steps
 

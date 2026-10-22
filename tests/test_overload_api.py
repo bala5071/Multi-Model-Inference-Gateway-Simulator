@@ -18,16 +18,16 @@ from gateway.metrics import percentile
 from gateway.overload import OverloadPolicy, SloMonitor, SloPolicy
 from gateway.profiles import Tier
 from gateway.routing import Plan, PlansConfig
-from helpers import TEST_PROFILES
+from helpers import TEST_PROFILES, application_access, bearer, tenant_headers
 
 PLANS = PlansConfig(
     plans={
         "enterprise": Plan("enterprise", ("economy", "standard", "premium"), 1.0, 10**9),
         "pro": Plan("pro", ("economy", "standard"), 1.0, 10**9),
         "premium_only": Plan("premium_only", ("premium",), 1.0, 10**9),
-    },
-    tenants={"acme": "enterprise", "globex": "pro", "solo": "premium_only"},
+    }
 )
+APPS = {"acme": "enterprise", "globex": "pro", "solo": "premium_only"}
 # Premium's SLO is 2 s; it counts as recovered under 1 s.
 SLO = SloPolicy(
     p99_ms={"premium": 2000.0, "standard": 2000.0},
@@ -43,6 +43,7 @@ class Gateway:
     client: httpx.AsyncClient
     clock: SimClock
     monitor: SloMonitor | None
+    keys: dict[str, str]
     counter: int = 0
 
     async def generate(self, **body: Any) -> httpx.Response:
@@ -50,7 +51,15 @@ class Gateway:
         self.counter += 1
         body.setdefault("prompt", " ".join(f"p{self.counter}w{i}" for i in range(10)))
         body.setdefault("max_tokens", 2)
-        return await self.client.post("/v1/generate", json=body)
+        headers = tenant_headers(body, self.keys)
+        return await self.client.post("/v1/generate", json=body, headers=headers)
+
+    async def usage(self, tenant: str) -> dict[str, Any]:
+        response = await self.client.get(
+            "/v1/applications/me/usage", headers=bearer(self.keys[tenant])
+        )
+        data: dict[str, Any] = response.json()
+        return data
 
     async def status(self) -> dict[str, Any]:
         data: dict[str, Any] = (await self.client.get("/v1/overload")).json()
@@ -68,10 +77,11 @@ async def _gateway(
     registry = build_continuous_registry(
         clock, seed=7, max_queue_len=max_queue_len, profiles=TEST_PROFILES
     )
-    app = create_app(registry, clock, plans=plans, overload=overload)
+    access, keys = (None, {}) if plans is None else application_access(clock, plans, apps=APPS)
+    app = create_app(registry, clock, applications=access, overload=overload)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
-        yield Gateway(client, clock, app.state.slo_monitor)
+        yield Gateway(client, clock, app.state.slo_monitor, keys)
     await registry.aclose()
 
 
@@ -98,7 +108,7 @@ async def test_requests_beyond_the_queue_limit_get_429_with_retry_after() -> Non
             *(gateway.generate(tenant_id="acme", model="premium") for _ in range(12)),
             gateway.generate(tenant_id="acme", model="economy"),
         )
-        usage = (await gateway.client.get("/v1/tenants/acme/usage")).json()
+        usage = await gateway.usage("acme")
         metrics = (await gateway.client.get("/metrics/summary")).json()["models"]
 
     *premium, economy = responses
@@ -144,7 +154,7 @@ async def test_request_over_the_timeout_gets_504_and_frees_its_capacity() -> Non
         slow = await gateway.generate(tenant_id="acme", model="premium", max_tokens=50)
         timed_out_at = gateway.clock.now_ms()
         quick = await gateway.generate(tenant_id="acme", model="premium", max_tokens=2)
-        usage = (await gateway.client.get("/v1/tenants/acme/usage")).json()
+        usage = await gateway.usage("acme")
         metrics = (await gateway.client.get("/metrics/summary")).json()["models"]
         status = await gateway.status()
 
@@ -251,7 +261,7 @@ async def test_downgrade_engages_under_overload_and_recovers_afterwards() -> Non
         assert "X-Downgraded-From" not in no_cheaper.headers
 
         # The downgraded requests were billed as standard requests.
-        usage = (await gateway.client.get("/v1/tenants/acme/usage")).json()
+        usage = await gateway.usage("acme")
         assert {m: u["requests"] for m, u in usage["by_model"].items()} == {
             "premium": 10,
             "standard": 2,

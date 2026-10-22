@@ -79,7 +79,7 @@ test("capture the README pictures", async ({ page }) => {
   // By the start of the label's text: "Model" is also one of the choices of "Choose by".
   const form = page.locator("form.request-form");
   await form
-    .locator("label", { hasText: /^Tenant/ })
+    .locator("label", { hasText: /^Application/ })
     .locator("select")
     .selectOption("acme");
   await form

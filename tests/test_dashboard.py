@@ -16,8 +16,7 @@ from gateway.clock import SimClock
 from gateway.continuous import build_continuous_registry
 from gateway.overload import OverloadPolicy, SloPolicy
 from gateway.profiles import Tier
-from gateway.routing import load_plans
-from helpers import TEST_PROFILES
+from helpers import TEST_PROFILES, application_access, tenant_headers
 from mock_llama import MockLlamaServer
 
 FIXTURES = Path(__file__).resolve().parent.parent / "frontend" / "src" / "test" / "fixtures"
@@ -85,7 +84,8 @@ async def _simulated_snapshot() -> dict[str, Any]:
         min_samples=5,
         min_hold_ms=1000.0,
     )
-    app = create_app(registry, clock, plans=load_plans(), overload=OverloadPolicy(slo=slo))
+    access, keys = application_access(clock)
+    app = create_app(registry, clock, applications=access, overload=OverloadPolicy(slo=slo))
     counter = 0
 
     async with _client(app) as client:
@@ -94,7 +94,8 @@ async def _simulated_snapshot() -> dict[str, Any]:
             nonlocal counter
             counter += 1
             body.setdefault("prompt", " ".join(f"p{counter}w{i}" for i in range(10)))
-            return await client.post("/v1/generate", json=body)
+            headers = tenant_headers(body, keys)
+            return await client.post("/v1/generate", json=body, headers=headers)
 
         for second in range(3):
             await asyncio.gather(

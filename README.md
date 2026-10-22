@@ -192,6 +192,11 @@ To run it as a server:
 make serve       # or: uv run uvicorn gateway.app:create_default_app --factory --port 8000
 ```
 
+Since platform step 2 the server needs `GATEWAY_KEY_PEPPER` set (it refuses to start
+without it) and every request needs an application's API key, issued with
+`scripts/manage.py`; see [note 20](docs/20-applications-api-keys.md). This README's commands
+are brought up to date in step 6 of the [platform plan](docs/platform-plan.md).
+
 Then open <http://127.0.0.1:8000/docs>. The dashboard is at `/dashboard/` once it has
 been built (`cd frontend && npm ci && npm run build`, Node 20;
 [docs/16-dashboard.md](docs/16-dashboard.md)).
@@ -218,7 +223,9 @@ license, which is not an open-source license.
 ## Curl demo
 
 With the server running (simulator mode shown; the three demo tenants are `initech` on free,
-`globex` on pro and `acme` on enterprise):
+`globex` on pro and `acme` on enterprise). **Out of date since platform step 2:** send
+`-H "Authorization: Bearer <key>"` instead of a `tenant_id`, and read usage from
+`/v1/applications/me/usage` ([note 20](docs/20-applications-api-keys.md)):
 
 ```sh
 # The best model the tenant's plan includes.

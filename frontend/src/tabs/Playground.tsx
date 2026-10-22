@@ -4,6 +4,7 @@ import {
   QUALITIES,
   reduceRun,
   requestBody,
+  requestPath,
   streamGenerate,
   tokenGaps,
   ttft,
@@ -137,7 +138,10 @@ function Output({ run }: { run: Run }) {
 export function Playground({ state, control }: { state: MonitorState; control: Control }) {
   const snapshot = state.snapshot;
   const models = Object.keys(snapshot?.models ?? {});
-  const tenants = Object.keys(snapshot?.tenants.tenants ?? {});
+  // The gateway's applications (reported as tenants until the monitoring rename).
+  const viaPlayground = control.status?.playground.available ?? false;
+  const applications = viaPlayground ? Object.keys(snapshot?.tenants.tenants ?? {}) : [];
+  const hasApplications = snapshot?.tenants.available ?? false;
   const [edited, setEdited] = useState<Partial<PlaygroundForm>>({});
   const [run, dispatch] = useReducer(reduceRun, IDLE_RUN);
   const abort = useRef<AbortController | null>(null);
@@ -149,9 +153,9 @@ export function Playground({ state, control }: { state: MonitorState; control: C
     [],
   );
 
-  // Until the viewer chooses, the first tenant and model the gateway lists.
+  // Until the viewer chooses, the first application and model the gateway lists.
   const form: PlaygroundForm = {
-    tenant: tenants[0] ?? "",
+    application: applications[0] ?? "",
     choose: "model",
     model: models[0] ?? "",
     quality: "balanced",
@@ -175,22 +179,34 @@ export function Playground({ state, control }: { state: MonitorState; control: C
             event.preventDefault();
             const controller = new AbortController();
             abort.current = controller;
-            void streamGenerate(requestBody(form), dispatch, controller.signal);
+            void streamGenerate(
+              requestBody(form),
+              dispatch,
+              controller.signal,
+              requestPath(viaPlayground),
+            );
           }}
         >
+          {hasApplications && !viaPlayground && (
+            <p className="note">
+              This gateway needs an API key on every request, and the Playground has none: it sends
+              as an application only in simulated live mode. Send requests with a key to POST
+              /v1/generate instead.
+            </p>
+          )}
           <div className="filters">
-            {tenants.length > 0 && (
+            {applications.length > 0 && (
               <label className="choice">
-                Tenant
+                Application
                 <select
-                  value={form.tenant}
+                  value={form.application}
                   onChange={(event) => {
-                    set({ tenant: event.target.value });
+                    set({ application: event.target.value });
                   }}
                 >
-                  {tenants.map((tenant) => (
-                    <option key={tenant} value={tenant}>
-                      {tenant} ({snapshot?.tenants.tenants?.[tenant]?.plan})
+                  {applications.map((application) => (
+                    <option key={application} value={application}>
+                      {application} ({snapshot?.tenants.tenants?.[application]?.plan})
                     </option>
                   ))}
                 </select>

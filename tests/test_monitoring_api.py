@@ -29,7 +29,7 @@ from gateway.registry import ModelRegistry
 from gateway.routing import Plan, PlansConfig, load_plans
 from gateway.schema import RequestResult
 from gateway.timeseries import TimeSeriesStore
-from helpers import EXACT
+from helpers import EXACT, application_access, default_server_key, tenant_headers
 from mock_llama import MockLlamaServer
 
 # Ten words: 10 prompt tokens, so 5 ms of prefill on the EXACT profile. With three output
@@ -105,10 +105,12 @@ class Gateway:
     client: httpx.AsyncClient
     clock: SimClock
     app: Any
+    keys: dict[str, str]
 
     async def generate(self, **body: Any) -> httpx.Response:
         body.setdefault("max_tokens", 3)
-        return await self.client.post("/v1/generate", json=body)
+        headers = tenant_headers(body, self.keys)
+        return await self.client.post("/v1/generate", json=body, headers=headers)
 
     async def snapshot(self, **params: Any) -> dict[str, Any]:
         response = await self.client.get("/v1/monitor/snapshot", params=params)
@@ -124,12 +126,21 @@ class Gateway:
 
 @asynccontextmanager
 async def _gateway(
-    registry: ModelRegistry, clock: SimClock, **app_kwargs: Any
+    registry: ModelRegistry,
+    clock: SimClock,
+    *,
+    plans: PlansConfig | tuple[PlansConfig, dict[str, str]] | None = None,
+    **app_kwargs: Any,
 ) -> AsyncIterator[Gateway]:
+    """``plans`` is the templates, or the templates and the applications to create."""
+    keys: dict[str, str] = {}
+    if plans is not None:
+        templates, apps = plans if isinstance(plans, tuple) else (plans, None)
+        app_kwargs["applications"], keys = application_access(clock, templates, apps=apps)
     app = create_app(registry, clock, **app_kwargs)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
-        yield Gateway(client, clock, app)
+        yield Gateway(client, clock, app, keys)
     await registry.aclose()
 
 
@@ -552,9 +563,9 @@ def test_only_a_worker_with_its_own_scheduler_matches_the_view() -> None:
 
 # --- tenants -------------------------------------------------------------------------------
 
-PLANS = PlansConfig(
-    plans={"basic": Plan("basic", ("standard",), 2.0, 30)},
-    tenants={"t1": "basic", "t2": "basic"},
+PLANS = (
+    PlansConfig(plans={"basic": Plan("basic", ("standard",), 2.0, 30)}),
+    {"t1": "basic", "t2": "basic"},
 )
 
 
@@ -573,7 +584,7 @@ async def test_tenants_show_spend_tokens_against_budget_and_rejections() -> None
     # 26 used, and fails at 39.
     assert [r.status_code for r in served] == [200, 200, 200]
     assert (rejected.status_code, rejected.json()["error"]["code"]) == (429, "budget_exhausted")
-    assert unknown.status_code == 404
+    assert unknown.status_code == 401  # a key that matches no application
     billed = COST * 2.0
     assert snapshot["tenants"] == {
         "available": True,
@@ -1070,9 +1081,9 @@ async def test_memory_stays_bounded_through_the_api() -> None:
     registry = ModelRegistry()
     registry.register("standard", _worker(clock, max_queue_len=0))
     registry.register("other", _worker(clock))
-    plans = PlansConfig(
-        plans={"big": Plan("big", ("standard", "other"), 1.0, 10**9)},
-        tenants={"t1": "big", "t2": "big"},
+    plans = (
+        PlansConfig(plans={"big": Plan("big", ("standard", "other"), 1.0, 10**9)}),
+        {"t1": "big", "t2": "big"},
     )
     async with _gateway(registry, clock, plans=plans, series=series, events=events) as gateway:
         most_buckets = 0
@@ -1170,6 +1181,7 @@ async def test_query_parameters_are_validated() -> None:
 
 
 async def test_default_app_reports_every_group_for_the_three_simulated_models() -> None:
+    default_server_key()  # creates the demo applications in the default server's database
     transport = httpx.ASGITransport(app=create_default_app())
     async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
         snapshot = (await client.get("/v1/monitor/snapshot")).json()

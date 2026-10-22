@@ -176,12 +176,11 @@ def test_the_runner_needs_an_autocommit_connection() -> None:
 # --- the gateway's own migrations ---------------------------------------------------------
 
 
-def test_the_gateway_migrations_create_only_the_usage_table(tmp_path: Path) -> None:
+def test_the_gateway_migrations_create_exactly_their_tables(tmp_path: Path) -> None:
     db = open_database(tmp_path / "gateway.db")
     runner = MigrationRunner(db, MIGRATIONS, ClockEpoch(SimClock()))
 
-    runner.migrate()
-
+    assert runner.migrate(1) == (1,)
     assert _tables(db) == {"schema_migrations", "usage_events"}
     assert _columns(db, "usage_events") == [
         "seq",
@@ -195,7 +194,35 @@ def test_the_gateway_migrations_create_only_the_usage_table(tmp_path: Path) -> N
         "billed_cost_usd",
         "occurred_at_ms",
     ]
-    runner.rollback(0)
-    assert _tables(db) == {"schema_migrations"}
-    runner.migrate()
+
+    assert runner.migrate() == (2,)
+    assert _tables(db) == {"schema_migrations", "usage_events", "applications", "api_keys"}
+    # No organization column: organizations arrive in A3 with their own migration.
+    assert _columns(db, "applications") == [
+        "id",
+        "name",
+        "plan_name",
+        "models",
+        "price_multiplier",
+        "monthly_token_budget",
+        "max_tokens",
+        "requests_per_minute",
+        "created_at_ms",
+    ]
+    assert _columns(db, "api_keys") == [
+        "key_id",
+        "application_id",
+        "label",
+        "key_hmac",
+        "created_at_ms",
+        "expires_at_ms",
+        "revoked",
+        "last_used_at_ms",
+    ]
+
+    assert runner.rollback(1) == (2,)
     assert _tables(db) == {"schema_migrations", "usage_events"}
+    assert runner.rollback(0) == (1,)
+    assert _tables(db) == {"schema_migrations"}
+    assert runner.migrate() == (1, 2)
+    assert _tables(db) == {"schema_migrations", "usage_events", "applications", "api_keys"}

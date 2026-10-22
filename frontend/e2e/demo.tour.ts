@@ -63,7 +63,7 @@ test("capture the dashboard tour", async ({ page }) => {
   const form = page.locator("form.request-form");
   // By the start of the label's text: "Model" is also one of the choices of "Choose by".
   await form
-    .locator("label", { hasText: /^Tenant/ })
+    .locator("label", { hasText: /^Application/ })
     .locator("select")
     .selectOption("acme");
   await form

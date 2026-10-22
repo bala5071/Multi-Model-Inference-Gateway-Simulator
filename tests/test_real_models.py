@@ -16,6 +16,7 @@ import pytest
 
 from gateway.app import create_default_app
 from gateway.profiles import Tier
+from helpers import bearer, default_server_key
 
 pytestmark = pytest.mark.real_models
 
@@ -37,7 +38,8 @@ async def test_each_tier_generates_text_with_plausible_usage_and_timing(
     ) as client:
         response = await client.post(
             "/v1/generate",
-            json={"tenant_id": "acme", "model": tier, "prompt": PROMPT, "max_tokens": 24},
+            json={"model": tier, "prompt": PROMPT, "max_tokens": 24},
+            headers=bearer(default_server_key()),
         )
 
     assert response.status_code == 200, response.text
@@ -57,8 +59,8 @@ async def test_streaming_delivers_the_text_piece_by_piece(real_backend: None) ->
     ) as client:
         response = await client.post(
             "/v1/generate",
+            headers=bearer(default_server_key()),
             json={
-                "tenant_id": "acme",
                 "model": "economy",
                 "prompt": PROMPT,
                 "max_tokens": 16,

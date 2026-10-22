@@ -2,7 +2,8 @@
 
 See docs/06-api.md, docs/09-routing.md, docs/10-overload.md,
 docs/11-streaming-chunked-prefill.md, docs/12-real-models.md, docs/15-monitoring-api.md,
-docs/16-dashboard.md and docs/17-playground-load-replay.md.
+docs/16-dashboard.md, docs/17-playground-load-replay.md and
+docs/20-applications-api-keys.md.
 """
 
 from __future__ import annotations
@@ -13,24 +14,41 @@ import itertools
 import json
 import math
 import os
+import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Request, Response
+from fastapi import Depends, FastAPI, Header, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+from gateway.apikeys import (
+    INVALID_KEY_MESSAGE,
+    ApiKeyRequiredError,
+    ApiKeyService,
+    ApplicationAccess,
+    InvalidApiKeyError,
+    load_pepper,
+)
+from gateway.applications import (
+    Application,
+    InMemoryApplicationStore,
+    SqliteApplicationStore,
+    seed_demo_applications,
+)
 from gateway.backend_config import build_llamacpp_registry, load_backend_config
 from gateway.backends import BackendError
-from gateway.clock import Clock, EpochSource, PacedSimClock, WallClock
+from gateway.clock import Clock, ClockEpoch, EpochSource, PacedSimClock, SystemEpoch, WallClock
 from gateway.continuous import RequestTooLargeError, build_continuous_registry
+from gateway.database import open_database
 from gateway.events import EventBus
 from gateway.ledger import BudgetExceededError, CostLedger, ModelUsage
 from gateway.loadcontrol import PRESETS, LoadController, UnknownPresetError
 from gateway.metrics import Distribution, MetricsStore
+from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.monitoring import Monitor, Snapshot, render_prometheus
 from gateway.overload import (
     OverloadPolicy,
@@ -42,16 +60,9 @@ from gateway.overload import (
     run_with_timeout,
 )
 from gateway.profiles import PROFILES, Tier, load_calibrated_profiles
+from gateway.ratelimit import RateLimitedError, RequestRateLimiter
 from gateway.registry import ModelRegistry, UnknownModelError
-from gateway.routing import (
-    ModelNotAllowedError,
-    PlansConfig,
-    Quality,
-    Router,
-    UnknownTenantError,
-    load_plans,
-    pick_by_quality,
-)
+from gateway.routing import ModelNotAllowedError, Quality, Router, load_plans, pick_by_quality
 from gateway.schema import GenerateRequest, RequestResult
 from gateway.timeseries import TimeSeriesStore
 from gateway.usage import UsageStore
@@ -62,6 +73,8 @@ MONITOR_STREAM_INTERVAL_MS = 1000.0
 PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 # The speeds the dashboard offers for simulated live mode.
 SIMULATION_SPEEDS = (1.0, 5.0, 20.0)
+# The default server's database, unless GATEWAY_DATABASE names another.
+DEFAULT_DATABASE = "gateway.db"
 # Where `npm run build` in frontend/ puts the dashboard. Not tracked; absent until built.
 DASHBOARD_DIR = Path(__file__).resolve().parent / "dashboard"
 
@@ -74,7 +87,6 @@ class GenerateBody(BaseModel):
     quality: Quality | None = None
     prompt: str = Field(min_length=1)
     max_tokens: int | None = Field(default=None, ge=1)
-    tenant_id: str | None = Field(default=None, min_length=1)
     # Opt in to being served by a cheaper model when the chosen one is missing its SLO.
     allow_downgrade: bool = False
     # Answer with server-sent events, one per output token, instead of one JSON body.
@@ -215,11 +227,21 @@ class Period(BaseModel):
     end_ms: float
 
 
-class TenantUsageResponse(BaseModel):
-    tenant_id: str
+class PlaygroundBody(GenerateBody):
+    """A generate request from the dashboard's Playground in simulated live mode: the
+    application it is for, instead of its key (which never leaves the server)."""
+
+    application_id: str = Field(min_length=1)
+
+
+class ApplicationUsageResponse(BaseModel):
+    application_id: str
+    name: str
     plan: str
     allowed_models: list[str]
     price_multiplier: float
+    max_tokens: int | None
+    requests_per_minute: int | None
     period: Period
     budget_tokens: int
     used_tokens: int
@@ -300,7 +322,7 @@ def create_app(
     registry: ModelRegistry,
     clock: Clock,
     *,
-    plans: PlansConfig | None = None,
+    applications: ApplicationAccess | None = None,
     overload: OverloadPolicy | None = None,
     metrics: MetricsStore | None = None,
     series: TimeSeriesStore | None = None,
@@ -311,6 +333,7 @@ def create_app(
     autostart_load: str | None = None,
     usage_store: UsageStore | None = None,
     epoch: EpochSource | None = None,
+    playground_keys: bool = False,
 ) -> FastAPI:
     """Build the API around an already wired registry.
 
@@ -319,9 +342,16 @@ def create_app(
     task on the server's event loop: the worker starts it on the first request and it
     parks when the model is idle. Shutdown stops them through ``registry.aclose()``.
 
-    With ``plans``, every generate request must name a known tenant, is routed within
-    that tenant's plan and is charged to the tenant's ledger. Without ``plans`` there are
-    no tenants: any model may be used and nothing is charged.
+    With ``applications``, every generate request must carry an API key
+    (``Authorization: Bearer <key>``); it is served for the key's application, within that
+    application's plan, limits and budget, and charged to it. Without ``applications``
+    there are no keys and no applications: any model may be used and nothing is charged,
+    and the request path has no code for any of it.
+
+    ``playground_keys`` (simulated live mode only; needs an in-memory application store)
+    issues one throwaway key per application at startup, kept in memory, and serves
+    ``POST /v1/playground/generate`` with them: the dashboard names an application and the
+    request goes through the same key check as any other.
 
     With ``overload``, requests are cancelled after its timeout, and a request that sets
     ``allow_downgrade`` is moved to a cheaper model while its own is missing its SLO.
@@ -352,7 +382,11 @@ def create_app(
         metrics = MetricsStore(clock)
     request_numbers = itertools.count(1)
     started_ms = clock.now_ms()
-    router = Router(plans, registry) if plans is not None else None
+    router = Router(applications.templates, registry) if applications is not None else None
+    if applications is not None:
+        for application in applications.store.list_applications():
+            Router.check_plan(application.plan, registry)
+    rate_limiter = RequestRateLimiter(clock) if applications is not None else None
     ledger = CostLedger(clock, store=usage_store, epoch=epoch)
     timeout_ms = overload.request_timeout_ms if overload is not None else None
     slo_policy = overload.slo if overload is not None else None
@@ -363,8 +397,8 @@ def create_app(
         metrics,
         series=series if series is not None else TimeSeriesStore(clock),
         events=events if events is not None else EventBus(clock),
-        ledger=ledger if plans is not None else None,
-        plans=plans,
+        ledger=ledger if applications is not None else None,
+        applications=applications.store if applications is not None else None,
         slo_models=tuple(slo_policy.p99_ms) if slo_policy is not None else (),
     )
     monitor = (
@@ -384,6 +418,8 @@ def create_app(
         if load is not None:
             await load.stop()
         await registry.aclose()
+        if applications is not None:
+            applications.keys.flush_last_used()
 
     app = FastAPI(title="Cost-aware multi-model inference gateway", lifespan=lifespan)
     app.state.slo_monitor = monitor
@@ -405,6 +441,12 @@ def create_app(
             {"field": ".".join(str(part) for part in e["loc"][1:]), "message": e["msg"]}
             for e in exc.errors()
         ]
+        for detail in details:
+            if detail["field"] == "tenant_id":
+                detail["message"] = (
+                    "tenant_id is no longer accepted: the API key says which application "
+                    "a request is for ('Authorization: Bearer <key>')."
+                )
         return _error(
             422,
             "invalid_request",
@@ -421,9 +463,31 @@ def create_app(
     async def backend_failed(_: Request, exc: BackendError) -> JSONResponse:
         return JSONResponse({"error": _backend_failure(exc)}, status_code=502)
 
-    @app.exception_handler(UnknownTenantError)
-    async def unknown_tenant(_: Request, exc: UnknownTenantError) -> JSONResponse:
-        return _error(404, "unknown_tenant", str(exc))
+    @app.exception_handler(ApiKeyRequiredError)
+    async def api_key_required(_: Request, exc: ApiKeyRequiredError) -> JSONResponse:
+        return _error(401, "api_key_required", str(exc), headers={"WWW-Authenticate": "Bearer"})
+
+    @app.exception_handler(InvalidApiKeyError)
+    async def invalid_api_key(_: Request, exc: InvalidApiKeyError) -> JSONResponse:
+        # One message for every bad key, so a key cannot be probed.
+        return _error(
+            401,
+            "invalid_api_key",
+            INVALID_KEY_MESSAGE,
+            headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
+        )
+
+    @app.exception_handler(RateLimitedError)
+    async def rate_limited(_: Request, exc: RateLimitedError) -> JSONResponse:
+        retry_after_s = max(1, math.ceil(exc.retry_after_ms / 1000))
+        return _error(
+            429,
+            "rate_limited",
+            f"{exc} Retry in {retry_after_s} seconds.",
+            headers={"Retry-After": str(retry_after_s)},
+            limit_per_minute=exc.limit,
+            retry_after_s=retry_after_s,
+        )
 
     @app.exception_handler(ModelNotAllowedError)
     async def model_not_allowed(_: Request, exc: ModelNotAllowedError) -> JSONResponse:
@@ -537,10 +601,11 @@ def create_app(
             valid_models=list(registry.valid_names),
         )
 
-    @app.post("/v1/generate", response_model=GenerateResponse)
-    async def generate(
-        body: GenerateBody, response: Response
+    async def serve(
+        body: GenerateBody, response: Response, caller: Application | None
     ) -> GenerateResponse | JSONResponse | StreamingResponse:
+        """Serve one generate request; ``caller`` is None exactly when there are no
+        applications."""
         if body.model is None and body.quality is None:
             return choice_error("Give either a model or a quality.", "model")
         if body.model is not None and body.quality is not None:
@@ -548,20 +613,26 @@ def create_app(
 
         price_multiplier = 1.0
         allowed_models: tuple[str, ...] = registry.names
-        if router is None:
+        max_tokens = body.max_tokens
+        if caller is None:
             if body.model is not None:
                 model = registry.resolve(body.model)
             else:
                 assert body.quality is not None
                 model = pick_by_quality(registry.names, body.quality)
         else:
-            if body.tenant_id is None:
-                return _error(
-                    401, "tenant_required", "This gateway needs a tenant_id on every request."
-                )
-            route = router.route(body.tenant_id, model=body.model, quality=body.quality)
+            assert router is not None
+            assert rate_limiter is not None
+            if caller.max_tokens is not None:
+                if max_tokens is not None and max_tokens > caller.max_tokens:
+                    return choice_error(
+                        f"At most {caller.max_tokens} on this application's plan.", "max_tokens"
+                    )
+                max_tokens = max_tokens or caller.max_tokens
+            rate_limiter.admit(caller.id, caller.requests_per_minute)
+            route = router.route(caller, model=body.model, quality=body.quality)
             try:
-                ledger.check_budget(body.tenant_id, route.plan.monthly_token_budget)
+                ledger.check_budget(caller.id, route.plan.monthly_token_budget)
             except BudgetExceededError as exc:
                 monitoring.budget_exhausted(route.model, exc)
                 raise
@@ -577,7 +648,7 @@ def create_app(
                 downgraded_from, model = model, healthier
 
         request_id = f"req-{next(request_numbers)}"
-        tenant_id = body.tenant_id if router is not None else None
+        tenant_id = caller.id if caller is not None else None
         headers = {"X-Model-Used": model}
         if downgraded_from is not None:
             headers["X-Downgraded-From"] = downgraded_from
@@ -596,7 +667,7 @@ def create_app(
             if body.stream:
                 tokens.put_nowait((index, at_ms - arrived_ms, text))
 
-        request = GenerateRequest(request_id, model, body.prompt, body.max_tokens)
+        request = GenerateRequest(request_id, model, body.prompt, max_tokens)
 
         async def tracked() -> RequestResult:
             monitoring.request_started(model)
@@ -683,17 +754,17 @@ def create_app(
             headers={**headers, "Cache-Control": "no-cache"},
         )
 
-    @app.get("/v1/tenants/{tenant_id}/usage", response_model=TenantUsageResponse)
-    async def tenant_usage(tenant_id: str) -> TenantUsageResponse | JSONResponse:
-        if router is None:
-            return _error(404, "tenancy_disabled", "This gateway has no plans configured.")
-        plan = router.plan_for(tenant_id)
-        usage = ledger.usage(tenant_id)
-        return TenantUsageResponse(
-            tenant_id=tenant_id,
+    def usage_body(caller: Application) -> ApplicationUsageResponse:
+        plan = caller.plan
+        usage = ledger.usage(caller.id)
+        return ApplicationUsageResponse(
+            application_id=caller.id,
+            name=caller.name,
             plan=plan.name,
             allowed_models=list(plan.models),
             price_multiplier=plan.price_multiplier,
+            max_tokens=caller.max_tokens,
+            requests_per_minute=caller.requests_per_minute,
             period=Period(start_ms=usage.period_start_ms, end_ms=usage.period_end_ms),
             budget_tokens=plan.monthly_token_budget,
             used_tokens=usage.total.billed_tokens,
@@ -701,6 +772,72 @@ def create_app(
             total=_totals(usage.total),
             by_model={name: _totals(u) for name, u in usage.by_model.items()},
         )
+
+    if applications is None:
+        # No applications: the request path has no key check at all.
+        @app.post("/v1/generate", response_model=GenerateResponse)
+        async def generate(
+            body: GenerateBody, response: Response
+        ) -> GenerateResponse | JSONResponse | StreamingResponse:
+            return await serve(body, response, None)
+
+        @app.get("/v1/applications/me/usage")
+        async def usage_disabled() -> JSONResponse:
+            return _error(
+                404, "applications_disabled", "This gateway has no applications configured."
+            )
+
+    else:
+        keys = applications.keys
+
+        # async, so it runs on the event loop: a dependency run on a thread would let a
+        # SimClock's time jump, and the SQLite connection belongs to the loop's thread.
+        async def authenticate(authorization: str | None = Header(default=None)) -> Application:
+            scheme, _, credentials = (authorization or "").strip().partition(" ")
+            if scheme.lower() != "bearer" or not credentials.strip():
+                raise ApiKeyRequiredError()
+            return keys.authenticate(credentials.strip())
+
+        @app.post("/v1/generate", response_model=GenerateResponse)
+        async def generate_for_application(
+            body: GenerateBody,
+            response: Response,
+            caller: Application = Depends(authenticate),
+        ) -> GenerateResponse | JSONResponse | StreamingResponse:
+            return await serve(body, response, caller)
+
+        @app.get("/v1/applications/me/usage", response_model=ApplicationUsageResponse)
+        async def application_usage(
+            caller: Application = Depends(authenticate),
+        ) -> ApplicationUsageResponse:
+            return usage_body(caller)
+
+    # Throwaway keys for the Playground: in memory, never printed, logged or returned.
+    playground: dict[str, str] = {}
+    if playground_keys:
+        if applications is None or not isinstance(applications.store, InMemoryApplicationStore):
+            raise ValueError("playground_keys needs applications in an in-memory store")
+        for application in applications.store.list_applications():
+            issued = applications.keys.issue(application.id, "playground (in memory)")
+            playground[application.id] = issued.key
+
+    @app.post("/v1/playground/generate", response_model=GenerateResponse)
+    async def playground_generate(
+        body: PlaygroundBody, response: Response
+    ) -> GenerateResponse | JSONResponse | StreamingResponse:
+        if applications is None or not playground:
+            return _error(
+                404,
+                "playground_unavailable",
+                "The Playground sends requests only in simulated live mode. Elsewhere, send "
+                "them to POST /v1/generate with an API key. See docs/20-applications-api-keys.md.",
+            )
+        key = playground.get(body.application_id)
+        if key is None:
+            raise InvalidApiKeyError()
+        caller = applications.keys.authenticate(key)
+        request = GenerateBody.model_validate(body.model_dump(exclude={"application_id"}))
+        return await serve(request, response, caller)
 
     @app.get("/")
     async def index() -> dict[str, object]:
@@ -711,7 +848,7 @@ def create_app(
             "endpoints": [
                 "POST /v1/generate",
                 "GET /v1/models",
-                "GET /v1/tenants/{tenant_id}/usage",
+                "GET /v1/applications/me/usage",
                 "GET /v1/overload",
                 "GET /v1/control",
                 "GET /v1/monitor/snapshot",
@@ -818,38 +955,38 @@ def create_app(
 
     # --- load control and simulated live mode ---------------------------------------------
 
-    # Which tenants may use each model, in the plans file's order.
-    tenants_for: dict[str, list[str]] = {}
-    if plans is not None:
-        for tenant, plan_name in plans.tenants.items():
-            for allowed in plans.plans[plan_name].models:
-                tenants_for.setdefault(allowed, []).append(tenant)
+    # Which applications may use each model, in the order they were created.
+    applications_for: dict[str, list[Application]] = {}
+    if applications is not None:
+        for application in applications.store.list_applications():
+            for allowed in application.plan.models:
+                applications_for.setdefault(allowed, []).append(application)
 
     async def send_planned(planned: PlannedRequest, allow_downgrade: bool) -> bool:
-        """Put one generated request through the same handler an HTTP request reaches."""
-        tenant_id = None
-        if plans is not None:
-            candidates = tenants_for.get(registry.resolve(planned.model), [])
+        """Put one generated request through the same handler an HTTP request reaches,
+        for an application that is already resolved (load control holds no keys)."""
+        caller = None
+        if applications is not None:
+            candidates = applications_for.get(registry.resolve(planned.model), [])
             if not candidates:
                 return False
-            # Spread over the tenants that may use the model, by a rule with no randomness.
-            tenant_id = candidates[planned.index % len(candidates)]
+            # Spread over the applications that may use the model, with no randomness.
+            caller = candidates[planned.index % len(candidates)]
         body = GenerateBody(
             model=planned.model,
             prompt=planned.prompt,
             max_tokens=planned.max_tokens,
-            tenant_id=tenant_id,
             allow_downgrade=allow_downgrade,
         )
         try:
-            answer = await generate(body, Response())
+            answer = await serve(body, Response(), caller)
         except (
             BackendError,
             BudgetExceededError,
             ModelNotAllowedError,
+            RateLimitedError,
             RequestTooLargeError,
             UnknownModelError,
-            UnknownTenantError,
         ):
             return False
         return isinstance(answer, GenerateResponse)
@@ -872,6 +1009,7 @@ def create_app(
                 else None,
                 "status": dataclasses.asdict(load.status()) if load is not None else None,
             },
+            "playground": {"available": bool(playground)},
             "simulation": {
                 "active": paced is not None,
                 "speed": paced.speed if paced is not None else None,
@@ -1044,10 +1182,18 @@ def create_simulated_live_app(
         max_queue_len=DEFAULT_MAX_QUEUE_LEN,
         prefill_chunk_tokens=DEFAULT_PREFILL_CHUNK_TOKENS,
     )
+    # Applications and keys in memory only, for the life of the process: the pepper is a
+    # throwaway too, and no key is ever printed or written anywhere.
+    templates = load_plans()
+    store = InMemoryApplicationStore()
+    epoch = ClockEpoch(clock)
+    seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms())
+    keys = ApiKeyService(store, secrets.token_bytes(32), epoch)
     return create_app(
         registry,
         clock,
-        plans=load_plans(),
+        applications=ApplicationAccess(keys, templates),
+        playground_keys=True,
         overload=DEFAULT_OVERLOAD,
         dashboard_dir=dashboard_dir,
         load_control=True,
@@ -1072,6 +1218,11 @@ def create_default_app() -> FastAPI:
     ``GATEWAY_SEED`` (default 0) seeds the simulated output lengths. ``GATEWAY_PLANS`` is
     the path of a plans file; without it the plans packaged with the gateway are used.
 
+    Applications and API keys are read from the SQLite database ``GATEWAY_DATABASE``
+    (default ``gateway.db``), created and migrated if needed; ``scripts/manage.py`` creates
+    applications and issues keys. ``GATEWAY_KEY_PEPPER`` is required: without it the server
+    refuses to start (docs/20-applications-api-keys.md).
+
     ``GATEWAY_LOAD_CONTROL=1`` lets the dashboard start and stop load against this server.
 
     ``GATEWAY_SIMULATED_LIVE=1`` gives simulated live mode instead of all the above (see
@@ -1093,8 +1244,16 @@ def create_default_app() -> FastAPI:
             seed=seed, speed=speed, preset=os.environ.get("GATEWAY_SIM_PRESET", "steady")
         )
     clock = WallClock()
+    # Before anything else: without the pepper no key can be checked.
+    pepper = load_pepper(os.environ)
     plans_path = os.environ.get("GATEWAY_PLANS")
-    plans = load_plans(Path(plans_path) if plans_path else None)
+    templates = load_plans(Path(plans_path) if plans_path else None)
+    epoch = SystemEpoch()
+    database = open_database(os.environ.get("GATEWAY_DATABASE", DEFAULT_DATABASE))
+    MigrationRunner(database, MIGRATIONS, epoch).migrate()
+    access = ApplicationAccess(
+        ApiKeyService(SqliteApplicationStore(database), pepper, epoch), templates
+    )
     backends_path = os.environ.get("GATEWAY_BACKENDS")
     backends = load_backend_config(
         Path(backends_path) if backends_path else None,
@@ -1114,7 +1273,7 @@ def create_default_app() -> FastAPI:
     return create_app(
         registry,
         clock,
-        plans=plans,
+        applications=access,
         overload=DEFAULT_OVERLOAD,
         dashboard_dir=DASHBOARD_DIR,
         load_control=os.environ.get("GATEWAY_LOAD_CONTROL") == "1",

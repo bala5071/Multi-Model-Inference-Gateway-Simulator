@@ -25,7 +25,7 @@ from gateway.clock import SimClock
 from gateway.cost_model import estimate_cost
 from gateway.passthrough import PassthroughWorker
 from gateway.profiles import PREMIUM, Tier
-from gateway.routing import load_plans
+from helpers import application_access, bearer, default_server_key
 from mock_llama import MockLlamaServer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -41,12 +41,19 @@ CONFIG = BackendConfig(
 
 @asynccontextmanager
 async def _gateway(
-    server: MockLlamaServer, clock: SimClock, config: BackendConfig = CONFIG
+    server: MockLlamaServer,
+    clock: SimClock,
+    config: BackendConfig = CONFIG,
+    application: str = "acme",
 ) -> AsyncIterator[httpx.AsyncClient]:
     registry = build_llamacpp_registry(config, clock, client=server.client())
-    app = create_app(registry, clock, plans=load_plans())
+    access, keys = application_access(clock)
+    app = create_app(registry, clock, applications=access)
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+    # Every request is for one application (acme unless the test says otherwise).
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://gateway", headers=bearer(keys[application])
+    ) as client:
         yield client
     await registry.aclose()
 
@@ -61,7 +68,7 @@ def _events(response: httpx.Response) -> list[tuple[str, dict[str, Any]]]:
 
 
 def _body(**fields: Any) -> dict[str, Any]:
-    return {"tenant_id": "acme", "prompt": "Say hello to the world", **fields}
+    return {"prompt": "Say hello to the world", **fields}
 
 
 # --- serving -------------------------------------------------------------------------------
@@ -72,7 +79,7 @@ async def test_gateway_returns_the_models_text_usage_and_measured_timing() -> No
     server = MockLlamaServer(clock)
     async with _gateway(server, clock) as client:
         response = await client.post("/v1/generate", json=_body(model="premium", max_tokens=16))
-        usage = (await client.get("/v1/tenants/acme/usage")).json()
+        usage = (await client.get("/v1/applications/me/usage")).json()
         metrics = (await client.get("/metrics/summary")).json()["models"]["premium"]
 
     base = estimate_cost(PREMIUM, new_prefill_tokens=7, output_tokens=3, batch_size=1).cost_usd
@@ -118,10 +125,8 @@ async def test_each_tier_is_sent_to_its_own_server() -> None:
 async def test_plan_limits_still_apply_with_real_backends() -> None:
     clock = SimClock()
     server = MockLlamaServer(clock)
-    async with _gateway(server, clock) as client:
-        response = await client.post(
-            "/v1/generate", json=_body(tenant_id="initech", model="premium")
-        )
+    async with _gateway(server, clock, application="initech") as client:
+        response = await client.post("/v1/generate", json=_body(model="premium"))
     assert response.status_code == 403
     assert server.requests == []  # the model server was never contacted
 
@@ -174,7 +179,7 @@ async def test_server_down_is_a_502_with_a_clear_message() -> None:
         down = await client.post("/v1/generate", json=_body(model="premium"))
         streamed = await client.post("/v1/generate", json=_body(model="premium", stream=True))
         other = await client.post("/v1/generate", json=_body(model="economy"))
-        usage = (await client.get("/v1/tenants/acme/usage")).json()
+        usage = (await client.get("/v1/applications/me/usage")).json()
         metrics = (await client.get("/metrics/summary")).json()["models"]
 
     assert down.status_code == 502
@@ -216,7 +221,7 @@ async def test_connection_lost_mid_stream_ends_the_stream_with_an_error_event() 
     async with _gateway(server, clock) as client:
         streamed = await client.post("/v1/generate", json=_body(model="economy", stream=True))
         plain = await client.post("/v1/generate", json=_body(model="economy"))
-        usage = (await client.get("/v1/tenants/acme/usage")).json()
+        usage = (await client.get("/v1/applications/me/usage")).json()
 
     events = _events(streamed)
     assert [name for name, _ in events] == ["token", "token", "error"]
@@ -352,11 +357,12 @@ async def test_default_app_switches_backend_by_config(
     path.write_text(f"backend: simulated\nllamacpp:\n  servers:\n{servers}", encoding="utf-8")
     monkeypatch.setenv("GATEWAY_BACKENDS", str(path))
     body = _body(model="economy", max_tokens=1)
+    key = default_server_key("acme")
 
     async def post() -> httpx.Response:
         transport = httpx.ASGITransport(app=create_default_app())
         async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
-            return await client.post("/v1/generate", json=body)
+            return await client.post("/v1/generate", json=body, headers=bearer(key))
 
     simulated = await post()
     monkeypatch.setenv("GATEWAY_BACKEND", "llamacpp")

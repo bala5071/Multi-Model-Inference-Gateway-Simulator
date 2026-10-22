@@ -13,7 +13,7 @@ import {
 import { createSseParser } from "./sse";
 
 const FORM: PlaygroundForm = {
-  tenant: "acme",
+  application: "acme",
   choose: "model",
   model: "premium",
   quality: "best",
@@ -96,12 +96,12 @@ describe("createSseParser", () => {
 });
 
 describe("requestBody", () => {
-  it("sends the model, the tenant and the limit, and always asks for a stream", () => {
+  it("sends the model, the application and the limit, and always asks for a stream", () => {
     expect(requestBody(FORM)).toEqual({
       prompt: "hello there",
       stream: true,
       model: "premium",
-      tenant_id: "acme",
+      application_id: "acme",
       max_tokens: 32,
     });
   });
@@ -111,13 +111,13 @@ describe("requestBody", () => {
       prompt: "hello there",
       stream: true,
       quality: "best",
-      tenant_id: "acme",
+      application_id: "acme",
       max_tokens: 32,
     });
   });
 
   it("leaves out what was not set", () => {
-    const body = requestBody({ ...FORM, tenant: "", maxTokens: "", allowDowngrade: true });
+    const body = requestBody({ ...FORM, application: "", maxTokens: "", allowDowngrade: true });
     expect(body).toEqual({
       prompt: "hello there",
       stream: true,
