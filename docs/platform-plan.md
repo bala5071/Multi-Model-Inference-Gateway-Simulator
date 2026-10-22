@@ -162,6 +162,9 @@ no new code on the request path: no store, no auth, no extra awaits.
 
 The first action of step 1 records the sha256 of each on the tree this plan is committed
 on. After every step they are produced again and compared; any difference stops the step.
+The check is `uv run python scripts/protected_outputs.py`, against the sums committed in
+`scripts/protected_outputs.sha256` (recorded at `d1ad230`; identical in content to the
+`4a35700` outputs, with line endings normalised so any checkout gives the same sums).
 The one planned exception is step 6: `report.py` says "tenant" in four sentences, and
 renaming them changes `REPORT.md`. That diff must contain those words and nothing else, and
 it gets new recorded sums.

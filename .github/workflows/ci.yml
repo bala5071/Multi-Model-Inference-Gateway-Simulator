@@ -22,6 +22,10 @@ jobs:
       - name: Install
         run: uv sync --locked
 
+      # The usage store and migrations run on whatever SQLite this Python was built with.
+      - name: SQLite version
+        run: uv run python -c "import sqlite3; print('SQLite', sqlite3.sqlite_version)"
+
       - name: Ruff lint
         run: uv run ruff check .
 

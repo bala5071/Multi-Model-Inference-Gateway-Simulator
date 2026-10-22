@@ -161,8 +161,11 @@ the monitoring API (`docs/15`); it has no logic of its own about the gateway.
   development machine (no Docker): do not write that they work until CI has built them.
 
 `scripts/` holds operational entry points only: `perf_gate.py`, `demo.py`,
-`capture_demo.py` (retakes the dashboard pictures in `docs/img/`) and
-`run_local_models.sh`. Anything that measures or compares goes in `benchmarks/`.
+`capture_demo.py` (retakes the dashboard pictures in `docs/img/`),
+`run_local_models.sh`, and `protected_outputs.py`, which checks the outputs that must not
+change against the sha256 sums in `scripts/protected_outputs.sha256` (a gate, like
+`perf_gate.py`). Anything that measures or compares results goes in `benchmarks/`.
+Never refresh that baseline to make a failure pass; the README says how to refresh it.
 
 Rules:
 
@@ -238,6 +241,7 @@ uv run ruff format --check . # formatting (drop --check to apply)
 uv run mypy                  # type check
 uv run pytest                # tests
 uv run python scripts/perf_gate.py   # performance gate
+uv run python scripts/protected_outputs.py  # protected outputs unchanged (platform work)
 uv run python -m benchmarks.report   # regenerate docs/REPORT.md
 ```
 

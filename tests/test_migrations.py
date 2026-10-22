@@ -41,7 +41,11 @@ def _fill_dollars(c: sqlite3.Connection) -> None:
 
 
 def _drop_dollars(c: sqlite3.Connection) -> None:
-    c.execute("ALTER TABLE items DROP COLUMN price_usd")
+    # A rebuild, not ALTER TABLE ... DROP COLUMN, which needs SQLite 3.35 or later.
+    c.execute("CREATE TABLE items_new (id INTEGER PRIMARY KEY, price_cents INTEGER NOT NULL)")
+    c.execute("INSERT INTO items_new (id, price_cents) SELECT id, price_cents FROM items")
+    c.execute("DROP TABLE items")
+    c.execute("ALTER TABLE items_new RENAME TO items")
 
 
 ITEMS = Migration(1, "items", _create_items, _drop_items)

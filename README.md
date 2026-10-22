@@ -454,6 +454,28 @@ npm run check    # eslint, prettier, tsc, component tests
 npm run e2e      # browser smoke tests against the gateway in simulated live mode
 ```
 
+### Protected outputs
+
+The performance gate results, the load generator's output, the report and the tracked
+benchmark data must not change while the platform work goes on
+([plan, section 5](docs/platform-plan.md)). Their sha256 sums are committed in
+[scripts/protected_outputs.sha256](scripts/protected_outputs.sha256):
+
+```sh
+uv run python scripts/protected_outputs.py    # regenerate, compare; exits 1 on any change
+```
+
+A changed sum is a failure to explain, not a file to refresh. Refresh the baseline only
+when a change to one of those outputs is intended and understood:
+
+1. Run the check and note exactly which sums changed and why.
+2. Run `uv run python scripts/protected_outputs.py --update`, which rewrites the baseline.
+3. Commit the new `scripts/protected_outputs.sha256` on its own, with the reason and the
+   list of changed files in the commit message and the pull request.
+
+Text files are hashed with Windows line endings read as Unix ones, so a checkout on either
+system gives the same sums. `docs/REPORT.md` is hashed without the line naming its commit.
+
 Without `make`, run the commands from the [Makefile](Makefile) directly. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the rules and [docs/README.md](docs/README.md) for the
 documentation index.
