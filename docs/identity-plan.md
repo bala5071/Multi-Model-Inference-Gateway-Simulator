@@ -67,7 +67,7 @@ New migrations only; the A1 tables are unchanged except for the one column in mi
 | 5 | `users (id, username unique, password_hash, organization_id, created_at, disabled, must_change_password, bootstrap, failed_logins, first_failure_at, locked_until, platform_admin)`. Step 4 |
 | 6 | `sessions (id_hash, handle, user_id, csrf_hash, created_at, last_seen_at, expires_at, revoked)`; session ids and CSRF tokens are stored only as SHA-256; `handle` is a random public id for the session list. Step 4 (step 6 adds `step_up_until`) |
 | 7 | `audit_log (seq, at, actor_user_id, action, target_type, target_id, outcome, details)`; `details` is written through an allowlist of fields. Step 4 |
-| 8 | `role_assignments (user_id, role, scope_type, scope_id, granted_by, granted_at)`; `app_roles (application_id, name)` for application-defined roles such as `clinic_staff`. Step 5: moves `users.platform_admin` into `role_assignments` and drops the column |
+| 8 | `role_assignments (user_id, role, scope_type, scope_id, granted_by, granted_at)`, unique per user, role and scope, `scope_id` `*` for the platform scope; `app_roles (application_id, name)` for application-defined roles such as `clinic_staff`. Step 5: moves `users.platform_admin` into `role_assignments` and drops the column through the table-rebuild path (a backup first, through `manage.py migrate`) |
 
 **Organizations.** An `individual` organization has exactly one member, its `org_admin`, and
 refuses to add anyone else. A `business` organization has any number of members and allows
@@ -166,12 +166,27 @@ and a session reaches only login, logout, `/me`, change-password and the session
 
 ## 7. Roles and `authorize`
 
+Step 5 builds this section (note 28); the management endpoints that use it are step 7.
+
 - **Role assignments:** `(user, role, scope_type, scope_id)`, scope types `platform`,
-  `organization` and `application`.
-- **Built-in roles:** `platform_admin` (global); `org_admin` (its organization, and app_admin
-  and viewer of every application in it); `app_admin` (its application, and viewer of it);
-  `viewer`. A user is assigned roles only within their own organization (platform_admin
-  excepted).
+  `organization` and `application`, written by migration 8's table and read from the
+  database on every request (no cache), so removing a role takes effect on a session's next
+  request.
+- **Built-in roles:** `platform_admin` (platform scope); `org_admin` (its organization, and
+  app_admin and viewer of every application in it); `app_admin` (its application, and viewer
+  of it); `viewer` (an organization or an application: it reads usage and the application list
+  in its scope, and nothing else). A user is assigned roles only within their own
+  organization (platform_admin excepted).
+- **What platform_admin can do:** create, disable and enable organizations, list them, see
+  aggregate usage per organization, create users in any organization, and (through the CLI
+  only) grant `org_admin`. Nothing at application level: no application keys, application
+  roles, provider keys or anything inside an application (the gateway stores no prompts or
+  responses, so there are no transcripts to read).
+- **Granting:** org_admin grants and revokes roles within its own organization, never
+  `platform_admin`; app_admin cannot grant `org_admin`; `platform_admin` is granted only
+  through the CLI. The last `org_admin` of an organization and the last `platform_admin`
+  cannot be revoked or disabled. Roles and organizations are managed through the CLI in A2;
+  there are no endpoints for them.
 - **Existing users at step 5:** the role migration gives each user with
   `users.platform_admin` the `platform_admin` role, and every other existing user no role at
   all: membership of an organization alone grants nothing. The one exception is required: the
@@ -179,21 +194,36 @@ and a session reaches only login, logout, `/me`, change-password and the session
 - **Application-defined roles** (for example `clinic_staff`) are defined by an app_admin,
   carried in tokens for the application to interpret, and grant nothing inside the gateway.
 - **One permission table**, `permissions.py`: each action, the roles and scope relation that
-  allow it, and whether it needs step-up. Actions cover users, passwords, roles,
-  organizations, applications, application API keys (moving from CLI-only to endpoints),
-  application roles, the audit log and usage. It also declares `provider_keys.add`,
-  `provider_keys.replace`, `provider_keys.delete` and `mode.change` (step-up; A5 adds the
-  endpoints), and `monitoring.*` and `control.*`, marked "local only until A8" (section 10).
+  allow it, whether it needs step-up (enforced from step 6), and when it is wired (now, step 7,
+  A5 or A8). Actions cover users, passwords, roles, organizations, applications, application
+  API keys, application roles, the audit log and usage. It also declares `provider_keys.*`
+  and `mode.change` (step-up; A5 adds the endpoints), and `monitoring.*` and `control.*`,
+  marked "local only until A8" (section 10).
 - **`authorize(actor, action, resource) -> Decision`**, deny by default. A resource carries its
   application and organization, so a request that crosses organizations is denied whatever
-  the role (platform_admin excepted, by design).
-- **Every endpoint declares its permission** through a FastAPI dependency. A test walks
-  `app.routes` and fails on any route that neither declares one nor appears on the explicit
-  public list (generate, which takes an application key; healthz; JWKS; login).
+  the role (platform_admin excepted, by design, for its platform-level actions only).
+- **Every endpoint declares its permission** through a FastAPI dependency, and that dependency
+  enforces it: `requires(action, resolver)` resolves the resource from the request and calls
+  `authorize` itself, so a route cannot be declared without being checked. Other routes are
+  declared `local_only(action)` (enforced by the guard of section 10 until A8) or `public(...)`
+  on an explicit list (generate and an application's own usage, which take an application
+  key; healthz; models; the documentation; the session's own `/v1/auth` endpoints). A test
+  walks `app.routes` of every app variant and fails on any route with no declaration. A
+  mutation check (authorize made to allow everything) must fail the matrix and the HTTP tests.
+- **No difference between missing and forbidden:** an organization or application that does
+  not exist and one the actor may not touch get the same status and body, byte for byte.
 - **The test matrix is generated from the table:** every role, scope relation and action
-  through `authorize`, and representative endpoints through HTTP. The role table in the docs
-  is parsed by a test and must equal `permissions.py`, so every cell of the documented table
-  is tested.
+  through `authorize`, checked against invariants written apart from the table, and
+  representative endpoints through HTTP. The role table in the docs is parsed by a test and
+  must equal `permissions.py`, so every cell of the documented table is tested.
+- **Management endpoints** (step 7: users, applications and application keys only) live under
+  `/v1/admin/orgs/{org}/...`, never under `/v1/applications/...` (the prefix of the public,
+  key-authenticated `/v1/applications/me/usage`), and are local-only until A8. Creating a user
+  goes through the same checks as the CLI, the individual rule included. Every
+  state-changing one needs the session's CSRF token and the Origin check, and step-up where
+  the table says so. A new application key is returned once, with `Cache-Control: no-store`,
+  and never logged. The cost of reading assignments on each request is measured, and
+  `/v1/generate`, the performance gate and the protected outputs are shown unaffected.
 
 ## 8. Step-up
 
@@ -201,14 +231,18 @@ and a session reaches only login, logout, `/me`, change-password and the session
 injected clock. Actions flagged in the table return 403 `step_up_required` without it. In A2:
 changing roles, creating or disabling users, and issuing, rotating or revoking application API
 keys; provider keys and modes are flagged now and wired in A5. Step-up through a token is not
-possible: tokens are for other applications, and sensitive actions need a session.
+possible: tokens are for other applications, and sensitive actions need a session. Step-up
+(step 6) lands before the management endpoints (step 7), so they enforce it from the start.
 
 ## 9. Audit log
 
 Logins, failures, lockouts, unlocks, password changes and resets, user creation and disabling,
 role changes, key changes, and (from A5) mode changes: who, when, what, and the outcome. Fields
 pass through an allowlist, so a password, token, key, session id or CSRF token cannot be
-written. platform_admin reads all of it; org_admin reads their organization's.
+written. platform_admin reads organization-, user-, role- and login-level entries; entries
+about application keys and application roles are read only by the org_admin of that
+organization and the app_admin of that application. org_admin reads all of their
+organization's entries, including those about accounts a platform_admin created in it.
 
 Step 4 writes the login entries. A failure for an unknown username is recorded with no
 identifier at all (one row per attempt, nothing of what was typed). Rows for unknown-user
@@ -319,7 +353,10 @@ derived from it to a third party, so only the bundled blocklist is used); **the 
 not tamper-evident** (anyone who can write the database can change it); **the in-memory
 login limiter can be flushed** by trying many unique usernames, while the database lockout
 still protects real accounts; **the `__Host-` cookie prefix cannot be used** until the server
-runs over HTTPS (it requires `Secure`); the measured timing difference between a failed
+runs over HTTPS (it requires `Secure`); **a platform_admin who creates an account knows its
+first password** (mitigated: an account a platform_admin creates must change its password at
+first login, and the creation is in the audit log, visible to that organization's
+org_admin); the measured timing difference between a failed
 login for a known and an unknown username (note 27); **two hashing
 threads bound login throughput**, so a flood of logins can delay legitimate ones (logins are
 limited per username; limits per source address wait for A8). For the local-only endpoints it states what the checks of
@@ -346,19 +383,23 @@ Each step is its own pull request and stops for review.
    and a burst of 8 timed through the running server at the default argon2 setting (64 MiB,
    3, 1), with the hardware, in note 24; the known-versus-unknown failure timing and the
    cost of writing `last_seen_at`, in note 27. Done (note 27).
-5. Roles, `permissions.py`, `authorize`, the per-route declarations, the management endpoints
-   (users, roles, organizations, applications, application keys, application roles, audit)
-   and the generated matrix.
-6. Step-up.
-7. Access tokens, JWKS and `generate-signing-key`.
-8. The threat model, the leak scan across everything, and the docs.
+5. (Was 5a.) Roles: migration 8 and its backfill, `permissions.py`, `authorize`, the
+   per-route declarations (`requires` enforcing, `local_only`, `public`), the generated matrix
+   and the documented table, and the CLI for roles (`grant-role`, `revoke-role`,
+   `list-roles`). No new endpoint.
+6. Step-up, before the management endpoints so they enforce it from the start.
+7. (Was 5b.) The management endpoints under `/v1/admin/orgs/{org}/...`: users, applications
+   and application keys, each declaring and enforcing its permission; the escalation and
+   last-admin tests, missing equals forbidden, and the cost of reading assignments.
+8. Access tokens, JWKS and `generate-signing-key`.
+9. The threat model, the leak scan across everything, and the docs.
 
 ## 14. Waiting for A8
 
 What A2 leaves for the A8 step, collected from the sections above:
 
 - **Monitoring and load control with roles** in place of local-only (section 10); `/v1/auth`
-  reachable from other machines.
+  and the management endpoints under `/v1/admin` reachable from other machines.
 - **TLS**, and with it the `Secure` session cookie by default and the `__Host-` prefix.
 - **Limits per source address** for logins and failed key checks, once there is a client
   address the server can trust.
