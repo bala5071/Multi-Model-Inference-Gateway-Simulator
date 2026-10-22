@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 import pytest
 
-from gateway.app import create_app, create_default_app
+from gateway.app import create_app
 from gateway.backend_config import (
     BackendConfig,
     BackendConfigError,
@@ -25,7 +25,7 @@ from gateway.clock import SimClock
 from gateway.cost_model import estimate_cost
 from gateway.passthrough import PassthroughWorker
 from gateway.profiles import PREMIUM, Tier
-from helpers import application_access, bearer, default_server_key
+from helpers import application_access, bearer, default_server, default_server_key
 from mock_llama import MockLlamaServer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -360,9 +360,10 @@ async def test_default_app_switches_backend_by_config(
     key = default_server_key("acme")
 
     async def post() -> httpx.Response:
-        transport = httpx.ASGITransport(app=create_default_app())
-        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
-            return await client.post("/v1/generate", json=body, headers=bearer(key))
+        with default_server() as app:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+                return await client.post("/v1/generate", json=body, headers=bearer(key))
 
     simulated = await post()
     monkeypatch.setenv("GATEWAY_BACKEND", "llamacpp")

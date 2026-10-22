@@ -81,7 +81,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `database.py` + `migrations/` — `open_database` (WAL, busy timeout, autocommit) and the
   versioned `MigrationRunner`; migration 1 is `usage_events`, 2 `applications` and
   `api_keys`, 3 an index for retention. The default database is in the user's data folder,
-  owner-only (exists)
+  owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
+  `restore_database` use SQLite's backup API (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),
   `pick_downgrade`, `QueueFullError`; the queue limit itself is in the worker (exists)
 - `metrics.py` — nearest-rank `percentile` and `MetricsStore`: per-model metrics in bounded
@@ -138,6 +139,8 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   reported (exists)
 - `benchmarks/usage_store_writes.py` — times one usage-event write on the local disk; the
   numbers in `docs/19-usage-store.md` (exists)
+- `benchmarks/usage_retention.py` — times pruning old usage events in batches and in one
+  go; the numbers in `docs/21-persistence.md` (exists)
 - `benchmarks/key_checks.py` — times a key check, and what writing `last_used_at` per
   request would add; the numbers in `docs/20-applications-api-keys.md` (exists)
 

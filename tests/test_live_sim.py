@@ -14,7 +14,7 @@ from gateway.app import create_app, create_default_app, create_simulated_live_ap
 from gateway.clock import PacedSimClock, SimClock
 from gateway.continuous import build_continuous_registry
 from gateway.loadcontrol import UnknownPresetError
-from helpers import application_access
+from helpers import application_access, default_server
 
 
 class Waits:
@@ -269,10 +269,10 @@ async def test_default_app_offers_load_control_only_when_asked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def available() -> bool:
-        app = create_default_app()
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
-            control = (await client.get("/v1/control")).json()
+        with default_server() as app:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+                control = (await client.get("/v1/control")).json()
         assert control["simulation"]["active"] is False
         return bool(control["load"]["available"])
 

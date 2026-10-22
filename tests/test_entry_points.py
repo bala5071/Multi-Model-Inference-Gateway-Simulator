@@ -22,6 +22,7 @@ from benchmarks import (
     metrics_example,
     overload,
     report,
+    usage_retention,
     usage_store_writes,
 )
 
@@ -106,6 +107,18 @@ def test_key_check_benchmark_times_checks_and_last_used_writes(
         "flush of 1000 keys",
     ]
     assert "gwk_" not in out  # its throwaway keys are never printed
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_retention_benchmark_times_batched_and_unbatched_pruning(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    usage_retention.main(["--rows", "3000", "--expired", "2500", "--dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert out.startswith("MEASURED on this machine")
+    rows = [line.split() for line in out.splitlines()[-2:]]
+    assert [r[:3] for r in rows] == [["batch", "of", "1000"], ["all", "at", "once"]]
+    assert rows[0][3] == "3"  # 1000 + 1000 + 500
     assert list(tmp_path.iterdir()) == []
 
 

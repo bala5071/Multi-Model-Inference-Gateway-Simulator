@@ -9,6 +9,8 @@ endpoints). See docs/20-applications-api-keys.md.
     uv run python scripts/manage.py rotate-key --key-id <id> --grace-hours 24
     uv run python scripts/manage.py revoke-key --key-id <id>
     uv run python scripts/manage.py list-keys --application shop
+    uv run python scripts/manage.py backup --to /backups/gateway-2025-06-01.db
+    uv run python scripts/manage.py restore --from /backups/gateway-2025-06-01.db
 
 The database is GATEWAY_DATABASE (default: the user's local data folder, outside the working
 tree), the one the server reads; it is created owner-only and migrated if needed. Issuing or
@@ -34,7 +36,14 @@ from gateway.applications import (
     seed_demo_applications,
 )
 from gateway.clock import SystemEpoch
-from gateway.database import database_path, open_database
+from gateway.database import (
+    DatabaseInUseError,
+    backup_database,
+    check_backup,
+    database_path,
+    open_database,
+    restore_database,
+)
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.routing import load_plans
 
@@ -83,7 +92,30 @@ def main(argv: Sequence[str] | None = None, environ: dict[str, str] | None = Non
     revoke.add_argument("--key-id", required=True)
     keys = commands.add_parser("list-keys", help="key ids, labels and state; never the keys")
     keys.add_argument("--application", required=True)
+    backup = commands.add_parser(
+        "backup", help="a consistent copy of the database, safe while the server runs"
+    )
+    backup.add_argument("--to", type=Path, required=True, help="a new file; never overwritten")
+    restore = commands.add_parser(
+        "restore", help="replace the database with a backup; the server must be stopped"
+    )
+    restore.add_argument("--from", dest="source", type=Path, required=True)
     args = parser.parse_args(argv)
+
+    if args.command == "restore":
+        # Before opening the database: restore takes the server's lock, so it refuses while
+        # a gateway process is running on it.
+        try:
+            version = check_backup(args.source)
+            restore_database(args.source, database_path(env))
+        except (ValueError, DatabaseInUseError) as exc:
+            _note(f"error: {exc}")
+            return 1
+        _note(
+            f"restored {database_path(env)} from {args.source} (at migration {version}); "
+            "the server migrates it forward when it starts. The pepper is not in a backup."
+        )
+        return 0
 
     plans_path = env.get("GATEWAY_PLANS")
     templates = load_plans(Path(plans_path) if plans_path else None)
@@ -108,6 +140,12 @@ def main(argv: Sequence[str] | None = None, environ: dict[str, str] | None = Non
         elif args.command == "list-keys":
             for key in store.list_keys(args.application):
                 print(_describe(key))
+        elif args.command == "backup":
+            backup_database(connection, args.to)
+            _note(
+                f"backed up to {args.to}. It holds key HMACs and usage, not the pepper: back the "
+                "pepper up separately, or the copy cannot check any key."
+            )
         elif args.command == "revoke-key":
             store.revoke_key(args.key_id)
             _note(f"revoked key {args.key_id}")
@@ -128,7 +166,7 @@ def main(argv: Sequence[str] | None = None, environ: dict[str, str] | None = Non
                 "The key is printed below, once; store it now, it cannot be shown again."
             )
             print(issued.key)
-    except (ValueError, KeyError) as exc:
+    except (ValueError, KeyError, FileExistsError) as exc:
         _note(f"error: {exc}")
         return 1
     finally:

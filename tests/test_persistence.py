@@ -19,20 +19,19 @@ from gateway.apikeys import ApiKeyService, ApplicationAccess
 from gateway.app import (
     DEFAULT_USAGE_RETENTION_DAYS,
     create_app,
-    create_default_app,
     usage_retention_ms,
 )
 from gateway.applications import SqliteApplicationStore, seed_demo_applications
 from gateway.clock import ClockEpoch, SimClock
 from gateway.continuous import build_continuous_registry
 from gateway.database import open_database
-from gateway.ledger import PRUNE_EVERY_MS, CostLedger
+from gateway.ledger import PRUNE_EVERY_MS, CostLedger, run_retention
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.periods import CalendarMonthsUTC, FixedPeriods
 from gateway.routing import DemoApplication, Plan, PlansConfig
 from gateway.schema import RequestResult
 from gateway.usage import InMemoryUsageStore, SqliteUsageStore, UsageEvent
-from helpers import TEST_PEPPER, bearer, default_server_key
+from helpers import TEST_PEPPER, bearer, default_server, default_server_key
 
 DAY_MS = 86_400_000.0
 WORDS = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi"
@@ -186,13 +185,14 @@ async def test_usage_and_budgets_survive_a_restart(tmp_path: Path) -> None:
 async def test_the_default_server_stores_usage_in_its_database() -> None:
     key = default_server_key("acme")
     body = {"model": "economy", "prompt": "hello there", "max_tokens": 1}
-    for _ in range(2):  # two processes, one database file
-        transport = httpx.ASGITransport(app=create_default_app())
-        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
-            assert (
-                await client.post("/v1/generate", json=body, headers=bearer(key))
-            ).status_code == 200
-            usage = (await client.get("/v1/applications/me/usage", headers=bearer(key))).json()
+    for _ in range(2):  # two processes, one after the other, one database file
+        with default_server() as app:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+                assert (
+                    await client.post("/v1/generate", json=body, headers=bearer(key))
+                ).status_code == 200
+                usage = (await client.get("/v1/applications/me/usage", headers=bearer(key))).json()
     assert usage["total"]["requests"] == 2
     start = datetime.datetime.fromtimestamp(usage["period"]["start_ms"] / 1000, tz=UTC)
     assert (start.day, start.hour, start.minute, start.second) == (1, 0, 0, 0)
@@ -243,33 +243,81 @@ def _event(at_ms: float, app: str = "a") -> UsageEvent:
     return UsageEvent(app, "req-x", "economy", 10, 0, 5, 0.1, 0.1, at_ms)
 
 
+def _store(kind: str, tmp_path: Path, clock: SimClock) -> InMemoryUsageStore | SqliteUsageStore:
+    if kind == "memory":
+        return InMemoryUsageStore(max_events=100_000)
+    connection = open_database(tmp_path / "gateway.db")
+    MigrationRunner(connection, MIGRATIONS, ClockEpoch(clock)).migrate()
+    return SqliteUsageStore(connection)
+
+
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
-async def test_events_older_than_the_retention_are_pruned_at_most_hourly(
-    tmp_path: Path, store_kind: str
+async def test_retention_runs_beside_the_server_in_bounded_batches(
+    tmp_path: Path, store_kind: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     now = ms(2025, 5, 20)
     clock = SimClock()
-    if store_kind == "memory":
-        store: InMemoryUsageStore | SqliteUsageStore = InMemoryUsageStore()
-    else:
-        connection = open_database(tmp_path / "gateway.db")
-        MigrationRunner(connection, MIGRATIONS, ClockEpoch(clock)).migrate()
-        store = SqliteUsageStore(connection)
-    for at in (now - 100 * DAY_MS, now - 50 * DAY_MS, now - 10 * DAY_MS):
-        store.append(_event(at))
+    store = _store(store_kind, tmp_path, clock)
+    for i in range(2500):  # far older than the retention
+        store.append(_event(now - 100 * DAY_MS + i))
+    store.append(_event(now - 10 * DAY_MS))  # within it
     ledger = CostLedger(clock, store=store, epoch=ClockEpoch(clock, now), retention_ms=40 * DAY_MS)
 
-    ledger.record("a", _result(), model="economy", price_multiplier=1.0)  # prunes: first time
-    assert [round((now - e.event.occurred_at_ms) / DAY_MS) for e in store.events()] == [10, 0]
+    # A charge never prunes: the request path does not delete anything.
+    ledger.record("a", _result(), model="economy", price_multiplier=1.0)
+    assert len(store.events()) == 2502
 
-    store.append(_event(now - 90 * DAY_MS))
-    await clock.sleep_ms(PRUNE_EVERY_MS - 1.0)
-    ledger.record("a", _result(), model="economy", price_multiplier=1.0)
-    assert len(store.events()) == 4  # not due yet
-    await clock.sleep_ms(1.0)
-    ledger.record("a", _result(), model="economy", price_multiplier=1.0)
-    assert len(store.events()) == 4  # the 90-day-old one went, the new charge arrived
+    batches: list[int] = []
+    real_prune = store.prune
+
+    def counted(before_ms: float, limit: int | None = None) -> int:
+        removed = real_prune(before_ms, limit)
+        batches.append(removed)
+        return removed
+
+    monkeypatch.setattr(store, "prune", counted)
+    task = asyncio.create_task(run_retention(ledger, clock, batch=1000, every_ms=PRUNE_EVERY_MS))
+    try:
+        await clock.sleep_ms(1.0)
+        # Batches of at most 1000, until one comes back short.
+        assert batches == [1000, 1000, 500]
+        assert len(store.events()) == 2
+
+        store.append(_event(now - 90 * DAY_MS))
+        await clock.sleep_ms(PRUNE_EVERY_MS - 2.0)
+        assert len(store.events()) == 3  # the next pass is not due yet
+        await clock.sleep_ms(2.0)
+        assert len(store.events()) == 2
+        assert batches[3:] == [1]
+    finally:
+        task.cancel()
     assert min(e.event.occurred_at_ms for e in store.events()) >= now - 40 * DAY_MS
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
+async def test_the_retention_loop_never_removes_the_current_month(
+    tmp_path: Path, store_kind: str
+) -> None:
+    now = ms(2025, 5, 25, 12)
+    clock = SimClock()
+    store = _store(store_kind, tmp_path, clock)
+    this_month = [ms(2025, 5, 1), ms(2025, 5, 2), ms(2025, 5, 24)]
+    for at in [ms(2025, 4, 30, 23), *this_month]:
+        store.append(_event(at))
+    # A retention of one day: everything before 24 May would go, but not this month's.
+    ledger = CostLedger(clock, store=store, epoch=ClockEpoch(clock, now), retention_ms=DAY_MS)
+    task = asyncio.create_task(run_retention(ledger, clock, batch=1, every_ms=PRUNE_EVERY_MS))
+    try:
+        await clock.sleep_ms(1.0)
+    finally:
+        task.cancel()
+    assert [e.event.occurred_at_ms for e in store.events()] == this_month
+    assert ledger.usage("a").total.requests == 3
+
+
+def test_the_retention_batch_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="batch"):
+        asyncio.run(run_retention(CostLedger(SimClock()), SimClock(), batch=0))
 
 
 def test_the_current_period_is_kept_whatever_the_retention() -> None:

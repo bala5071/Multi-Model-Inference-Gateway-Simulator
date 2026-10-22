@@ -81,3 +81,116 @@ def open_database(path: str | Path, *, synchronous: str = "FULL") -> sqlite3.Con
     connection.execute(f"PRAGMA synchronous = {synchronous}")
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+class DatabaseInUseError(RuntimeError):
+    """Another gateway process holds this database."""
+
+
+class ProcessLock:
+    """An exclusive lock on ``<database>.lock``, held for the life of a gateway process.
+
+    One gateway process per database is the supported setup (docs/21-persistence.md): each
+    process keeps the current period's budget totals in memory, so two would each enforce
+    budgets on their own totals. The lock is the operating system's (``flock`` on POSIX,
+    ``msvcrt.locking`` on Windows) on an open file: it is released when the process exits,
+    even if it crashes, so a dead process leaves no stale lock. It is not reliable on network
+    filesystems, where advisory locks may not be shared between machines.
+    """
+
+    def __init__(self, database: Path) -> None:
+        self.path = database.with_name(database.name + ".lock")
+        _restrict(self.path)
+        self.path.touch(exist_ok=True)
+        self._file = self.path.open("r+b")
+        try:
+            self._lock()
+        except OSError as exc:
+            self._file.close()
+            raise DatabaseInUseError(
+                f"{database} is in use by another gateway process (it holds {self.path}). "
+                "Run one gateway process per database (docs/21-persistence.md), or point "
+                "GATEWAY_DATABASE at another file."
+            ) from exc
+
+    def _lock(self) -> None:
+        if sys.platform == "win32":
+            import msvcrt
+
+            self._file.seek(0)
+            msvcrt.locking(self._file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def release(self) -> None:
+        """Release the lock now (closing the file releases it too)."""
+        if self._file.closed:
+            return
+        if sys.platform == "win32":
+            import msvcrt
+
+            self._file.seek(0)
+            msvcrt.locking(self._file.fileno(), msvcrt.LK_UNLCK, 1)
+        self._file.close()
+
+
+def backup_database(source: sqlite3.Connection, target: Path) -> None:
+    """A consistent copy of a live database, through SQLite's online backup API.
+
+    Safe while the server runs: the copy is a snapshot of one moment, whatever is being
+    written. The target must not exist; it is created owner-only like the database. The
+    copy holds what the database holds (applications, key HMACs, usage), never a key and
+    never the pepper, which must be backed up separately (docs/21-persistence.md).
+    """
+    if target.exists():
+        raise FileExistsError(f"{target} exists; a backup never overwrites a file")
+    _restrict(target)
+    copy = sqlite3.connect(target)
+    try:
+        source.backup(copy)
+    finally:
+        copy.close()
+
+
+def check_backup(backup: Path) -> int:
+    """Raise ``ValueError`` unless ``backup`` is an intact gateway database; return the
+    number of migrations it has applied."""
+    if not backup.is_file():
+        raise ValueError(f"{backup} is not a file")
+    connection = sqlite3.connect(f"file:{backup.as_posix()}?mode=ro", uri=True)
+    try:
+        status = connection.execute("PRAGMA integrity_check").fetchone()[0]
+        if status != "ok":
+            raise ValueError(f"{backup} is damaged: {status}")
+        found = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+        ).fetchone()
+        if found is None:
+            raise ValueError(f"{backup} is not a gateway database (no schema_migrations)")
+        return int(connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0])
+    finally:
+        connection.close()
+
+
+def restore_database(backup: Path, target: Path) -> None:
+    """Replace the database at ``target`` with the contents of ``backup``.
+
+    Refuses while a gateway process holds ``target`` (its ``ProcessLock``): stop the server
+    first. Checks the backup's integrity before touching the target, then copies it in
+    through the backup API, so the target is replaced consistently, write-ahead log
+    included. The server migrates the restored database forward when it next starts.
+    """
+    check_backup(backup)
+    lock = ProcessLock(target)
+    try:
+        source = sqlite3.connect(f"file:{backup.as_posix()}?mode=ro", uri=True)
+        destination = open_database(target)
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+            source.close()
+    finally:
+        lock.release()

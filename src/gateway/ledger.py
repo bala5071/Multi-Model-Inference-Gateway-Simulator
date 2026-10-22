@@ -16,8 +16,10 @@ from gateway.periods import BudgetPeriods, CalendarMonthsUTC
 from gateway.schema import RequestResult
 from gateway.usage import InMemoryUsageStore, ModelUsage, UsageEvent, UsageStore
 
-# How often the ledger prunes events older than its retention, at most.
+# How often the retention loop prunes, and how many events it deletes in one go: a batch is
+# one short transaction, and the loop yields to the event loop between batches.
 PRUNE_EVERY_MS = 60 * 60 * 1000.0
+PRUNE_BATCH = 1000
 
 __all__ = [
     "BudgetExceededError",
@@ -72,9 +74,9 @@ class CostLedger:
     how usage stored by an earlier process is picked up; after that the totals are kept in
     memory.
 
-    With ``retention_ms``, events older than that are deleted from the store, at most once
-    per ``PRUNE_EVERY_MS``, by the first charge after it is due; events of the current
-    period are always kept, whatever the retention.
+    With ``retention_ms``, ``prune`` deletes events older than that from the store; events
+    of the current period are always kept, whatever the retention. Pruning is not done on
+    the request path: ``run_retention`` does it in bounded batches.
     """
 
     def __init__(
@@ -92,7 +94,6 @@ class CostLedger:
         self._store = store if store is not None else InMemoryUsageStore()
         self._periods = periods if periods is not None else CalendarMonthsUTC()
         self._retention_ms = retention_ms
-        self._next_prune_ms = self._epoch.epoch_ms()
         self._accounts: dict[str, _Account] = {}
 
     def _account(self, tenant_id: str) -> _Account:
@@ -117,15 +118,18 @@ class CostLedger:
             by_model=dict(account.by_model),
         )
 
-    def prune(self) -> int:
-        """Delete events older than the retention (never the current period's). Returns how
-        many; 0 without a retention."""
+    @property
+    def retention_ms(self) -> float | None:
+        return self._retention_ms
+
+    def prune(self, limit: int | None = None) -> int:
+        """Delete events older than the retention (never the current period's), at most
+        ``limit`` of them. Returns how many; 0 without a retention."""
         if self._retention_ms is None:
             return 0
         now_ms = self._epoch.epoch_ms()
-        self._next_prune_ms = now_ms + PRUNE_EVERY_MS
         period_start_ms, _ = self._periods.bounds(now_ms)
-        return self._store.prune(min(now_ms - self._retention_ms, period_start_ms))
+        return self._store.prune(min(now_ms - self._retention_ms, period_start_ms), limit)
 
     def check_budget(self, tenant_id: str, budget_tokens: int) -> None:
         """Raise ``BudgetExceededError`` if the tenant has no budget left this period.
@@ -152,8 +156,6 @@ class CostLedger:
         """
         billed_cost_usd = result.cost_usd * price_multiplier
         account = self._account(tenant_id)
-        if self._retention_ms is not None and self._epoch.epoch_ms() >= self._next_prune_ms:
-            self.prune()
         self._store.append(
             UsageEvent.of(
                 tenant_id,
@@ -179,3 +181,24 @@ def _add(a: ModelUsage, b: ModelUsage) -> ModelUsage:
         base_cost_usd=a.base_cost_usd + b.base_cost_usd,
         billed_cost_usd=a.billed_cost_usd + b.billed_cost_usd,
     )
+
+
+async def run_retention(
+    ledger: CostLedger,
+    clock: Clock,
+    *,
+    batch: int = PRUNE_BATCH,
+    every_ms: float = PRUNE_EVERY_MS,
+) -> None:
+    """Prune the ledger's store now and then every ``every_ms``, until cancelled.
+
+    Each pass deletes ``batch`` events at a time and yields to the event loop between
+    batches (``clock.sleep_ms(0)``), so no request waits behind more than one batch. Run as
+    a task beside the server; nothing on the request path prunes.
+    """
+    if batch < 1:
+        raise ValueError("batch must be at least 1")
+    while True:
+        while ledger.prune(batch) == batch:
+            await clock.sleep_ms(0)
+        await clock.sleep_ms(every_ms)

@@ -5,13 +5,19 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import sys
+import threading
 from pathlib import Path
 
 import pytest
 
+from gateway.app import create_default_app
+from gateway.clock import WallClock
 from gateway.database import (
     APP_DIRECTORY,
     DATABASE_NAME,
+    DatabaseInUseError,
+    ProcessLock,
     database_path,
     default_database_path,
     open_database,
@@ -79,3 +85,67 @@ def test_opening_tightens_a_file_that_others_could_read(tmp_path: Path) -> None:
 def test_git_ignores_the_database_and_the_env_file(name: str) -> None:
     done = subprocess.run(["git", "check-ignore", "--no-index", "-q", name], cwd=REPO, check=False)
     assert done.returncode == 0, f"{name} is not ignored"
+
+
+# --- one gateway process per database --------------------------------------------------------
+
+
+def test_a_second_lock_on_the_same_database_is_refused_with_a_clear_message(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "gateway.db"
+    first = ProcessLock(database)
+    with pytest.raises(DatabaseInUseError) as excinfo:
+        ProcessLock(database)
+    message = str(excinfo.value)
+    assert "in use by another gateway process" in message
+    assert "GATEWAY_DATABASE" in message
+    ProcessLock(tmp_path / "other.db").release()  # another database is unaffected
+    first.release()
+    ProcessLock(database).release()  # free again once released
+
+
+def test_a_second_default_server_on_the_same_database_refuses_to_start() -> None:
+    first = create_default_app()
+    with pytest.raises(DatabaseInUseError):
+        create_default_app()
+    first.state.database_lock.release()
+    create_default_app().state.database_lock.release()
+
+
+def test_a_crashed_process_leaves_no_stale_lock(tmp_path: Path) -> None:
+    database = tmp_path / "gateway.db"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from pathlib import Path; from gateway.database import ProcessLock; "
+            f"lock = ProcessLock(Path({str(database)!r})); print('held', flush=True); "
+            "sys.stdin.read()",
+        ],
+        cwd=REPO,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "held"
+        with pytest.raises(DatabaseInUseError):
+            ProcessLock(database)
+    finally:
+        holder.kill()  # no clean shutdown: the operating system releases the lock
+        holder.wait(timeout=30)
+    # Nobody deletes or unlocks anything: the lock becomes free by itself. On Windows the
+    # system releases a dead process's locks shortly after it exits, not at the same instant,
+    # so wait for that state (up to 10 s) rather than expect it at once.
+    clock, pause = WallClock(), threading.Event()
+    deadline = clock.now_ms() + 10_000.0
+    while True:
+        try:
+            ProcessLock(database).release()
+            break
+        except DatabaseInUseError:
+            if clock.now_ms() > deadline:
+                raise
+            pause.wait(0.02)

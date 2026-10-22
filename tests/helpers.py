@@ -5,12 +5,16 @@ from __future__ import annotations
 import os
 import random
 import zlib
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import replace
 from types import MappingProxyType
 from typing import Any
 
+from fastapi import FastAPI
+
 from gateway.apikeys import ApiKeyService, ApplicationAccess
+from gateway.app import create_default_app
 from gateway.applications import (
     InMemoryApplicationStore,
     SqliteApplicationStore,
@@ -176,3 +180,14 @@ def default_server_key(application_id: str = "acme") -> str:
     key = ApiKeyService(store, TEST_PEPPER, epoch).issue(application_id, "test").key
     connection.close()
     return key
+
+
+@contextmanager
+def default_server() -> Iterator[FastAPI]:
+    """``create_default_app()``, whose database lock is released on leaving, as it is when the
+    server process exits. Lets one test start the default server more than once."""
+    app = create_default_app()
+    try:
+        yield app
+    finally:
+        app.state.database_lock.release()

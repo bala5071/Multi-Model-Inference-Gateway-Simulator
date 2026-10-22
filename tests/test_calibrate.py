@@ -49,7 +49,7 @@ from gateway.clock import SimClock
 from gateway.continuous import build_continuous_registry
 from gateway.profiles import PROFILES, STANDARD, Tier, load_calibrated_profiles
 from gateway.schema import GenerateRequest
-from helpers import TEST_STANDARD
+from helpers import TEST_STANDARD, default_server
 from mock_llama import GroundTruthServer
 
 CONFIG = BackendConfig(
@@ -743,9 +743,10 @@ async def test_default_app_loads_calibrated_profiles_by_config(
     monkeypatch.delenv("GATEWAY_BACKENDS", raising=False)
 
     monkeypatch.setenv("GATEWAY_PROFILES", str(tmp_path / "calibrated_profiles.json"))
-    transport = httpx.ASGITransport(app=create_default_app())
-    async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
-        ok = await client.get("/healthz")
+    with default_server() as app:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+            ok = await client.get("/healthz")
     assert ok.status_code == 200
 
     # The setting is really read: a file that is not there stops the server from starting.

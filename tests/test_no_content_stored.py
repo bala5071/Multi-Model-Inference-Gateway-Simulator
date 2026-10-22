@@ -21,7 +21,7 @@ from typing import Any
 import httpx
 import pytest
 
-from gateway.app import create_app, create_default_app
+from gateway.app import create_app
 from gateway.backend_config import build_llamacpp_registry
 from gateway.clock import ClockEpoch, SimClock
 from gateway.continuous import build_continuous_registry
@@ -31,7 +31,7 @@ from gateway.monitoring import Monitor
 from gateway.registry import ModelRegistry
 from gateway.tokenizer import WordTokenizer
 from gateway.usage import SqliteUsageStore
-from helpers import application_access, bearer, default_server_key
+from helpers import application_access, bearer, default_server, default_server_key
 from mock_llama import MockLlamaServer
 from test_real_backend_api import CONFIG
 
@@ -162,13 +162,14 @@ async def test_the_default_server_stores_no_prompt_response_or_token_ids(
     """The default server's own SQLite file, with usage, applications and keys all in it."""
     caplog.set_level(logging.DEBUG)
     key = default_server_key("acme")
-    transport = httpx.ASGITransport(app=create_default_app())
-    async with httpx.AsyncClient(
-        transport=transport, base_url="http://gateway", headers=bearer(key)
-    ) as client:
-        body = {"model": "economy", "prompt": PROMPT, "max_tokens": 2}
-        answers = [(await client.post("/v1/generate", json=body)).json() for _ in range(2)]
-        await client.post("/v1/generate", json={**body, "stream": True})
+    with default_server() as app:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://gateway", headers=bearer(key)
+        ) as client:
+            body = {"model": "economy", "prompt": PROMPT, "max_tokens": 2}
+            answers = [(await client.post("/v1/generate", json=body)).json() for _ in range(2)]
+            await client.post("/v1/generate", json={**body, "stream": True})
     path = Path(os.environ["GATEWAY_DATABASE"])
     connection = open_database(path)
     rows = connection.execute("SELECT count(*) FROM usage_events").fetchone()[0]

@@ -43,9 +43,9 @@ from gateway.backend_config import build_llamacpp_registry, load_backend_config
 from gateway.backends import BackendError
 from gateway.clock import Clock, ClockEpoch, EpochSource, PacedSimClock, SystemEpoch, WallClock
 from gateway.continuous import RequestTooLargeError, build_continuous_registry
-from gateway.database import database_path, open_database
+from gateway.database import ProcessLock, database_path, open_database
 from gateway.events import EventBus
-from gateway.ledger import BudgetExceededError, CostLedger, ModelUsage
+from gateway.ledger import BudgetExceededError, CostLedger, ModelUsage, run_retention
 from gateway.loadcontrol import PRESETS, LoadController, UnknownPresetError
 from gateway.metrics import Distribution, MetricsStore
 from gateway.migrations import MIGRATIONS, MigrationRunner
@@ -415,7 +415,15 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if load is not None and autostart_load is not None:
             await load.start(autostart_load, seed)
+        # Retention runs beside the server, never on a request (docs/21).
+        retention = (
+            asyncio.create_task(run_retention(ledger, clock))
+            if ledger.retention_ms is not None
+            else None
+        )
         yield
+        if retention is not None:
+            retention.cancel()
         if load is not None:
             await load.stop()
         await registry.aclose()
@@ -1267,7 +1275,10 @@ def create_default_app() -> FastAPI:
     plans_path = os.environ.get("GATEWAY_PLANS")
     templates = load_plans(Path(plans_path) if plans_path else None)
     epoch = SystemEpoch()
-    database = open_database(database_path(os.environ))
+    path = database_path(os.environ)
+    # One gateway process per database: a second one refuses to start (docs/21).
+    lock = ProcessLock(path)
+    database = open_database(path)
     MigrationRunner(database, MIGRATIONS, epoch).migrate()
     access = ApplicationAccess(
         ApiKeyService(SqliteApplicationStore(database), pepper, epoch), templates
@@ -1289,7 +1300,7 @@ def create_default_app() -> FastAPI:
             prefill_chunk_tokens=DEFAULT_PREFILL_CHUNK_TOKENS,
             profiles=load_calibrated_profiles(Path(profiles_path)) if profiles_path else PROFILES,
         )
-    return create_app(
+    app = create_app(
         registry,
         clock,
         applications=access,
@@ -1301,3 +1312,6 @@ def create_default_app() -> FastAPI:
         load_control=os.environ.get("GATEWAY_LOAD_CONTROL") == "1",
         seed=seed,
     )
+    # Held for the life of the process; released when it exits, however it exits.
+    app.state.database_lock = lock
+    return app
