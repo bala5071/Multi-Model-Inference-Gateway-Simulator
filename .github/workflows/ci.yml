@@ -180,6 +180,13 @@ jobs:
           echo "$published"
           case "$published" in 127.0.0.1:*) ;; *) echo "not loopback: $published"; exit 1;; esac
 
+      # The address the host's requests reach the container from, as the access log names it
+      # (docs/25-local-only.md says how to find it on Docker Desktop).
+      - name: Where the host's requests arrive from
+        run: |
+          curl --silent http://127.0.0.1:8000/v1/control > /dev/null
+          docker compose logs gateway | grep '"GET /v1/control' | tail -n 1
+
       - name: The dashboard is served and the gateway is in simulated live mode
         run: |
           curl --silent --fail http://127.0.0.1:8000/dashboard/ | grep --quiet "Gateway monitor"

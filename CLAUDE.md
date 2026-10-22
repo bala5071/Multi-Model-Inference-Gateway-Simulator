@@ -71,7 +71,7 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   with the pepper from `GATEWAY_KEY_PEPPER`, checks in constant time, rotates with a grace
   period, revokes, and batches `last_used_at`; `ApplicationAccess` is what `create_app`
   takes (exists)
-- `passwords.py` — argon2id `PasswordHasher` (OWASP parameters), `InlineHashRunner` (for
+- `passwords.py` — argon2id `PasswordHasher` (64 MiB, 3 iterations, 1 lane; `GATEWAY_ARGON2_*`), `InlineHashRunner` (for
   `SimClock`: no await, so simulated time cannot move) and `ThreadHashRunner` (for the server:
   a pool of 2, the loop keeps serving), `Passwords`, and `PasswordPolicy` with the bundled
   blocklist in `data/` (public data, MIT, recorded in `docs/licenses.md`) (exists)

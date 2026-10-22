@@ -294,7 +294,8 @@ Each step is its own pull request and stops for review.
 3. Organizations: migration 4 and the backfill; individual and business rules.
 4. Users, the one-time bootstrap admin, login, lockout, sessions, CSRF, password change,
    `must_change_password`, the CLI (`create-user`, `reset-password`, `unlock-user`), and the
-   audit log for these.
+   audit log for these. One login and a burst of 8 timed through the running server at the
+   default argon2 setting (64 MiB, 3, 1, accepted in step 2), with the hardware, in note 24.
 5. Roles, `permissions.py`, `authorize`, the per-route declarations, the management endpoints
    (users, roles, organizations, applications, application keys, application roles, audit)
    and the generated matrix.

@@ -91,6 +91,13 @@ The pictures and both GIFs were taken with `uv run python scripts/capture_demo.p
 7, with `PLAYWRIGHT_CHANNEL=chrome`, on the tree of the commit that renamed tenants to
 applications (`613ca7a`, parent `0815dc9`).
 
+**In Docker, the bridge network counts as local.** The host's requests reach the container
+from Docker's network, so the compose file sets `GATEWAY_LOCAL_NETWORKS=172.16.0.0/12`. Any
+container in that range that can connect to the gateway (every container on the demo's
+network) can then use monitoring, load control, the Playground and the dashboard. That is
+acceptable only for a local, single-user demo ([docs/25](docs/25-local-only.md#docker), which
+also says how to find the address on Docker Desktop).
+
 **Docker has not been run on the development machine**, which does not have it. CI builds
 the image and starts this compose demo on every push, and checks that it serves the
 dashboard in simulated live mode (the `docker` job). Without Docker, the same thing needs
@@ -493,13 +500,26 @@ in this README are of three different kinds.
 
 These are not built, and the server is not ready for a network until they are:
 
-- **Monitoring and load control are not authenticated.** `/v1/monitor/*`, `/metrics`,
-  `/metrics/summary`, `/v1/overload`, `/v1/control/*`, the Playground and the dashboard show
-  every application's usage and spend, and load control (off by default) starts load. They
-  are served only to this machine: the gateway refuses other peers, forwarded requests,
-  foreign Host names (DNS rebinding) and cross-site requests ([docs/25](docs/25-local-only.md)),
-  but any process on this machine can use them. A later role-based monitoring step adds
-  logins. Generating text and reading an application's own usage do need a key.
+- **Monitoring and load control are not authenticated.** These endpoints (each path and
+  everything under it) have no login, and are served only to this machine:
+
+  | Endpoint | What it gives whoever can reach it |
+  |---|---|
+  | `/v1/monitor` | The snapshot and live stream: every application's usage and spend |
+  | `/metrics` | Prometheus text, and the summary and detail views |
+  | `/v1/overload` | Each model's overload state |
+  | `/v1/control` | Load control: start and stop load, change the speed (off by default) |
+  | `/v1/playground` | Sends requests as an application, with keys the server holds |
+  | `/dashboard` | The dashboard, which shows all of the above |
+
+  The gateway refuses other peers, forwarded requests, foreign Host names (DNS rebinding) and
+  cross-site requests ([docs/25](docs/25-local-only.md)), but any process on this machine can
+  use them. A later role-based monitoring step adds logins. Generating text and reading an
+  application's own usage do need a key.
+- **In Docker, the bridge network counts as local.** The compose demo sets
+  `GATEWAY_LOCAL_NETWORKS=172.16.0.0/12`, so any container in that range that can connect to
+  the gateway can use the endpoints above. Acceptable only for a local, single-user demo
+  ([docs/25](docs/25-local-only.md#docker)).
 - **The server binds to `127.0.0.1` and must not be exposed to a network.** That includes
   the Docker image (published on `127.0.0.1` only) and any reverse proxy in front of it.
   Keys also travel over plain HTTP, and failed key checks are not rate-limited per source

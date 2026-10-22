@@ -47,11 +47,12 @@ PARALLELISM_ENV = "GATEWAY_ARGON2_PARALLELISM"
 
 @dataclass(frozen=True, slots=True)
 class Argon2Parameters:
-    """argon2id cost parameters. The defaults are OWASP's first recommended configuration
-    (19 MiB of memory, 2 iterations, 1 lane); docs/24 records what they cost here."""
+    """argon2id cost parameters. The defaults are RFC 9106's second recommended setting with
+    one lane (64 MiB of memory, 3 iterations); docs/24 records what they cost here and why
+    they were chosen. ``GATEWAY_ARGON2_*`` overrides them (``parameters_from``)."""
 
-    time_cost: int = 2
-    memory_cost_kib: int = 19 * 1024
+    time_cost: int = 3
+    memory_cost_kib: int = 64 * 1024
     parallelism: int = 1
     hash_len: int = 32
     salt_len: int = 16
