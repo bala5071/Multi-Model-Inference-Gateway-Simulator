@@ -54,6 +54,7 @@ says so, and the table below points out the main cases.
 | [22 Monitoring rename](22-monitoring-rename.md) | Tenants become applications in the snapshot, Prometheus, events and the dashboard; rate-limit refusals become a rejection reason | Platform plan step 4; rename only, plus that one addition |
 | [23 Docs and quickstart](23-docs-and-quickstart.md) | The README rewritten for keys and persistence, its quickstart run by CI exactly as written, the report's wording, the known gaps | Platform plan steps 5 and 6 |
 | [24 Password hashing](24-password-hashing.md) | argon2id, the inline and thread runners that keep simulated time still and the event loop free, the password policy and blocklist, and what hashing costs on this machine | Identity plan step 1; licenses in [licenses.md](licenses.md) |
+| [25 Local only](25-local-only.md) | The guard that serves monitoring, load control, the Playground and the dashboard only to this machine (peer address, no forwarded headers, Host allowlist, Origin, content type), Docker, and the `gateway.serve` launcher | Identity plan step 2; until A8 adds logins |
 
 ## Which numbers to trust for what
 

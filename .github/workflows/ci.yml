@@ -149,6 +149,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The local-only endpoints rely on the port being published on loopback only.
+      - name: Compose publishes only on 127.0.0.1
+        run: |
+          docker compose config --format json | python3 -c '
+          import json, sys
+          services = json.load(sys.stdin)["services"]
+          ports = [(name, p) for name, s in services.items() for p in s.get("ports", [])]
+          assert ports, "no published ports"
+          bad = [(n, p) for n, p in ports if p.get("host_ip") != "127.0.0.1"]
+          print(ports)
+          sys.exit(f"published beyond loopback: {bad}" if bad else 0)
+          '
+
       - name: Build and start
         run: docker compose up --build --detach
 
@@ -160,6 +173,12 @@ jobs:
           done
           docker compose logs
           exit 1
+
+      - name: The running service is published on 127.0.0.1 only
+        run: |
+          published=$(docker compose port gateway 8000)
+          echo "$published"
+          case "$published" in 127.0.0.1:*) ;; *) echo "not loopback: $published"; exit 1;; esac
 
       - name: The dashboard is served and the gateway is in simulated live mode
         run: |

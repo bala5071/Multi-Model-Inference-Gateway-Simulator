@@ -39,7 +39,7 @@ async def _running(app: Any) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=app)
     async with (
         app.router.lifespan_context(app),
-        httpx.AsyncClient(transport=transport, base_url="http://gateway") as client,
+        httpx.AsyncClient(transport=transport, base_url="http://localhost") as client,
     ):
         yield client
 
@@ -242,7 +242,7 @@ async def test_default_app_enters_simulated_live_mode_by_environment(
     assert isinstance(app.state.clock, PacedSimClock)
     assert app.state.clock.speed == 5.0
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
         control = (await client.get("/v1/control")).json()
     assert control["seed"] == 21
     assert control["simulation"]["active"] is True
@@ -274,7 +274,9 @@ async def test_default_app_offers_load_control_only_when_asked(
     async def available() -> bool:
         with default_server() as app:
             transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://localhost"
+            ) as client:
                 control = (await client.get("/v1/control")).json()
         assert control["simulation"]["active"] is False
         return bool(control["load"]["available"])

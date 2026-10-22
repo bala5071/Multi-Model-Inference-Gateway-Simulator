@@ -75,6 +75,12 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `SimClock`: no await, so simulated time cannot move) and `ThreadHashRunner` (for the server:
   a pool of 2, the loop keeps serving), `Passwords`, and `PasswordPolicy` with the bundled
   blocklist in `data/` (public data, MIT, recorded in `docs/licenses.md`) (exists)
+- `localonly.py` — `LocalOnlyMiddleware`: monitoring, metrics, overload, load control, the
+  Playground and the dashboard are served only to loopback peers (and `GATEWAY_LOCAL_NETWORKS`),
+  never through forwarding headers, only for allowed Host names, never cross-site; until A8.
+  Installed by both server factories (exists)
+- `serve.py` — the launcher, `python -m gateway.serve`: uvicorn with proxy headers off;
+  refuses a non-loopback bind unless `GATEWAY_ALLOW_NETWORK_BIND=1` (exists)
 - `ratelimit.py` — `RequestRateLimiter`: per-application requests per minute, a sliding
   window on the injected clock (exists)
 - `ledger.py` — `CostLedger`: per-application tokens and spend per budget period (calendar

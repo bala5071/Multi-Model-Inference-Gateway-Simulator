@@ -238,6 +238,9 @@ hostile name resolve there. So, on these endpoints:
   `python -m gateway.serve`, and the readme-quickstart CI job keeps running the README's
   commands literally, and passing.
 
+Done in step 2 (note 25). `/v1/playground` is also local-only: it sends requests as an
+application with keys the server holds.
+
 ### Tests for this section
 
 Loopback allowed for `127.0.0.1`, another `127.x` address, `::1` and `::ffff:127.0.0.1`; a

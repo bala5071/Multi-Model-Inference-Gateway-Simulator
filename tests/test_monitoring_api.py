@@ -1190,7 +1190,7 @@ async def test_query_parameters_are_validated() -> None:
 async def test_default_app_reports_every_group_for_the_three_simulated_models() -> None:
     default_server_key()  # creates the demo applications in the default server's database
     transport = httpx.ASGITransport(app=create_default_app())
-    async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
         snapshot = (await client.get("/v1/monitor/snapshot")).json()
         metrics = await client.get("/metrics")
 

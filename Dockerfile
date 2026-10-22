@@ -1,7 +1,7 @@
 # The gateway with its dashboard, in two stages: Node builds the dashboard, Python serves it.
 #
 #   docker build -t inference-gateway .
-#   docker run --rm -p 127.0.0.1:8000:8000 inference-gateway
+#   docker run --rm -p 127.0.0.1:8000:8000 -e GATEWAY_LOCAL_NETWORKS=172.16.0.0/12 inference-gateway
 #
 # Publish on 127.0.0.1 only: monitoring and load control are not authenticated, and a plain
 # `-p 8000:8000` publishes on every interface (docs/platform-plan.md, section 9).
@@ -55,8 +55,12 @@ RUN useradd --create-home gateway \
     && mkdir /data && chown gateway:gateway /data && chmod 700 /data
 USER gateway
 
+# The launcher refuses a non-loopback bind unless told the port is kept local some other way:
+# here, by publishing it on 127.0.0.1 only (docker-compose.yml, docs/25-local-only.md).
+ENV GATEWAY_ALLOW_NETWORK_BIND=1
+
 EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
     CMD ["/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
 
-CMD ["/app/.venv/bin/uvicorn", "gateway.app:create_default_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/app/.venv/bin/python", "-m", "gateway.serve", "--host", "0.0.0.0", "--port", "8000"]

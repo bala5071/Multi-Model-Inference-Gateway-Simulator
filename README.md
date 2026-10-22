@@ -99,7 +99,7 @@ Python 3.11+, [uv](https://docs.astral.sh/uv/) and Node 20:
 ```sh
 uv sync
 cd frontend && npm ci && npm run build && cd ..
-GATEWAY_SIMULATED_LIVE=1 GATEWAY_SIM_SPEED=5 GATEWAY_SEED=7 uv run uvicorn gateway.app:create_default_app --factory --port 8000
+GATEWAY_SIMULATED_LIVE=1 GATEWAY_SIM_SPEED=5 GATEWAY_SEED=7 uv run python -m gateway.serve --port 8000
 ```
 
 On the Playground tab, choose the `overload` preset and press Restart to see what the GIF
@@ -218,12 +218,13 @@ uv run python scripts/manage.py seed-demo
 export GATEWAY_API_KEY=$(uv run python scripts/manage.py create-key --application acme --label quickstart)
 ```
 
-Start the server (it binds to `127.0.0.1`; do not expose it to a network, see
-[Known gaps](#known-gaps)) and wait until it answers:
+Start the server and wait until it answers. `gateway.serve` binds `127.0.0.1` and refuses any
+other address while monitoring has no login ([Known gaps](#known-gaps),
+[docs/25](docs/25-local-only.md)):
 
 <!-- quickstart -->
 ```sh
-uv run uvicorn gateway.app:create_default_app --factory --port 8000 &
+uv run python -m gateway.serve --port 8000 &
 SERVER=$!
 until curl -sf http://127.0.0.1:8000/healthz > /dev/null; do sleep 1; done
 ```
@@ -249,7 +250,7 @@ counted against its monthly budget.
 <!-- quickstart -->
 ```sh
 kill $SERVER; wait $SERVER || true
-uv run uvicorn gateway.app:create_default_app --factory --port 8000 &
+uv run python -m gateway.serve --port 8000 &
 SERVER=$!
 until curl -sf http://127.0.0.1:8000/healthz > /dev/null; do sleep 1; done
 curl -sf http://127.0.0.1:8000/v1/applications/me/usage -H "Authorization: Bearer $GATEWAY_API_KEY"
@@ -493,10 +494,12 @@ in this README are of three different kinds.
 These are not built, and the server is not ready for a network until they are:
 
 - **Monitoring and load control are not authenticated.** `/v1/monitor/*`, `/metrics`,
-  `/metrics/summary`, `/v1/overload`, `/v1/control/*` and the dashboard are open to anyone
-  who can reach the server, and show every application's usage and spend; load control
-  (off by default) lets them start load. A later role-based monitoring step protects them.
-  Generating text and reading an application's own usage do need a key.
+  `/metrics/summary`, `/v1/overload`, `/v1/control/*`, the Playground and the dashboard show
+  every application's usage and spend, and load control (off by default) starts load. They
+  are served only to this machine: the gateway refuses other peers, forwarded requests,
+  foreign Host names (DNS rebinding) and cross-site requests ([docs/25](docs/25-local-only.md)),
+  but any process on this machine can use them. A later role-based monitoring step adds
+  logins. Generating text and reading an application's own usage do need a key.
 - **The server binds to `127.0.0.1` and must not be exposed to a network.** That includes
   the Docker image (published on `127.0.0.1` only) and any reverse proxy in front of it.
   Keys also travel over plain HTTP, and failed key checks are not rate-limited per source

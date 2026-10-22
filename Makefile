@@ -48,13 +48,13 @@ demo:
 
 # The gateway on http://127.0.0.1:8000 in simulator mode. API docs at /docs.
 serve:
-	uv run uvicorn gateway.app:create_default_app --factory --port 8000
+	uv run python -m gateway.serve --port 8000
 
 # The gateway in simulated live mode: no models, a seeded load replayed on simulated time
 # at 5 times real time. Everything it shows is simulated. See
 # docs/17-playground-load-replay.md.
 serve-sim:
-	GATEWAY_SIMULATED_LIVE=1 GATEWAY_SIM_SPEED=5 uv run uvicorn gateway.app:create_default_app --factory --port 8000
+	GATEWAY_SIMULATED_LIVE=1 GATEWAY_SIM_SPEED=5 uv run python -m gateway.serve --port 8000
 
 # Builds the monitoring dashboard into src/gateway/dashboard, which `make serve` then
 # serves at /dashboard. Needs Node 20. See docs/16-dashboard.md.

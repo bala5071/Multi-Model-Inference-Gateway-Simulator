@@ -343,7 +343,7 @@ async def test_the_playground_sends_as_an_application_in_simulated_live_mode() -
 
     app = create_simulated_live_app(wait=never, dashboard_dir=None)
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
         ok = await client.post(
             "/v1/playground/generate",
             json={"application_id": "acme", "quality": "best", "prompt": PROMPT, "max_tokens": 2},

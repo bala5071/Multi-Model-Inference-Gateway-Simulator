@@ -28,7 +28,7 @@ export default defineConfig({
   },
   webServer: {
     // Simulated time at 20 times real time, so a minute of load takes three seconds.
-    command: `uv run uvicorn gateway.app:create_default_app --factory --port ${PORT} --log-level warning`,
+    command: `uv run python -m gateway.serve --port ${PORT} --log-level warning`,
     cwd: "..",
     env: {
       GATEWAY_SIMULATED_LIVE: "1",

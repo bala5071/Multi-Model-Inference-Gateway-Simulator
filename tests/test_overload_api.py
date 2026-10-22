@@ -352,7 +352,7 @@ async def test_allow_downgrade_must_be_a_boolean() -> None:
 
 async def test_default_app_has_overload_protection_switched_on() -> None:
     transport = httpx.ASGITransport(app=create_default_app())
-    async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
         status = (await client.get("/v1/overload")).json()
 
     assert status["request_timeout_ms"] == DEFAULT_OVERLOAD.request_timeout_ms
