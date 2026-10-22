@@ -24,7 +24,8 @@ from gateway.localonly import LocalOnlyPolicy
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.organizations import new_organization
 from gateway.passwords import CHEAP, InlineHashRunner, PasswordHasher, Passwords
-from gateway.users import AccountStore
+from gateway.roles import RoleStore
+from gateway.users import AccountStore, Bootstrap, User
 from helpers import TEST_PEPPER
 
 ORIGIN_MS = 1.75e12
@@ -63,6 +64,7 @@ def make_service(
         AccountStore(connection),
         AuditLog(connection, unknown_user_rows_per_minute=unknown_user_rows_per_minute),
         Passwords(PasswordHasher(CHEAP), InlineHashRunner()),
+        roles=RoleStore(connection),
         organizations=organizations,
         clock=clock,
         epoch=epoch,
@@ -70,6 +72,20 @@ def make_service(
         random_bytes=random.Random(seed).randbytes,
         audit_retention_ms=audit_retention_ms,
     )
+
+
+def ready_user(accounts: Accounts, username: str, password: str, org: str) -> User:
+    """A user who has already set their own password: created as the operator would
+    (which makes the password one to change), then changed, as the user's first login
+    would."""
+    user = accounts.service.create_user(username, password, org)
+    hasher = PasswordHasher(CHEAP)
+    accounts.store.set_password(
+        user.id, hasher.hash(password), must_change=False, bootstrap=Bootstrap.NONE
+    )
+    found = accounts.store.get_user(user.id)
+    assert found is not None
+    return found
 
 
 def make_accounts(**kwargs: object) -> Accounts:

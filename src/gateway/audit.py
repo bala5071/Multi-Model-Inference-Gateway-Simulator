@@ -32,6 +32,7 @@ DEFAULT_UNKNOWN_USER_ROWS_PER_MINUTE = 60
 ID_PATTERN = re.compile(r"(usr|ses)_[0-9a-f]{16}")
 # Organization ids are chosen by an operator; an entry stores them only in this form.
 ORGANIZATION_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
+SCOPE_TYPES = frozenset({"platform", "organization", "application"})
 
 
 class AuditAction(StrEnum):
@@ -48,6 +49,8 @@ class AuditAction(StrEnum):
     PASSWORD_RESET = "password_reset"
     SESSIONS_REVOKED = "sessions_revoked"
     ROWS_DROPPED = "audit_rows_dropped"
+    ROLE_GRANTED = "role_granted"
+    ROLE_REVOKED = "role_revoked"
 
 
 class Outcome(StrEnum):
@@ -90,6 +93,10 @@ DETAIL_FIELDS: Mapping[str, type] = {
     "password_rehashed": bool,
     "dropped": int,
     "minute_start_ms": float,
+    "must_change_password": bool,
+    "role": str,
+    "scope_type": str,
+    "scope_id": str,
 }
 
 
@@ -115,9 +122,17 @@ def _checked_details(details: Mapping[str, object]) -> dict[str, object]:
             if not math.isfinite(value):
                 raise ValueError(f"audit detail {key!r} must be finite")
             checked[key] = float(value)
-        elif key == "organization_id":
-            if not isinstance(value, str) or not ORGANIZATION_ID_PATTERN.fullmatch(value):
-                raise ValueError("audit detail 'organization_id' must be an organization id")
+        elif key == "scope_type":
+            if value not in SCOPE_TYPES:
+                raise ValueError("audit detail 'scope_type' must be a scope type")
+            checked[key] = value
+        else:  # organization_id, role, scope_id: ids, never free text
+            ok = isinstance(value, str) and (
+                ORGANIZATION_ID_PATTERN.fullmatch(value) is not None
+                or (key == "scope_id" and value == "*")
+            )
+            if not ok:
+                raise ValueError(f"audit detail {key!r} must be in the form of an id")
             checked[key] = value
     return checked
 

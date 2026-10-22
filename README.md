@@ -306,7 +306,8 @@ People log in to a console with a username and password ([docs/27](docs/27-users
 There is no sign-up: the first admin comes from `GATEWAY_ADMIN_USERNAME` and
 `GATEWAY_ADMIN_PASSWORD` (as in the quickstart's `gateway.env`) when none exists, and must
 change that password at its first login; the server refuses to start without an admin.
-Further accounts come from the CLI, which asks for the password and never prints it:
+Further accounts come from the CLI, which asks for the password and never prints it; one the
+operator creates must change its password at first login:
 
 ```sh
 uv run python scripts/manage.py create-user --username alice --organization north
@@ -314,6 +315,19 @@ uv run python scripts/manage.py reset-password --username alice   # a temporary 
 uv run python scripts/manage.py unlock-user --username alice      # after 5 failed logins
 uv run python scripts/manage.py disable-user --username alice     # ends every session
 ```
+
+Roles decide what an account may do ([docs/28](docs/28-roles.md)): `platform_admin`
+(organizations; users in any organization), `org_admin` (its organization), `app_admin` (its
+application) and `viewer` (usage, read only). Membership alone grants nothing. Roles are granted
+from the CLI; `--as USERNAME` acts within that user's roles instead of as the operator:
+
+```sh
+uv run python scripts/manage.py grant-role --username alice --role org_admin --organization north
+uv run python scripts/manage.py list-roles --username alice
+```
+
+Upgrading a database from before roles: run `uv run python scripts/manage.py migrate` once before
+starting this version (it backs the database up first).
 
 `POST /v1/auth/login` with `{"username", "password"}` sets an `HttpOnly`, `SameSite=Strict`
 session cookie and returns a CSRF token, which `POST /v1/auth/logout` and

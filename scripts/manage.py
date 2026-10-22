@@ -15,6 +15,12 @@ endpoints). See docs/20-applications-api-keys.md and docs/26-organizations.md.
     uv run python scripts/manage.py enable-organization --organization north
     uv run python scripts/manage.py create-user --username alice --organization north
     uv run python scripts/manage.py create-user --username root --platform-admin
+    uv run python scripts/manage.py grant-role --username alice --role org_admin \\
+        --organization north
+    uv run python scripts/manage.py grant-role --username bob --role viewer --organization north \\
+        --as alice
+    uv run python scripts/manage.py list-roles --username bob
+    uv run python scripts/manage.py revoke-role --username bob --role viewer --organization north
     uv run python scripts/manage.py reset-password --username alice
     uv run python scripts/manage.py unlock-user --username alice
     uv run python scripts/manage.py disable-user --username alice
@@ -56,7 +62,7 @@ from gateway.applications import (
     seed_demo_applications,
 )
 from gateway.audit import AuditLog
-from gateway.auth import AccountService
+from gateway.auth import AccountService, NotPermittedError
 from gateway.clock import EpochSource, SystemEpoch, WallClock
 from gateway.database import (
     DatabaseInUseError,
@@ -84,6 +90,8 @@ from gateway.passwords import (
     Passwords,
     parameters_from,
 )
+from gateway.permissions import PLATFORM_SCOPE_ID, ScopeType
+from gateway.roles import RoleStore
 from gateway.routing import load_plans
 from gateway.usage import SqliteUsageStore
 from gateway.users import AccountStore
@@ -238,11 +246,81 @@ def _accounts(
         AccountStore(connection),
         AuditLog(connection),
         Passwords(hasher, InlineHashRunner()),
+        roles=RoleStore(connection),
         organizations=store,
         clock=WallClock(),
         epoch=SystemEpoch(),
         secret=secrets.token_bytes(32),
     )
+
+
+ACCOUNT_COMMANDS = frozenset(
+    {
+        "create-user",
+        "disable-user",
+        "enable-user",
+        "reset-password",
+        "unlock-user",
+        "grant-role",
+        "revoke-role",
+        "list-roles",
+    }
+)
+
+
+def _scope(args: argparse.Namespace) -> tuple[str, str]:
+    if args.platform:
+        return ScopeType.PLATFORM.value, PLATFORM_SCOPE_ID
+    if args.organization is not None:
+        return ScopeType.ORGANIZATION.value, args.organization
+    return ScopeType.APPLICATION.value, args.application
+
+
+def _account_command(
+    args: argparse.Namespace, accounts: AccountService, read_password: ReadPassword
+) -> None:
+    """The user and role commands. ``--as`` acts as that user, checked with ``authorize``;
+    without it the operator acts (docs/28)."""
+    actor = accounts.actor_named(args.as_user) if args.as_user else None
+    name = args.username
+    if args.command == "create-user":
+        made = accounts.create_user(
+            name,
+            _new_password(read_password),
+            args.organization,
+            actor=actor,
+            platform_admin=args.platform_admin,
+        )
+        role = " (platform_admin)" if args.platform_admin else ""
+        change = "; it must change its password at first login" if made.must_change_password else ""
+        where = made.organization_id
+        _note(f"created user {made.username!r}{role} in organization {where!r}{change}")
+    elif args.command == "disable-user":
+        revoked = accounts.disable_user(name, actor=actor)
+        _note(f"disabled user {name!r}; revoked {revoked} session(s)")
+    elif args.command == "enable-user":
+        accounts.enable_user(name, actor=actor)
+        _note(f"enabled user {name!r}")
+    elif args.command == "reset-password":
+        revoked = accounts.reset_password(name, _new_password(read_password), actor=actor)
+        _note(
+            f"reset the password of {name!r}: it must be changed at the next login; "
+            f"revoked {revoked} session(s)"
+        )
+    elif args.command == "unlock-user":
+        accounts.unlock_user(name, actor=actor)
+        _note(f"unlocked user {name!r}")
+    elif args.command == "list-roles":
+        for held in accounts.list_roles(name, actor=actor):
+            print(f"{held.role}  {held.scope_type.value}  {held.scope_id}")
+    else:
+        scope_type, scope_id = _scope(args)
+        if args.command == "grant-role":
+            accounts.grant_role(name, args.role, scope_type, scope_id, actor=actor)
+            _note(f"granted {args.role} ({scope_type} {scope_id}) to {name!r}")
+        else:
+            accounts.revoke_role(name, args.role, scope_type, scope_id, actor=actor)
+            _note(f"revoked {args.role} ({scope_type} {scope_id}) from {name!r}")
 
 
 def main(
@@ -283,14 +361,37 @@ def main(
     user.add_argument("--username", required=True)
     user.add_argument("--organization", default=DEFAULT_ORGANIZATION_ID, help="an organization id")
     user.add_argument("--platform-admin", action="store_true")
+    acting = [user]
     for name, help_text in (
         ("disable-user", "it cannot log in; all its sessions are revoked"),
         ("enable-user", "it can log in again"),
         ("reset-password", "a temporary password it must change; revokes its sessions"),
         ("unlock-user", "clear a lockout after failed logins"),
+        ("list-roles", "the roles a user holds"),
     ):
         command = commands.add_parser(name, help=help_text)
         command.add_argument("--username", required=True)
+        acting.append(command)
+    for name, help_text in (
+        ("grant-role", "give a user a role in a scope"),
+        ("revoke-role", "take a role away (never the last org_admin or platform_admin)"),
+    ):
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("--username", required=True)
+        command.add_argument("--role", required=True, help="a built-in or application role")
+        scope = command.add_mutually_exclusive_group(required=True)
+        scope.add_argument("--organization", help="an organization id")
+        scope.add_argument("--application", help="an application id")
+        scope.add_argument("--platform", action="store_true", help="the platform scope")
+        acting.append(command)
+    for command in acting:
+        command.add_argument(
+            "--as",
+            dest="as_user",
+            metavar="USERNAME",
+            help="act as this user, checked against its roles (default: the operator, who may "
+            "do anything, including granting platform_admin)",
+        )
     issue = commands.add_parser("create-key", help="issue a key; it is printed once")
     issue.add_argument("--application", required=True)
     issue.add_argument("--label", required=True)
@@ -386,33 +487,8 @@ def main(
                 raise ValueError(f"no organization {args.organization!r}")
             store.set_organization_disabled(args.organization, disabled)
             _note(f"organization {args.organization!r} {'disabled' if disabled else 'enabled'}")
-        elif args.command == "create-user":
-            accounts = _accounts(connection, store, env)
-            new_user = accounts.create_user(
-                args.username,
-                _new_password(read_password),
-                args.organization,
-                platform_admin=args.platform_admin,
-            )
-            role = " (platform_admin)" if new_user.platform_admin else ""
-            where = new_user.organization_id
-            _note(f"created user {new_user.username!r}{role} in organization {where!r}")
-        elif args.command == "disable-user":
-            revoked = _accounts(connection, store, env).disable_user(args.username)
-            _note(f"disabled user {args.username!r}; revoked {revoked} session(s)")
-        elif args.command == "enable-user":
-            _accounts(connection, store, env).enable_user(args.username)
-            _note(f"enabled user {args.username!r}")
-        elif args.command == "reset-password":
-            accounts = _accounts(connection, store, env)
-            revoked = accounts.reset_password(args.username, _new_password(read_password))
-            _note(
-                f"reset the password of {args.username!r}: it must be changed at the next "
-                f"login; revoked {revoked} session(s)"
-            )
-        elif args.command == "unlock-user":
-            _accounts(connection, store, env).unlock_user(args.username)
-            _note(f"unlocked user {args.username!r}")
+        elif args.command in ACCOUNT_COMMANDS:
+            _account_command(args, _accounts(connection, store, env), read_password)
         elif args.command == "organization-usage":
             _organization_usage(connection, store, args.organization)
         elif args.command == "list-applications":
@@ -463,7 +539,13 @@ def main(
             if isinstance(sys.stdout, io.TextIOWrapper):
                 sys.stdout.reconfigure(newline="\n")
             print(issued.key)
-    except (ValueError, KeyError, FileExistsError, PasswordPolicyError) as exc:
+    except (
+        ValueError,
+        KeyError,
+        FileExistsError,
+        PasswordPolicyError,
+        NotPermittedError,
+    ) as exc:
         _note(f"error: {exc}")
         return 1
     finally:

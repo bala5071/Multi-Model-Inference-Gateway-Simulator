@@ -21,6 +21,7 @@ from accounts_helpers import (
     cookie,
     http_login,
     make_accounts,
+    ready_user,
     with_csrf,
 )
 from gateway.app import create_app, create_default_app
@@ -45,6 +46,7 @@ from gateway.auth import (
 from gateway.clock import SimClock
 from gateway.continuous import build_continuous_registry
 from gateway.passwords import Argon2Parameters, PasswordHasher, PasswordPolicyError
+from gateway.permissions import Assignment, ScopeType
 from gateway.users import Bootstrap, normalize_username
 from helpers import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME, default_server
 
@@ -131,10 +133,9 @@ def test_the_bootstrap_admin_is_made_once_and_never_overwritten(accounts: Accoun
     assert accounts.service.bootstrap_admin(ADMIN_ENV) is BootstrapOutcome.CREATED
     admin = accounts.store.find_user("root")
     assert admin is not None
-    assert (admin.platform_admin, admin.must_change_password, admin.bootstrap) == (
-        True,
-        True,
-        Bootstrap.UNUSED,
+    assert (admin.must_change_password, admin.bootstrap) == (True, Bootstrap.UNUSED)
+    assert accounts.service.roles.assignments_for(admin.id) == (
+        Assignment("platform_admin", ScopeType.PLATFORM, "*"),
     )
     assert admin.organization_id == "default"
     other = {ADMIN_USERNAME_ENV: "root", ADMIN_PASSWORD_ENV: "another long passphrase here"}
@@ -168,7 +169,7 @@ def test_the_bootstrap_password_must_pass_the_policy(
     with pytest.raises(BootstrapError, match=rule) as excinfo:
         accounts.service.bootstrap_admin({ADMIN_USERNAME_ENV: "root", ADMIN_PASSWORD_ENV: password})
     assert password not in str(excinfo.value)
-    assert not accounts.store.platform_admin_exists()
+    assert not accounts.service.roles.platform_admin_exists()
 
 
 def test_the_server_refuses_to_start_without_an_admin(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -604,8 +605,8 @@ async def test_disabling_a_user_revokes_every_session(accounts: Accounts) -> Non
 
 
 async def test_the_session_list_shows_only_ones_own_live_sessions(accounts: Accounts) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
-    accounts.service.create_user("bob", PASSWORD, "north")
+    ready_user(accounts, "alice", PASSWORD, "north")
+    ready_user(accounts, "bob", PASSWORD, "north")
     async with console(accounts) as c:
         _, first, _ = await http_login(c, "alice", PASSWORD)
         _, second, csrf2 = await http_login(c, "alice", PASSWORD)

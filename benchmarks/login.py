@@ -49,6 +49,7 @@ from gateway.passwords import (
     Passwords,
     parameters_from,
 )
+from gateway.roles import RoleStore
 from gateway.users import AccountStore
 
 FAILURES_PER_KNOWN_USER = 4  # below the lockout's 5
@@ -69,6 +70,7 @@ def _make_users(path: Path, count: int, environ: dict[str, str]) -> dict[str, st
         AccountStore(connection),
         AuditLog(connection),
         Passwords(hasher, InlineHashRunner()),
+        roles=RoleStore(connection),
         organizations=SqliteApplicationStore(connection),
         clock=WallClock(),
         epoch=SystemEpoch(),

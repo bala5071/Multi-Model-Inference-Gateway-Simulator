@@ -9,6 +9,9 @@ server's (WAL, synchronous FULL):
 - "check + write": the same when the minute is up, so ``last_seen_at`` is written (at most
   once a minute per session).
 - "the write alone": that one ``UPDATE``.
+- "check + roles + authorize": what ``requires`` does for a management endpoint (docs/28): the
+  check without a write, the user's role assignments and organization read afresh, and
+  ``authorize``.
 
     uv run python -m benchmarks.session_checks
     uv run python -m benchmarks.session_checks --checks 5000 --dir D:/somewhere
@@ -37,6 +40,8 @@ from gateway.database import open_database
 from gateway.metrics import percentile
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.passwords import CHEAP, InlineHashRunner, PasswordHasher, Passwords
+from gateway.permissions import Resource, authorize
+from gateway.roles import RoleStore
 from gateway.users import AccountStore
 
 
@@ -51,6 +56,7 @@ def run(checks: int, directory: Path | None) -> list[WriteTimes]:
             store,
             AuditLog(connection),
             Passwords(PasswordHasher(CHEAP), InlineHashRunner()),
+            roles=RoleStore(connection),
             organizations=SqliteApplicationStore(connection),
             clock=WallClock(),
             epoch=epoch,
@@ -63,6 +69,18 @@ def run(checks: int, directory: Path | None) -> list[WriteTimes]:
         results = [
             _times("check, no write", checks, lambda: service.authenticate(login.session_id))
         ]
+        # What requires() does on each management request (docs/28): the session check, then
+        # the actor's roles and organization read afresh, then authorize.
+        service.grant_role("bench", "org_admin", "organization", "default")
+        resource = Resource.organization("default")
+
+        def check_and_authorize() -> None:
+            context = service.authenticate(login.session_id)
+            actor = service.actor_for(context.user)
+            if not authorize(actor, "users.list", resource).allowed:
+                raise RuntimeError("the benchmark's user should be allowed")
+
+        results.append(_times("check + roles + authorize", checks, check_and_authorize))
 
         def stale() -> None:
             # Untimed: put the last write more than a minute back, so the check writes.
@@ -111,10 +129,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"database folder: {args.dir or tempfile.gettempdir()}")
     print(f"warm-up per row: {WARMUP_CHECKS}; percentiles: nearest rank")
     print()
-    print(f"{'what':<18} {'n':>6} {'mean ms':>9} {'p50 ms':>9} {'p99 ms':>9} {'max ms':>9}")
+    print(f"{'what':<26} {'n':>6} {'mean ms':>9} {'p50 ms':>9} {'p99 ms':>9} {'max ms':>9}")
     for r in run(args.checks, args.dir):
         print(
-            f"{r.store:<18} {r.writes:>6} {r.mean_ms:>9.3f} {r.p50_ms:>9.3f} "
+            f"{r.store:<26} {r.writes:>6} {r.mean_ms:>9.3f} {r.p50_ms:>9.3f} "
             f"{r.p99_ms:>9.3f} {r.max_ms:>9.3f}"
         )
 

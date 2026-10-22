@@ -179,7 +179,10 @@ Step 5 builds this section (note 28); the management endpoints that use it are s
   organization (platform_admin excepted).
 - **What platform_admin can do:** create, disable and enable organizations, list them, see
   aggregate usage per organization, create users in any organization, and (through the CLI
-  only) grant `org_admin`. Nothing at application level: no application keys, application
+  only) grant `org_admin`. An account created by a platform_admin for an organization it is
+  not a member of, or by the operator at the CLI, starts with `must_change_password`, on the CLI
+  and the endpoint alike (the shared create-user function; step 5 tests the CLI, step 7 the
+  endpoint). Nothing at application level: no application keys, application
   roles, provider keys or anything inside an application (the gateway stores no prompts or
   responses, so there are no transcripts to read).
 - **Granting:** org_admin grants and revokes roles within its own organization, never
@@ -383,7 +386,7 @@ Each step is its own pull request and stops for review.
    and a burst of 8 timed through the running server at the default argon2 setting (64 MiB,
    3, 1), with the hardware, in note 24; the known-versus-unknown failure timing and the
    cost of writing `last_seen_at`, in note 27. Done (note 27).
-5. (Was 5a.) Roles: migration 8 and its backfill, `permissions.py`, `authorize`, the
+5. (Was 5a.) Done (note 28). Roles: migration 8 and its backfill, `permissions.py`, `authorize`, the
    per-route declarations (`requires` enforcing, `local_only`, `public`), the generated matrix
    and the documented table, and the CLI for roles (`grant-role`, `revoke-role`,
    `list-roles`). No new endpoint.
