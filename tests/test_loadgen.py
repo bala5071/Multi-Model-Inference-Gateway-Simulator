@@ -22,8 +22,8 @@ from gateway.backends import SimulatedBackend
 from gateway.clock import SimClock, WallClock
 from gateway.continuous import ContinuousBatchingWorker, build_continuous_registry
 from gateway.prefix_cache import PrefixCache
-from gateway.profiles import ECONOMY, PREMIUM
 from gateway.registry import ModelRegistry
+from helpers import TEST_ECONOMY, TEST_PREMIUM, TEST_PROFILES
 
 SMALL = LoadConfig(seed=7, total_requests=60, arrival_rate_per_s=20, max_tokens=8)
 
@@ -297,6 +297,7 @@ def test_summary_math() -> None:
 
 # 98% of a 200 req/s stream goes to the economy model, far more than it can serve, while the
 # premium model gets about 4 req/s. Prompts are 20-80 words and outputs 16 tokens.
+# On the hand-made test profiles: these tests pin the isolation mechanism, not a result.
 FAIRNESS = LoadConfig(
     seed=7,
     total_requests=1000,
@@ -307,23 +308,23 @@ FAIRNESS = LoadConfig(
     max_tokens=16,
 )
 # The slowest a single request can be on an idle model: longest prompt, then 16 decode steps.
-ECONOMY_WORST_ALONE_MS = 80 * ECONOMY.prefill_ms_per_token + 16 * ECONOMY.decode_base_ms
-PREMIUM_WORST_ALONE_MS = 80 * PREMIUM.prefill_ms_per_token + 16 * PREMIUM.decode_base_ms
+ECONOMY_WORST_ALONE_MS = 80 * TEST_ECONOMY.prefill_ms_per_token + 16 * TEST_ECONOMY.decode_base_ms
+PREMIUM_WORST_ALONE_MS = 80 * TEST_PREMIUM.prefill_ms_per_token + 16 * TEST_PREMIUM.decode_base_ms
 # The bound on the light model's p99: twice its slowest unloaded request.
 PREMIUM_P99_BOUND_MS = 2 * PREMIUM_WORST_ALONE_MS
 
 
 def _separate_workers(clock: SimClock) -> ModelRegistry:
-    return build_continuous_registry(clock, seed=FAIRNESS.seed)
+    return build_continuous_registry(clock, seed=FAIRNESS.seed, profiles=TEST_PROFILES)
 
 
 def _one_shared_queue(clock: SimClock) -> ModelRegistry:
     """Both model names feed a single worker, so all requests wait in one queue."""
     worker = ContinuousBatchingWorker(
-        ECONOMY,
+        TEST_ECONOMY,
         SimulatedBackend(seed=FAIRNESS.seed),
         clock,
-        prefix_cache=PrefixCache(ECONOMY.kv_capacity_tokens),
+        prefix_cache=PrefixCache(TEST_ECONOMY.kv_capacity_tokens),
     )
     registry = ModelRegistry()
     registry.register("economy", worker, aliases=["premium"])

@@ -1,0 +1,845 @@
+{
+  "at_ms": 6782.0,
+  "resolution_ms": 1000.0,
+  "window_ms": 900000.0,
+  "models": {
+    "economy": {
+      "traffic": {
+        "available": true,
+        "in_flight": 0,
+        "arrived_total": 6,
+        "completed_total": 6,
+        "output_tokens_total": 36,
+        "queue_full_total": 0,
+        "timeout_total": 0,
+        "downgrade_total": 0
+      },
+      "queue": {
+        "available": true,
+        "length": 0
+      },
+      "batch": {
+        "available": true,
+        "size": 0,
+        "max_size": 32
+      },
+      "kv": {
+        "available": true,
+        "used_tokens": 60,
+        "capacity_tokens": 65536
+      },
+      "cache": {
+        "available": true,
+        "size_tokens": 60,
+        "lookups_total": 6,
+        "hits_total": 0,
+        "prompt_tokens_total": 60,
+        "cached_tokens_total": 0,
+        "hit_rate": 0.0,
+        "token_hit_rate": 0.0
+      },
+      "latency": {
+        "available": true,
+        "window_ms": 300000.0,
+        "ttft_ms": {
+          "p50": 7.2000000000000455,
+          "p99": 7.2000000000000455,
+          "samples": 6
+        },
+        "itl_ms": {
+          "p50": 6.2,
+          "p99": 6.2000000000000455,
+          "samples": 30
+        },
+        "total_ms": {
+          "p50": 25.800000000000182,
+          "p99": 49.80000000000018,
+          "samples": 6
+        }
+      },
+      "slo": {
+        "available": true,
+        "degraded": false,
+        "slo_p99_ms": 5000.0,
+        "recent_p99_ms": 49.80000000000018,
+        "samples": 6,
+        "window_ms": 10000.0,
+        "min_samples": 5
+      },
+      "series": [
+        {
+          "t_ms": 0.0,
+          "final": true,
+          "arrived": 2,
+          "completed": 2,
+          "req_per_s": 2.0,
+          "output_tokens": 12,
+          "tokens_per_s": 12.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 0,
+          "in_flight_max": 2,
+          "queue_len": 0,
+          "queue_len_max": 0,
+          "batch_size": 0,
+          "batch_size_max": 2,
+          "kv_used_tokens": 20,
+          "kv_used_tokens_max": 32,
+          "cache_lookups": 2,
+          "cache_hit_rate": 0.0,
+          "cache_token_hit_rate": 0.0,
+          "ttft_p50_ms": 7.2,
+          "ttft_p99_ms": 7.2,
+          "itl_p50_ms": 6.199999999999999,
+          "itl_p99_ms": 6.200000000000001,
+          "total_p50_ms": 25.8,
+          "total_p99_ms": 49.8,
+          "latency_truncated": false,
+          "degraded": false
+        },
+        {
+          "t_ms": 1000.0,
+          "final": true,
+          "arrived": 2,
+          "completed": 2,
+          "req_per_s": 2.0,
+          "output_tokens": 12,
+          "tokens_per_s": 12.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 0,
+          "in_flight_max": 2,
+          "queue_len": 0,
+          "queue_len_max": 0,
+          "batch_size": 0,
+          "batch_size_max": 2,
+          "kv_used_tokens": 40,
+          "kv_used_tokens_max": 52,
+          "cache_lookups": 2,
+          "cache_hit_rate": 0.0,
+          "cache_token_hit_rate": 0.0,
+          "ttft_p50_ms": 7.2000000000000455,
+          "ttft_p99_ms": 7.2000000000000455,
+          "itl_p50_ms": 6.2000000000000455,
+          "itl_p99_ms": 6.2000000000000455,
+          "total_p50_ms": 25.800000000000182,
+          "total_p99_ms": 49.80000000000018,
+          "latency_truncated": false,
+          "degraded": false
+        },
+        {
+          "t_ms": 2000.0,
+          "final": true,
+          "arrived": 2,
+          "completed": 2,
+          "req_per_s": 2.0,
+          "output_tokens": 12,
+          "tokens_per_s": 12.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 0,
+          "in_flight_max": 2,
+          "queue_len": 0,
+          "queue_len_max": 0,
+          "batch_size": 0,
+          "batch_size_max": 2,
+          "kv_used_tokens": 60,
+          "kv_used_tokens_max": 72,
+          "cache_lookups": 2,
+          "cache_hit_rate": 0.0,
+          "cache_token_hit_rate": 0.0,
+          "ttft_p50_ms": 7.2000000000000455,
+          "ttft_p99_ms": 7.2000000000000455,
+          "itl_p50_ms": 6.2000000000000455,
+          "itl_p99_ms": 6.2000000000000455,
+          "total_p50_ms": 25.800000000000182,
+          "total_p99_ms": 49.80000000000018,
+          "latency_truncated": false,
+          "degraded": false
+        },
+        {
+          "t_ms": 6000.0,
+          "final": false,
+          "arrived": 0,
+          "completed": 0,
+          "req_per_s": 0.0,
+          "output_tokens": 0,
+          "tokens_per_s": 0.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 0,
+          "in_flight_max": 0,
+          "queue_len": 0,
+          "queue_len_max": 0,
+          "batch_size": 0,
+          "batch_size_max": 0,
+          "kv_used_tokens": 60,
+          "kv_used_tokens_max": 60,
+          "cache_lookups": 0,
+          "cache_hit_rate": null,
+          "cache_token_hit_rate": null,
+          "ttft_p50_ms": null,
+          "ttft_p99_ms": null,
+          "itl_p50_ms": null,
+          "itl_p99_ms": null,
+          "total_p50_ms": null,
+          "total_p99_ms": null,
+          "latency_truncated": false,
+          "degraded": false
+        }
+      ]
+    },
+    "standard": {
+      "traffic": {
+        "available": true,
+        "in_flight": 0,
+        "arrived_total": 4,
+        "completed_total": 4,
+        "output_tokens_total": 28,
+        "queue_full_total": 0,
+        "timeout_total": 0,
+        "downgrade_total": 0
+      },
+      "queue": {
+        "available": true,
+        "length": 0
+      },
+      "batch": {
+        "available": true,
+        "size": 0,
+        "max_size": 16
+      },
+      "kv": {
+        "available": true,
+        "used_tokens": 40,
+        "capacity_tokens": 32768
+      },
+      "cache": {
+        "available": true,
+        "size_tokens": 40,
+        "lookups_total": 4,
+        "hits_total": 0,
+        "prompt_tokens_total": 40,
+        "cached_tokens_total": 0,
+        "hit_rate": 0.0,
+        "token_hit_rate": 0.0
+      },
+      "latency": {
+        "available": true,
+        "window_ms": 300000.0,
+        "ttft_ms": {
+          "p50": 13.5,
+          "p99": 13.5,
+          "samples": 4
+        },
+        "itl_ms": {
+          "p50": 12.0,
+          "p99": 12.0,
+          "samples": 24
+        },
+        "total_ms": {
+          "p50": 97.5,
+          "p99": 97.5,
+          "samples": 4
+        }
+      },
+      "slo": {
+        "available": true,
+        "degraded": false,
+        "slo_p99_ms": 10000.0,
+        "recent_p99_ms": 97.5,
+        "samples": 4,
+        "window_ms": 10000.0,
+        "min_samples": 5
+      },
+      "series": [
+        {
+          "t_ms": 0.0,
+          "final": true,
+          "arrived": 1,
+          "completed": 1,
+          "req_per_s": 1.0,
+          "output_tokens": 8,
+          "tokens_per_s": 8.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 0,
+          "in_flight_max": 1,
+          "queue_len": 0,
+          "queue_len_max": 0,
+          "batch_size": 0,
+          "batch_size_max": 1,
+          "kv_used_tokens": 10,
+          "kv_used_tokens_max": 18,
+          "cache_lookups": 1,
+          "cache_hit_rate": 0.0,
+          "cache_token_hit_rate": 0.0,
+          "ttft_p50_ms": 13.5,
+          "ttft_p99_ms": 13.5,
+          "itl_p50_ms": 12.0,
+          "itl_p99_ms": 12.0,
+          "total_p50_ms": 97.5,
+          "total_p99_ms": 97.5,
+          "latency_truncated": false,
+          "degraded": false
+        },
+        {
+          "t_ms": 1000.0,
+          "final": true,
+          "arrived": 1,
+          "completed": 1,
+          "req_per_s": 1.0,
+          "output_tokens": 8,
+          "tokens_per_s": 8.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 0,
+          "in_flight_max": 1,
+          "queue_len": 0,
+          "queue_len_max": 0,
+          "batch_size": 0,
+          "batch_size_max": 1,
+          "kv_used_tokens": 20,
+          "kv_used_tokens_max": 28,
+          "cache_lookups": 1,
+          "cache_hit_rate": 0.0,
+          "cache_token_hit_rate": 0.0,
+          "ttft_p50_ms": 13.5,
+          "ttft_p99_ms": 13.5,
+          "itl_p50_ms": 12.0,
+          "itl_p99_ms": 12.0,
+          "total_p50_ms": 97.5,
+          "total_p99_ms": 97.5,
+          "latency_truncated": false,
+          "degraded": false
+        },
+        {
+          "t_ms": 2000.0,
+          "final": true,
+          "arrived": 1,
+          "completed": 1,
+          "req_per_s": 1.0,
+          "output_tokens": 8,
+          "tokens_per_s": 8.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 0,
+          "in_flight_max": 1,
+          "queue_len": 0,
+          "queue_len_max": 0,
+          "batch_size": 0,
+          "batch_size_max": 1,
+          "kv_used_tokens": 30,
+          "kv_used_tokens_max": 38,
+          "cache_lookups": 1,
+          "cache_hit_rate": 0.0,
+          "cache_token_hit_rate": 0.0,
+          "ttft_p50_ms": 13.5,
+          "ttft_p99_ms": 13.5,
+          "itl_p50_ms": 12.0,
+          "itl_p99_ms": 12.0,
+          "total_p50_ms": 97.5,
+          "total_p99_ms": 97.5,
+          "latency_truncated": false,
+          "degraded": false
+        },
+        {
+          "t_ms": 6000.0,
+          "final": false,
+          "arrived": 1,
+          "completed": 1,
+          "req_per_s": 1.0,
+          "output_tokens": 4,
+          "tokens_per_s": 4.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 0,
+          "in_flight_max": 1,
+          "queue_len": 0,
+          "queue_len_max": 0,
+          "batch_size": 0,
+          "batch_size_max": 1,
+          "kv_used_tokens": 40,
+          "kv_used_tokens_max": 44,
+          "cache_lookups": 1,
+          "cache_hit_rate": 0.0,
+          "cache_token_hit_rate": 0.0,
+          "ttft_p50_ms": 13.5,
+          "ttft_p99_ms": 13.5,
+          "itl_p50_ms": 12.0,
+          "itl_p99_ms": 12.0,
+          "total_p50_ms": 49.5,
+          "total_p99_ms": 49.5,
+          "latency_truncated": false,
+          "degraded": false
+        }
+      ]
+    },
+    "premium": {
+      "traffic": {
+        "available": true,
+        "in_flight": 0,
+        "arrived_total": 12,
+        "completed_total": 10,
+        "output_tokens_total": 523,
+        "queue_full_total": 2,
+        "timeout_total": 0,
+        "downgrade_total": 1
+      },
+      "queue": {
+        "available": true,
+        "length": 0
+      },
+      "batch": {
+        "available": true,
+        "size": 0,
+        "max_size": 8
+      },
+      "kv": {
+        "available": true,
+        "used_tokens": 100,
+        "capacity_tokens": 16384
+      },
+      "cache": {
+        "available": true,
+        "size_tokens": 100,
+        "lookups_total": 10,
+        "hits_total": 0,
+        "prompt_tokens_total": 100,
+        "cached_tokens_total": 0,
+        "hit_rate": 0.0,
+        "token_hit_rate": 0.0
+      },
+      "latency": {
+        "available": true,
+        "window_ms": 300000.0,
+        "ttft_ms": {
+          "p50": 95.5,
+          "p99": 2150.0,
+          "samples": 10
+        },
+        "itl_ms": {
+          "p50": 47.5,
+          "p99": 53.5,
+          "samples": 513
+        },
+        "total_ms": {
+          "p50": 2910.0,
+          "p99": 3732.5,
+          "samples": 10
+        }
+      },
+      "slo": {
+        "available": true,
+        "degraded": true,
+        "slo_p99_ms": 2000.0,
+        "recent_p99_ms": 3732.5,
+        "samples": 10,
+        "window_ms": 10000.0,
+        "min_samples": 5
+      },
+      "series": [
+        {
+          "t_ms": 0.0,
+          "final": true,
+          "arrived": 0,
+          "completed": 0,
+          "req_per_s": 0.0,
+          "output_tokens": 0,
+          "tokens_per_s": 0.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 0,
+          "in_flight_max": 0,
+          "queue_len": null,
+          "queue_len_max": null,
+          "batch_size": null,
+          "batch_size_max": null,
+          "kv_used_tokens": null,
+          "kv_used_tokens_max": null,
+          "cache_lookups": null,
+          "cache_hit_rate": null,
+          "cache_token_hit_rate": null,
+          "ttft_p50_ms": null,
+          "ttft_p99_ms": null,
+          "itl_p50_ms": null,
+          "itl_p99_ms": null,
+          "total_p50_ms": null,
+          "total_p99_ms": null,
+          "latency_truncated": false,
+          "degraded": false
+        },
+        {
+          "t_ms": 3000.0,
+          "final": true,
+          "arrived": 12,
+          "completed": 1,
+          "req_per_s": 12.0,
+          "output_tokens": 152,
+          "tokens_per_s": 152.0,
+          "queue_full": 2,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 9,
+          "in_flight_max": 11,
+          "queue_len": 1,
+          "queue_len_max": 2,
+          "batch_size": 8,
+          "batch_size_max": 8,
+          "kv_used_tokens": 553,
+          "kv_used_tokens_max": 553,
+          "cache_lookups": 9,
+          "cache_hit_rate": 0.0,
+          "cache_token_hit_rate": 0.0,
+          "ttft_p50_ms": 95.5,
+          "ttft_p99_ms": 95.5,
+          "itl_p50_ms": 47.5,
+          "itl_p99_ms": 47.5,
+          "total_p50_ms": 855.5,
+          "total_p99_ms": 855.5,
+          "latency_truncated": false,
+          "degraded": false
+        },
+        {
+          "t_ms": 4000.0,
+          "final": true,
+          "arrived": 0,
+          "completed": 0,
+          "req_per_s": 0.0,
+          "output_tokens": 168,
+          "tokens_per_s": 168.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 9,
+          "in_flight_max": 9,
+          "queue_len": 1,
+          "queue_len_max": 1,
+          "batch_size": 8,
+          "batch_size_max": 8,
+          "kv_used_tokens": 553,
+          "kv_used_tokens_max": 553,
+          "cache_lookups": 0,
+          "cache_hit_rate": null,
+          "cache_token_hit_rate": null,
+          "ttft_p50_ms": null,
+          "ttft_p99_ms": null,
+          "itl_p50_ms": null,
+          "itl_p99_ms": null,
+          "total_p50_ms": null,
+          "total_p99_ms": null,
+          "latency_truncated": false,
+          "degraded": false
+        },
+        {
+          "t_ms": 5000.0,
+          "final": true,
+          "arrived": 0,
+          "completed": 7,
+          "req_per_s": 0.0,
+          "output_tokens": 164,
+          "tokens_per_s": 164.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 0,
+          "in_flight": 2,
+          "in_flight_max": 9,
+          "queue_len": 0,
+          "queue_len_max": 1,
+          "batch_size": 2,
+          "batch_size_max": 8,
+          "kv_used_tokens": 203,
+          "kv_used_tokens_max": 563,
+          "cache_lookups": 1,
+          "cache_hit_rate": 0.0,
+          "cache_token_hit_rate": 0.0,
+          "ttft_p50_ms": 95.5,
+          "ttft_p99_ms": 95.5,
+          "itl_p50_ms": 47.5,
+          "itl_p99_ms": 53.5,
+          "total_p50_ms": 2910.0,
+          "total_p99_ms": 2910.0,
+          "latency_truncated": false,
+          "degraded": true
+        },
+        {
+          "t_ms": 6000.0,
+          "final": false,
+          "arrived": 0,
+          "completed": 2,
+          "req_per_s": 0.0,
+          "output_tokens": 39,
+          "tokens_per_s": 39.0,
+          "queue_full": 0,
+          "timeouts": 0,
+          "downgrades": 1,
+          "in_flight": 0,
+          "in_flight_max": 2,
+          "queue_len": 0,
+          "queue_len_max": 0,
+          "batch_size": 0,
+          "batch_size_max": 2,
+          "kv_used_tokens": 100,
+          "kv_used_tokens_max": 203,
+          "cache_lookups": 0,
+          "cache_hit_rate": null,
+          "cache_token_hit_rate": null,
+          "ttft_p50_ms": 909.0,
+          "ttft_p99_ms": 2150.0,
+          "itl_p50_ms": 47.5,
+          "itl_p99_ms": 47.5,
+          "total_p50_ms": 3462.5,
+          "total_p99_ms": 3732.5,
+          "latency_truncated": false,
+          "degraded": true
+        }
+      ]
+    }
+  },
+  "tenants": {
+    "available": true,
+    "tenants": {
+      "initech": {
+        "plan": "free",
+        "period_start_ms": 0.0,
+        "period_end_ms": 2592000000.0,
+        "budget_tokens": 100000,
+        "used_tokens": 42,
+        "remaining_tokens": 99958,
+        "spend_usd": 0.0,
+        "requests": 3,
+        "rejections_total": {
+          "budget_exhausted": 0,
+          "queue_full": 0
+        },
+        "timeout_total": 0,
+        "downgrade_total": 0,
+        "series": [
+          {
+            "t_ms": 0.0,
+            "final": true,
+            "requests": 1,
+            "billed_tokens": 14,
+            "spend_usd": 0.0,
+            "rejections": 0,
+            "timeouts": 0,
+            "downgrades": 0
+          },
+          {
+            "t_ms": 1000.0,
+            "final": true,
+            "requests": 1,
+            "billed_tokens": 14,
+            "spend_usd": 0.0,
+            "rejections": 0,
+            "timeouts": 0,
+            "downgrades": 0
+          },
+          {
+            "t_ms": 2000.0,
+            "final": true,
+            "requests": 1,
+            "billed_tokens": 14,
+            "spend_usd": 0.0,
+            "rejections": 0,
+            "timeouts": 0,
+            "downgrades": 0
+          }
+        ]
+      },
+      "globex": {
+        "plan": "pro",
+        "period_start_ms": 0.0,
+        "period_end_ms": 2592000000.0,
+        "budget_tokens": 5000000,
+        "used_tokens": 54,
+        "remaining_tokens": 4999946,
+        "spend_usd": 2.34e-05,
+        "requests": 3,
+        "rejections_total": {
+          "budget_exhausted": 0,
+          "queue_full": 0
+        },
+        "timeout_total": 0,
+        "downgrade_total": 0,
+        "series": [
+          {
+            "t_ms": 0.0,
+            "final": true,
+            "requests": 1,
+            "billed_tokens": 18,
+            "spend_usd": 7.8e-06,
+            "rejections": 0,
+            "timeouts": 0,
+            "downgrades": 0
+          },
+          {
+            "t_ms": 1000.0,
+            "final": true,
+            "requests": 1,
+            "billed_tokens": 18,
+            "spend_usd": 7.8e-06,
+            "rejections": 0,
+            "timeouts": 0,
+            "downgrades": 0
+          },
+          {
+            "t_ms": 2000.0,
+            "final": true,
+            "requests": 1,
+            "billed_tokens": 18,
+            "spend_usd": 7.8e-06,
+            "rejections": 0,
+            "timeouts": 0,
+            "downgrades": 0
+          }
+        ]
+      },
+      "acme": {
+        "plan": "enterprise",
+        "period_start_ms": 0.0,
+        "period_end_ms": 2592000000.0,
+        "budget_tokens": 100000000,
+        "used_tokens": 691,
+        "remaining_tokens": 99999309,
+        "spend_usd": 0.0009273600000000002,
+        "requests": 14,
+        "rejections_total": {
+          "budget_exhausted": 0,
+          "queue_full": 2
+        },
+        "timeout_total": 0,
+        "downgrade_total": 1,
+        "series": [
+          {
+            "t_ms": 0.0,
+            "final": true,
+            "requests": 1,
+            "billed_tokens": 18,
+            "spend_usd": 2.08e-06,
+            "rejections": 0,
+            "timeouts": 0,
+            "downgrades": 0
+          },
+          {
+            "t_ms": 1000.0,
+            "final": true,
+            "requests": 1,
+            "billed_tokens": 18,
+            "spend_usd": 2.08e-06,
+            "rejections": 0,
+            "timeouts": 0,
+            "downgrades": 0
+          },
+          {
+            "t_ms": 2000.0,
+            "final": true,
+            "requests": 1,
+            "billed_tokens": 18,
+            "spend_usd": 2.08e-06,
+            "rejections": 0,
+            "timeouts": 0,
+            "downgrades": 0
+          },
+          {
+            "t_ms": 3000.0,
+            "final": true,
+            "requests": 1,
+            "billed_tokens": 27,
+            "spend_usd": 3.520000000000001e-05,
+            "rejections": 2,
+            "timeouts": 0,
+            "downgrades": 0
+          },
+          {
+            "t_ms": 5000.0,
+            "final": true,
+            "requests": 7,
+            "billed_tokens": 473,
+            "spend_usd": 0.0007008000000000001,
+            "rejections": 0,
+            "timeouts": 0,
+            "downgrades": 0
+          },
+          {
+            "t_ms": 6000.0,
+            "final": false,
+            "requests": 3,
+            "billed_tokens": 137,
+            "spend_usd": 0.00018512000000000004,
+            "rejections": 0,
+            "timeouts": 0,
+            "downgrades": 1
+          }
+        ]
+      }
+    }
+  },
+  "events": {
+    "available": true,
+    "capacity": 1000,
+    "retained": 4,
+    "last_seq": 4,
+    "counts": {
+      "state_change": 1,
+      "queue_full": 2,
+      "timeout": 0,
+      "downgrade": 1,
+      "budget_exhausted": 0
+    },
+    "recent": [
+      {
+        "seq": 1,
+        "at_ms": 3000.0,
+        "type": "queue_full",
+        "model": "premium",
+        "tenant_id": "acme",
+        "data": {
+          "waiting": 2,
+          "limit": 2
+        }
+      },
+      {
+        "seq": 2,
+        "at_ms": 3000.0,
+        "type": "queue_full",
+        "model": "premium",
+        "tenant_id": "acme",
+        "data": {
+          "waiting": 2,
+          "limit": 2
+        }
+      },
+      {
+        "seq": 3,
+        "at_ms": 5910.0,
+        "type": "state_change",
+        "model": "premium",
+        "tenant_id": null,
+        "data": {
+          "degraded": true,
+          "p99_ms": 2910.0
+        }
+      },
+      {
+        "seq": 4,
+        "at_ms": 6732.5,
+        "type": "downgrade",
+        "model": "premium",
+        "tenant_id": "acme",
+        "data": {
+          "to_model": "standard"
+        }
+      }
+    ]
+  }
+}

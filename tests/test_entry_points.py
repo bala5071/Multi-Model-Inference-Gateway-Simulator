@@ -18,20 +18,23 @@ from benchmarks import (
     compare_batching,
     fairness,
     loadgen,
+    metrics_example,
     overload,
     report,
+    usage_store_writes,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SIMULATED = "SIMULATED with illustrative profiles; not measurements of real models."
+SIMULATED = "SIMULATED on the calibrated profiles"
+MECHANISM_DEMO = "MECHANISM DEMO, NOT MEASURED ON REAL DATA"
 
 
 def test_baseline_limits_prints_the_table_in_the_docs(capsys: pytest.CaptureFixture[str]) -> None:
     baseline_limits.main()
     out = capsys.readouterr().out
     # The rows quoted in docs/02-baseline.md.
-    assert "economy        841.0  1.189  166.7           2623.0  15.74" in out
-    assert "premium       4380.0  0.228   33.3            168.4   5.05" in out
+    assert "economy       1010.7  0.989  149.0            271.4   1.82" in out
+    assert "premium       6570.0  0.152   22.2             33.5   1.51" in out
 
 
 async def test_compare_batching_runs_with_small_arguments(
@@ -54,7 +57,7 @@ async def test_fairness_demo_shows_isolation_and_what_breaks_it(
         (parts[0] + " " + parts[1] + (" " + parts[2] if parts[0] == "one" else ""), parts[-4]): (
             float(parts[-1])
         )
-        for parts in (line.split() for line in capsys.readouterr().out.splitlines()[2:])
+        for parts in (line.split() for line in capsys.readouterr().out.splitlines()[3:])
     }
     separate = rows[("separate workers", "premium")]
     alone = rows[("premium alone", "premium")]
@@ -70,11 +73,12 @@ async def test_overload_benchmark_prints_both_runs_and_the_state_changes(
 ) -> None:
     await overload.main()
     out = capsys.readouterr().out
-    assert SIMULATED in out
+    # A demonstration of the mechanism, labelled so nobody quotes it; the behaviour itself
+    # is pinned on the test profiles in test_overload_api.py.
+    assert out.startswith(MECHANISM_DEMO)
     assert "no downgrade" in out
     assert "with downgrade" in out
-    assert out.count("DEGRADED") == 1
-    assert out.count("recovered") == 1
+    assert "state changes with downgrade:" in out
 
 
 async def test_chunked_prefill_benchmark_prints_a_row_per_chunk_size(
@@ -82,8 +86,34 @@ async def test_chunked_prefill_benchmark_prints_a_row_per_chunk_size(
 ) -> None:
     await chunked_prefill.main()
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0] == SIMULATED
+    assert lines[0].startswith(MECHANISM_DEMO)
     assert [line.split()[0] for line in lines[3:]] == ["off", "4096", "1024", "256", "64", "16"]
+
+
+def test_usage_store_write_benchmark_times_every_store(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    usage_store_writes.main(["--writes", "5", "--dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert out.startswith("MEASURED on this machine")
+    rows = [line.split() for line in out.splitlines() if line.startswith(("in-memory", "sqlite"))]
+    assert [" ".join(r[:-5]) for r in rows] == ["in-memory", "sqlite WAL FULL", "sqlite WAL NORMAL"]
+    assert all(r[-5] == "5" for r in rows)
+    # The temporary database was removed.
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_metrics_example_prints_the_rows_in_the_docs(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    await metrics_example.main()
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].startswith(SIMULATED)
+    # The rows quoted in docs/05-metrics.md.
+    assert "premium   queue_ms       23     172.9     161.9     199.1     225.0     225.0" in out
+    assert "premium   total_ms       23   10614.4   11231.7   16066.3   22677.0   22677.0" in out
+    assert "economy   itl_ms      22098       9.0       9.4      12.1      14.7     137.3" in out
+    assert out.rstrip().endswith("cost USD is at PLACEHOLDER prices: operator-supplied, not data.")
 
 
 def test_load_generator_command_line(
@@ -117,12 +147,13 @@ def test_load_generator_command_line(
     loadgen.main()
     table = capsys.readouterr().out
     assert table.startswith("IN-PROCESS on simulated time")
-    assert [line.split()[0] for line in table.splitlines()[2:]] == [
+    assert [line.split()[0] for line in table.splitlines()[2:-1]] == [
         "model",
         "economy",
         "standard",
         "ALL",
     ]
+    assert table.splitlines()[-1].startswith("cost USD is at PLACEHOLDER prices")
 
 
 def test_demo_script_runs_end_to_end() -> None:
@@ -153,28 +184,36 @@ async def test_whole_report_builds_with_every_section(
 ) -> None:
     monkeypatch.setattr(report, "FIGURES", tmp_path / "figures")
     monkeypatch.setattr(report, "CALIBRATION", tmp_path / "no-calibration")
+    monkeypatch.setattr(report, "QUALITY_RESULTS", tmp_path / "no-results.json")
 
     text = await report.build(None)
+
+    # Sections 4 and 5 have no results, and say so first.
+    for section in ("## 4. ", "## 5. "):
+        assert (
+            text.split(section)[1]
+            .split("\n\n")[1]
+            .startswith("**Not measured on real data.** No results are given.")
+        )
+    assert "illustrative" not in text.lower()
 
     headings = [line for line in text.splitlines() if line.startswith("## ")]
     assert headings == [
         "## 1. Baseline vs continuous batching",
         "## 2. Prefix cache on and off",
-        "## 3. Cost against latency, and routing by plan",
+        "## 3. Each model on the same workload",
         "## 4. Overload: admission control and downgrade",
         "## 5. Chunked prefill",
         "## 6. Simulated against real models",
+        "## 7. Answer quality",
         "## Limitations",
     ]
-    assert text.count("Reproduce this section: `uv run python -m benchmarks.report --only ") == 6
-    assert "**Sections 1 to 5 are simulated**" in text
+    assert text.count("Reproduce this section: `uv run python -m benchmarks.report --only ") == 7
+    assert "**Sections 1 to 3 are simulated**" in text
     assert sorted(p.name for p in (tmp_path / "figures").iterdir()) == [
         "1-batching.png",
         "2-prefix-cache.png",
-        "3-cost-latency.png",
-        "4-overload.png",
-        "5-chunked-prefill.png",
     ]
     # Every figure the text points at was written.
-    for name in ("1-batching", "2-prefix-cache", "3-cost-latency", "4-overload"):
+    for name in ("1-batching", "2-prefix-cache"):
         assert f"![{name}.png](report/{name}.png)" in text

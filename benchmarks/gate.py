@@ -3,8 +3,9 @@
 Run through scripts/perf_gate.py. See docs/08-ci-gate.md.
 
 The gate runs the standard seeded load in-process on simulated time, so the same code
-always gives the same numbers. The numbers come from illustrative model profiles; the gate
-guards the scheduler's behaviour, not real-model performance.
+always gives the same numbers. It runs on the calibrated profiles with batches of at most 4,
+at a rate where no model is saturated (``uv run python -m benchmarks.saturation``). It
+protects the scheduler logic; it does not measure real hardware.
 """
 
 from __future__ import annotations
@@ -21,8 +22,10 @@ from pathlib import Path
 from benchmarks.loadgen import LoadConfig, LoadReport, run_in_process
 from gateway.profiles import PROFILES, ModelProfile, Tier
 
-# The workload every budget refers to. Changing it invalidates the budgets.
-STANDARD_LOAD = LoadConfig(seed=7, total_requests=1000, arrival_rate_per_s=5.0)
+# The workload every budget refers to. Changing it invalidates the budgets. 0.8 req/s keeps
+# every model at or below 60% of its capacity on the calibrated profiles, at the median cost
+# per extra sequence and at the highest one measured (docs/08-ci-gate.md).
+STANDARD_LOAD = LoadConfig(seed=7, total_requests=1000, arrival_rate_per_s=0.8)
 
 BUDGETS_PATH = Path(__file__).parent / "budgets.json"
 DEFAULT_TOLERANCE = 0.02
@@ -265,7 +268,10 @@ def main(
     profiles = _slowed_profiles(args.simulate_regression) if args.simulate_regression else PROFILES
     if args.simulate_regression:
         print(f"DEMO: simulating a regression ({args.simulate_regression} on prefill cost).")
-    print("Simulated time, illustrative model profiles: not measurements of real models.")
+    print(
+        "Simulated time, calibrated model profiles (batches of at most 4): this checks the "
+        "scheduler logic, not real hardware."
+    )
     print(
         f"workload: seed={config.seed} requests={config.total_requests} "
         f"rate={config.arrival_rate_per_s}/s weights={dict(config.model_weights)}"

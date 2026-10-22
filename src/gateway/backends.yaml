@@ -2,14 +2,15 @@
 # or just the choice below with GATEWAY_BACKEND=llamacpp.
 #
 # simulated: no model runs. The gateway's own scheduler (continuous batching, prefix cache,
-#            chunked prefill) decides the timing from illustrative model profiles.
+#            chunked prefill) decides the timing from the calibrated model profiles
+#            (docs/13): measured on one laptop with Ollama; prices are placeholders.
 # llamacpp:  each tier is a real model behind a llama.cpp llama-server (or anything with
 #            the same OpenAI-compatible streaming API, such as Ollama). The model server
 #            does the batching; the gateway only routes, meters and times.
 backend: simulated
 
 # simulated:
-#   # Replace the illustrative timing parameters with ones fitted to real models by
+#   # Use the timing parameters of another calibration file written by
 #   # benchmarks/calibrate.py. GATEWAY_PROFILES=/path/to/file overrides this.
 #   profiles: benchmarks/calibration/calibrated_profiles.json
 

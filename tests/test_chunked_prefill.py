@@ -12,7 +12,7 @@ from gateway.continuous import ContinuousBatchingWorker, StepRecord, build_conti
 from gateway.cost_model import decode_step_ms
 from gateway.prefix_cache import PrefixCache
 from gateway.schema import GenerateRequest, RequestResult
-from helpers import EXACT, SizedBackend
+from helpers import EXACT, TEST_STANDARD, SizedBackend
 
 
 def _request(request_id: str, prompt: str = "") -> GenerateRequest:
@@ -253,10 +253,11 @@ async def test_registry_builder_turns_chunked_prefill_on_for_every_model() -> No
 
 
 async def test_chunked_prefill_cuts_the_latency_tails_on_a_mixed_workload() -> None:
+    # On the hand-made test profiles: this pins the mechanism, it is not a result.
     arrivals = benchmark.workload()
-    off = benchmark.summarise(arrivals, await benchmark.run(arrivals, None))
-    mid = benchmark.summarise(arrivals, await benchmark.run(arrivals, 256))
-    small = benchmark.summarise(arrivals, await benchmark.run(arrivals, 16))
+    off = benchmark.summarise(arrivals, await benchmark.run(arrivals, None, profile=TEST_STANDARD))
+    mid = benchmark.summarise(arrivals, await benchmark.run(arrivals, 256, profile=TEST_STANDARD))
+    small = benchmark.summarise(arrivals, await benchmark.run(arrivals, 16, profile=TEST_STANDARD))
 
     # The worst stall: unchunked, one long prompt freezes every stream for over a second.
     assert off.itl_max_ms > 1000.0
@@ -278,10 +279,13 @@ async def test_chunked_prefill_cuts_the_latency_tails_on_a_mixed_workload() -> N
 async def test_medium_chunks_can_make_the_itl_p99_worse_than_no_chunking() -> None:
     # Long prompts are rare, so unchunked their stalls touch fewer than 1% of all gaps
     # and the ITL p99 does not see them. Chunking turns each rare, huge stall into many
-    # moderate ones, which do reach the p99. Pinned so the docs' claim stays true.
+    # moderate ones, which do reach the p99. On the hand-made test profiles: a mechanism,
+    # not a result.
     arrivals = benchmark.workload()
-    off = benchmark.summarise(arrivals, await benchmark.run(arrivals, None))
-    medium = benchmark.summarise(arrivals, await benchmark.run(arrivals, 1024))
+    off = benchmark.summarise(arrivals, await benchmark.run(arrivals, None, profile=TEST_STANDARD))
+    medium = benchmark.summarise(
+        arrivals, await benchmark.run(arrivals, 1024, profile=TEST_STANDARD)
+    )
 
     assert medium.itl_p99_ms > off.itl_p99_ms
     assert medium.itl_max_ms < off.itl_max_ms

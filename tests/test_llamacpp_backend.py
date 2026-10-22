@@ -314,3 +314,20 @@ def test_in_flight_limit_must_be_positive() -> None:
     server = MockLlamaServer(SimClock())
     with pytest.raises(ValueError, match="max_in_flight"):
         PassthroughWorker(ECONOMY, _backend(server), SimClock(), max_in_flight=0)
+
+
+async def test_sampling_settings_are_sent_only_when_given() -> None:
+    server = MockLlamaServer(SimClock())
+    await _backend(server).generate(_request(max_tokens=4))
+    await _backend(server, sampling={"temperature": 0.0, "seed": 7, "stream": False}).generate(
+        _request(max_tokens=4)
+    )
+
+    plain, sampled = server.bodies
+    # By default the server's own sampling settings apply: nothing is sent.
+    assert "temperature" not in plain
+    assert "seed" not in plain
+    assert (sampled["temperature"], sampled["seed"]) == (0.0, 7)
+    # Sampling settings cannot switch off what the backend depends on.
+    assert sampled["stream"] is True
+    assert sampled["max_tokens"] == 4

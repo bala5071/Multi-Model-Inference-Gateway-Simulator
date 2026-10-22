@@ -6,9 +6,10 @@ import itertools
 import pytest
 
 from gateway.cost_model import CostEstimate, OutputLengthGenerator, estimate_cost
-from gateway.profiles import ECONOMY, PREMIUM, PROFILES, STANDARD, ModelProfile, Tier
+from gateway.profiles import PROFILES, ModelProfile, Tier
+from helpers import TEST_ECONOMY, TEST_PREMIUM, TEST_PROFILES, TEST_STANDARD
 
-ALL_PROFILES = (ECONOMY, STANDARD, PREMIUM)
+ALL_PROFILES = (TEST_ECONOMY, TEST_STANDARD, TEST_PREMIUM)
 PROMPTS = ("", "hello", "Summarise this contract.", "héllo wörld", "a" * 5000)
 
 
@@ -83,7 +84,7 @@ def test_estimate_is_deterministic(profile: ModelProfile) -> None:
 
 
 def test_estimate_known_values() -> None:
-    estimate = _estimate(STANDARD, new_prefill_tokens=1000, output_tokens=500, batch_size=5)
+    estimate = _estimate(TEST_STANDARD, new_prefill_tokens=1000, output_tokens=500, batch_size=5)
     assert estimate.prefill_ms == pytest.approx(150.0)
     assert estimate.decode_step_ms == pytest.approx(14.4)
     assert estimate.cost_usd == pytest.approx(0.0006)
@@ -114,7 +115,7 @@ def test_more_output_tokens_cost_more_time_and_money(profile: ModelProfile) -> N
 
 
 def test_zero_tokens_cost_nothing() -> None:
-    estimate = _estimate(PREMIUM, new_prefill_tokens=0, output_tokens=0)
+    estimate = _estimate(TEST_PREMIUM, new_prefill_tokens=0, output_tokens=0)
     assert estimate.prefill_ms == 0
     assert estimate.cost_usd == 0
 
@@ -125,7 +126,7 @@ def test_zero_tokens_cost_nothing() -> None:
 )
 def test_negative_token_counts_are_rejected(new_prefill_tokens: int, output_tokens: int) -> None:
     with pytest.raises(ValueError, match="must not be negative"):
-        _estimate(ECONOMY, new_prefill_tokens=new_prefill_tokens, output_tokens=output_tokens)
+        _estimate(TEST_ECONOMY, new_prefill_tokens=new_prefill_tokens, output_tokens=output_tokens)
 
 
 # --- batch-size effect ---------------------------------------------------------------------
@@ -163,48 +164,23 @@ def test_batch_size_outside_profile_limits_is_rejected(profile: ModelProfile) ->
 
 def test_profiles_cover_every_tier_once() -> None:
     assert set(PROFILES) == set(Tier)
-    assert [PROFILES[tier] for tier in Tier] == list(ALL_PROFILES)
-    assert len({p.name for p in ALL_PROFILES}) == len(ALL_PROFILES)
+    assert [PROFILES[tier].tier for tier in Tier] == list(Tier)
+    assert len({p.name for p in PROFILES.values()}) == len(PROFILES)
+    assert set(TEST_PROFILES) == set(Tier)
 
 
-def test_profiles_are_ordered_on_every_axis() -> None:
-    for cheaper, pricier in ((ECONOMY, STANDARD), (STANDARD, PREMIUM)):
-        assert pricier.price_per_1k_input_tokens > cheaper.price_per_1k_input_tokens
-        assert pricier.price_per_1k_output_tokens > cheaper.price_per_1k_output_tokens
-        assert pricier.prefill_ms_per_token > cheaper.prefill_ms_per_token
-        assert pricier.decode_base_ms > cheaper.decode_base_ms
-        assert pricier.decode_ms_per_extra_seq > cheaper.decode_ms_per_extra_seq
-        assert pricier.max_batch_size < cheaper.max_batch_size
-        assert pricier.kv_capacity_tokens < cheaper.kv_capacity_tokens
-
-
-def test_same_workload_gives_distinct_estimates_per_profile() -> None:
+def test_same_workload_gives_distinct_estimates_per_test_profile() -> None:
     economy, standard, premium = (_estimate(p, batch_size=4) for p in ALL_PROFILES)
     assert economy.prefill_ms < standard.prefill_ms < premium.prefill_ms
     assert economy.decode_step_ms < standard.decode_step_ms < premium.decode_step_ms
     assert economy.cost_usd < standard.cost_usd < premium.cost_usd
 
 
-def test_profiles_differ_in_shape_not_only_in_scale() -> None:
-    # If premium were just "economy times k", the batching penalty relative to the base
-    # step would be the same for every tier. It should be steeper for the larger model.
-    penalties = [p.decode_ms_per_extra_seq / p.decode_base_ms for p in ALL_PROFILES]
-    assert penalties[0] < penalties[1] < penalties[2]
-
-    # Best-case decode throughput (full batch) should also separate the tiers clearly.
-    best_ms_per_token = [
-        _estimate(p, batch_size=p.max_batch_size).decode_step_ms / p.max_batch_size
-        for p in ALL_PROFILES
-    ]
-    assert best_ms_per_token[1] > 2 * best_ms_per_token[0]
-    assert best_ms_per_token[2] > 2 * best_ms_per_token[1]
-
-
 def test_profiles_are_immutable() -> None:
     with pytest.raises(dataclasses.FrozenInstanceError):
-        ECONOMY.max_batch_size = 64  # type: ignore[misc]
+        TEST_ECONOMY.max_batch_size = 64  # type: ignore[misc]
     with pytest.raises(TypeError):
-        PROFILES[Tier.ECONOMY] = PREMIUM  # type: ignore[index]
+        PROFILES[Tier.ECONOMY] = TEST_PREMIUM  # type: ignore[index]
 
 
 @pytest.mark.parametrize(
@@ -216,6 +192,7 @@ def test_profiles_are_immutable() -> None:
         {"prefill_ms_per_token": 0.0},
         {"decode_base_ms": 0.0},
         {"decode_ms_per_extra_seq": -0.1},
+        {"per_request_overhead_ms": -1.0},
         {"max_batch_size": 0},
         {"kv_capacity_tokens": 0},
     ],
@@ -223,4 +200,13 @@ def test_profiles_are_immutable() -> None:
 )
 def test_invalid_profile_values_are_rejected(overrides: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="must"):
-        dataclasses.replace(ECONOMY, **overrides)  # type: ignore[arg-type]
+        dataclasses.replace(TEST_ECONOMY, **overrides)  # type: ignore[arg-type]
+
+
+def test_estimate_carries_the_per_request_overhead_and_does_not_bill_it() -> None:
+    slow_start = dataclasses.replace(TEST_ECONOMY, per_request_overhead_ms=90.0)
+    plain = estimate_cost(TEST_ECONOMY, new_prefill_tokens=100, output_tokens=10, batch_size=1)
+    delayed = estimate_cost(slow_start, new_prefill_tokens=100, output_tokens=10, batch_size=1)
+
+    assert plain.overhead_ms == 0.0
+    assert delayed == dataclasses.replace(plain, overhead_ms=90.0)

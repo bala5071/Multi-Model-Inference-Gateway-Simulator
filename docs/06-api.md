@@ -4,14 +4,17 @@ Step 6 puts a FastAPI app in front of the registry. Code: `src/gateway/app.py`, 
 `MetricsRecorder` in `metrics.py` and `aclose` on the workers and registry.
 Tests: `tests/test_app.py`.
 
-(There is no `docs/05-*.md`: no step 5 has been implemented in this repo.)
+**Updated by the metrics step (`docs/05-metrics.md`, built after step 13).** `MetricsStore`
+replaced `MetricsRecorder`. `/metrics/summary` keeps the shape shown below; its percentiles
+now cover the last five minutes (at most 10,000 requests per model) instead of every
+request since the process started, and `GET /metrics/detail` has the fuller figures.
 
 **Updated by the routing step (`docs/09-routing.md`).** The default server now loads tenant
 plans, so every `/v1/generate` call to it needs a `tenant_id` (`initech`, `globex` or `acme`
 in the packaged plans); without one it returns 401. Requests may give a `quality` in place
 of a `model`, responses carry `X-Model-Used` and `X-Cost-USD` headers, and there is a
-`GET /v1/tenants/{id}/usage` endpoint. The examples below were recorded before that change:
-add `"tenant_id": "acme"` to the request bodies to run them today.
+`GET /v1/tenants/{id}/usage` endpoint. The examples below were recorded with
+`"tenant_id": "acme"` in the request bodies, as they now need.
 
 ## Running it
 
@@ -53,8 +56,8 @@ curl -s -X POST http://127.0.0.1:8000/v1/generate \
   "text": "[simulated output, 32 tokens]",
   "model": "economy",
   "usage": {"prompt_tokens": 11, "cached_tokens": 0, "completion_tokens": 32, "total_tokens": 43},
-  "timing": {"queue_ms": 0.0, "ttft_ms": 16.0, "total_ms": 500.0},
-  "cost": {"usd": 7.5e-06}
+  "timing": {"queue_ms": 97.86110019683838, "ttft_ms": 128.12660026550293, "total_ms": 601.7565002441406},
+  "cost": {"usd": 6e-6}
 }
 ```
 
@@ -63,11 +66,12 @@ curl -s -X POST http://127.0.0.1:8000/v1/generate \
   neither prefilled nor billed.
 - `timing.queue_ms` is enqueue to start, `ttft_ms` enqueue to first token, `total_ms`
   enqueue to finish, all read from the app's clock.
-- `cost.usd` uses the illustrative prices from step 1.
+- `cost.usd` uses the placeholder prices of note 01 (operator-supplied, not data), times the
+  tenant plan's multiplier (note 09).
 - `id` is a per-process counter (`req-1`, `req-2`, ...), not a UUID, so runs stay
   reproducible.
 
-Sending the same prompt again hits the cache:
+Sending the same prompt again, through the alias `llama-3.2-1b`, hits the cache:
 
 ```json
 {
@@ -75,8 +79,8 @@ Sending the same prompt again hits the cache:
   "text": "[simulated output, 32 tokens]",
   "model": "economy",
   "usage": {"prompt_tokens": 11, "cached_tokens": 11, "completion_tokens": 32, "total_tokens": 43},
-  "timing": {"queue_ms": 0.0, "ttft_ms": 16.0, "total_ms": 485.0},
-  "cost": {"usd": 6.4000000000000006e-06}
+  "timing": {"queue_ms": 86.79789996147156, "ttft_ms": 101.48000025749207, "total_ms": 578.255900144577},
+  "cost": {"usd": 5.120000000000001e-6}
 }
 ```
 
@@ -103,7 +107,7 @@ curl -s http://127.0.0.1:8000/healthz
 ```
 
 ```json
-{"status": "ok", "models": 3, "uptime_ms": 8406.0}
+{"status": "ok", "models": 3, "uptime_ms": 5411.044499874115}
 ```
 
 ### GET /metrics/summary
@@ -121,17 +125,18 @@ curl -s http://127.0.0.1:8000/metrics/summary
   "models": {
     "economy": {
       "requests": 2,
-      "queue_ms": {"p50": 0.0, "p99": 0.0},
-      "ttft_ms": {"p50": 16.0, "p99": 16.0},
-      "total_ms": {"p50": 485.0, "p99": 500.0},
+      "queue_ms": {"p50": 86.79789996147156, "p99": 97.86110019683838},
+      "ttft_ms": {"p50": 101.48000025749207, "p99": 128.12660026550293},
+      "total_ms": {"p50": 578.255900144577, "p99": 601.7565002441406},
+      "itl_ms": {"p50": 15.267699956893921, "p99": 16.103299856185913},
       "prompt_tokens": 22,
       "cached_tokens": 11,
       "completion_tokens": 64,
-      "cost_usd": 1.39e-05
+      "cost_usd": 0.0000139
     },
-    "standard": {"requests": 0, "queue_ms": null, "ttft_ms": null, "total_ms": null,
+    "standard": {"requests": 0, "queue_ms": null, "ttft_ms": null, "total_ms": null, "itl_ms": null,
                  "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
-    "premium": {"requests": 0, "queue_ms": null, "ttft_ms": null, "total_ms": null,
+    "premium": {"requests": 0, "queue_ms": null, "ttft_ms": null, "total_ms": null, "itl_ms": null,
                 "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0}
   }
 }
@@ -149,7 +154,7 @@ Every error body is JSON of the form `{"error": {"code", "message", ...}}`.
 
 ```sh
 curl -s -X POST http://127.0.0.1:8000/v1/generate \
-  -H "Content-Type: application/json" -d '{"model": "gpt-4", "prompt": "hi"}'
+  -H "Content-Type: application/json" -d '{"model": "gpt-4", "prompt": "hi", "tenant_id": "acme"}'
 ```
 
 ```json
@@ -164,7 +169,7 @@ curl -s -X POST http://127.0.0.1:8000/v1/generate \
 
 ```sh
 curl -s -X POST http://127.0.0.1:8000/v1/generate \
-  -H "Content-Type: application/json" -d '{"model": "economy", "max_tokens": 0}'
+  -H "Content-Type: application/json" -d '{"model": "economy", "max_tokens": 0, "tenant_id": "acme"}'
 ```
 
 ```json
@@ -184,16 +189,19 @@ curl -s -X POST http://127.0.0.1:8000/v1/generate \
 ## Where the example outputs came from
 
 The responses above were copied from one local run of the server (`uvicorn` on Windows 11,
-Python 3.12; recorded on the working tree before it was committed; first committed in full as
-`c7e75ac`), using the curl commands shown, in this order: models, generate, generate again
-with the alias `llama-3.2-1b`, the two error calls, healthz, metrics. The JSON is reformatted for reading.
+Python 3.12) on the tree of the commit that added this text (parent commit `38bbb94`), using
+the curl commands shown, in this order: models, generate, generate again with the alias
+`llama-3.2-1b`, the two error calls, healthz, metrics. The JSON is reformatted for reading.
+The examples first recorded for this note ran on invented profiles and were replaced (note 13).
 
-**The timings in them are not model performance.** They are wall-clock waits of a simulator.
-They are also much longer than the cost model asks for: 32 decode steps at 6 ms is 192 ms,
-but the run took about 500 ms, because each step is a separate `asyncio.sleep` and the
-operating system's timer on that machine rounds short sleeps up to roughly 16 ms. Under
-`WallClock` the reported timings are what really elapsed, so they include this. Under
-`SimClock` they match the cost model exactly, which is what the tests check.
+**The timings in them are not model performance.** They are wall-clock waits of a simulator
+running on the calibrated profiles (note 01). They are also longer than the cost model asks
+for: the first request's 32 decode steps at 6.7 ms are 215 ms after a 90 ms overhead and 2 ms
+of prefill, but it took about 600 ms, because each step is a separate `asyncio.sleep` and the
+operating system's timer on that machine rounds short sleeps up to roughly 15 ms (its
+inter-token gaps are 15 to 16 ms). Under `WallClock` the reported timings are what really
+elapsed, so they include this. Under `SimClock` they match the cost model exactly, which is
+what the tests check. Costs are at placeholder prices.
 
 ## Design decisions
 

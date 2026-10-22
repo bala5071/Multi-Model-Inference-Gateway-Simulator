@@ -1,19 +1,34 @@
 # docker compose up --build
 #
-# Starts the gateway on http://localhost:8000 in simulator mode. No model runs.
+# The demo: the gateway in simulated live mode, with its dashboard, on
+#   http://localhost:8000/dashboard/
+#
+# No model runs. A seeded load is replayed on simulated time, and every number the
+# dashboard shows is simulated on the calibrated model profiles, with placeholder prices:
+# nothing here is a measurement. See docs/18-demo.md and docs/17-playground-load-replay.md.
 services:
   gateway:
     build: .
     ports:
-      - "8000:8000"
+      # This machine only. Monitoring and load control are not authenticated; do not publish
+      # on other interfaces (docs/platform-plan.md, section 9).
+      - "127.0.0.1:8000:8000"
     environment:
-      # simulated (default): the gateway's own scheduler with illustrative model profiles.
-      GATEWAY_BACKEND: simulated
-      GATEWAY_SEED: "0"
+      GATEWAY_SIMULATED_LIVE: "1"
+      # Simulated seconds per real second: 1, 5 or 20. The dashboard can change it.
+      GATEWAY_SIM_SPEED: "5"
+      # The load started with the server: steady, burst, overload or long-prompts.
+      GATEWAY_SIM_PRESET: steady
+      GATEWAY_SEED: "7"
 
-      # Real models instead: run the model servers on the host (docs/12-real-models.md),
-      # mount a backends file whose URLs use host.docker.internal instead of 127.0.0.1,
-      # and switch the two lines below on.
+      # A plain simulator server instead (wall-clock time, no load until a client sends
+      # some): remove the four lines above. Add the next line to let the dashboard start
+      # load; leave it out on anything others can reach, since there is no authentication.
+      # GATEWAY_LOAD_CONTROL: "1"
+
+      # Real models instead: remove the four lines above, run the model servers on the
+      # host (docs/12-real-models.md), mount a backends file whose URLs use
+      # host.docker.internal instead of 127.0.0.1, and switch the two lines below on.
       # GATEWAY_BACKEND: llamacpp
       # GATEWAY_BACKENDS: /config/backends.yaml
     # volumes:

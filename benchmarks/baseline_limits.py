@@ -1,6 +1,6 @@
 """Print the baseline throughput limits quoted in docs/02-baseline.md.
 
-Simulated, from the illustrative profiles: nothing here is a measurement of a real model.
+Simulated, on the calibrated profiles: nothing here is a measurement of a real model.
 
     uv run python -m benchmarks.baseline_limits
 """

@@ -17,10 +17,11 @@ from gateway.continuous import (
     build_continuous_registry,
 )
 from gateway.cost_model import decode_step_ms
-from gateway.profiles import ECONOMY, PREMIUM, PROFILES, STANDARD, ModelProfile, Tier
+from gateway.overload import QueueFullError
+from gateway.profiles import PROFILES, ModelProfile, Tier
 from gateway.registry import UnknownModelError, Worker
 from gateway.schema import GenerateRequest, RequestResult
-from helpers import EXACT, SizedBackend
+from helpers import EXACT, TEST_ECONOMY, TEST_PREMIUM, TEST_STANDARD, SizedBackend
 
 WorkerFactory = Callable[[ModelProfile, Backend, SimClock], Worker]
 WORKER_KINDS: tuple[WorkerFactory, ...] = (BaselineWorker, ContinuousBatchingWorker)
@@ -217,7 +218,9 @@ async def test_admission_is_first_come_first_served_even_if_a_later_request_woul
 # --- throughput ----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("profile", [ECONOMY, STANDARD, PREMIUM], ids=lambda p: p.tier.value)
+@pytest.mark.parametrize(
+    "profile", [TEST_ECONOMY, TEST_STANDARD, TEST_PREMIUM], ids=lambda p: p.tier.value
+)
 async def test_twenty_concurrent_requests_have_higher_throughput_than_baseline(
     profile: ModelProfile,
 ) -> None:
@@ -370,3 +373,67 @@ async def test_continuous_registry_mirrors_the_baseline_registry() -> None:
         assert worker.profile is PROFILES[tier]
     with pytest.raises(UnknownModelError):
         continuous.get("llama-3.3-70b")
+
+
+# --- per-request overhead ------------------------------------------------------------------
+
+SLOW_START = dataclasses.replace(EXACT, per_request_overhead_ms=8.0)
+
+
+@pytest.mark.parametrize("make_worker", WORKER_KINDS)
+async def test_per_request_overhead_delays_the_first_token_and_is_queue_wait(
+    make_worker: WorkerFactory,
+) -> None:
+    async def serve(profile: ModelProfile) -> RequestResult:
+        return await make_worker(profile, SizedBackend({"a": (10, 3)}), SimClock()).submit(
+            _request("a")
+        )
+
+    plain = await serve(EXACT)
+    delayed = await serve(SLOW_START)
+
+    # 8 ms of overhead, 5 ms of prefill, then three 4 ms steps.
+    assert (delayed.enqueue_ms, delayed.start_ms) == (0.0, 8.0)
+    assert (delayed.first_token_ms, delayed.finish_ms) == (17.0, 25.0)
+    assert delayed.queue_wait_ms == 8.0
+    assert delayed.time_to_first_token_ms == plain.time_to_first_token_ms + 8.0
+    assert delayed.inter_token_ms == plain.inter_token_ms
+    assert delayed.cost_usd == plain.cost_usd
+
+
+async def test_overheads_of_requests_that_arrive_together_overlap() -> None:
+    sizes = dict.fromkeys(("a", "b"), (10, 3))
+
+    clock = SimClock()
+    a, b = await _burst(
+        ContinuousBatchingWorker(SLOW_START, SizedBackend(sizes), clock), ["a", "b"]
+    )
+    # Both are ready at 8, not 8 and 16. They are prefilled one after the other (8..13,
+    # 13..18) and then decode together at 4.25 ms per step.
+    assert (a.start_ms, b.start_ms) == (8.0, 13.0)
+    assert (a.first_token_ms, b.first_token_ms) == (22.25, 22.25)
+
+    clock = SimClock()
+    a, b = await _burst(BaselineWorker(SLOW_START, SizedBackend(sizes), clock), ["a", "b"])
+    # One at a time: a finishes at 25, and b's overhead passed while it waited.
+    assert (a.finish_ms, b.start_ms, b.first_token_ms) == (25.0, 25.0, 34.0)
+
+
+async def test_requests_in_their_overhead_count_against_the_queue_limit() -> None:
+    clock = SimClock()
+    profile = dataclasses.replace(SLOW_START, max_batch_size=1)
+    worker = ContinuousBatchingWorker(
+        profile, SizedBackend(dict.fromkeys(("a", "b", "c"), (10, 3))), clock, max_queue_len=1
+    )
+    first = asyncio.ensure_future(worker.submit(_request("a")))
+    second = asyncio.ensure_future(worker.submit(_request("b")))
+    await clock.sleep_ms(1.0)
+
+    # Neither has joined the queue yet. One will take the free slot and the other will wait.
+    assert worker.waiting == 1
+    with pytest.raises(QueueFullError):
+        await worker.submit(_request("c"))
+
+    results = await asyncio.gather(first, second)
+    assert [r.request_id for r in results] == ["a", "b"]
+    assert worker.waiting == 0

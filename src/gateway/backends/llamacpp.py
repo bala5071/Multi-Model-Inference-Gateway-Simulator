@@ -7,6 +7,7 @@ See docs/12-real-models.md.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import httpx
@@ -27,18 +28,22 @@ class LlamaCppBackend(Backend):
         endpoint: Endpoint = "completions",
         client: httpx.AsyncClient | None = None,
         connect_timeout_s: float = 5.0,
+        sampling: Mapping[str, Any] | None = None,
     ) -> None:
         """``name`` identifies the backend in error messages.
 
         ``model`` is sent as the request's ``model`` field. llama-server serves one model
         and ignores it; Ollama needs it. ``client`` is for tests; by default the backend
         makes and owns one, with no limit on how long a response may take (the gateway's
-        own request timeout covers that).
+        own request timeout covers that). ``sampling`` is extra request fields such as
+        ``temperature`` and ``seed``, sent with every request; by default none are sent
+        and the server's own settings apply.
         """
         self._name = name
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._endpoint: Endpoint = endpoint
+        self._sampling = dict(sampling or {})
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(None, connect=connect_timeout_s)
@@ -54,7 +59,11 @@ class LlamaCppBackend(Backend):
             await self._client.aclose()
 
     def _payload(self, request: GenerateRequest) -> dict[str, Any]:
-        payload: dict[str, Any] = {"stream": True, "stream_options": {"include_usage": True}}
+        payload: dict[str, Any] = {
+            **self._sampling,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
         if self._endpoint == "chat":
             payload["messages"] = [{"role": "user", "content": request.prompt}]
         else:

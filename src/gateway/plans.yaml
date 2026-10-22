@@ -1,4 +1,5 @@
-# Plans and tenants for the default server. Prices and budgets are illustrative.
+# Plans and tenants for the default server. Multipliers and budgets are PLACEHOLDER values:
+# operator-supplied, not data. So are the model prices they multiply (gateway.profiles).
 #
 # models: the registered model ids a plan may use, cheapest first. The order matters:
 #   quality "cheapest" picks the first, "best" the last, "balanced" the middle one.

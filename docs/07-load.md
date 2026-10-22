@@ -7,10 +7,10 @@ Code: `benchmarks/loadgen.py`, `benchmarks/fairness.py`. Tests: `tests/test_load
 
 ## Running it
 
-In-process on simulated time (the default; deterministic, finishes in about a second):
+In-process on simulated time (the default; deterministic, finishes in a few seconds):
 
 ```sh
-uv run python -m benchmarks.loadgen --seed 7 --requests 300 --rate 8
+uv run python -m benchmarks.loadgen --seed 7 --requests 1000 --rate 0.8
 uv run python -m benchmarks.loadgen --json          # the report as JSON
 ```
 
@@ -18,7 +18,7 @@ Against a server that is already running, on real time:
 
 ```sh
 uv run uvicorn gateway.app:create_default_app --factory --port 8000
-uv run python -m benchmarks.loadgen --url http://127.0.0.1:8000 --tenant acme --requests 40 --rate 10
+uv run python -m benchmarks.loadgen --url http://127.0.0.1:8000 --tenant acme --requests 20 --rate 0.8
 ```
 
 The default server requires a tenant since the routing step (`docs/09-routing.md`);
@@ -28,8 +28,8 @@ models.
 | Option                     | Config field             | Default                              |
 |----------------------------|--------------------------|--------------------------------------|
 | `--seed`                   | `seed`                   | 7                                    |
-| `--requests`               | `total_requests`         | 300                                  |
-| `--rate`                   | `arrival_rate_per_s`     | 8.0, over all models together        |
+| `--requests`               | `total_requests`         | 1000                                 |
+| `--rate`                   | `arrival_rate_per_s`     | 0.8, over all models together        |
 | `--weights`                | `model_weights`          | `economy=70,standard=20,premium=10`  |
 | `--prompt-words MIN-MAX`   | `prompt_lengths`         | 60% 20-80, 30% 80-300, 10% 300-800   |
 | `--shared-prefix-fraction` | `shared_prefix_fraction` | 0.5                                  |
@@ -91,31 +91,67 @@ the text, and request ids are a counter.
 Live runs are not deterministic, and repeat runs with the same seed send the same prompts,
 so a server that has seen them reports more cache hits the second time.
 
+## Choosing the defaults: no model may be saturated
+
+The defaults are **1000 requests at 0.8 req/s**. On the calibrated profiles (note 01, batches
+of at most 4) the premium model serves only about 0.23 requests a second on this mix, so the
+old default of 8 req/s offered it over four times its capacity: every p99 measured the length
+of the run. Before a workload's latency is reported, it is checked:
+
+```sh
+uv run python -m benchmarks.saturation
+```
+
+A model counts as saturated when it is offered more than 60% of its capacity (requests per
+second when the same requests arrive all at once), or when its p99 grows by more than 25% as
+the run is doubled at the same rate. For the default (simulated; parent commit `38bbb94`):
+
+| Model    | Requests | Offered req/s | Capacity req/s | Utilisation | p99 growth, run doubled |
+|----------|---------:|--------------:|---------------:|------------:|------------------------:|
+| economy  |      693 |         0.565 |          1.881 |         30% |                     +3% |
+| standard |      204 |         0.166 |          0.975 |         17% |                     +4% |
+| premium  |      103 |         0.084 |          0.231 |         36% |                     -3% |
+
+With 300 requests the standard model got 68, and its p99 (its slowest request) grew by 28%
+when the run was doubled even at 20% utilisation; lowering the rate made that worse, not
+better, because the doubled run simply contains a slower request. So the default has 1000
+requests, which is also the performance gate's workload (note 08). Capacity rests on the cost
+per extra sequence, unstable on every tier; at the highest value the calibration runs fitted,
+premium would be at 52% on this workload (note 08).
+
 ## Example results
 
-**Simulated, from the illustrative profiles of step 1. Not measurements of real models.**
-Commit `c7e75ac`.
+**Simulated on the calibrated profiles (note 01). Not measurements of a model server.**
+On the tree of the commit that added this text (parent commit `38bbb94`).
 
-`uv run python -m benchmarks.loadgen` (seed 7, 300 requests, 8 req/s, weights 70/20/10, half
-the requests sharing a 200-word system prompt):
+`uv run python -m benchmarks.loadgen` (seed 7, 1000 requests, 0.8 req/s, weights 70/20/10,
+half the requests sharing a 200-word system prompt):
 
-| Model    | Reqs | TTFT p50 ms | TTFT p99 ms | Total p50 ms | Total p99 ms | req/s | tok/s | Hit rate | Token hit rate | Cost USD |
-|----------|-----:|------------:|------------:|-------------:|-------------:|------:|------:|---------:|---------------:|---------:|
-| economy  |  197 |        15.0 |        71.8 |      1,014.2 |      1,917.8 |  5.38 | 723.6 |     0.50 |           0.39 | 0.008366 |
-| standard |   68 |        38.3 |       135.4 |      2,254.8 |      3,993.8 |  1.81 | 259.2 |     0.53 |           0.39 | 0.009242 |
-| premium  |   35 |     3,029.3 |     6,448.6 |      9,585.4 |     17,402.3 |  0.84 | 123.4 |     0.37 |           0.34 | 0.015390 |
-| all      |  300 |        21.6 |     5,021.9 |      1,229.6 |     13,458.2 |  7.13 | 984.3 |     0.49 |           0.39 | 0.032998 |
+| Model    | Reqs | TTFT p50 ms | TTFT p99 ms | Total p50 ms | Total p99 ms | req/s | tok/s | Hit rate | Token hit rate |
+|----------|-----:|------------:|------------:|-------------:|-------------:|------:|------:|---------:|---------------:|
+| economy  |  693 |       116.4 |     1,058.4 |      1,300.8 |      3,099.0 |  0.57 |  77.2 |     0.51 |           0.42 |
+| standard |  204 |       137.1 |       407.3 |      2,534.0 |      5,316.9 |  0.17 |  23.3 |     0.57 |           0.45 |
+| premium  |  103 |       338.1 |     8,050.4 |      8,262.0 |     25,175.3 |  0.08 |  11.7 |     0.47 |           0.39 |
+| all      | 1000 |       126.6 |       919.7 |      1,555.0 |     17,776.7 |  0.81 | 111.2 |     0.52 |           0.42 |
 
-At this rate the economy and standard models keep up and the premium model, at 0.8 req/s,
-is near its limit, so its requests queue. The request-level hit rate is close to the 0.5
-shared fraction; the premium model's is lower because more of its requests are admitted
-while the first carriers of the system prompt are still in flight, and a prefix only becomes
-reusable when its request finishes (see step 4).
+The tool also prints a cost column; it is at placeholder prices (note 01), operator-supplied,
+not data, and is left out here.
+
+- **Most of the median time to first token on economy and standard is the fixed
+  per-request overhead** (90 and 88 ms of 116 and 137 ms; unstable). On premium the overhead
+  is 162 ms of 338 ms, the rest prefill and waiting for a free place in the batch.
+- **Premium's tail is long because its requests are long**, not because it is overloaded:
+  at 36% utilisation one request with 256 output tokens at a full batch of 4 takes about
+  30 s on its own. Its p99 is the second-slowest of 103 requests.
+- The request-level hit rate is close to the 0.5 shared fraction. A prefix only becomes
+  reusable when its request finishes (see step 4), so requests that arrive while the first
+  carrier is still in flight miss.
 
 A live run was also done once, to check that the mode works: 40 requests at 10 req/s with
 `--max-tokens 16` against `uvicorn` on the same machine (Windows 11, Python 3.12) completed
-with 0 errors. Its latencies are wall-clock waits of the simulator, inflated by the OS timer
-(see `docs/06-api.md`), so they are not reported here as results.
+with 0 errors. That was on the earlier, invented profiles. Latencies of live runs are
+wall-clock waits of the simulator, inflated by the OS timer (see `docs/06-api.md`), so they
+are not reported here as results.
 
 ## Fairness: a saturated model must not starve a light one
 
@@ -123,13 +159,13 @@ with 0 errors. Its latencies are wall-clock waits of the simulator, inflated by 
 
 `test_saturated_model_does_not_starve_a_lightly_loaded_one` sends 1000 requests at 200
 req/s, 98% to the economy model and 2% to the premium model (prompts of 20-80 words, 16
-output tokens, no shared prefix). That is far more than the economy model can serve, while
-the premium model sees about 4 req/s. It asserts:
+output tokens, no shared prefix), **on the hand-made test profiles** (`TEST_PROFILES` in
+`tests/helpers.py`: fixtures, not data), where its bounds can be checked by hand. It asserts:
 
 - the economy model is saturated: its p99 is more than 30 times its slowest possible
-  unloaded request (100 ms);
-- the premium model's p99 is within the bound of **twice its slowest possible unloaded
-  request**, 2 x (80 x 0.6 + 16 x 30) = 1056 ms;
+  unloaded request;
+- the premium model's p99 is within **twice its slowest possible unloaded request** on the
+  test profile;
 - stronger than a bound: with every economy request removed from the workload, each premium
   request's TTFT and total latency are **exactly the same**. The heavy load has no effect on
   the light model at all.
@@ -137,19 +173,25 @@ the premium model sees about 4 req/s. It asserts:
 `test_a_single_shared_queue_breaks_that_isolation` runs the same workload with both model
 names routed to one worker, and asserts the premium requests' p99 now exceeds the bound.
 
-`uv run python -m benchmarks.fairness` prints the three scenarios (simulated):
+### The demo on the calibrated profiles
+
+`uv run python -m benchmarks.fairness` prints three scenarios (simulated on the calibrated
+profiles; parent commit `38bbb94`). The workload is 2000 requests at 20 req/s, 97% economy
+and 3% premium, prompts of 20-80 words, 16 output tokens. Economy is **saturated on purpose**
+(about 140% of its capacity), so its p99 measures its backlog and is not a latency; premium
+gets about a third of its own capacity (`benchmarks.saturation`), and its 60 requests are
+enough for a p99 that is not just its slowest request.
 
 | Scenario         | Model   | Reqs | Total p50 ms | Total p99 ms |
 |------------------|---------|-----:|-------------:|-------------:|
-| separate workers | economy |  979 |      1,794.3 |      3,494.6 |
-| separate workers | premium |   21 |        715.5 |        943.2 |
-| premium alone    | premium |   21 |        715.5 |        943.2 |
-| one shared queue | economy |  979 |      1,887.4 |      3,663.9 |
-| one shared queue | premium |   21 |      1,460.6 |      3,045.4 |
+| separate workers | economy | 1940 | backlog, not reported | backlog, not reported |
+| separate workers | premium |   60 |      1,186.1 |      2,127.0 |
+| premium alone    | premium |   60 |      1,186.1 |      2,127.0 |
+| one shared queue | premium |   60 | backlog, not reported | backlog, not reported |
 
-In the shared-queue scenario the single worker uses the economy profile, which is the
-faster one, and the premium requests are still more than three times slower at p99 than on
-their own slower model.
+With its own worker, premium is served exactly as if the economy flood did not exist. With
+one shared queue it waits behind economy's backlog: its requests then take as long as the
+run lets the queue grow, which is the point of the demo and not a latency to quote.
 
 ### Why per-model workers give isolation
 

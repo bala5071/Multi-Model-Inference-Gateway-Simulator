@@ -86,6 +86,9 @@ class ContinuousBatchingWorker:
     With ``prefill_chunk_tokens``, a new request's prompt is prefilled a chunk at a time,
     between decode steps, so a long prompt does not stall the requests already decoding.
     Without it, the whole prompt is prefilled at admission while the batch waits.
+
+    A profile's ``per_request_overhead_ms`` passes between a request's arrival and its
+    joining the queue. It delays that request only and counts as queue wait.
     """
 
     def __init__(
@@ -117,6 +120,8 @@ class ContinuousBatchingWorker:
         self._queue: deque[_Queued] = deque()
         self._running: list[_Running] = []
         self._reserved_tokens = 0
+        # Requests that have arrived and are still in their per-request overhead.
+        self._preparing = 0
         self._loop_task: asyncio.Task[None] | None = None
         self._closed = False
 
@@ -137,8 +142,17 @@ class ContinuousBatchingWorker:
             raise QueueFullError(
                 self._profile.name, self.waiting, self._max_queue_len, self._retry_after_ms
             )
+        enqueue_ms = self._clock.now_ms()
+        if self._profile.per_request_overhead_ms > 0:
+            self._preparing += 1
+            try:
+                await self._clock.sleep_ms(self._profile.per_request_overhead_ms)
+            finally:
+                self._preparing -= 1
+            if self._closed:
+                raise RuntimeError("worker is closed")
         done: asyncio.Future[RequestResult] = asyncio.get_running_loop().create_future()
-        self._queue.append(_Queued(request, self._clock.now_ms(), done, on_token))
+        self._queue.append(_Queued(request, enqueue_ms, done, on_token))
         if self._loop_task is None or self._loop_task.done():
             self._loop_task = asyncio.create_task(self._run())
         return await done
@@ -149,12 +163,31 @@ class ContinuousBatchingWorker:
 
         A request that has just arrived sits in the queue until the scheduler's next
         iteration even when the batch has room, so free slots are subtracted. Requests
-        whose caller has given up are not counted.
+        still in their per-request overhead count as queued. Requests whose caller has
+        given up are not counted.
         """
         return self._waiting(arriving=0)
 
+    @property
+    def batch_size(self) -> int:
+        """Requests seated in the batch now, decoding or still being prefilled.
+
+        Read-only, for monitoring. Like ``waiting``, it leaves out requests whose caller
+        has given up.
+        """
+        return sum(1 for r in self._running if not r.queued.done.cancelled())
+
+    @property
+    def kv_used_tokens(self) -> int:
+        """Tokens held against the KV capacity now: running requests plus the prefix cache.
+
+        Read-only, for monitoring. The same number ``StepRecord.kv_tokens`` reports.
+        """
+        return self._kv_tokens()
+
     def _waiting(self, *, arriving: int) -> int:
         queued = sum(1 for q in self._queue if not q.done.cancelled()) + arriving
+        queued += self._preparing
         running = sum(1 for r in self._running if not r.queued.done.cancelled())
         return max(0, queued - (self._profile.max_batch_size - running))
 

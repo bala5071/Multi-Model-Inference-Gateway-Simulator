@@ -15,7 +15,7 @@ from gateway.clock import SimClock
 from gateway.continuous import ContinuousBatchingWorker, StepRecord, build_continuous_registry
 from gateway.registry import ModelRegistry
 from gateway.schema import GenerateRequest
-from helpers import EXACT
+from helpers import EXACT, TEST_PROFILES
 
 # Ten words: 10 prompt tokens, so 5 ms of prefill on the EXACT profile.
 PROMPT = "one two three four five six seven eight nine ten"
@@ -226,7 +226,9 @@ async def test_root_points_a_visitor_at_the_real_endpoints(gateway: Gateway) -> 
     for entry in body["endpoints"]:
         method, path = entry.split()
         if method == "GET" and "{" not in path:
-            assert (await gateway.client.get(path)).status_code == 200, path
+            # The monitoring stream never ends by itself; ask it for a single push.
+            url = f"{path}?count=1" if path == "/v1/monitor/stream" else path
+            assert (await gateway.client.get(url)).status_code == 200, path
 
 
 async def test_models_lists_names_and_aliases(gateway: Gateway) -> None:
@@ -325,7 +327,8 @@ async def test_prefix_cache_hits_show_up_in_usage_and_metrics() -> None:
 
 async def test_shutdown_stops_the_scheduler_loops_and_cancels_what_is_in_flight() -> None:
     clock = SimClock()
-    registry = build_continuous_registry(clock, seed=7)
+    # No per-request overhead, so both requests are being served 1 ms in.
+    registry = build_continuous_registry(clock, seed=7, profiles=TEST_PROFILES)
     app = create_app(registry, clock)
     worker = registry.get("premium")
     assert isinstance(worker, ContinuousBatchingWorker)

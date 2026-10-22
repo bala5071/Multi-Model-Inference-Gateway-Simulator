@@ -74,7 +74,8 @@ At admission:
 
 At finish: `insert` the prompt's tokens, release the lease, drop the reservation.
 
-**One capacity for both.** `kv_capacity_tokens` bounds *cached tokens + tokens reserved by
+**One capacity for both.** `kv_capacity_tokens` (a placeholder in the default profiles,
+operator-supplied, not data: KV capacity was never measured) bounds *cached tokens + tokens reserved by
 running requests*. The cache is not a second budget on top of the KV memory; it is the idle
 part of it. Consequences: cached prefixes are evicted to admit new work; a prefix in use
 cannot be evicted, so a request may wait instead; and a cache hit makes a request smaller,
@@ -83,8 +84,10 @@ because it takes over space the request was already holding.
 
 ### Worked example
 
-On the test profile (0.5 ms prefill per token, 4 ms decode step, 2 output tokens), from
-`test_shared_system_prompt_cuts_prefill_time_and_cost_exactly`:
+On the hand-made test profile (`EXACT` in `tests/helpers.py`: a fixture, not data; 0.5 ms
+prefill per token, 4 ms decode step, 2 output tokens), from
+`test_shared_system_prompt_cuts_prefill_time_and_cost_exactly`. It checks the mechanism; it
+is not a result:
 
 | Request | Prompt                          | Cached | Prefill          | Served     |
 |---------|---------------------------------|-------:|------------------|------------|

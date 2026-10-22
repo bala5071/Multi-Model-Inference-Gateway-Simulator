@@ -1,98 +1,217 @@
 # 13 — Calibrating the simulator against real models
 
-`benchmarks/calibrate.py` measures real models and fits the simulator's three timing
+`benchmarks/calibrate.py` measures real models and fits the simulator's four timing
 parameters to them, then checks the simulator against what it measured.
 
 Code: `benchmarks/calibrate.py`, `load_calibrated_profiles` in `src/gateway/profiles.py`,
 `simulated.profiles` in `src/gateway/backend_config.py`. Tests: `tests/test_calibrate.py`.
 
-## Status: calibrated once, on one laptop
+## Status: the median of six runs on one laptop, most of it unstable
 
-`benchmarks/calibration/` holds one calibration of the three Llama models:
-`calibrated_profiles.json`, `samples.json` (every request measured) and a plot per tier.
+`benchmarks/calibration/calibrated_profiles.json` is the **median of six calibration runs**
+made on 2026-10-08, with the lowest and highest value of every parameter beside it. No run
+was picked: `--aggregate` takes every run it is given. The runs themselves are in
+`run1/` to `run6/` (`calibrated_profiles.json` and `samples.json` each); the three plots
+beside the aggregate show the median profile against all six runs' requests.
 
-**The simulator does not use it by default.** The illustrative profiles are still what
-`profiles.py`, the performance gate and sections 1 to 5 of `docs/REPORT.md` run on. Loading
-the calibration is opt-in (see "Using a calibration in the simulator" below).
+**Seven of the twelve fitted parameters are marked unstable**: their highest and lowest
+fitted values are more than 25% of the median apart. **The premium tier is marked
+hardware-limited**: the 8B model does not fit on this GPU. Read every calibrated figure in
+this repository with that in mind.
+
+The first calibration, a single run on 2026-10-07 with three repeats and no overhead term,
+is in the history at commit `e36ce3b`.
+
+**This calibration is the simulator's default.** `profiles.py` holds its medians (a test
+fails if the two differ), with batches of at most 4, the most requests measured together, and
+placeholder prices and KV capacities, which were never measured. The performance gate, the
+step notes and `docs/REPORT.md` all run on it. "What changed" below says what that replaced.
 
 ### What was measured
 
 | | |
 |---|---|
-| When | 2026-10-07 (UTC timestamp in the JSON) |
+| When | 2026-10-08. Runs 1 to 3 started at 18:03, 18:07 and 18:12 UTC; Ollama was then stopped and started again; runs 4 to 6 started at 18:36, 18:40 and 18:44. Each took 3.8 to 4.6 minutes |
 | Machine | Intel Core Ultra 7 155H (22 logical cores), 15.4 GB RAM, NVIDIA GeForce RTX 4060 Laptop GPU (8188 MiB), Windows 11 (10.0.26200), Python 3.12.10 |
 | Server | **Ollama 0.12.6**, started with `OLLAMA_NUM_PARALLEL=4`, default 4096-token context. Not llama-server. |
-| Models | `llama3.2:1b-instruct-q4_K_M` (1.2B), `llama3.2:3b` (3.2B), `llama3.1:8b` (8.0B); all report Q4_K_M |
-| Plan | defaults: prompts of 32, 128, 512 and 1536 words; 16, 64 and 128 output tokens; 1, 2 and 4 requests together; 3 repeats |
-| Requests | 42 per tier, none failed; one run, about 3 minutes in all |
-| Command | `uv run python -m benchmarks.calibrate --backends examples/backends.ollama.yaml --out benchmarks/calibration` |
+| Models | `llama3.2:1b-instruct-q4_K_M`, `llama3.2:3b`, `llama3.1:8b`; all report Q4_K_M |
+| Plan | defaults except repeats: prompts of 32, 128, 512 and 1536 words; 16, 64 and 128 output tokens; 1, 2 and 4 requests together; **5 repeats**, the last held out |
+| Requests | 70 per tier per run, 420 per tier in all; none failed |
+| Measure | `uv run python -m benchmarks.calibrate --backends examples/backends.ollama.yaml --out benchmarks/calibration/runN --repeats 5`, for N = 1 to 6 |
+| Combine | `uv run python -m benchmarks.calibrate --aggregate benchmarks/calibration/run1 benchmarks/calibration/run2 benchmarks/calibration/run3 benchmarks/calibration/run4 benchmarks/calibration/run5 benchmarks/calibration/run6 --out benchmarks/calibration` |
 
-Other applications were not closed during the run. The 8B model did not fit entirely on the
-8 GB GPU: right after the run Ollama reported 7.4 of 8.65 GB in VRAM, so **the premium tier
-ran partly on the CPU**. Ollama's default `llama3.2:1b` tag is a Q8 build; the Q4_K_M tag
-was used instead to match the other two.
+Other applications were not closed during the runs. The tool had not been committed when
+they were made: runs 1 to 3 used it as it was before it recorded where a model was
+loaded, runs 4 to 6 as it is in the commit that added this section. The fitting code was
+the same for all six.
+
+### Where the models ran
+
+Recorded by the tool from Ollama's process list straight after each tier was measured, in
+runs 4 to 6. Runs 1 to 3 were made before the tool recorded it.
+
+| Tier | Loaded size | On the GPU | On the CPU | Verdict |
+|----------|--------:|-----:|---:|---|
+| economy  | 2.8 GiB | 100% | 0% | fits on the GPU |
+| standard | 5.0 GiB | 100% | 0% | fits on the GPU |
+| premium  | 8.1 GiB |  95% | 5% | **hardware-limited** |
+
+The premium figures are those of an 8B model that does not fit an 8 GB GPU, not of the model
+on adequate hardware. The split was the same 95% / 5% in all three runs that recorded it.
 
 ### Fitted parameters
 
-| Tier | Prefill ms/token | Decode base ms | ms per extra sequence | R² prefill fit | R² decode fit |
-|----------|-------:|-------:|-------:|------:|------:|
-| economy  | 0.2099 |  6.666 |  1.915 | 0.997 | 0.933 |
-| standard | 0.3915 | 14.194 |  4.086 | 0.999 | 0.982 |
-| premium  | 1.0812 | 49.992 | 15.990 | 0.995 | 0.975 |
+The median of the six runs, with the range over them. "Range" is highest minus lowest as a
+percentage of the median; above 25% the parameter is marked unstable.
 
-Against the illustrative profiles from step 1:
+| Tier | Parameter | Median | Lowest | Highest | Range | |
+|----------|---------------------------|-------:|-------:|-------:|-------:|---|
+| economy  | prefill ms/token          | 0.1960 | 0.1821 | 0.2141 |  16.3% | |
+| economy  | decode base ms            |  6.711 |  6.481 |  6.741 |   3.9% | |
+| economy  | ms per extra sequence     |  2.676 |  2.092 |  3.686 |  59.6% | **unstable** |
+| economy  | per-request overhead ms   |   90.1 |   75.4 |  113.7 |  42.5% | **unstable** |
+| standard | prefill ms/token          | 0.3754 | 0.3521 | 0.4221 |  18.6% | |
+| standard | decode base ms            | 15.298 | 14.747 | 22.171 |  48.5% | **unstable** |
+| standard | ms per extra sequence     |  4.133 |  1.705 |  4.905 |  77.4% | **unstable** |
+| standard | per-request overhead ms   |   88.4 |   65.5 |  126.1 |  68.6% | **unstable** |
+| premium  | prefill ms/token          | 0.8623 | 0.7637 | 0.9577 |  22.5% | |
+| premium  | decode base ms            | 45.138 | 42.767 | 48.328 |  12.3% | |
+| premium  | ms per extra sequence     | 24.760 |  7.744 | 42.860 | 141.8% | **unstable** |
+| premium  | per-request overhead ms   |  161.9 |   42.0 |  236.3 | 120.0% | **unstable** |
 
-| Tier | Prefill: illustrative / measured | Decode base: illustrative / measured | Per extra sequence: illustrative / measured |
-|----------|--------------:|-------------:|--------------:|
-| economy  | 0.05 / 0.21   | 6 / 6.67     | 0.2 / 1.92    |
-| standard | 0.15 / 0.39   | 12 / 14.19   | 0.6 / 4.09    |
-| premium  | 0.60 / 1.08   | 30 / 49.99   | 2.5 / 15.99   |
+Every run, in order (`uv run python -m benchmarks.calibrate --compare` over the six files):
 
-- **Single-request decode speed was guessed fairly well** for the two small models (6 vs
-  6.7 ms, 12 vs 14.2 ms) and too optimistically for the 8B, which here was partly on the CPU.
-- **The cost of batching was guessed far too low.** Each extra sequence added about 29% to
-  32% of the base step time (1.9 of 6.7 ms, 4.1 of 14.2, 16 of 50), against the 3% to 8% the
-  illustrative profiles assume. On this server and hardware, batching buys much less than
-  sections 1 to 5 of the report suggest: by these fits, four requests together take about
-  1.9 times as long per token as one alone, so throughput rises about 2.1 times, not 4.
-- **Prefill was guessed 2 to 4 times too cheap.**
-- This is concurrency up to 4 only. The illustrative batch limits of 32, 16 and 8 were not
-  tested, and the 8B model would not fit more slots on this GPU anyway.
+| Tier | Parameter | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Run 6 |
+|----------|-------------------------|------:|------:|------:|------:|------:|------:|
+| economy  | ms per extra sequence   |  2.09 |  2.26 |  3.69 |  3.08 |  2.29 |  3.06 |
+| economy  | per-request overhead ms |  95.4 |  85.9 |  94.3 |  75.4 |  82.9 | 113.7 |
+| standard | decode base ms          | 15.30 | 14.86 | 14.75 | 15.29 | 16.01 | 22.17 |
+| standard | ms per extra sequence   |  4.12 |  3.66 |  4.14 |  4.43 |  4.91 |  1.71 |
+| standard | per-request overhead ms |  91.9 |  85.0 |  95.6 |  65.5 |  70.7 | 126.1 |
+| premium  | ms per extra sequence   | 33.54 | 37.78 | 42.86 | 11.66 | 15.98 |  7.74 |
+| premium  | per-request overhead ms | 216.4 | 230.3 | 236.3 |  59.8 |  42.0 | 107.4 |
+
+- **What repeats:** prefill cost on every tier (16% to 23%), and single-request decode speed
+  on economy and premium (4% and 12%).
+- **The cost of batching does not repeat on any tier.** It is the parameter the batching
+  results depend on most.
+- **The premium tier changed between the two sessions.** Before Ollama was restarted it
+  fitted 33.5 to 42.9 ms per extra sequence and 216 to 236 ms of overhead; after, 7.7 to
+  16.0 ms and 42 to 107 ms. The command and the reported GPU share were the same. The cause
+  is not known. The median of two such groups (24.8 and 161.9) describes neither.
+- **Run 6 of the standard tier is a bad fit and was kept.** Its decode regression has an R²
+  of 0.043: per-token latency barely tracked concurrency in that run, and the fit put the
+  cost into the base step (22.2 ms) instead of the slope (1.7 ms). It is one of six values
+  going into each median, and it is why two of standard's parameters are unstable.
+- **Each extra sequence in a batch adds 40%, 27% and 55% of the base step** on the three
+  tiers, by the medians, and every request pays a fixed overhead before its first token.
+  Concurrency was measured up to 4 only; nothing is known about larger batches.
 
 ### How well the calibrated simulator matches
 
-MAPE of the simulator, run with the fitted parameters, against the measurements:
+The simulator on the median profile against all six runs' requests (MAPE), with the worst
+R² any run's regressions had:
 
-| Tier | TTFT: fitted / held out | Total latency: fitted / held out |
-|----------|----------------:|----------------:|
-| economy  | 56.9% / 54.1%   | 19.8% / 18.8%   |
-| standard | 42.6% / 42.2%   | 10.7% / 10.5%   |
-| premium  | 35.6% / 31.4%   | 6.1% / 5.1%     |
+| Tier | TTFT: fitted / held out | Total latency: fitted / held out | Lowest R², TTFT fit | Lowest R², decode fit |
+|----------|----------------:|----------------:|------:|------:|
+| economy  | 12.0% / 13.5%   | 8.0% / 8.1%     | 0.960 | 0.631 |
+| standard | 16.3% / 15.5%   | 7.5% / 8.0%     | 0.948 | 0.043 |
+| premium  | 35.7% / 35.1%   | 19.8% / 18.7%   | 0.914 | 0.684 |
 
-- **Total latency is predicted to within about 5% to 20%**, best on the slowest model, where
-  decoding dominates.
-- **TTFT is predicted badly, 31% to 57% off.** The fitted TTFT line has an intercept of
-  92 ms (economy and standard) and 139 ms (premium): a fixed cost per request, whatever the
-  prompt length. The simulator has no such term; its TTFT is prefill plus one decode step,
-  so it predicts first tokens far too early for short prompts. For the fast models that
-  fixed cost is most of the TTFT, which is why their error is largest. This is the clearest
-  thing the simulator gets wrong, and adding a per-request overhead to the cost model would
-  be the first fix.
-- The tool raised no warnings: no request failed and none looked queued.
+Over all requests, split by how many were sent together:
+
+| Tier | TTFT: alone | TTFT: 2 together | TTFT: 4 together | Total: alone | Total: 2 together | Total: 4 together |
+|----------|------:|------:|------:|------:|------:|------:|
+| economy  |  9.3% | 14.3% | 17.4% |  7.0% | 10.9% |  8.6% |
+| standard | 10.4% | 21.5% | 24.9% |  8.1% | 10.4% |  5.3% |
+| premium  | 27.6% | 40.6% | 49.0% | 11.7% | 18.4% | 35.9% |
+
+- **The overhead term fixed most of the TTFT error on the two small models.** Their
+  held-out TTFT error was 54.1% and 42.2% in the 2026-10-07 calibration, which had no such
+  term, and is 13.5% and 15.5% here. Those are different measurements, so this compares
+  calibrations; it is not a like-for-like test of the term on the same requests.
+- **It did not fix the premium tier**, which is 35% off on TTFT (31.4% held out before) and
+  19% off on total latency. A median taken across two sessions that disagree fits neither.
+- **TTFT with concurrency is still poor on every tier**: 17% to 49% with four together,
+  against 9% to 28% alone. The simulator prefills requests that arrive together one after
+  another, and a real server does not; a constant overhead cannot represent that.
+- **Total latency is within 7% to 11% on the two small models.**
 
 The plots are `benchmarks/calibration/economy.png`, `standard.png` and `premium.png`, and
 are included in section 6 of `docs/REPORT.md`.
 
+### What the calibrated profiles do to the simulated results
+
+`docs/REPORT.md` (`uv run python -m benchmarks.report`) runs sections 1 to 3 on these
+profiles; still simulated. Every workload is checked for saturation first, and a saturated
+run's p99 is not reported. From section 1, the capacity of continuous batching over the
+one-at-a-time baseline, with batches of at most 4:
+
+| Tier | Gain, median cost per extra sequence | Lowest fitted cost | Highest fitted cost |
+|----------|------:|------:|------:|
+| economy  | 1.76x | 1.97x | 1.48x |
+| standard | 2.11x | 2.79x | 1.96x |
+| premium  | 1.49x | 2.52x | 1.04x |
+
+- **The gain rests on the least stable parameter.** The cost per extra sequence is unstable
+  on all three tiers, so the last two columns rerun the simulation with it at the lowest and
+  highest value the six runs fitted (both measured). On premium the gain ranges from almost
+  nothing to two and a half times.
+- **Nothing batches beyond 4**, so nothing extrapolates the fitted cost past the measured
+  range.
+- **Overload and chunked prefill have no results** (report sections 4 and 5, notes 10 and
+  11): on these profiles the old overload workload is saturated and its outcome rests on
+  unstable parameters, and the chunked-prefill workload needs prompts far beyond the 1,536
+  words measured. They are listed as not measured on real data.
+
 ### What this calibration is not
 
 - Not llama-server. Ollama wraps llama.cpp but schedules and loads models its own way.
-- Not repeated. It is one run; two runs of the tool on a stand-in model earlier differed by
-  20% to 50% in the fitted values (see the end of this note).
+- Not independent repeats. Six runs in two sessions on one machine on one day.
+- Not a measurement of the 8B model on hardware that fits it.
 - Not transferable to another machine, GPU, quantization, context size or server version.
 - Not a measurement of this repo's scheduler: Ollama did the batching (`docs/12`).
 
-The four `real_models` tests were also run against these three models through Ollama and
-passed.
+The four `real_models` tests were run against these three models through Ollama on
+2026-10-07 and passed; they were not run again on 2026-10-08.
+
+## What changed: the invented profiles were removed
+
+Until this change, the simulator ran on **invented model profiles**, written in step 1 to give
+the three tiers plausible, clearly different shapes: prefill of 0.05, 0.15 and 0.6 ms per
+token, decode steps of 6, 12 and 30 ms, 0.2 to 2.5 ms per extra sequence, no per-request
+overhead, and batch limits of 32, 16 and 8. Every simulated result in the report, the step
+notes, the README and the performance gate's budgets came from them, labelled as
+illustrative.
+
+They were removed because measurement showed them wrong where it matters, and a labelled
+wrong number still gets quoted:
+
+- **They made batching look several times cheaper than it was.** Each extra sequence was
+  measured to add 27% to 55% of a decode step, not 3% to 8%, and the batch limits they relied
+  on were never measured. The batching gains quoted from them (up to about 12 times) were
+  largely an artefact of those two choices.
+- **Their workloads were saturated on the measured timings.** The gate's workload offered
+  premium more than twice its calibrated capacity; the overload surge about fifteen times. A
+  p99 from such a run measures the length of the run.
+- **Their prices were never data**, so the cost savings computed from them (a routing saving
+  and per-plan savings) were statements about made-up numbers.
+
+What replaced them:
+
+- the six-run median above is the default profile set, with batches of at most 4;
+- every simulated workload that is reported is first checked for saturation
+  (`benchmarks/saturation.py`), and rates were lowered where needed, saying so;
+- results that could not be redone honestly (overload, chunked prefill, every cost saving)
+  were deleted and are listed as not measured on real data;
+- prices and KV capacities are kept only as `PLACEHOLDER_*` values, operator-supplied, not
+  data, and no cost result is reported;
+- the old numbers survive only as `TEST_PROFILES` in `tests/helpers.py`, hand-made fixtures
+  for tests that need timings checkable by hand. Nothing outside the tests may import them.
+
+**The caveat on everything that replaced them:** it is calibrated once, on one laptop, with
+Ollama, the 8B model partly on the CPU, and seven of the twelve parameters did not repeat
+between runs.
 
 ## What the tool does
 
@@ -125,9 +244,16 @@ Two ordinary least-squares fits per tier, over the samples that are not held out
 | `prefill_ms_per_token`    | slope of TTFT against prompt tokens, requests sent alone                    |
 | `decode_base_ms`          | intercept of per-token latency against the number of *other* requests       |
 | `decode_ms_per_extra_seq` | slope of the same fit                                                       |
+| `per_request_overhead_ms` | intercept of the TTFT fit, less the fitted `decode_base_ms`                 |
 
-Everything else in the profile (prices, `max_batch_size`, `kv_capacity_tokens`) is copied
-from the illustrative profile; calibration does not measure it. A fit that comes out at or
+The overhead is the intercept less one decode step because the simulator's first token
+already comes one step after prefill; only the rest of the intercept is unexplained. It
+was added after the first calibration showed an intercept of 92 to 139 ms that the
+simulator could not represent (`docs/01-cost-model.md` says how the simulator applies it).
+
+Everything else in the profile (prices, `kv_capacity_tokens`) is copied from the default
+profile, where they are placeholders, operator-supplied, not data; calibration does not
+measure them. `max_batch_size` is set to the highest concurrency measured. A fit that comes out at or
 below zero is clamped and flagged in the notes rather than passed off as a result.
 
 ### 3. Check
@@ -140,7 +266,42 @@ used in the fit and for the held-out ones (the last repeat of each scenario), an
 figure per tier: simulated against measured for TTFT and for total latency, with the
 residuals of each below. Marker shape shows how many requests were sent together.
 
-### 4. Record the hardware
+It also reports the same errors over all samples split by how many requests were sent
+together (`mape_percent_by_concurrency`), since an average over mostly single requests
+hides how the simulator does under concurrency.
+
+### 4. Report the spread
+
+- **Within a run:** every repeat is fitted on its own and the lowest, mean and highest
+  value of each parameter are reported (`spread_across_repeats`), with the range as a
+  percentage of the mean. The held-out repeat is included; nothing is checked against it
+  here.
+- **Between runs:** `uv run python -m benchmarks.calibrate --compare FILE FILE ...` prints
+  the same for the fitted parameters of several `calibrated_profiles.json` files. It
+  measures nothing.
+
+### 5. Combine runs
+
+`uv run python -m benchmarks.calibrate --aggregate DIR DIR ... --out OUT` reads the
+`calibrated_profiles.json` and `samples.json` of every run folder named and writes one
+calibration to `OUT`. It measures nothing.
+
+- **Each parameter is the median over the runs**, stored with its lowest and highest
+  value and every run's value (`aggregate` in the JSON). With an even number of runs the
+  median is the mean of the middle two.
+- **No run is chosen.** Every folder given goes in, including a run whose fit is poor.
+  Dropping one after looking at it would be choosing the answer. The tool refuses to
+  write the result over one of its inputs or to aggregate an aggregate.
+- **A parameter is marked unstable** when highest minus lowest is more than 25% of the
+  median (`unstable: true`, `unstable_parameters`, and a line in the tier's notes). The
+  median is still written; the flag says it did not repeat.
+- **The errors are recomputed for the median profile**: the simulator is run on it
+  against every run's requests, and the plots show that. Each run's own R² is kept in
+  `fit_r2_by_run`.
+- A tier counts only if every run measured it. `samples.json` is not written: the
+  samples stay with their runs.
+
+### 6. Record the hardware and where the model ran
 
 `calibrated_profiles.json` carries, beside the parameters, fit statistics and errors:
 
@@ -151,6 +312,20 @@ residuals of each below. Marker shape shows how many requests were sent together
 - `measured_at`, the plan that was run, and free-text `--notes`.
 
 The numbers mean nothing without that context, which is why it is in the same file.
+
+**Where the model was loaded.** Straight after measuring a tier, while its model is still
+loaded, the tool asks Ollama's process list (`/api/ps`, what `ollama ps` prints) for the
+model's size and how much of it is in VRAM, and stores both with the GPU and CPU shares
+under `servers.<tier>.placement`.
+
+- A tier with any of its model on the CPU gets `hardware_limited: true` and a
+  `hardware-limited` line in its notes. Its timings describe that model on hardware too
+  small for it. The fit is not changed or dropped; it is labelled.
+- If the server is not Ollama or does not list the model, the placement is `null` and
+  `hardware_limited` is `null`: unknown, not assumed to be fine. llama-server is in that
+  case today.
+- An aggregate is hardware-limited if any run that recorded a placement was, and keeps
+  every run's placement in `placement_by_run`.
 
 ## Using a calibration in the simulator
 
@@ -167,13 +342,17 @@ simulated:
   profiles: benchmarks/calibration/calibrated_profiles.json
 ```
 
-`load_calibrated_profiles(path)` returns the standard profiles with the three timing
-parameters replaced for every tier in the file; a tier that is not in the file keeps its
-illustrative profile. In code, pass the result as `profiles=` to
+The default profiles already are the tracked aggregate; this is for another calibration file.
+`load_calibrated_profiles(path)` returns the default profiles with the timing parameters
+replaced for every tier in the file, and the batch limit set to the file's
+`max_concurrency_measured`; a tier that is not in the file keeps its default profile. A file written before the overhead was fitted has no
+`per_request_overhead_ms` and loads with 0. An aggregate loads the same way: the
+medians are in the same fields. The loader does not act on the `unstable` or
+`hardware_limited` flags; they are for the reader and the report. In code, pass the result as `profiles=` to
 `build_continuous_registry` or `run_in_process`.
 
-The performance gate does not use calibrated profiles. Its budgets were recorded with the
-illustrative ones; switching would be a deliberate re-baseline.
+The performance gate runs on the default profiles, so it uses this calibration; loading
+another file does not change it (`docs/08-ci-gate.md`).
 
 ## Limitations, and where the simulator diverges
 
@@ -184,8 +363,9 @@ Some of these are structural and some were seen in the tool check below.
 - It prefills requests admitted together one after another. A real server processes
   several prompts in the same batches, so with concurrency the simulator predicts first
   tokens in the wrong pattern.
-- It has no fixed per-request overhead. The fitted TTFT line had an intercept of 7 to 9 ms
-  in the check, which the simulator can only represent as one decode step.
+- Its per-request overhead is a constant that delays one request and does not hold up the
+  model. Whether the real overhead holds up the server was not measured, and it need not
+  be constant: the within-run spread of the fitted value was 9% to 22%.
 - TTFT error was 28% to 49% in the check; total latency, which decoding dominates, was much
   closer. **Expect TTFT to be the weak spot.**
 
@@ -199,9 +379,9 @@ Some of these are structural and some were seen in the tool check below.
   uses 4), or set `OLLAMA_NUM_PARALLEL`.
 - Step time is modelled as linear in batch size. In the check the fit explained only half
   to three quarters of the variance.
-- Only the measured range is known. The illustrative profiles allow batches of 32, 16 and
-  8; a calibration that measured up to 4 says nothing about 32. `max_concurrency_measured`
-  is in the output for this reason.
+- Only the measured range is known: a calibration that measured up to 4 says nothing about
+  32. `max_concurrency_measured` is in the output for this reason, and the simulator's batch
+  limit is set to it.
 
 **It is one machine on one day.**
 

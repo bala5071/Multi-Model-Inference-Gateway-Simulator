@@ -48,32 +48,37 @@ Consequences:
 
 ### Numbers
 
-These figures are **simulated from the illustrative profiles in step 1**. They are not
-measurements of real models and say nothing about real hardware. They were produced by
+These figures are **simulated on the calibrated profiles** (note 01: the median of six
+calibration runs on one laptop with Ollama, the premium model partly on the CPU). They are
+this scheduler with measured step costs, not measurements of a model server. Produced by
 
 ```sh
 uv run python -m benchmarks.baseline_limits
 ```
 
-at commit `c7e75ac`.
+on the tree of the commit that added this text (parent commit `38bbb94`).
 Workload: every request has 500 tokens in and 136 tokens out; 10 requests arrive together.
+The waits include each request's per-request overhead (90, 88 and 162 ms), which is
+**unstable** on every tier.
 
 | Tier     | Service ms | Max req/s | Decode tok/s | Mean wait ms (burst of 10) | Last wait ms |
 |----------|-----------:|----------:|-------------:|---------------------------:|-------------:|
-| economy  |      841.0 |     1.189 |        166.7 |                    3,784.5 |      7,569.0 |
-| standard |    1,707.0 |     0.586 |         83.3 |                    7,681.5 |     15,363.0 |
-| premium  |    4,380.0 |     0.228 |         33.3 |                   19,710.0 |     39,420.0 |
+| economy  |    1,010.7 |     0.989 |        149.0 |                    4,638.0 |      9,186.0 |
+| standard |    2,268.2 |     0.441 |         65.4 |                   10,295.3 |     20,502.2 |
+| premium  |    6,570.0 |     0.152 |         22.2 |                   29,726.7 |     59,291.5 |
 
-For scale, the same cost model says a decode step at the full batch size would yield:
+For scale, the same cost model says a decode step with the batch full, at 4 requests, the
+most that were measured together, would yield:
 
 | Tier     | Baseline tok/s | Full-batch tok/s | Ratio |
 |----------|---------------:|-----------------:|------:|
-| economy  |          166.7 |          2,623.0 | 15.7x |
-| standard |           83.3 |            761.9 |  9.1x |
-| premium  |           33.3 |            168.4 |  5.0x |
+| economy  |          149.0 |            271.4 | 1.82x |
+| standard |           65.4 |            144.4 | 2.21x |
+| premium  |           22.2 |             33.5 | 1.51x |
 
-The full-batch column is a ceiling implied by the profile formulas, not a result: no batcher
-exists yet. It shows how much room the baseline leaves.
+The full-batch column is a ceiling implied by the profile formulas, not a run. It rests on
+`decode_ms_per_extra_seq`, which is **unstable** on every tier: across the six calibration
+runs it moved by 60% to 142% of its median (note 13).
 
 ## What later steps must beat
 
@@ -84,6 +89,7 @@ On the same seed and the same arrival pattern, compared against `BaselineWorker`
 - neither may change `tokens_in`, `tokens_out` for a request.
 
 Re-run `benchmarks/baseline_limits.py` if the profiles change; the tables above go stale.
+`tests/test_entry_points.py` checks two of its rows against this note.
 
 ## Design decisions
 

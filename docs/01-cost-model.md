@@ -3,37 +3,43 @@
 Step 1 adds the model profiles and a pure cost function. Code: `src/gateway/profiles.py`,
 `src/gateway/cost_model.py`. Tests: `tests/test_cost_model.py`.
 
-## The numbers are illustrative
+## The profiles are calibrated; prices and capacities are placeholders
 
-**Nothing in the profiles was measured.** Prices, per-token times, batch limits and KV
-capacities are invented to give the three tiers plausible, clearly different shapes. They are
-not benchmarks of Llama 3.2 1B, Llama 3.2 3B or Llama 3.1 8B, and they are not anyone's real
-prices. Do not quote them as performance or pricing figures. A later step calibrates them
-against real runs; until then, any result built on them is a simulated result.
+The timing parameters are the **median of six calibration runs of the real models** on one
+laptop with Ollama, the 8B model partly on the CPU (`docs/13-calibration.md`,
+`benchmarks/calibration/calibrated_profiles.json`). The range is the lowest and highest value
+over the six runs; a parameter whose range is more than 25% of its median is **unstable**: it
+did not repeat. `tests/test_profiles.py` fails if `profiles.py` and the calibration file
+disagree.
 
-| Field                            | economy        | standard       | premium        |
-|----------------------------------|----------------|----------------|----------------|
-| `name`                           | `llama-3.2-1b` | `llama-3.2-3b` | `llama-3.1-8b` |
-| `price_per_1k_input_tokens` USD  | 0.0001         | 0.0003         | 0.0010         |
-| `price_per_1k_output_tokens` USD | 0.0002         | 0.0006         | 0.0020         |
-| `prefill_ms_per_token`           | 0.05           | 0.15           | 0.60           |
-| `decode_base_ms`                 | 6.0            | 12.0           | 30.0           |
-| `decode_ms_per_extra_seq`        | 0.2            | 0.6            | 2.5            |
-| `max_batch_size`                 | 32             | 16             | 8              |
-| `kv_capacity_tokens`             | 65,536         | 32,768         | 16,384         |
+| Field                       | economy | standard | premium |
+|-----------------------------|--------:|---------:|--------:|
+| `name`                      | `llama-3.2-1b` | `llama-3.2-3b` | `llama-3.1-8b` |
+| `prefill_ms_per_token`      | 0.1960 (0.1821 to 0.2141) | 0.3754 (0.3521 to 0.4221) | 0.8623 (0.7637 to 0.9577) |
+| `decode_base_ms`            | 6.711 (6.481 to 6.741) | 15.298 (14.747 to 22.171) **unstable** | 45.138 (42.767 to 48.328) |
+| `decode_ms_per_extra_seq`   | 2.676 (2.092 to 3.686) **unstable** | 4.133 (1.705 to 4.905) **unstable** | 24.760 (7.744 to 42.860) **unstable** |
+| `per_request_overhead_ms`   | 90.1 (75.4 to 113.7) **unstable** | 88.4 (65.5 to 126.1) **unstable** | 161.9 (42.0 to 236.3) **unstable** |
+| `max_batch_size`            | 4 | 4 | 4 |
+| `price_per_1k_input_tokens` USD  | 0.0001 placeholder | 0.0003 placeholder | 0.0010 placeholder |
+| `price_per_1k_output_tokens` USD | 0.0002 placeholder | 0.0006 placeholder | 0.0020 placeholder |
+| `kv_capacity_tokens`        | 65,536 placeholder | 32,768 placeholder | 16,384 placeholder |
 
-## Why the shapes differ
+- **Premium is hardware-limited**: the 8B model did not fit the 8 GB GPU and ran 5% on the
+  CPU, so its timings are of that laptop's limits as much as of the model.
+- **`max_batch_size` is 4 on every tier**, the most requests the calibration sent together
+  (`MEASURED_MAX_BATCH_SIZE`). Nothing the simulator reports batches more, so nothing
+  extrapolates the fitted cost per extra sequence past what was measured. How these models
+  behave with larger batches is not known.
+- **Prices and `kv_capacity_tokens` were never measured.** They are
+  `PLACEHOLDER_PRICE_PER_1K_INPUT_TOKENS`, `PLACEHOLDER_PRICE_PER_1K_OUTPUT_TOKENS` and
+  `PLACEHOLDER_KV_CAPACITY_TOKENS`: operator-supplied, not data. They exist because the ledger
+  and the KV accounting need a number. No document reports a cost, saving or ratio from them.
+- Every result built on these profiles is a **simulated** result: this repo's scheduler with
+  step costs measured on one machine, not a measurement of a model server.
 
-The tiers are not one profile scaled by a constant. Going up a tier:
-
-- prefill gets much slower (3x, then 4x per token), so prefix reuse is worth more;
-- each decode step gets slower (2x, then 2.5x);
-- adding a sequence to the batch costs relatively more (3.3%, 5%, 8.3% of the base step);
-- the batch limit halves and the KV capacity halves, as if the same memory budget were
-  shared with a larger model.
-
-So batching helps the small model most and the cache matters most for the large one. That is
-what makes later routing and batching decisions non-trivial.
+`tests/helpers.py` keeps `TEST_PROFILES`: three hand-made fixtures, not data, with round
+numbers so unit tests can check timings by hand. Only tests may import them
+(`tests/test_profiles.py` enforces it), and no document quotes a result from them.
 
 ## Formulas
 
@@ -44,9 +50,32 @@ prefill_ms     = n_in * p.prefill_ms_per_token
 decode_step_ms = p.decode_base_ms + p.decode_ms_per_extra_seq * (b - 1)
 cost_usd       = (n_in * p.price_per_1k_input_tokens
                   + n_out * p.price_per_1k_output_tokens) / 1000
+overhead_ms    = p.per_request_overhead_ms
 ```
 
-`estimate_cost` returns these three values as a `CostEstimate`.
+`estimate_cost` returns these values as a `CostEstimate`.
+
+## Per-request overhead
+
+Added after calibration (`docs/13-calibration.md`), which found that real servers spend a
+fixed time on every request before its first token, whatever the prompt length, and that
+the simulator had no term for it.
+
+- **It is calibrated and unstable on every tier**: 90, 88 and 162 ms, ranging over 75 to 114,
+  65 to 126 and 42 to 236 ms across the six runs (`docs/13-calibration.md`). So is the cost
+  per extra sequence. Treat a result that depends on either as resting on a value that did
+  not repeat.
+- **It delays one request and does not occupy the model.** The workers let it pass between
+  a request's arrival and its joining the queue; other requests are served meanwhile, and
+  the overheads of requests that arrive together overlap. A request served alone gets its
+  first token after `overhead_ms + prefill_ms + decode_step_ms`.
+- **It counts as queue wait** (`start_ms - enqueue_ms`), and so is inside TTFT and total
+  latency. Inter-token latency and throughput at saturation do not change.
+- **It is not billed.** `cost_usd` is the same with and without it.
+- A request still in its overhead counts as waiting for the queue limit of note 10.
+- Whether the real overhead blocks the model or not was not measured. Treating it as
+  non-blocking is an assumption: it is the kind of work (request handling, templating,
+  tokenising, slot set-up) that happens outside the batched decode loop.
 
 ## Assumptions
 
@@ -65,7 +94,8 @@ cost_usd       = (n_in * p.price_per_1k_input_tokens
   pricing decision left for the prefix-cache step.
 - **Price does not depend on batch size or latency.**
 - **`kv_capacity_tokens` and `max_batch_size` are carried on the profile but only
-  `max_batch_size` is used here.** The KV capacity is for the prefix-cache step.
+  `max_batch_size` is used here.** The KV capacity, a placeholder, is for the prefix-cache
+  step.
 - **Money is a `float`.** Good enough for a simulator; this is not a billing system.
 
 ## Output length

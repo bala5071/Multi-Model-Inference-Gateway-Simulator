@@ -8,7 +8,9 @@ Code: `src/gateway/overload.py`, changes in `src/gateway/continuous.py` and
 `src/gateway/app.py`. Benchmark: `benchmarks/overload.py`.
 Tests: `tests/test_overload.py`, `tests/test_overload_api.py`.
 
-All limits, SLOs and results here are illustrative or simulated.
+All limits and SLOs here are operator settings, chosen and not measured. **The overload
+results are not measured on real data** (see "Benchmark" below); the tests pin the mechanism
+on hand-made test profiles (`TEST_PROFILES` in `tests/helpers.py`: fixtures, not data).
 
 ## Summary
 
@@ -97,7 +99,8 @@ and again just before each decode step, and for each one it finds it:
 - releases its lease on the prefix cache, so the prefix can be evicted again.
 
 A cancelled request therefore stops consuming capacity within one decode step. Requests
-cancelled while still queued are skipped when they reach the head of the queue. Tests:
+cancelled while still queued are skipped when they reach the head of the queue. Tests, on
+hand-made test profiles:
 
 - `test_timed_out_request_leaves_the_batch_and_frees_its_kv_tokens`: a 30-token request
   blocks a 16-token one in a 40-token KV budget; when the first times out at t=10 the
@@ -184,8 +187,8 @@ HTTP and asserts there is exactly one change each way.
 
 - **It reacts late.** A request has to finish before its latency is known, so the monitor
   learns about an overload only after slow requests complete. Requests that arrived before
-  that are not helped; in the benchmark below the worst of them still take 50 s. Queue
-  length or queue age would signal sooner; the p99 trigger is what this step specified.
+  that are not helped. Queue length or queue age would signal sooner; the p99 trigger is
+  what this step specified.
 - **Sustained overload still oscillates, slowly.** If demand stays above capacity, a model
   recovers once drained, is overloaded again, and degrades again. Hysteresis lengthens the
   cycle to at least the hold time plus the time to gather evidence; it cannot remove it.
@@ -196,50 +199,26 @@ HTTP and asserts there is exactly one change each way.
 - **Quality drops silently unless the client reads the header.**
 - **State is per process and in memory.**
 
-## Benchmark: p99 with and without degradation
+## Benchmark: not measured on real data
 
-**Simulated, from the illustrative profiles. Not measurements of real models.**
+**No results are given.** Earlier drafts of this note had a table showing what downgrade did
+to p99 under a surge; it came from invented model profiles and was removed (note 13). It
+cannot be redone honestly on the calibrated profiles:
 
-```sh
-uv run python -m benchmarks.overload
-```
+- the surge (300 requests at 3 req/s, all asking for premium) is many times what the
+  calibrated premium model can serve (about 0.23 req/s with batches of 4), so a run measures
+  its backlog, not the defences;
+- what the defences achieve rests on each model's capacity, which depends on the cost per
+  extra sequence and the per-request overhead, both **unstable** on every tier (note 13), and
+  premium's timings are hardware-limited;
+- the SLO thresholds and queue limits are operator settings nobody measured.
 
-Commit `c7e75ac`. Every request asks
-for the premium model and opts in. 300 requests arrive at 3 req/s, about three times what
-the premium model serves on this workload, followed by 100 at 0.25 req/s. Prompts are
-20-200 words; seed 7. Queue limits and timeouts are off in both runs, so the only difference
-is the downgrade. Policy: premium p99 SLO 20 s, window 30 s, recover below 70%, hold 15 s,
-at least 10 samples.
-
-| Run            | Requests | p50 ms   | p99 ms    | Max ms    | By premium | By standard | Cost USD |
-|----------------|---------:|---------:|----------:|----------:|-----------:|------------:|---------:|
-| No downgrade   |      400 | 92,071.4 | 190,170.3 | 194,071.2 |        400 |           0 | 0.160073 |
-| With downgrade |      400 |  3,433.6 |  48,214.9 |  51,611.4 |        169 |         231 | 0.095520 |
-
-State changes in the second run:
-
-| Time    | Model   | Change    | Window p99        |
-|---------|---------|-----------|-------------------|
-| 26.1 s  | premium | degraded  | 20,776.7 ms       |
-| 111.6 s | premium | recovered | window was empty  |
-
-Reading it:
-
-- p99 falls from about 190 s to about 48 s, and the median from 92 s to 3.4 s.
-- The p99 with downgrade is still well over the 20 s SLO. The requests that arrived in the
-  first 26 s were already queued on premium when the monitor first had evidence, and
-  downgrade does not move queued requests.
-- 231 requests were served by the standard model; the standard model was never degraded and
-  nothing reached economy.
-- The state changed once each way. Premium recovered at 111.6 s, after it had drained its
-  backlog and gone a full window without finishing anything; the calm phase then ran on
-  premium.
-- Cost is lower with downgrade because the standard model is cheaper per token. That is a
-  saving for the tenant and less revenue for the provider.
-
-`test_benchmark_shows_downgrade_cutting_p99_without_flapping` runs the same two scenarios
-and asserts the p99 is more than halved, every moved request went from premium to standard,
-and there are exactly two state changes.
+`uv run python -m benchmarks.overload` still runs the two scenarios, as a demonstration of the
+mechanism; it says so when it starts, and its numbers are not to be quoted.
+`test_benchmark_shows_downgrade_cutting_p99_without_flapping` runs the same workload on the
+hand-made test profiles and pins the behaviour: the p99 is more than halved, every moved
+request went from premium to standard, and the state changes exactly twice, once each way.
+That is a check of the logic, not a performance result.
 
 ## Design decisions
 

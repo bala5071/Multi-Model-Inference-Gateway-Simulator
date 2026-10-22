@@ -3,7 +3,7 @@
   "workload": {
     "seed": 7,
     "total_requests": 1000,
-    "arrival_rate_per_s": 5.0,
+    "arrival_rate_per_s": 0.8,
     "model_weights": {
       "economy": 70,
       "standard": 20,
@@ -31,8 +31,8 @@
     "max_tokens": null
   },
   "p99_total_ms": {
-    "economy": 1817.854,
-    "standard": 3562.306,
-    "premium": 10881.739
+    "economy": 3099.029,
+    "standard": 5316.909,
+    "premium": 25175.307
   }
 }

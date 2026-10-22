@@ -9,7 +9,8 @@ per-token times), `src/gateway/schema.py`, `src/gateway/metrics.py`.
 Benchmark: `benchmarks/chunked_prefill.py`.
 Tests: `tests/test_streaming.py`, `tests/test_chunked_prefill.py`.
 
-All benchmark figures are simulated from the illustrative profiles.
+**The chunked-prefill results are not measured on real data** (see "Benchmark" below); the
+tests pin the mechanism on hand-made test profiles (fixtures, not data).
 
 ## Per-token times
 
@@ -28,8 +29,9 @@ with an occasional long gap reads as a stutter.
 "itl_ms": {"p50": 4.5, "p99": 4.5}
 ```
 
-It is `null` until some request has produced at least two tokens. (The class is
-`MetricsRecorder`; there is no `MetricsStore` in this repo.)
+It is `null` until some request has produced at least two tokens. (When this step was
+built the class was `MetricsRecorder`; `MetricsStore` replaced it later, see
+`docs/05-metrics.md`.)
 
 ## Streaming
 
@@ -146,7 +148,8 @@ server uses 256 (`DEFAULT_PREFILL_CHUNK_TOKENS`).
 
 ### A worked example
 
-Test profile: 0.5 ms prefill per token, 4 ms decode step. Request A is decoding; request B
+Hand-made test profile (`EXACT` in `tests/helpers.py`: a fixture, not data): 0.5 ms prefill
+per token, 4 ms decode step. Request A is decoding; request B
 with a 10-token prompt arrives at t=1. Chunks of 4 tokens.
 (`test_long_prompt_is_prefilled_in_chunks_between_decode_steps`.)
 
@@ -159,57 +162,33 @@ Unchunked, B's 5 ms prefill lands in one of A's gaps. Chunked, it is spread over
 iterations (2 + 2 + 1 ms) with a decode step for A after each. A is smoother; B waits longer
 for its first token, because A's decode steps now run between its chunks.
 
-### Benchmark
+### Benchmark: not measured on real data
 
-**Simulated, from the illustrative profiles. Not measurements of real models.**
+**No results are given.** Earlier drafts of this note had a table of inter-token latency and
+time-to-first-token tails by chunk size; it came from invented model profiles and was removed
+(note 13). It cannot be redone honestly on the calibrated profiles:
 
-```sh
-uv run python -m benchmarks.chunked_prefill
-```
+- the workload that shows the effect mixes short prompts with prompts of 6,000 to 10,000
+  words, far beyond the 1,536 words the calibration measured and the 4,096-token context the
+  models were run with, so it would extrapolate the fitted prefill cost well past its data;
+- how a real server's prefill behaves when interleaved with decoding was never measured, and
+  the simulator runs a chunk and a decode step one after the other, which a real engine does
+  not (see below).
 
-Commit `c7e75ac`. One model, the
-standard tier. 400 short prompts of 20-80 words arrive as a Poisson stream at 4 req/s; 8
-long prompts of 6,000-10,000 words are spread evenly through the run. Up to 64 output
-tokens each; no prefix cache; seed 7. All times in ms.
+`uv run python -m benchmarks.chunked_prefill` still runs the workload, as a demonstration of
+the mechanism; it says so when it starts, and its numbers are not to be quoted.
+`test_chunked_prefill_cuts_the_latency_tails_on_a_mixed_workload` and
+`test_medium_chunks_can_make_the_itl_p99_worse_than_no_chunking` run it on the hand-made test
+profiles and pin the behaviour, not a performance figure:
 
-| Chunk tokens | ITL p50 | ITL p99 | ITL p99.9 | ITL max | Worst-gap p99 | Short TTFT p50 | Short TTFT p99 | Long TTFT p50 | Total p99 |
-|-------------:|--------:|--------:|----------:|--------:|--------------:|---------------:|---------------:|--------------:|----------:|
-| off          |    15.0 |    29.4 |   1,063.0 | 1,303.0 |       1,303.0 |           30.1 |        1,027.0 |       1,075.1 |   2,500.7 |
-| 4096         |    15.0 |    29.7 |     630.0 |   643.5 |         643.5 |           30.4 |          999.4 |       1,080.4 |   2,503.4 |
-| 1024         |    15.0 |   168.6 |     180.8 |   188.4 |         186.8 |           30.7 |          308.9 |       1,173.7 |   2,488.4 |
-| 256          |    15.0 |    57.6 |      74.1 |    77.4 |          77.4 |           31.3 |          121.6 |       1,507.2 |   2,487.6 |
-| 64           |    15.6 |    33.6 |      38.6 |    44.8 |          44.8 |           34.0 |           83.6 |       2,725.0 |   3,648.8 |
-| 16           |    16.2 |    23.4 |      24.6 |    25.8 |          25.8 |           71.4 |          129.1 |       5,566.7 |   6,401.7 |
-
-"Worst-gap p99" is the p99, over requests, of each request's single longest gap: how bad the
-worst stutter is for the unluckiest 1% of streams. "Short" and "long" split TTFT by prompt
-kind. The run takes 92.4 s of simulated time in every row; throughput does not change.
-
-What it shows:
-
-- **The worst stall falls from 1.3 s to 77 ms at 256 tokens** and to 26 ms at 16. So does
-  the per-request worst gap. Unchunked, about one stream in a hundred freezes for over a
-  second.
-- **Short prompts' TTFT p99 falls from 1,027 ms to 122 ms at 256** and 84 ms at 64. They no
-  longer queue behind a long prompt's whole prefill.
-- **Plain ITL p99 does not behave the way one might expect.** Unchunked it is a healthy
-  29.4 ms, because long prompts are rare: their stalls touch fewer than 1% of all gaps, so
-  the 99th percentile never sees them. Chunking turns each rare, huge stall into many
-  moderate ones, and at 1024 tokens those are frequent enough to reach the p99, which gets
-  *worse* (168.6 ms). Only at 16 tokens is ITL p99 better than unchunked. The improvement is
-  in the far tail: p99.9, the maximum, and the per-request view. A dashboard showing only
-  ITL p99 would have hidden the original problem and then blamed the fix.
-- **The long prompts pay.** Their own TTFT rises from 1.1 s to 1.5 s at 256 and 5.6 s at 16,
-  because decode steps for everyone else now run between their chunks.
-- **Too small is bad for everyone.** At 16 tokens the short prompts' TTFT p50 more than
-  doubles (30 to 71 ms) and total p99 goes from 2.5 s to 6.4 s. Many requests are
-  mid-prefill at once and each iteration only moves each of them 16 tokens.
-- **Around 64 to 256 tokens is the sensible range on this workload**: nearly all of the tail
-  benefit for a modest delay to the long prompts.
-
-`test_chunked_prefill_cuts_the_latency_tails_on_a_mixed_workload` runs this workload and
-asserts the improvements and the cost. `test_medium_chunks_can_make_the_itl_p99_worse_than_
-no_chunking` pins the ITL p99 observation.
+- with chunking, the longest gap between tokens and each request's worst gap fall by more
+  than ten times, and short prompts stop waiting behind a long prompt's whole prefill;
+- the long prompts themselves start later, the more so the smaller the chunk;
+- **plain ITL p99 can get worse with medium chunks.** Long prompts are rare, so unchunked
+  their stalls touch fewer than 1% of gaps and the p99 never sees them; chunking turns each
+  rare, huge stall into many moderate ones, which do reach the p99. The improvement is in the
+  far tail: p99.9, the maximum and the per-request worst gap. A dashboard showing only ITL
+  p99 would have hidden the original problem and then blamed the fix.
 
 ### Correctness tests
 

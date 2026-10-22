@@ -8,10 +8,17 @@ from gateway.backends import Backend, BackendTokenCallback, Generation, Simulate
 from gateway.baseline import BaselineWorker, build_baseline_registry
 from gateway.clock import SimClock
 from gateway.cost_model import estimate_cost
-from gateway.profiles import ECONOMY, PREMIUM, PROFILES, STANDARD, ModelProfile, Tier
+from gateway.profiles import PROFILES, ModelProfile, Tier
 from gateway.registry import UnknownModelError
 from gateway.schema import GenerateRequest, RequestResult
-from helpers import EXACT, unique_tokens
+from helpers import (
+    EXACT,
+    TEST_ECONOMY,
+    TEST_PREMIUM,
+    TEST_PROFILES,
+    TEST_STANDARD,
+    unique_tokens,
+)
 
 # request_id -> (tokens_in, tokens_out); service time on EXACT is in*0.5 + out*4.
 SIZES = {
@@ -83,7 +90,9 @@ async def test_timing_is_relative_to_the_clock_not_to_zero() -> None:
     )
 
 
-@pytest.mark.parametrize("profile", [ECONOMY, STANDARD, PREMIUM], ids=lambda p: p.tier.value)
+@pytest.mark.parametrize(
+    "profile", [TEST_ECONOMY, TEST_STANDARD, TEST_PREMIUM], ids=lambda p: p.tier.value
+)
 async def test_real_profile_timing_matches_the_cost_model_exactly(profile: ModelProfile) -> None:
     prompt = "Explain continuous batching to a new engineer in two short paragraphs."
     backend = SimulatedBackend(seed=7)
@@ -267,7 +276,7 @@ async def test_baseline_registry_rejects_unknown_models_with_the_valid_names() -
 
 async def test_models_queue_independently() -> None:
     clock = SimClock()
-    registry = build_baseline_registry(clock, seed=7)
+    registry = build_baseline_registry(clock, seed=7, profiles=TEST_PROFILES)
     prompt = "Explain continuous batching to a new engineer in two short paragraphs."
 
     results = await asyncio.gather(

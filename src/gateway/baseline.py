@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from gateway.backends import Backend, SimulatedBackend
 from gateway.clock import Clock
 from gateway.cost_model import estimate_cost
-from gateway.profiles import PROFILES, ModelProfile
+from gateway.profiles import PROFILES, ModelProfile, Tier
 from gateway.registry import ModelRegistry
 from gateway.schema import GenerateRequest, RequestResult, TokenCallback
 
@@ -45,8 +46,15 @@ class BaselineWorker:
     ) -> RequestResult:
         if self._closed:
             raise RuntimeError("worker is closed")
+        enqueue_ms = self._clock.now_ms()
+        # The fixed per-request time passes before the request joins the queue, so it
+        # is part of its queue wait and does not hold up the request being served.
+        if self._profile.per_request_overhead_ms > 0:
+            await self._clock.sleep_ms(self._profile.per_request_overhead_ms)
+            if self._closed:
+                raise RuntimeError("worker is closed")
         done: asyncio.Future[RequestResult] = asyncio.get_running_loop().create_future()
-        self._queue.append(_Queued(request, self._clock.now_ms(), done, on_token))
+        self._queue.append(_Queued(request, enqueue_ms, done, on_token))
         if self._drain_task is None or self._drain_task.done():
             self._drain_task = asyncio.create_task(self._drain())
         return await done
@@ -109,11 +117,16 @@ class BaselineWorker:
         )
 
 
-def build_baseline_registry(clock: Clock, *, seed: int) -> ModelRegistry:
-    """One baseline worker per tier, named by tier, with the model name as an alias."""
+def build_baseline_registry(
+    clock: Clock, *, seed: int, profiles: Mapping[Tier, ModelProfile] = PROFILES
+) -> ModelRegistry:
+    """One baseline worker per tier, named by tier, with the model name as an alias.
+
+    ``profiles`` replaces the standard model profiles.
+    """
     backend = SimulatedBackend(seed=seed)
     registry = ModelRegistry()
-    for tier, profile in PROFILES.items():
+    for tier, profile in profiles.items():
         registry.register(
             tier.value, BaselineWorker(profile, backend, clock), aliases=[profile.name]
         )

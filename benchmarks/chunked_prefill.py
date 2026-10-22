@@ -1,6 +1,9 @@
 """Compare inter-token latency and time to first token with chunked prefill off and on.
 
-Simulated, from the illustrative profiles: nothing here is a measurement of a real model.
+A demonstration of the mechanism, not a result: NOT MEASURED ON REAL DATA. The long prompts
+(6,000 to 10,000 words) are far beyond the 1,536 words the calibration measured and the
+4,096-token context the models were run with, and chunked prefill itself was never
+measured. Do not quote its numbers (docs/11-streaming-chunked-prefill.md).
 
     uv run python -m benchmarks.chunked_prefill
 
@@ -122,7 +125,10 @@ def summarise(arrivals: list[Arrival], results: dict[str, RequestResult]) -> Sum
 
 async def main() -> None:
     arrivals = workload()
-    print("SIMULATED with illustrative profiles; not measurements of real models.")
+    print(
+        "MECHANISM DEMO, NOT MEASURED ON REAL DATA: prompts far beyond the measured range. "
+        "Do not quote these numbers (docs/11-streaming-chunked-prefill.md)."
+    )
     print(
         f"model: {PROFILE.tier.value} ({PROFILE.name}); {SHORT_REQUESTS} short prompts "
         f"({SHORT_WORDS[0]}-{SHORT_WORDS[1]} words) at {SHORT_RATE_PER_S}/s, "
