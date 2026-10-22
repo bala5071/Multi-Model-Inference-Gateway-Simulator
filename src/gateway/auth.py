@@ -296,6 +296,25 @@ class AccountService:
         return self.actor_for(self._user_by_name(username))
 
     @staticmethod
+    def _who(actor: Actor | None) -> tuple[str | None, dict[str, object]]:
+        """Whom an audit entry names as its actor, and any ``acting_as``: a user acting
+        for itself is the actor; the operator at the CLI is recorded as no user, and when it
+        acts within a user's roles (--as) that user is ``acting_as``, never the actor."""
+        if actor is None:
+            return None, {}
+        if actor.via_operator:
+            return None, {"acting_as": actor.user_id}
+        return actor.user_id, {}
+
+    def _user_event(
+        self, action: AuditAction, user: User, actor: Actor | None, **details: object
+    ) -> AuditEvent:
+        who, acting = self._who(actor)
+        return AuditEvent(
+            action, Outcome.SUCCESS, TargetType.USER, user.id, who, {**details, **acting}
+        )
+
+    @staticmethod
     def _require(actor: Actor | None, action: str, resource: Resource) -> None:
         if actor is None:
             return  # the operator at the CLI
@@ -360,23 +379,16 @@ class AccountService:
         }
         if ORGANIZATION_ID_PATTERN.fullmatch(organization.id):
             details["organization_id"] = organization.id
-        actor_id = actor.user_id if actor is not None else None
-        event = AuditEvent(
-            AuditAction.USER_CREATED,
-            Outcome.SUCCESS,
-            TargetType.USER,
-            user.id,
-            actor_id,
-            details=details,
-        )
+        event = self._user_event(AuditAction.USER_CREATED, user, actor, **details)
         self.store.add_user(user)
         self._record(event)
         if platform_admin:
-            self._grant(user, Assignment(Role.PLATFORM_ADMIN.value, ScopeType.PLATFORM, "*"), None)
+            platform = Assignment(Role.PLATFORM_ADMIN.value, ScopeType.PLATFORM, "*")
+            self._grant(user, platform, None)
         if organization.kind is OrganizationKind.INDIVIDUAL:
             # The one member of an individual organization is its org_admin.
             org_admin = Assignment(Role.ORG_ADMIN.value, ScopeType.ORGANIZATION, organization.id)
-            self._grant(user, org_admin, actor_id)
+            self._grant(user, org_admin, actor)
         return user
 
     def bootstrap_admin(self, environ: Mapping[str, str]) -> BootstrapOutcome:
@@ -454,32 +466,19 @@ class AccountService:
         Refused for the last org_admin of an organization or the last platform_admin."""
         user = self._user_by_name(username)
         self._require(actor, "users.disable", Resource.organization(user.organization_id))
-        self._guard_last_admin(user, self.roles.assignments_for(user.id))
-        self.store.set_disabled(user.id, True)
-        self._record(
-            AuditEvent(
-                AuditAction.USER_DISABLED,
-                Outcome.SUCCESS,
-                TargetType.USER,
-                user.id,
-                actor.user_id if actor is not None else None,
-            )
-        )
-        return self._revoke_all(user, Reason.USER_DISABLED)
+        # The count of the other admins and the change are one transaction: no other
+        # connection can remove the last other admin in between.
+        with self.store.immediate():
+            self._guard_last_admin(user, self.roles.assignments_for(user.id))
+            self.store.set_disabled(user.id, True)
+            self._record(self._user_event(AuditAction.USER_DISABLED, user, actor))
+            return self._revoke_all(user, Reason.USER_DISABLED)
 
     def enable_user(self, username: str, *, actor: Actor | None = None) -> None:
         user = self._user_by_name(username)
         self._require(actor, "users.enable", Resource.organization(user.organization_id))
         self.store.set_disabled(user.id, False)
-        self._record(
-            AuditEvent(
-                AuditAction.USER_ENABLED,
-                Outcome.SUCCESS,
-                TargetType.USER,
-                user.id,
-                actor.user_id if actor is not None else None,
-            )
-        )
+        self._record(self._user_event(AuditAction.USER_ENABLED, user, actor))
 
     def reset_password(
         self, username: str, new_password: str, *, actor: Actor | None = None
@@ -496,30 +495,14 @@ class AccountService:
             bootstrap=Bootstrap.NONE,
         )
         self.store.set_login_state(user.id, 0, None, None)
-        self._record(
-            AuditEvent(
-                AuditAction.PASSWORD_RESET,
-                Outcome.SUCCESS,
-                TargetType.USER,
-                user.id,
-                actor.user_id if actor is not None else None,
-            )
-        )
+        self._record(self._user_event(AuditAction.PASSWORD_RESET, user, actor))
         return self._revoke_all(user, Reason.PASSWORD_RESET)
 
     def unlock_user(self, username: str, *, actor: Actor | None = None) -> None:
         user = self._user_by_name(username)
         self._require(actor, "users.unlock", Resource.organization(user.organization_id))
         self.store.set_login_state(user.id, 0, None, None)
-        self._record(
-            AuditEvent(
-                AuditAction.USER_UNLOCKED,
-                Outcome.SUCCESS,
-                TargetType.USER,
-                user.id,
-                actor.user_id if actor is not None else None,
-            )
-        )
+        self._record(self._user_event(AuditAction.USER_UNLOCKED, user, actor))
 
     # --- roles ---------------------------------------------------------------------------
 
@@ -550,19 +533,19 @@ class AccountService:
                 raise ValueError(f"application {scope_id!r} defines no role {role!r}")
         return Assignment(role, kind, scope_id)
 
-    def _grant(self, user: User, assignment: Assignment, granted_by: str | None) -> None:
+    def _grant(self, user: User, assignment: Assignment, actor: Actor | None) -> None:
+        granted_by, _ = self._who(actor)
         self.roles.grant(user.id, assignment, granted_by, self._now())
-        self._record(self._role_event(AuditAction.ROLE_GRANTED, user, assignment, granted_by))
+        self._record(self._role_event(AuditAction.ROLE_GRANTED, user, assignment, actor))
 
-    @staticmethod
     def _role_event(
-        action: AuditAction, user: User, assignment: Assignment, actor_id: str | None
+        self, action: AuditAction, user: User, assignment: Assignment, actor: Actor | None
     ) -> AuditEvent:
         details: dict[str, object] = {"scope_type": assignment.scope_type.value}
         for key, value in (("role", assignment.role), ("scope_id", assignment.scope_id)):
             if ORGANIZATION_ID_PATTERN.fullmatch(value) or value == PLATFORM_SCOPE_ID:
                 details[key] = value
-        return AuditEvent(action, Outcome.SUCCESS, TargetType.USER, user.id, actor_id, details)
+        return self._user_event(action, user, actor, **details)
 
     def _check_granting(self, actor: Actor | None, role: str) -> None:
         """Which roles an actor may grant or revoke, beyond the table's ``roles.*`` rows."""
@@ -591,7 +574,7 @@ class AccountService:
         self._require(actor, "roles.assign", Resource.organization(user.organization_id))
         self._check_granting(actor, role)
         assignment = self._assignment(user, role, scope_type, scope_id, defined=True)
-        self._grant(user, assignment, actor.user_id if actor is not None else None)
+        self._grant(user, assignment, actor)
 
     def revoke_role(
         self,
@@ -606,11 +589,11 @@ class AccountService:
         self._require(actor, "roles.revoke", Resource.organization(user.organization_id))
         self._check_granting(actor, role)
         assignment = self._assignment(user, role, scope_type, scope_id, defined=False)
-        self._guard_last_admin(user, (assignment,))
-        if not self.roles.revoke(user.id, assignment):
-            raise ValueError(f"{user.username!r} does not hold that role in that scope")
-        actor_id = actor.user_id if actor is not None else None
-        self._record(self._role_event(AuditAction.ROLE_REVOKED, user, assignment, actor_id))
+        with self.store.immediate():  # the count and the revocation together
+            self._guard_last_admin(user, (assignment,))
+            if not self.roles.revoke(user.id, assignment):
+                raise ValueError(f"{user.username!r} does not hold that role in that scope")
+            self._record(self._role_event(AuditAction.ROLE_REVOKED, user, assignment, actor))
 
     def list_roles(self, username: str, *, actor: Actor | None = None) -> tuple[Assignment, ...]:
         user = self._user_by_name(username)

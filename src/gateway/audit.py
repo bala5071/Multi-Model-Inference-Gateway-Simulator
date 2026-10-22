@@ -97,6 +97,7 @@ DETAIL_FIELDS: Mapping[str, type] = {
     "role": str,
     "scope_type": str,
     "scope_id": str,
+    "acting_as": str,
 }
 
 
@@ -125,6 +126,10 @@ def _checked_details(details: Mapping[str, object]) -> dict[str, object]:
         elif key == "scope_type":
             if value not in SCOPE_TYPES:
                 raise ValueError("audit detail 'scope_type' must be a scope type")
+            checked[key] = value
+        elif key == "acting_as":
+            if not isinstance(value, str) or not re.fullmatch(r"usr_[0-9a-f]{16}", value):
+                raise ValueError("audit detail 'acting_as' must be a user id")
             checked[key] = value
         else:  # organization_id, role, scope_id: ids, never free text
             ok = isinstance(value, str) and (

@@ -118,7 +118,13 @@ planned in A2).
 - An org_admin grants within its own organization; an app_admin cannot grant at all.
 - **The last enabled org_admin of an organization, and the last enabled platform_admin, can be
   neither revoked nor disabled.** For an individual organization, whose one member is that
-  last org_admin, disable the organization instead.
+  last org_admin, disable the organization instead. The count of the other admins and the
+  revocation or disabling run in **one write transaction** (`BEGIN IMMEDIATE`), so another
+  connection (the CLI beside the server) cannot remove the last other admin in between.
+  `tests/test_last_admin.py`: two revocations back to back leave one and refuse the second;
+  and a revocation (or a disabling) from a second connection, attempted while the first is
+  between its count and its change, is held off (the database is locked) and, run again, is
+  refused as the last admin.
 
 ## Who must change their password
 
@@ -136,9 +142,14 @@ that must change its password at first login.
 `grant-role --username U --role R (--organization ORG | --application APP | --platform)`,
 `revoke-role` with the same arguments, and `list-roles --username U`. The user and role
 commands take `--as USERNAME`: the action is then checked with `authorize` against that user's
-roles and recorded with that user as its actor. `--as` does not authenticate anyone: whoever
-runs the CLI has the database already. It only narrows what the operator does to what that
-user may do, and attributes it.
+roles. `--as` does not authenticate anyone: whoever runs the CLI has the database already.
+So the audit entry records **the operator as the actor** (no user id) and the user in a
+separate allowlisted field, `acting_as` (a user id), never as the actor; a role granted this
+way records no user as `granted_by` either. **`--as` only narrows**:
+`test_as_only_narrows_what_the_operator_may_do` runs nine commands, each in two identical
+fresh databases, as the operator and `--as` each of four users: nothing succeeds with `--as`
+that fails without it, every command succeeds for the operator, and every one of the four
+users is refused some.
 
 ## Declaring every route
 
@@ -165,17 +176,46 @@ routes and the dashboard's static mount. The lists must match real routes, so th
 stale. **The request path is unchanged**: `public_route` and `local_only_route` are attributes on
 the endpoint, so `/v1/generate` and every route of the no-applications path run no new code.
 
-## The mutation check
+## The mutation checks
 
-`authorize` was made to allow everything (its first line `return Decision(True, ...)`). The
-invariant tests (no role is denied everything, a disabled user is denied everything, nothing
-crosses organizations, platform_admin never reaches inside an application, a viewer never
-changes anything, an app_admin never reaches another application, only platform_admin acts on
-the platform), the matrix file, the HTTP tests of `requires` (another organization, a user with
-no role, a viewer's change, a removed role) and the CLI's escalation tests failed: 22 of the 35
-tests in `tests/test_permissions.py` and `tests/test_manage_roles.py`. With the change undone
-all 35 passed and the file was byte-for-byte as before. The invariants are written apart from the table, so a wrong table
-fails them too.
+Each rule about who may do what is enforced in one place, and each place was broken on purpose
+to show its tests fail. Every time, the file was restored and found byte-for-byte as before,
+and all 39 tests of `tests/test_permissions.py`, `tests/test_manage_roles.py` and
+`tests/test_last_admin.py` passed again.
+
+| Broken on purpose | Tests that failed |
+|---|---|
+| `authorize` allows everything | 23 of the 36 in the first two files: every invariant, the role anchors, the matrix file, the three HTTP tests of `requires`, and four CLI tests (who must change their password, an app_admin granting org_admin, an org_admin granting outside its organization, application roles granting nothing) |
+| The granting rules (`_check_granting`) allow everything | 3: platform_admin granted only by the operator; a platform_admin appointing only org_admins; `--as` only narrowing |
+| The last-admin guard does nothing | 6: the last org_admin, the last platform_admin, the individual organization's member, and the three of `tests/test_last_admin.py` |
+| No transaction around the count and the change | 2: a revocation and a disabling from another connection slipping in between |
+
+**The 13 that still pass with `authorize` allowing everything**, and why none of them depends
+on it:
+
+- `test_the_documented_table_is_the_table`: compares the documented table with the code's;
+  no decision is made.
+- `test_requires_waits_for_a_password_change`: `requires` refuses a password that must be
+  changed before it calls `authorize`.
+- `test_requires_refuses_an_undeclared_action`: checked when the route is declared.
+- `test_every_route_of_every_app_declares_itself`, `test_a_route_without_a_declaration_is_found`:
+  the structure of the routes.
+- `test_the_creation_is_audited_with_the_operator_acting_as_a_user`: what the audit entry
+  records.
+- `test_grant_list_and_revoke`: the actions it performs are allowed anyway; the refusals it
+  checks (twice, outside the user's organization) are the scope checks of the assignment.
+- `test_platform_admin_is_granted_only_by_the_operator`,
+  `test_a_platform_admin_appoints_org_admins_and_nothing_else`,
+  `test_as_only_narrows_what_the_operator_may_do`: the granting rules, enforced apart from
+  `authorize`; they fail when those rules are broken (above).
+- `test_the_last_org_admin_cannot_be_revoked_or_disabled`,
+  `test_the_last_platform_admin_cannot_be_revoked_or_disabled`,
+  `test_an_individual_organizations_member_is_its_org_admin`: the last-admin guard; they fail
+  when it is broken (above).
+
+In the first version of this step one more passed: the role anchors checked only what roles
+may do, so allowing everything satisfied them. They now check what roles may not do as well,
+and fail with the mutation.
 
 ## Migration 8
 

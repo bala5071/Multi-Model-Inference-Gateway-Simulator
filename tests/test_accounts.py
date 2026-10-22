@@ -686,6 +686,8 @@ async def test_a_login_does_not_let_simulated_time_move(accounts: Accounts) -> N
         {"reason": "free text"},
         {"failures": "5"},
         {"organization_id": "has spaces in it"},
+        {"acting_as": "alice"},  # a user id, never a name
+        {"acting_as": "ses_0000000000000001"},
         {"failures": -1},
     ],
 )

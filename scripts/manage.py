@@ -45,6 +45,7 @@ again. Everything else goes to standard error.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import getpass
 import io
 import os
@@ -281,7 +282,13 @@ def _account_command(
 ) -> None:
     """The user and role commands. ``--as`` acts as that user, checked with ``authorize``;
     without it the operator acts (docs/28)."""
-    actor = accounts.actor_named(args.as_user) if args.as_user else None
+    # --as: the operator acts, within that user's roles; the audit log records the operator
+    # as the actor and the user as acting_as (docs/28).
+    actor = (
+        dataclasses.replace(accounts.actor_named(args.as_user), via_operator=True)
+        if args.as_user
+        else None
+    )
     name = args.username
     if args.command == "create-user":
         made = accounts.create_user(

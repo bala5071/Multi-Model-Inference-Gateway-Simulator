@@ -151,16 +151,31 @@ def test_unknown_actions_and_wrong_resources_are_denied() -> None:
     assert not authorize(actor, "users.create", RESOURCES["platform"]).allowed
 
 
-def test_what_each_role_can_do_at_least() -> None:
-    # Anchors, so the invariants above are not satisfied by denying everything.
+def test_what_each_role_can_and_cannot_do() -> None:
+    # Anchors both ways: the allowances keep the invariants above from being satisfied by
+    # denying everything, and the denials fail an authorize that allows everything.
     org_admin = _actor(ASSIGNMENTS["org_admin"])
     app_admin = _actor(ASSIGNMENTS["app_admin"])
     platform_admin = _actor(ASSIGNMENTS["platform_admin"])
-    assert authorize(org_admin, "users.create", RESOURCES["own organization"]).allowed
-    assert authorize(org_admin, "application_keys.issue", RESOURCES["sibling application"]).allowed
-    assert authorize(app_admin, "application_keys.issue", RESOURCES["own application"]).allowed
-    assert authorize(platform_admin, "organizations.create", RESOURCES["platform"]).allowed
-    assert authorize(platform_admin, "users.create", RESOURCES["other organization"]).allowed
+    viewer = _actor(ASSIGNMENTS["viewer of the organization"])
+    expected = [
+        (org_admin, "users.create", "own organization", True),
+        (org_admin, "application_keys.issue", "sibling application", True),
+        (org_admin, "organizations.create", "platform", False),
+        (org_admin, "users.create", "other organization", False),
+        (app_admin, "application_keys.issue", "own application", True),
+        (app_admin, "application_keys.issue", "sibling application", False),
+        (app_admin, "users.create", "own organization", False),
+        (platform_admin, "organizations.create", "platform", True),
+        (platform_admin, "users.create", "other organization", True),
+        (platform_admin, "application_keys.issue", "own application", False),
+        (platform_admin, "applications.create", "own organization", False),
+        (viewer, "applications.list", "own organization", True),
+        (viewer, "applications.create", "own organization", False),
+    ]
+    for actor, action, resource, allowed in expected:
+        decision = authorize(actor, action, RESOURCES[resource])
+        assert decision.allowed is allowed, (actor.assignments, action, resource)
 
 
 # --- the table, as documented and as generated ------------------------------------------------

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
@@ -113,6 +115,18 @@ class AccountStore:
         if found[0] != 2:
             raise RuntimeError("users and sessions do not exist; run the migrations first")
         self._connection = connection
+
+    @contextmanager
+    def immediate(self) -> Iterator[None]:
+        """One write transaction, taken at once (``BEGIN IMMEDIATE``): another connection
+        cannot write until it ends. Rolled back if the block raises."""
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._connection.execute("ROLLBACK")
+            raise
+        self._connection.execute("COMMIT")
 
     # --- users ---------------------------------------------------------------------------
 

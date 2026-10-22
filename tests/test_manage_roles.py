@@ -94,7 +94,7 @@ def test_accounts_made_by_an_outsider_must_change_their_password(
     assert "not permitted: users.create" in capsys.readouterr().err
 
 
-def test_the_creation_is_audited_with_its_actor_and_whether_it_must_change(
+def test_the_creation_is_audited_with_the_operator_acting_as_a_user(
     world: dict[str, str],
 ) -> None:
     assert run(world, "create-user --username carl --organization north --as root") == 0
@@ -110,7 +110,9 @@ def test_the_creation_is_audited_with_its_actor_and_whether_it_must_change(
         for e in entries
         if e.event.target_id == carl.id and e.event.action.value == "user_created"
     ]
-    assert created.actor_user_id == root.id
+    # The operator acted (no user is the actor), within root's roles (acting_as).
+    assert created.actor_user_id is None
+    assert created.details["acting_as"] == root.id
     assert created.details["must_change_password"] is True
     assert created.details["organization_id"] == "north"
 
@@ -235,3 +237,65 @@ def test_an_individual_organizations_member_is_its_org_admin(
     assert capsys.readouterr().out.splitlines() == ["org_admin  organization  solo"]
     # The one member is also the last org_admin: disable the organization instead.
     assert run(world, "disable-user --username indy") == 1
+
+
+# --- --as only narrows --------------------------------------------------------------------------
+
+WORLD = (
+    "create-user --username root --platform-admin",
+    "create-organization --id north --name North --kind business",
+    "create-organization --id south --name South --kind business",
+    "create-user --username alice --organization north",
+    "create-user --username bob --organization north",
+    "create-user --username carol --organization north",
+    "create-user --username sid --organization south",
+    "create-application --id north-shop --name Shop --plan pro --organization north",
+    "grant-role --username alice --role org_admin --organization north",
+    "grant-role --username carol --role org_admin --organization north",
+    "grant-role --username sid --role org_admin --organization south",
+)
+COMMANDS = (
+    "create-user --username new --organization north",
+    "create-user --username new --organization south",
+    "grant-role --username bob --role viewer --organization north",
+    "grant-role --username bob --role org_admin --organization north",
+    "grant-role --username bob --role platform_admin --platform",
+    "revoke-role --username carol --role org_admin --organization north",
+    "disable-user --username bob",
+    "reset-password --username sid",
+    "list-roles --username sid",
+)
+
+
+def _fresh(tmp_path: Path, name: str) -> dict[str, str]:
+    environ = {
+        "GATEWAY_DATABASE": str(tmp_path / f"{name}.db"),
+        "GATEWAY_KEY_PEPPER": TEST_PEPPER.decode(),
+        "GATEWAY_ARGON2_MEMORY_KIB": "8",
+        "GATEWAY_ARGON2_TIME_COST": "1",
+    }
+    for line in WORLD:
+        assert run(environ, line) == 0, line
+    return environ
+
+
+def test_as_only_narrows_what_the_operator_may_do(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Each command, in two identical fresh databases: as the operator, and --as a user.
+    Nothing succeeds with --as that fails without it; some things the operator may do fail
+    with it."""
+    narrowed = []
+    for number, (command, actor) in enumerate(
+        (c, a) for c in COMMANDS for a in ("alice", "bob", "root", "sid")
+    ):
+        as_operator = run(_fresh(tmp_path, f"op{number}"), command)
+        as_user = run(_fresh(tmp_path, f"as{number}"), f"{command} --as {actor}")
+        assert as_operator == 0, command  # the operator may do every one of them
+        assert not (as_user == 0 and as_operator != 0), (command, actor)
+        if as_operator == 0 and as_user != 0:
+            narrowed.append((command, actor))
+    capsys.readouterr()
+    # Every command works for the operator; --as refuses some to every user.
+    assert {actor for _, actor in narrowed} == {"alice", "bob", "root", "sid"}
+    assert ("grant-role --username bob --role platform_admin --platform", "root") in narrowed

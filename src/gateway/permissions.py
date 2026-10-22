@@ -196,6 +196,9 @@ class Actor:
     assignments: tuple[Assignment, ...]
     disabled: bool = False
     organization_disabled: bool = False
+    # The operator at the CLI acting within this user's roles (--as): the operator is the
+    # one who acts, and is recorded so (docs/28).
+    via_operator: bool = False
 
     def holds(self, role: Role) -> bool:
         return any(a.role == role.value for a in self.assignments)

@@ -277,6 +277,8 @@ Then open <http://127.0.0.1:8000/docs>. The dashboard is at `/dashboard/` once i
 been built (`cd frontend && npm ci && npm run build`, Node 20;
 [docs/16-dashboard.md](docs/16-dashboard.md)). More keys, rotation, revocation, backup and
 restore: `uv run python scripts/manage.py --help` and [docs/21](docs/21-persistence.md).
+A backup holds key HMACs and password hashes: never commit one (`*.db` is git-ignored), and
+keep it where only you can read it (it is created owner-only on Linux and macOS).
 
 Applications belong to organizations ([docs/26](docs/26-organizations.md)). The ones above
 are in `default`, which every database has; others are created with the CLI. Application
@@ -319,7 +321,9 @@ uv run python scripts/manage.py disable-user --username alice     # ends every s
 Roles decide what an account may do ([docs/28](docs/28-roles.md)): `platform_admin`
 (organizations; users in any organization), `org_admin` (its organization), `app_admin` (its
 application) and `viewer` (usage, read only). Membership alone grants nothing. Roles are granted
-from the CLI; `--as USERNAME` acts within that user's roles instead of as the operator:
+from the CLI; `--as USERNAME` keeps the operator within that user's roles (it can only
+narrow what the operator may do), and the audit log records the operator as having acted,
+with that user as `acting_as`:
 
 ```sh
 uv run python scripts/manage.py grant-role --username alice --role org_admin --organization north
