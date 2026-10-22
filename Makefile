@@ -10,6 +10,7 @@ install:
 lint:
 	uv run ruff check .
 	uv run ruff format --check .
+	uv run python scripts/check_characters.py
 
 format:
 	uv run ruff format .

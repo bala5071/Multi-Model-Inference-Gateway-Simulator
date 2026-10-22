@@ -54,7 +54,7 @@ def run(checks: int, directory: Path | None) -> list[WriteTimes]:
             organizations=SqliteApplicationStore(connection),
             clock=WallClock(),
             epoch=epoch,
-            limiter_secret=secrets.token_bytes(32),
+            secret=secrets.token_bytes(32),
         )
         password = secrets.token_urlsafe(18)
         service.create_user("bench", password, "default")

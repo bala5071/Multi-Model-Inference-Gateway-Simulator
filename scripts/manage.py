@@ -241,7 +241,7 @@ def _accounts(
         organizations=store,
         clock=WallClock(),
         epoch=SystemEpoch(),
-        limiter_secret=secrets.token_bytes(32),
+        secret=secrets.token_bytes(32),
     )
 
 

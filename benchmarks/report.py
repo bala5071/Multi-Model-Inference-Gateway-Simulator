@@ -79,6 +79,10 @@ class Section:
     body: str
 
 
+# "R squared", written as an escape: tracked code is ASCII (scripts/check_characters.py).
+R_SQUARED = "R\u00b2"
+
+
 def _table(header: Sequence[str], rows: Sequence[Sequence[object]]) -> str:
     def cell(value: object) -> str:
         if isinstance(value, float):
@@ -783,7 +787,7 @@ def _fit_quality(document: dict[str, Any]) -> str:
         )
     top = max(int(level) for p in profiles.values() for level in p["mape_percent_by_concurrency"])
     text = f"""
-The fourth fitted parameter, a fixed overhead per request, with the R² of the two regressions
+The fourth fitted parameter, a fixed overhead per request, with the R\u00b2 of the two regressions
 and the simulator's error over all requests, split by whether a request was sent alone or with
 the most others ({top} together). The errors by concurrency are where a poor fit shows:
 
@@ -792,8 +796,8 @@ the most others ({top} together). The errors by concurrency are where a poor fit
             (
                 "Tier",
                 "Per-request overhead ms",
-                "R² TTFT fit",
-                "R² decode fit",
+                R_SQUARED + " TTFT fit",
+                R_SQUARED + " decode fit",
                 "TTFT error, alone",
                 f"TTFT error, {top} together",
                 "Total error, alone",
@@ -927,7 +931,7 @@ but it did not repeat.
         )
     }
 
-The worst R² of the two regressions over the runs, and the simulator's error over all requests,
+The worst R\u00b2 of the two regressions over the runs, and the simulator's error over all requests,
 split by whether a request was sent alone or with the most others ({top} together). The errors by
 concurrency are where a poor fit shows:
 
@@ -935,8 +939,8 @@ concurrency are where a poor fit shows:
         _table(
             (
                 "Tier",
-                "Lowest R² TTFT fit",
-                "Lowest R² decode fit",
+                f"Lowest {R_SQUARED} TTFT fit",
+                f"Lowest {R_SQUARED} decode fit",
                 "TTFT error, alone",
                 f"TTFT error, {top} together",
                 "Total error, alone",

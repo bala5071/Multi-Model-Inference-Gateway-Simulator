@@ -352,3 +352,26 @@ Each step is its own pull request and stops for review.
 6. Step-up.
 7. Access tokens, JWKS and `generate-signing-key`.
 8. The threat model, the leak scan across everything, and the docs.
+
+## 14. Waiting for A8
+
+What A2 leaves for the A8 step, collected from the sections above:
+
+- **Monitoring and load control with roles** in place of local-only (section 10); `/v1/auth`
+  reachable from other machines.
+- **TLS**, and with it the `Secure` session cookie by default and the `__Host-` prefix.
+- **Limits per source address** for logins and failed key checks, once there is a client
+  address the server can trust.
+- **The response-time difference between known and unknown usernames on a failed login.**
+  Measured on the running server (`benchmarks/login.py`, three runs of 240 failures of each
+  kind, at the default argon2 setting; Intel Core Ultra 7 155H, 22 logical cores, 15.4 GB RAM,
+  Windows 11, Python 3.12.10; note 27): a wrong password for a known username took 112.9 to
+  117.0 ms at p50 and 115.04 to 117.87 ms on average; an unknown username 110.9 to 112.4 ms
+  and 110.92 to 112.56 ms. Known minus unknown: +1.6 to +6.2 ms at p50, +8.2 to +11.4 ms at p90,
+  +3.5 to +6.9 ms on average. The cause is the bookkeeping after the verify: a known
+  username's failure writes its count and an audit row (two fully synced SQLite writes),
+  an unknown one's at most an audit row, and none past the per-minute cap. **Proposed fix:**
+  respond first, and do the bookkeeping after the response is sent (a background task that
+  writes the failure count and the audit row), so the answer's timing depends only on the
+  lookup and the verify. The lockout check reads the count before the verify, so a short
+  delay in writing it changes only how quickly a burst of failures locks.

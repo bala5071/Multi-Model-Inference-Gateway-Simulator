@@ -110,7 +110,7 @@ upgrade; the audit entry says `password_rehashed`).
   attempts do not extend the lock. A wrong current password at change-password counts too.
   `unlock-user` ends a lock early. A success clears the count.
 - **The limiter, in memory:** the same rule for every username typed, known or not, keyed by
-  an HMAC of the text with the pepper, at most 10,000 names (least recently failed forgotten
+  an HMAC of the text under the limiter's own derived key (below), at most 10,000 names (least recently failed forgotten
   first). So an unknown username "locks" exactly as a real one would, and lockout cannot
   reveal which names exist. It is per process and forgotten on restart.
 
@@ -123,14 +123,24 @@ upgrade; the audit entry says `password_rehashed`).
   `SimClock`). `last_seen_at` is written **at most once a minute** per session, so the idle
   limit ends between 29 and 30 minutes after the last request (tested: twelve requests over
   two minutes write twice).
-- **CSRF:** the token is `HMAC-SHA256(session id, "gateway csrf token")`, base64url. Only its
-  SHA-256 is stored, so `/me` can give the same token again without storing it, and nothing
-  without the session id can compute it (a page cannot read the `HttpOnly` cookie). It is
+- **CSRF:** the token is `HMAC-SHA256(csrf_key, session id)`, base64url, where `csrf_key` is
+  derived from the pepper for this purpose alone (below). Only its SHA-256 is stored, so `/me`
+  can give the same token again without storing it, and nothing without both the session id (a
+  page cannot read the `HttpOnly` cookie) and the server's key can compute it. It is
   required in `X-CSRF-Token` on logout and change-password and compared in constant time;
   missing, wrong or another session's token is 403 `csrf_failed`. The Origin check of note
   25 applies to every state-changing request on `/v1/auth`, login included (tested:
   `https://evil.example` and `null` refused, `http://localhost:8000` accepted; a form body
   415; a rebound `Host` 403).
+- **Keys derived from the pepper** (`gateway.keyderivation`): each purpose has its own key,
+  `HMAC-SHA256(pepper, "gateway derived key v1: " + label)`, with the labels `csrf token` and
+  `login limiter`. No two purposes share a key, and neither is the pepper itself (tested). API
+  key HMACs, older than this, are keyed with the pepper directly (changing that would
+  invalidate every issued key); their input is always a key starting `gwk_`, never a
+  derivation's input. **Rotating the pepper invalidates CSRF tokens:** existing sessions still
+  identify their user, but their stored token digest no longer matches, so they can no longer
+  log out or change a password; log in again (a test shows it). It also resets the limiter, and,
+  as before, invalidates every API key.
 - **Password change** needs the current password and a different new one that passes the
   policy, and revokes every other session of the user. **Disabling** a user revokes all of
   them; enabling does not bring them back. **Logout** revokes the session and clears the
@@ -219,7 +229,8 @@ For `docs/threat-model.md` (plan section 12, written in step 8):
 - **The in-memory limiter can be flushed** by failing logins for more than 10,000 unique
   usernames; the database lockout still protects real accounts.
 - **Lockout can be abused** to keep a known username locked out.
-- **The known-versus-unknown timing difference** above.
+- **The known-versus-unknown timing difference** above; the proposed fix (respond first, write
+  the bookkeeping after the response) is on the A8 list, plan section 14.
 - **The `__Host-` cookie prefix** waits for HTTPS.
 - **Two hashing threads bound login throughput** (note 24): two hashes of about 110 ms at a
   time, so about 18 logins a second here (computed from the measurement, not measured).

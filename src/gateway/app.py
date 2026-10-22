@@ -458,7 +458,8 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
     @app.get("/v1/auth/me")
     async def me(context: SessionContext = Depends(session)) -> JSONResponse:
         return JSONResponse(
-            {"user": user_view(context), "csrf_token": context.csrf_token}, headers=_NO_STORE
+            {"user": user_view(context), "csrf_token": service.csrf_token(context)},
+            headers=_NO_STORE,
         )
 
     @app.post("/v1/auth/change-password")
@@ -1429,7 +1430,7 @@ def build_accounts(
     organizations: ApplicationStore,
     clock: Clock,
     epoch: EpochSource,
-    limiter_secret: bytes,
+    pepper: bytes,
     environ: Mapping[str, str],
 ) -> AccountAccess:
     """Console accounts for the default server (docs/27): argon2id at the configured
@@ -1446,7 +1447,7 @@ def build_accounts(
         organizations=organizations,
         clock=clock,
         epoch=epoch,
-        limiter_secret=limiter_secret,
+        secret=pepper,
         audit_retention_ms=audit_retention_ms(environ),
     )
     if service.bootstrap_admin(environ) is BootstrapOutcome.EXISTS_WITH_VARIABLES:

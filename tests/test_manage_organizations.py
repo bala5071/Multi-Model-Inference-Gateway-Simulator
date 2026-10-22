@@ -68,7 +68,8 @@ def test_create_list_disable_and_enable_organizations(
     assert "exists" in capsys.readouterr().err
     assert (
         manage(
-            ["create-organization", "--id", "x", "--name", "No​Name", "--kind", "business"], environ
+            ["create-organization", "--id", "x", "--name", "No\u200bName", "--kind", "business"],
+            environ,
         )
         == 1
     )

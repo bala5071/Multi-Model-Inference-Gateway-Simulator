@@ -72,7 +72,7 @@ def _make_users(path: Path, count: int, environ: dict[str, str]) -> dict[str, st
         organizations=SqliteApplicationStore(connection),
         clock=WallClock(),
         epoch=SystemEpoch(),
-        limiter_secret=secrets.token_bytes(32),
+        secret=secrets.token_bytes(32),
     )
     users = {}
     for i in range(count):

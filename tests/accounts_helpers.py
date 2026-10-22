@@ -25,6 +25,7 @@ from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.organizations import new_organization
 from gateway.passwords import CHEAP, InlineHashRunner, PasswordHasher, Passwords
 from gateway.users import AccountStore
+from helpers import TEST_PEPPER
 
 ORIGIN_MS = 1.75e12
 PASSWORD = "plum harbor ninety violet"
@@ -56,6 +57,7 @@ def make_service(
     seed: int = 1,
     audit_retention_ms: float | None = None,
     unknown_user_rows_per_minute: int = 60,
+    secret: bytes = TEST_PEPPER,
 ) -> AccountService:
     return AccountService(
         AccountStore(connection),
@@ -64,7 +66,7 @@ def make_service(
         organizations=organizations,
         clock=clock,
         epoch=epoch,
-        limiter_secret=b"a test limiter secret, not a real one",
+        secret=secret,
         random_bytes=random.Random(seed).randbytes,
         audit_retention_ms=audit_retention_ms,
     )

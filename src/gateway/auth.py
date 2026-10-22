@@ -13,8 +13,9 @@ See docs/27-users-and-sessions.md and docs/identity-plan.md, sections 4, 5 and 9
   injected epoch), so a restart does not clear it. ``LoginLimiter`` counts failures for every
   username, known or not, in memory, so an unknown username "locks" exactly like a real one.
 - **Sessions:** 256 random bits; the store keeps only SHA-256 digests. The CSRF token is an
-  HMAC of the session id (so ``/me`` can give it again without it being stored); its digest
-  is stored and compared in constant time. 30 minutes idle, 12 hours in all; ``last_seen`` is
+  HMAC of the session id under a key derived from the pepper for that purpose alone
+  (``gateway.keyderivation``), so ``/me`` can give it again without it being stored; its
+  digest is stored and compared in constant time. 30 minutes idle, 12 hours in all; ``last_seen`` is
   written at most once a minute.
 - **The bootstrap admin** comes from the environment only when no platform_admin exists. Its
   password works for one login; that session can only change it.
@@ -47,6 +48,7 @@ from gateway.audit import (
     TargetType,
 )
 from gateway.clock import Clock, EpochSource
+from gateway.keyderivation import KeyPurpose, derive_key
 from gateway.organizations import DEFAULT_ORGANIZATION_ID, membership_decision
 from gateway.passwords import PasswordPolicy, Passwords, load_blocklist
 from gateway.users import AccountStore, Bootstrap, Session, User, normalize_username
@@ -122,10 +124,11 @@ def _token(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
-def csrf_token_for(session_id: str) -> str:
-    """The CSRF token of a session: an HMAC of its id, so it can be given again without
-    being stored, and cannot be made without the id (which a page cannot read)."""
-    return _token(hmac.new(session_id.encode(), b"gateway csrf token", hashlib.sha256).digest())
+def csrf_token_for(csrf_key: bytes, session_id: str) -> str:
+    """The CSRF token of a session: ``HMAC-SHA256(csrf_key, session id)``, where ``csrf_key``
+    is the pepper's key for CSRF tokens. It can be given again without being stored, and
+    cannot be made without both the session id (which a page cannot read) and the key."""
+    return _token(hmac.new(csrf_key, session_id.encode(), hashlib.sha256).digest())
 
 
 class LoginLimiter:
@@ -154,7 +157,7 @@ class LoginLimiter:
         self._failures: OrderedDict[str, deque[float]] = OrderedDict()
 
     def key(self, username: str) -> str:
-        return hmac.new(self._secret, b"login:" + username.encode(), hashlib.sha256).hexdigest()
+        return hmac.new(self._secret, username.encode(), hashlib.sha256).hexdigest()
 
     def _recent(self, key: str) -> deque[float]:
         times = self._failures.get(key, deque())
@@ -201,10 +204,6 @@ class SessionContext:
     def __repr__(self) -> str:
         return f"SessionContext(user={self.user!r}, session={self.session!r})"
 
-    @property
-    def csrf_token(self) -> str:
-        return csrf_token_for(self.session_id)
-
 
 class AccountService:
     """Everything about console accounts, below HTTP."""
@@ -218,7 +217,7 @@ class AccountService:
         organizations: ApplicationStore,
         clock: Clock,
         epoch: EpochSource,
-        limiter_secret: bytes,
+        secret: bytes,
         policy: PasswordPolicy | None = None,
         random_bytes: Callable[[int], bytes] = secrets.token_bytes,
         audit_retention_ms: float | None = None,
@@ -231,7 +230,10 @@ class AccountService:
         self._epoch = epoch
         self._policy = policy if policy is not None else PasswordPolicy(load_blocklist())
         self._random_bytes = random_bytes
-        self.limiter = LoginLimiter(clock, limiter_secret)
+        # One key per purpose, derived from ``secret`` (the pepper on the server); neither
+        # is the pepper itself, and neither equals the other.
+        self._csrf_key = derive_key(secret, KeyPurpose.CSRF_TOKEN)
+        self.limiter = LoginLimiter(clock, derive_key(secret, KeyPurpose.LOGIN_LIMITER))
         self.audit_retention_ms = audit_retention_ms
         # A real argon2 hash at the current parameters, of a password nobody knows: what an
         # unknown username is verified against, so it costs what a real verify costs.
@@ -439,7 +441,7 @@ class AccountService:
         )
         current = self.store.get_user(user.id)
         assert current is not None
-        return LoginResult(current, session, session_id, csrf_token_for(session_id))
+        return LoginResult(current, session, session_id, csrf_token_for(self._csrf_key, session_id))
 
     def _failed(self, user: User | None, reason: Reason, key: str, now: float) -> None:
         self.limiter.record_failure(key)
@@ -492,7 +494,7 @@ class AccountService:
             id_hash=_digest(session_id),
             handle="ses_" + self._random_bytes(ID_BYTES).hex(),
             user_id=user.id,
-            csrf_hash=_digest(csrf_token_for(session_id)),
+            csrf_hash=_digest(csrf_token_for(self._csrf_key, session_id)),
             created_at_ms=now,
             last_seen_at_ms=now,
             expires_at_ms=now + SESSION_ABSOLUTE_MS,
@@ -526,6 +528,10 @@ class AccountService:
             self.store.touch_session(session.id_hash, now)
             session = replace(session, last_seen_at_ms=now)
         return SessionContext(user, session, session_id)
+
+    def csrf_token(self, context: SessionContext) -> str:
+        """The session's CSRF token, made again from its id (it is never stored)."""
+        return csrf_token_for(self._csrf_key, context.session_id)
 
     @staticmethod
     def check_csrf(context: SessionContext, token: str | None) -> None:

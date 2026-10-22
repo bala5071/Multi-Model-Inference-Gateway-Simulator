@@ -87,8 +87,11 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   bootstrap admin from `GATEWAY_ADMIN_USERNAME`/`GATEWAY_ADMIN_PASSWORD`, login with the same
   steps for every refusal (one lookup, one verify against the stored or a dummy hash), the
   database lockout and the in-memory `LoginLimiter`, sessions (30 min idle, 12 h, `last_seen`
-  at most once a minute), CSRF (an HMAC of the session id), password change, retention;
+  at most once a minute), CSRF (an HMAC of the session id under a derived key), password
+  change, retention;
   `AccountAccess` is what `create_app` takes for `/v1/auth` (exists)
+- `keyderivation.py` — `derive_key(pepper, KeyPurpose)`: one key per purpose (CSRF tokens, the
+  login limiter), each with its own label; API key HMACs keep the pepper itself (exists)
 - `audit.py` — `AuditEvent` through a field allowlist, `AuditLog` with the per-minute cap on
   unknown-user rows and retention (exists)
 - `localonly.py` — `LocalOnlyMiddleware`: monitoring, metrics, overload, load control, the
@@ -228,7 +231,10 @@ the monitoring API (`docs/15`); it has no logic of its own about the gateway.
 `run_local_models.sh`, `manage.py` (creates organizations and applications and issues, rotates
 and revokes API keys: the only way to issue one; prints a new key once, never logs it; also
 `migrate` with `--dry-run` and a backup before a table rebuild, backup and restore), `readme_quickstart.py` (runs the README's quickstart blocks exactly as written and
-checks the result; a CI job, so the README cannot go stale), and `protected_outputs.py`, which checks the outputs that must not
+checks the result; a CI job, so the README cannot go stale), `check_characters.py` (a CI
+gate: tracked source, test, workflow and shell files are printable ASCII, with a short
+allowlist of typographic characters for the dashboard; write anything else as an escape),
+and `protected_outputs.py`, which checks the outputs that must not
 change against the sha256 sums in `scripts/protected_outputs.sha256` (a gate, like
 `perf_gate.py`). Anything that measures or compares results goes in `benchmarks/`.
 Never refresh that baseline to make a failure pass; the README says how to refresh it.
@@ -308,6 +314,7 @@ uv run mypy                  # type check
 uv run pytest                # tests
 uv run python scripts/perf_gate.py   # performance gate
 uv run python scripts/protected_outputs.py  # protected outputs unchanged
+uv run python scripts/check_characters.py   # tracked code is printable ASCII
 uv run python scripts/readme_quickstart.py  # the README quickstart still works (port 8000 free)
 uv run python -m benchmarks.report   # regenerate docs/REPORT.md
 ```
