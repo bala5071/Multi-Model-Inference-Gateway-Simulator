@@ -21,7 +21,8 @@ Tests: `tests/test_apikeys.py`, `tests/test_auth_api.py`, `tests/test_applicatio
   `/v1/tenants/{id}/usage` is gone; there is no way to name another application.
 - **The default server refuses to start without `GATEWAY_KEY_PEPPER`** (at least 32
   characters) and reads applications and keys from the SQLite database `GATEWAY_DATABASE`
-  (default `gateway.db`, git-ignored).
+  (default: the user's local data folder, outside the working tree; see
+  [The database file](#the-database-file)).
 - **Live load runs** read the key from `GATEWAY_API_KEY`:
   `GATEWAY_API_KEY=... uv run python -m benchmarks.loadgen --url http://127.0.0.1:8000`.
 - `create_app(registry, clock)` without applications is unchanged: no keys, any model,
@@ -53,10 +54,16 @@ their own migration; migration 2 has no organization column.
 - **Storage:** only `HMAC-SHA256(pepper, key)`, as hex, in `api_keys.key_hmac`. The key is
   never stored, logged or put in an event; the pepper is never written anywhere. `repr` of
   the service and of a new key redact both.
-- **Checking:** the key id selects the record; the HMAC of the presented key is compared
-  with `hmac.compare_digest`. A malformed key or an unknown id is still hashed and compared
-  (against a dummy digest), so every attempt costs one HMAC and one constant-time
-  comparison.
+- **Checking: the same steps for every attempt.** One record lookup (a malformed key looks
+  up an id no record can have), one HMAC of the presented key, and one `hmac.compare_digest`
+  of two 64-character digests (against a dummy digest when there is no record), in that
+  order, whether the key is valid, has a wrong secret, an unknown id, is malformed, revoked
+  or expired. `test_every_attempt_takes_the_same_steps_whatever_is_wrong_with_the_key`
+  checks the sequence of steps; it is a structural test, not a timing one. **What timing
+  differences remain was not measured:** a found record is read from the database while a
+  missing one is not, a valid key goes on to load its application, and SQLite and Python
+  may take different times on either path. With 256-bit secrets, a timing difference could
+  at most tell an attacker whether a key id exists, not reveal a secret.
 - **One answer for every bad key.** Unknown, malformed, wrong secret, revoked, expired and
   rotated-out keys all get the same 401, byte for byte: body
   `{"error": {"code": "invalid_api_key", "message": "The API key is not valid."}}` and the
@@ -89,6 +96,43 @@ out, start the server, and revoke the old records. Clients are refused until the
 their new key. Rotation without that gap needs each record to say which pepper made it and
 the server to accept a previous pepper for a while; that is not built, and the plan lists it
 as deferred.
+
+### If the pepper is lost or changed
+
+Every key stops working at once, for every application: the stored HMACs can no longer be
+reproduced. Nothing else is lost (applications, usage and key records stay), but every
+client is refused until it is given a new key, issued under the new pepper. There is no way
+to recover keys from the database without the pepper; that is the point of it.
+
+**Back the pepper up** where the operator keeps other secrets (a password manager or a
+secrets store), separately from the database: a database backup without the pepper cannot
+check keys, and the pepper without the database grants nothing. Never commit it, put it in
+the compose file or the image, or write it next to the database.
+
+### Not built: limiting failed authentications
+
+There is no rate limit on failed key checks per source. Guessing is not the risk: a secret
+has 256 bits, so no number of attempts finds one. The risk is load: a flood of requests with
+bad keys costs one lookup, one HMAC and one comparison each (about 0.02 ms on the machine in
+the table below) and is otherwise unlimited. The per-application rate limit cannot help,
+because a bad key has no application. Limiting per source needs a trustworthy client
+address, which depends on what sits in front of the gateway (a proxy, a load balancer); it
+belongs with the network-facing work of A8, before the gateway is exposed to any network.
+
+### The database file
+
+It holds applications, key HMACs and (from step 3) usage, so:
+
+- **Its default location is outside the working tree:** `%LOCALAPPDATA%\inference-gateway\`
+  on Windows, `$XDG_DATA_HOME/inference-gateway/` (or `~/.local/share/inference-gateway/`)
+  elsewhere, as `gateway.db`. `GATEWAY_DATABASE` names another file.
+- **It is created readable by its owner only where the OS supports it:** on POSIX the folder
+  is created `0700` and the file `0600` (an existing file is tightened to `0600`); SQLite
+  creates its `-wal` and `-shm` files with the same permissions. On Windows `chmod` cannot
+  express this; the default location is in the user's own profile, which other users cannot
+  read. `tests/test_database.py` checks the POSIX permissions (on Linux, in CI).
+- **Git ignores it** anywhere in the tree (`gateway.db`, `gateway.db-*`, `*.sqlite3`), and
+  the env file that holds the pepper (`gateway.env`), in case either is put there.
 
 ## Limits
 

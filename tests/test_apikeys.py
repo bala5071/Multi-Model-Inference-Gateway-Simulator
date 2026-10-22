@@ -213,27 +213,56 @@ def test_a_key_whose_application_is_gone_is_invalid() -> None:
         keys.authenticate(key)
 
 
-def test_the_comparison_is_constant_time_for_every_kind_of_wrong_key(
+async def test_every_attempt_takes_the_same_steps_whatever_is_wrong_with_the_key(
     store: ApplicationStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    keys = _service(store, SimClock())
-    key = keys.issue("acme", "backend").key
-    calls: list[tuple[str, str]] = []
-    real = hmac.compare_digest
+    """Structural, not a timing test: every attempt does one record lookup, one HMAC of the
+    presented key and one constant-time comparison of two 64-character digests, in that
+    order, whether the key is valid, has a wrong secret, an unknown id, is malformed,
+    revoked or expired. What timing differences remain was not measured (docs/20)."""
+    clock = SimClock()
+    keys = _service(store, clock)
+    valid = keys.issue("acme", "valid").key
+    revoked = keys.issue("acme", "revoked")
+    keys.revoke(revoked.record.key_id)
+    expired = keys.issue("acme", "expired", expires_at_ms=1.0)
+    await clock.sleep_ms(1.0)
+    attempts = {
+        "valid": valid,
+        "wrong secret": valid[:-1] + ("x" if not valid.endswith("x") else "y"),
+        "unknown id": "gwk_" + "0" * 16 + "_" + "A" * 43,
+        "malformed": "nonsense",
+        "empty": "",
+        "revoked": revoked.key,
+        "expired": expired.key,
+    }
 
-    def spy(a: str, b: str) -> bool:
-        calls.append((a, b))
-        return real(a, b)
+    steps: list[tuple[str, object]] = []
+    real_get_key, real_hmac, real_compare = store.get_key, keys._hmac, hmac.compare_digest
 
-    monkeypatch.setattr(hmac, "compare_digest", spy)
-    keys.authenticate(key)
-    for wrong in (key[:-1] + "x", "gwk_" + "0" * 16 + "_" + "A" * 43, "nonsense"):
-        with pytest.raises(InvalidApiKeyError):
-            keys.authenticate(wrong)
-    # One constant-time comparison per attempt, of 64-character digests, even when the key
-    # is malformed or its id matches nothing.
-    assert len(calls) == 4
-    assert all(len(a) == len(b) == 64 for a, b in calls)
+    def get_key(key_id: str) -> ApiKeyRecord | None:
+        steps.append(("lookup", len(key_id)))
+        return real_get_key(key_id)
+
+    def digest(key: str) -> str:
+        steps.append(("hmac", None))
+        return real_hmac(key)
+
+    def compare(a: str, b: str) -> bool:
+        steps.append(("compare", (len(a), len(b))))
+        return real_compare(a, b)
+
+    monkeypatch.setattr(store, "get_key", get_key)
+    monkeypatch.setattr(keys, "_hmac", digest)
+    monkeypatch.setattr(hmac, "compare_digest", compare)
+
+    for name, key in attempts.items():
+        steps.clear()
+        try:
+            keys.authenticate(key)
+        except InvalidApiKeyError:
+            assert name != "valid"
+        assert steps == [("lookup", 16), ("hmac", None), ("compare", (64, 64))], name
 
 
 # --- last used, without a write per request -------------------------------------------------

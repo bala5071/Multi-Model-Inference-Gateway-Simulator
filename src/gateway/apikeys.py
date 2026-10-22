@@ -37,6 +37,8 @@ DEFAULT_LAST_USED_FLUSH_MS = 60_000.0
 INVALID_KEY_MESSAGE = "The API key is not valid."
 # Compared against when there is no record, so an unknown key costs the same comparison.
 _NO_RECORD = "0" * 64
+# Looked up for a malformed key: not 16 hex characters, so no record can have it.
+_NO_SUCH_ID = "-" * 16
 
 
 class PepperError(RuntimeError):
@@ -135,11 +137,12 @@ class ApiKeyService:
     def authenticate(self, presented: str) -> Application:
         """The application a key belongs to, or ``InvalidApiKeyError``."""
         match = KEY_PATTERN.fullmatch(presented)
-        record = self._store.get_key(match.group("id")) if match else None
-        # Always one HMAC and one constant-time comparison, whatever is wrong with the key.
-        valid = hmac.compare_digest(
-            self._hmac(presented), record.key_hmac if record is not None else _NO_RECORD
-        )
+        # The same steps whatever is wrong with the key: one lookup (a malformed key looks up
+        # an id no record can have), one HMAC, and one constant-time comparison (against a
+        # dummy digest when there is no record).
+        record = self._store.get_key(match.group("id") if match else _NO_SUCH_ID)
+        expected = record.key_hmac if record is not None else _NO_RECORD
+        valid = hmac.compare_digest(self._hmac(presented), expected)
         now_ms = self._epoch.epoch_ms()
         if (
             not valid

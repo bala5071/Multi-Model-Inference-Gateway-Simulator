@@ -10,10 +10,11 @@ endpoints). See docs/20-applications-api-keys.md.
     uv run python scripts/manage.py revoke-key --key-id <id>
     uv run python scripts/manage.py list-keys --application shop
 
-The database is GATEWAY_DATABASE (default gateway.db), the one the server reads; it is
-created and migrated if needed. Issuing or rotating a key needs GATEWAY_KEY_PEPPER, the same
-value the server has. A new key is printed once, alone, on standard output; it is not stored,
-logged or shown again. Everything else goes to standard error.
+The database is GATEWAY_DATABASE (default: the user's local data folder, outside the working
+tree), the one the server reads; it is created owner-only and migrated if needed. Issuing or
+rotating a key needs GATEWAY_KEY_PEPPER, the same value the server has. A new key is printed
+once, alone, on standard output; it is not stored, logged or shown again. Everything else
+goes to standard error.
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from gateway.apikeys import ApiKeyService, load_pepper
-from gateway.app import DEFAULT_DATABASE
 from gateway.applications import (
     ApiKeyRecord,
     SqliteApplicationStore,
@@ -34,7 +34,7 @@ from gateway.applications import (
     seed_demo_applications,
 )
 from gateway.clock import SystemEpoch
-from gateway.database import open_database
+from gateway.database import database_path, open_database
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.routing import load_plans
 
@@ -47,7 +47,7 @@ def _note(message: str) -> None:
 
 
 def _open(environ: dict[str, str]) -> tuple[sqlite3.Connection, SqliteApplicationStore]:
-    connection = open_database(environ.get("GATEWAY_DATABASE", DEFAULT_DATABASE))
+    connection = open_database(database_path(environ))
     MigrationRunner(connection, MIGRATIONS, SystemEpoch()).migrate()
     return connection, SqliteApplicationStore(connection)
 

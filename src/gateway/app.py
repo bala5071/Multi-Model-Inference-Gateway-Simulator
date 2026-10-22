@@ -43,7 +43,7 @@ from gateway.backend_config import build_llamacpp_registry, load_backend_config
 from gateway.backends import BackendError
 from gateway.clock import Clock, ClockEpoch, EpochSource, PacedSimClock, SystemEpoch, WallClock
 from gateway.continuous import RequestTooLargeError, build_continuous_registry
-from gateway.database import open_database
+from gateway.database import database_path, open_database
 from gateway.events import EventBus
 from gateway.ledger import BudgetExceededError, CostLedger, ModelUsage
 from gateway.loadcontrol import PRESETS, LoadController, UnknownPresetError
@@ -73,8 +73,6 @@ MONITOR_STREAM_INTERVAL_MS = 1000.0
 PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 # The speeds the dashboard offers for simulated live mode.
 SIMULATION_SPEEDS = (1.0, 5.0, 20.0)
-# The default server's database, unless GATEWAY_DATABASE names another.
-DEFAULT_DATABASE = "gateway.db"
 # Where `npm run build` in frontend/ puts the dashboard. Not tracked; absent until built.
 DASHBOARD_DIR = Path(__file__).resolve().parent / "dashboard"
 
@@ -1219,7 +1217,8 @@ def create_default_app() -> FastAPI:
     the path of a plans file; without it the plans packaged with the gateway are used.
 
     Applications and API keys are read from the SQLite database ``GATEWAY_DATABASE``
-    (default ``gateway.db``), created and migrated if needed; ``scripts/manage.py`` creates
+    (default: the user's local data folder, outside the working tree; see
+    ``gateway.database``), created owner-only and migrated if needed; ``scripts/manage.py`` creates
     applications and issues keys. ``GATEWAY_KEY_PEPPER`` is required: without it the server
     refuses to start (docs/20-applications-api-keys.md).
 
@@ -1249,7 +1248,7 @@ def create_default_app() -> FastAPI:
     plans_path = os.environ.get("GATEWAY_PLANS")
     templates = load_plans(Path(plans_path) if plans_path else None)
     epoch = SystemEpoch()
-    database = open_database(os.environ.get("GATEWAY_DATABASE", DEFAULT_DATABASE))
+    database = open_database(database_path(os.environ))
     MigrationRunner(database, MIGRATIONS, epoch).migrate()
     access = ApplicationAccess(
         ApiKeyService(SqliteApplicationStore(database), pepper, epoch), templates
