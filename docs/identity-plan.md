@@ -68,6 +68,7 @@ New migrations only; the A1 tables are unchanged except for the one column in mi
 | 6 | `sessions (id_hash, handle, user_id, csrf_hash, created_at, last_seen_at, expires_at, revoked)`; session ids and CSRF tokens are stored only as SHA-256; `handle` is a random public id for the session list. Step 4 (step 6 adds `step_up_until`) |
 | 7 | `audit_log (seq, at, actor_user_id, action, target_type, target_id, outcome, details)`; `details` is written through an allowlist of fields. Step 4 |
 | 8 | `role_assignments (user_id, role, scope_type, scope_id, granted_by, granted_at)`, unique per user, role and scope, `scope_id` `*` for the platform scope; `app_roles (application_id, name)` for application-defined roles such as `clinic_staff`. Step 5: moves `users.platform_admin` into `role_assignments` and drops the column through the table-rebuild path (a backup first, through `manage.py migrate`) |
+| 9 | `sessions.step_up_until_ms`, an `ADD COLUMN` (no rebuild; the server applies it). The reverse rebuilds `sessions` without it (no table refers to `sessions`). Step 6 |
 
 **Organizations.** An `individual` organization has exactly one member, its `org_admin`, and
 refuses to add anyone else. A `business` organization has any number of members and allows
@@ -230,12 +231,45 @@ Step 5 builds this section (note 28); the management endpoints that use it are s
 
 ## 8. Step-up
 
-`POST /v1/auth/step-up {password}` marks the session `step_up_until = now + 5 minutes` on the
-injected clock. Actions flagged in the table return 403 `step_up_required` without it. In A2:
-changing roles, creating or disabling users, and issuing, rotating or revoking application API
-keys; provider keys and modes are flagged now and wired in A5. Step-up through a token is not
-possible: tokens are for other applications, and sensitive actions need a session. Step-up
-(step 6) lands before the management endpoints (step 7), so they enforce it from the start.
+Step 6 builds and proves the mechanism (note 29); the management endpoints that use it are
+step 7, which cannot add a flagged action without enforcement.
+
+- **`POST /v1/auth/step-up {password}`** needs a session, the CSRF token and the Origin check,
+  and **refuses without either before verifying the password** (a test shows no verify runs).
+  It verifies through the `HashRunner` on the same steps whether it succeeds or fails, and on
+  success sets `step_up_until_ms = now + 5 minutes` (`GATEWAY_STEP_UP_MINUTES`, 1 to 60) on the
+  injected epoch. Asking again restarts the window; it never extends the session's own expiry.
+- **One answer for every refusal:** 403 `step_up_failed`, one fixed body, for a wrong password,
+  a locked account, the in-memory limiter, the per-session cap, and a session whose password
+  must be changed first.
+- **A wrong password counts like a failed login**, toward the database lockout and the
+  in-memory limiter under the same username. **Per session**, at most 3 failed step-ups in 5
+  minutes (configurable); after that the endpoint refuses without verifying, with the same
+  body, on top of the account lockout.
+- **Step-up belongs to one session**: it is never copied, inherited or shared (a new login
+  starts without it), and is cleared by logout, by a password change (the current session's
+  too), by revoking the session, when the account locks, when it is disabled, and when its
+  role assignments change. A session survives a lockout but cannot create new step-up.
+- **Enforcement is in `requires`**, after authorization: for an action flagged in the table, 403
+  `step_up_required` (one fixed body) before the handler, unless the session's window is still
+  open. Authorization comes first, so step-up never reveals whether a forbidden resource
+  exists. `/me` includes `step_up_until_ms` (null or the end time).
+- **It cannot be forgotten:** a test builds a route through `requires` for every flagged action
+  and shows it refused without step-up and served with it; `local_only_route` refuses a flagged
+  action, and the route-declaration test fails on any declaration of one that is not
+  `requires`; an AST check of `app.py` fails on any import or call of `authorize`, and any read
+  of `step_up_until_ms`, outside `make_requires`. What that check cannot catch (aliasing,
+  dynamic calls) is stated in note 29: review still matters.
+- **Audited:** `step_up_granted`, `step_up_failed` (with the reason) and `step_up_required`
+  (with the action's name) on every refusal; the audit retention keeps the table bounded.
+- **Consume-on-use** (a step-up used up by one successful call of the most dangerous actions,
+  provider keys in A5) is described in note 29 and not built; a test asserts the table has no
+  `consume` column yet, so adding it is a deliberate change.
+
+Flagged in A2: changing roles, creating or disabling users, and issuing, rotating or revoking
+application API keys; provider keys and modes are flagged now and wired in A5. Step-up through
+a token is not possible: tokens are for other applications, and sensitive actions need a
+session.
 
 ## 9. Audit log
 
@@ -356,7 +390,11 @@ derived from it to a third party, so only the bundled blocklist is used); **the 
 not tamper-evident** (anyone who can write the database can change it); **the in-memory
 login limiter can be flushed** by trying many unique usernames, while the database lockout
 still protects real accounts; **the `__Host-` cookie prefix cannot be used** until the server
-runs over HTTPS (it requires `Secure`); **a platform_admin who creates an account knows its
+runs over HTTPS (it requires `Secure`); **a hijacked session can try the password at
+step-up**, and so lock the real user out (the per-session cap of 3 failures in 5 minutes
+slows that but the account lockout still applies); **step-up does not help against an
+attacker who has the password**; a step-up window is a bearer state of the session: whoever
+holds the cookie while it is open can use it; **a platform_admin who creates an account knows its
 first password** (mitigated: an account a platform_admin creates must change its password at
 first login, and the creation is in the audit log, visible to that organization's
 org_admin); the measured timing difference between a failed
@@ -390,7 +428,9 @@ Each step is its own pull request and stops for review.
    per-route declarations (`requires` enforcing, `local_only`, `public`), the generated matrix
    and the documented table, and the CLI for roles (`grant-role`, `revoke-role`,
    `list-roles`). No new endpoint.
-6. Step-up, before the management endpoints so they enforce it from the start.
+6. Step-up, before the management endpoints so they enforce it from the start: migration 9,
+   `POST /v1/auth/step-up`, enforcement in `requires`, the per-session cap, the synthetic route
+   for every flagged action and the AST check, with their mutations; the audit entries.
 7. (Was 5b.) The management endpoints under `/v1/admin/orgs/{org}/...`: users, applications
    and application keys, each declaring and enforcing its permission; the escalation and
    last-admin tests, missing equals forbidden, and the cost of reading assignments.
