@@ -317,6 +317,57 @@ Tests that need a real model server are marked `real_models` and skipped unless
 - Randomness comes from a seeded `random.Random` instance that is passed in.
 - Line length 100; `ruff format` is the formatter.
 
+## Working agreement
+
+These apply to every task without being repeated.
+
+**Process**
+
+- Each step gets its own branch and PR. The first commit is the plan update. Open the PR as a
+  draft with `gh`, put the reviewer-facing description in the PR body, wait for CI with `gh`,
+  fix failures that are not in the stop list, then report.
+- Plan approval is required only for tasks that touch authentication, secrets, provider keys,
+  migrations that rebuild a table, or a new network surface. For all other tasks, write the plan
+  as the first commit and continue.
+- The next step may start from the previous branch once its CI is green. Say clearly which PRs
+  must be merged in which order.
+
+**Definition of done** (real output shown, never summarized): ruff, the format check, mypy, the
+full pytest, `scripts/check_characters.py`, protected outputs with `--include-images`, the perf
+gate, the README quickstart, the frontend checks, e2e, and every CI job green.
+
+**Security rules**
+
+- Every rule about who may do what, or what is refused, has a mutation check: break it, show
+  which tests fail, restore it byte for byte, show the tests pass again.
+- Any new path that handles a secret gets the leak scan with a planted control that must be
+  found.
+- Any refusal path in authentication gets a structural test that every case takes the same
+  steps, plus the early-return mutation.
+- A missing resource and a forbidden one get the same response, byte for byte.
+- No secret in logs, errors, audit entries, test output, PR text or commits.
+
+**Measurement rules**: performance statements are measured on this machine, with the hardware
+recorded and a range over three runs. Never state an unmeasured number. Label simulated results
+as simulated.
+
+**PR description template**, sections in order: What changed; Decisions not in the request
+(numbered, so they can be objected to); Mutation checks (a table); Timing (with hardware);
+Threat-model additions; Not built; Checks; CI result.
+
+**Stop and ask when**
+
+- a check fails and the fix would change a protected output, a budget or a tolerance;
+- a security semantic is ambiguous;
+- a secret, key or account is needed;
+- a test cannot be made to fail under mutation;
+- an unexpected file is tracked, or a dependency is added (pin it, check its license, and record
+  it in `docs/licenses.md` first);
+- anything would require a destructive git command.
+
+**Never** merge a PR, push to main, refresh a baseline to make a check pass, print a secret, stop
+a process you did not start, or run `git reset --hard` or any command that discards work.
+
 ## Commands
 
 ```sh
