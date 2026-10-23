@@ -279,7 +279,7 @@ def test_the_default_organization_is_made_even_with_no_applications(
     connection = open_database(tmp_path / "new.db")
     clock = SimClock()
     runner = MigrationRunner(connection, MIGRATIONS, ClockEpoch(clock, origin_ms=NOW_MS))
-    assert runner.migrate() == (1, 2, 3, 4, 5, 6, 7, 8)
+    assert runner.migrate() == (1, 2, 3, 4, 5, 6, 7, 8, 9)
     assert runner.migrate() == ()  # idempotent
     [(org_id, name, kind, created, disabled)] = _rows(connection, "SELECT * FROM organizations")
     applied = _rows(connection, "SELECT applied_at_ms FROM schema_migrations WHERE version = 4")
@@ -381,7 +381,7 @@ def test_the_plan_reports_changes_and_conflicts_without_writing(tmp_path: Path) 
     plan = plan_migrations(readonly, MIGRATIONS)
     readonly.close()
     assert plan.current_version == 3
-    assert [m.version for m, _ in plan.pending] == [4, 5, 6, 7, 8]
+    assert [m.version for m, _ in plan.pending] == [4, 5, 6, 7, 8, 9]
     assert plan.rebuilds_tables
     preview = plan.pending[0][1]
     assert any("2 application(s) into 'default'" in c for c in preview.changes)
@@ -393,7 +393,7 @@ def test_the_plan_reports_changes_and_conflicts_without_writing(tmp_path: Path) 
 
     empty = sqlite3.connect(":memory:")
     fresh = plan_migrations(empty, MIGRATIONS)
-    assert (fresh.current_version, len(fresh.pending), fresh.conflicts) == (0, 8, ())
+    assert (fresh.current_version, len(fresh.pending), fresh.conflicts) == (0, 9, ())
     assert _rows(empty, "SELECT name FROM sqlite_master") == []  # nothing created
     empty.close()
 

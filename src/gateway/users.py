@@ -68,6 +68,8 @@ class Session:
     last_seen_at_ms: float
     expires_at_ms: float
     revoked: bool = False
+    # Until when this session may perform flagged actions (step-up); None when it has none.
+    step_up_until_ms: float | None = None
 
     def __repr__(self) -> str:
         return f"Session(handle={self.handle!r}, user_id={self.user_id!r}, <digests redacted>)"
@@ -78,7 +80,8 @@ _USER_COLUMNS = (
     "must_change_password, bootstrap, failed_logins, first_failure_at_ms, locked_until_ms"
 )
 _SESSION_COLUMNS = (
-    "id_hash, handle, user_id, csrf_hash, created_at_ms, last_seen_at_ms, expires_at_ms, revoked"
+    "id_hash, handle, user_id, csrf_hash, created_at_ms, last_seen_at_ms, expires_at_ms, revoked, "
+    "step_up_until_ms"
 )
 
 
@@ -100,8 +103,10 @@ def _user(row: tuple[Any, ...]) -> User:
 
 
 def _session(row: tuple[Any, ...]) -> Session:
-    id_hash, handle, user_id, csrf_hash, created, seen, expires, revoked = row
-    return Session(id_hash, handle, user_id, csrf_hash, created, seen, expires, bool(revoked))
+    id_hash, handle, user_id, csrf_hash, created, seen, expires, revoked, step_up = row
+    return Session(
+        id_hash, handle, user_id, csrf_hash, created, seen, expires, bool(revoked), step_up
+    )
 
 
 class AccountStore:
@@ -214,7 +219,7 @@ class AccountStore:
     def add_session(self, session: Session) -> None:
         s = session
         self._connection.execute(
-            f"INSERT INTO sessions ({_SESSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO sessions ({_SESSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 s.id_hash,
                 s.handle,
@@ -224,6 +229,7 @@ class AccountStore:
                 s.last_seen_at_ms,
                 s.expires_at_ms,
                 int(s.revoked),
+                s.step_up_until_ms,
             ),
         )
 
@@ -240,16 +246,34 @@ class AccountStore:
 
     def revoke_session(self, id_hash: str) -> bool:
         cursor = self._connection.execute(
-            "UPDATE sessions SET revoked = 1 WHERE id_hash = ? AND revoked = 0", (id_hash,)
+            "UPDATE sessions SET revoked = 1, step_up_until_ms = NULL WHERE id_hash = ?"
+            " AND revoked = 0",
+            (id_hash,),
         )
         return cursor.rowcount == 1
 
     def revoke_sessions(self, user_id: str, *, keep_id_hash: str | None = None) -> int:
         """Revoke every live session of ``user_id`` except ``keep_id_hash``. Returns how many."""
         cursor = self._connection.execute(
-            "UPDATE sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0"
+            "UPDATE sessions SET revoked = 1, step_up_until_ms = NULL WHERE user_id = ?"
+            " AND revoked = 0"
             " AND id_hash IS NOT ?",
             (user_id, keep_id_hash),
+        )
+        return cursor.rowcount
+
+    def set_step_up(self, id_hash: str, until_ms: float | None) -> None:
+        """Open (or, with None, close) this one session's step-up window."""
+        self._connection.execute(
+            "UPDATE sessions SET step_up_until_ms = ? WHERE id_hash = ?", (until_ms, id_hash)
+        )
+
+    def clear_step_up(self, user_id: str) -> int:
+        """Close the step-up window of every session of ``user_id``. Returns how many."""
+        cursor = self._connection.execute(
+            "UPDATE sessions SET step_up_until_ms = NULL WHERE user_id = ?"
+            " AND step_up_until_ms IS NOT NULL",
+            (user_id,),
         )
         return cursor.rowcount
 

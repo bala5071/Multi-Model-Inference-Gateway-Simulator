@@ -33,6 +33,7 @@ ADMIN_PASSWORD = "maple quarry eleven hounds"
 TYPED_AS_USERNAME = "ochre lighthouse forty"
 OVERSIZED = "z" * (MAX_LENGTH + 1)
 CLI_PASSWORD = "birch canyon thirteen gulls"
+STEP_UP_WRONG = "amber window sixty crows"
 
 
 def find_leaks(corpus: dict[str, str], secrets: dict[str, str]) -> list[tuple[str, str]]:
@@ -71,6 +72,7 @@ async def _scenario(accounts: Accounts) -> tuple[dict[str, str], dict[str, str],
         "admin password": ADMIN_PASSWORD,
         "password typed as username": TYPED_AS_USERNAME,
         "oversized password": OVERSIZED,
+        "wrong step-up password": STEP_UP_WRONG,
     }
     objects: list[object] = [service]
     async with console(accounts) as c:
@@ -100,6 +102,21 @@ async def _scenario(accounts: Accounts) -> tuple[dict[str, str], dict[str, str],
             await c.client.post(
                 "/v1/auth/change-password",
                 json={"current_password": PASSWORD, "new_password": OTHER_PASSWORD},
+                headers=with_csrf(sid, csrf),
+            )
+        )
+        # Step-up: a wrong password, then the right one (the new password).
+        responses["step-up refused"] = _response(
+            await c.client.post(
+                "/v1/auth/step-up",
+                json={"password": STEP_UP_WRONG},
+                headers=with_csrf(sid, csrf),
+            )
+        )
+        responses["step-up granted"] = _response(
+            await c.client.post(
+                "/v1/auth/step-up",
+                json={"password": OTHER_PASSWORD},
                 headers=with_csrf(sid, csrf),
             )
         )

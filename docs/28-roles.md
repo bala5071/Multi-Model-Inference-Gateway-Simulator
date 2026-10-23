@@ -52,7 +52,8 @@ the session's next request (tested).
 
 `src/gateway/permissions.py` holds it; this copy is checked against it by
 `test_the_documented_table_is_the_table`, every cell. Allowed pairs are `role@relation`.
-**Step-up** is declared now and enforced from step 6. **Wired**: `now` (enforced today, through
+**Step-up** is enforced by `requires` since step 6 (docs/29): a flagged action is refused with
+`step_up_required` unless the session's step-up window is open. **Wired**: `now` (enforced today, through
 the CLI's `--as`), `step 7` (the management endpoints), `A5` (provider keys and modes), `A8`
 (monitoring, control and the Playground: local only until then), `later` (declared, no endpoint
 planned in A2).
@@ -257,5 +258,5 @@ performance gate and the protected outputs are unchanged.
 
 ## Not done here
 
-The management endpoints (step 7), step-up (step 6), endpoints for roles and organizations
+The management endpoints (step 7), endpoints for roles and organizations
 (CLI only in A2), reading the audit log, and defining application roles from the CLI.

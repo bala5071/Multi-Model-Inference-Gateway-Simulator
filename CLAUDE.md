@@ -89,7 +89,9 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   database lockout and the in-memory `LoginLimiter`, sessions (30 min idle, 12 h, `last_seen`
   at most once a minute), CSRF (an HMAC of the session id under a derived key), password
   change, retention;
-  `AccountAccess` is what `create_app` takes for `/v1/auth` (exists)
+  `AccountAccess` is what `create_app` takes for `/v1/auth`; step-up (`step_up`,
+  `check_step_up`): a 5-minute window per session, a per-session cap, refused through
+  `requires` for actions the table flags (exists)
 - `permissions.py` — `Role`, `ScopeType`, scope `Relation`s, `PERMISSIONS` (one table: action,
   level, allowed role@relation pairs, step-up, wired), `Actor`, `Resource`, and `authorize`, deny
   by default; `python -m gateway.permissions --matrix` writes `docs/permission-matrix.md` (exists)
@@ -121,7 +123,7 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   it and checks them; `plan_migrations` previews without writing; the server refuses a
   rebuild on a database with data, `scripts/manage.py migrate` backs up first); 5 `users`, 6
   `sessions`, 7 `audit_log`, 8 `role_assignments` and `app_roles` (a rebuild of `users` without
-  `platform_admin`). The default database is in the user's data folder,
+  `platform_admin`), 9 `sessions.step_up_until_ms`. The default database is in the user's data folder,
   owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
   `restore_database` use SQLite's backup API (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),
