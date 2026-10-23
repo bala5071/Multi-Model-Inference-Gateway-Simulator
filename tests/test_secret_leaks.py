@@ -209,3 +209,101 @@ async def test_no_secret_appears_anywhere_and_the_scan_would_see_one(
     found = find_leaks(corpus(), secrets)
     assert found == [("logs", "session id"), ("stdout", "admin password")]
     databases[1].close()
+
+
+# --- the management endpoints: temporary passwords and issued keys (docs/30) -------------------
+
+
+async def test_no_temporary_password_or_issued_key_leaks_and_the_scan_would_see_one(
+    caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A temporary password and a new key appear in the one response that delivers each, and
+    nowhere else: not in logs, output, other responses, the audit log or any table."""
+    from test_management_api import admin_console, make_world
+
+    caplog.set_level(logging.DEBUG)
+    world = make_world()
+    responses: dict[str, str] = {}
+    secrets: dict[str, str] = {}
+    delivered: dict[str, str] = {}  # which response delivers which secret
+    async with admin_console(world) as admin:
+        alice = await admin.login("alice")
+        await admin.step_up(alice)
+        made = await admin.post(alice, "/north/users", {"username": "newbie"})
+        secrets["temporary password, created"] = made.json()["temporary_password"]
+        responses["create user"] = _response(made)
+        delivered["create user"] = "temporary password, created"
+        reset = await admin.post(alice, "/north/users/bob/reset-password")
+        secrets["temporary password, reset"] = reset.json()["temporary_password"]
+        responses["reset"] = _response(reset)
+        delivered["reset"] = "temporary password, reset"
+        issued = await admin.post(alice, "/north/applications/north-shop/keys", {"label": "new"})
+        secrets["issued key"] = issued.json()["key"]
+        responses["issue"] = _response(issued)
+        delivered["issue"] = "issued key"
+        key_id = issued.json()["key_id"]
+        rotated = await admin.post(
+            alice, f"/north/applications/north-shop/keys/{key_id}/rotate", {"grace_hours": 1}
+        )
+        secrets["rotated key"] = rotated.json()["key"]
+        responses["rotate"] = _response(rotated)
+        delivered["rotate"] = "rotated key"
+        generated = await admin.client.post(
+            "/v1/generate",
+            json={"model": "economy", "prompt": "hello", "max_tokens": 1},
+            headers={"Authorization": f"Bearer {secrets['rotated key']}"},
+        )
+        responses["generate"] = _response(generated)
+        newbie = await admin.login("newbie", secrets["temporary password, created"])
+        responses["newbie lists"] = _response(await admin.get(newbie, "/north/users"))
+        for name, path in (
+            ("users", "/north/users"),
+            ("keys", "/north/applications/north-shop/keys"),
+            ("applications", "/north/applications"),
+        ):
+            responses[name] = _response(await admin.get(alice, path))
+        responses["revoke"] = _response(
+            await admin.post(alice, f"/north/applications/north-shop/keys/{key_id}/revoke")
+        )
+        responses["taken"] = _response(await admin.post(alice, "/north/users", {"username": "sam"}))
+    connection = world.accounts.connection
+    for (digest,) in connection.execute("SELECT key_hmac FROM api_keys"):
+        secrets[f"key hmac {len(secrets)}"] = digest
+    for (digest,) in connection.execute("SELECT password_hash FROM users"):
+        secrets[f"password hash {len(secrets)}"] = digest
+    for name, which in delivered.items():
+        assert secrets[which] in responses[name], name
+        responses[name] = responses[name].replace(secrets[which], "<delivered>")
+
+    captured = {"stdout": "", "stderr": ""}
+
+    def corpus() -> dict[str, str]:
+        out, err = capsys.readouterr()
+        captured["stdout"] += out
+        captured["stderr"] += err
+        texts = {
+            "logs": "\n".join(
+                f"{r.name} {r.getMessage()} {r.args!r} {r.exc_text or ''}" for r in caplog.records
+            ),
+            "stdout": captured["stdout"],
+            "stderr": captured["stderr"],
+            "audit_log": _table(connection, "audit_log", set()),
+            "users": _table(connection, "users", {"password_hash"}),
+            "api_keys": _table(connection, "api_keys", {"key_hmac"}),
+            "applications": _table(connection, "applications", set()),
+            "sessions": _table(connection, "sessions", {"id_hash", "csrf_hash"}),
+            "reprs": repr(world.keys) + repr(world.accounts.service),
+        }
+        texts.update({f"response: {name}": text for name, text in responses.items()})
+        return texts
+
+    assert len(secrets) >= 15
+    assert find_leaks(corpus(), secrets) == []
+
+    # The control: a temporary password logged and a key printed by mistake are found.
+    logging.getLogger("gateway").info("made user with %s", secrets["temporary password, reset"])
+    print(f"issued {secrets['issued key']}")
+    assert find_leaks(corpus(), secrets) == [
+        ("logs", "temporary password, reset"),
+        ("stdout", "issued key"),
+    ]

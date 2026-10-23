@@ -22,6 +22,7 @@ this table, the README's and the launcher's warning in step with it):
 | `/v1/playground` | Sends requests as an application, with keys the server holds |
 | `/dashboard` | The dashboard, which shows all of the above |
 | `/v1/auth` | Console login, logout and sessions (added in identity step 4, note 27); a password is needed, but logins come only from this machine |
+| `/v1/admin` | Users, applications and their keys (added in identity step 7, note 30); a session, a role and step-up are needed, and only from this machine |
 
 On these, a request is refused when:
 

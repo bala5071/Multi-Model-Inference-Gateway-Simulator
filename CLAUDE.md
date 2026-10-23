@@ -91,7 +91,15 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   change, retention;
   `AccountAccess` is what `create_app` takes for `/v1/auth`; step-up (`step_up`,
   `check_step_up`): a 5-minute window per session, a per-session cap, refused through
-  `requires` for actions the table flags (exists)
+  `requires` for actions the table flags; for the management endpoints, temporary passwords
+  (hashed through the runner, shown once), an admin refused on its own account, the cap on
+  user-creation attempts per session (`GATEWAY_USER_CREATE_ATTEMPTS`) and the audit of every
+  refusal (exists)
+- `management.py` — the management endpoints' logic below HTTP: resolvers that answer a
+  resource outside the path's organization as missing, `ManagementRefusal` (each 409 and 429,
+  its reason the error code), and `ManagementService` (applications from a plan template, keys
+  issued, rotated and revoked with an audit entry by key id; the HTTP path's `KeyLimits`),
+  shared with the CLI (exists)
 - `permissions.py` — `Role`, `ScopeType`, scope `Relation`s, `PERMISSIONS` (one table: action,
   level, allowed role@relation pairs, step-up, wired), `Actor`, `Resource`, and `authorize`, deny
   by default; `python -m gateway.permissions --matrix` writes `docs/permission-matrix.md` (exists)
@@ -149,7 +157,9 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `GATEWAY_KEY_PEPPER`; SQLite at `GATEWAY_DATABASE`; one process per database), and
   `create_simulated_live_app()` for simulated live mode (`GATEWAY_SIMULATED_LIVE=1`,
   everything in memory, Playground with throwaway keys); JSON or server-sent-event
-  responses; serves the built dashboard at `/dashboard` (exists)
+  responses; serves the built dashboard at `/dashboard`; with accounts, the management
+  endpoints under `/v1/admin/orgs/{org}` (docs/30), each through `requires`, every answer
+  `Cache-Control: no-store` (exists)
 
 Outside the package, `benchmarks/` is a package run with `python -m`:
 
@@ -195,6 +205,8 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   write; the numbers in `docs/27` (exists)
 - `benchmarks/key_checks.py` — times a key check, and what writing `last_used_at` per
   request would add; the numbers in `docs/20-applications-api-keys.md` (exists)
+- `benchmarks/management_requests.py` — management reads and key writes on the running
+  server, beside `/healthz` and `/v1/auth/me`; the numbers in `docs/30` (exists)
 
 - `benchmarks/report.py` — generates `docs/REPORT.md` and `docs/report/*.png` from the
   benchmarks above (`make report`). Sections 1 to 3 run on the calibrated profiles
@@ -237,7 +249,8 @@ the monitoring API (`docs/15`); it has no logic of its own about the gateway.
 `scripts/` holds operational entry points only: `perf_gate.py`, `demo.py`,
 `capture_demo.py` (retakes the dashboard pictures in `docs/img/`),
 `run_local_models.sh`, `manage.py` (creates organizations and applications and issues, rotates
-and revokes API keys: the only way to issue one; prints a new key once, never logs it; also
+and revokes API keys, audited like the management endpoints; prints a new key once, never logs
+it; also
 `migrate` with `--dry-run` and a backup before a table rebuild, backup and restore), `readme_quickstart.py` (runs the README's quickstart blocks exactly as written and
 checks the result; a CI job, so the README cannot go stale), `check_characters.py` (a CI
 gate: tracked source, test, workflow and shell files are printable ASCII, with a short

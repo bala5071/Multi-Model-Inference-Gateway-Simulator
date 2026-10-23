@@ -169,15 +169,27 @@ class ApiKeyService:
             self._store.record_last_used(pending)
         return len(pending)
 
-    def rotate(self, key_id: str, *, grace_ms: float, label: str | None = None) -> IssuedKey:
-        """Issue a new key for the same application; the old one stays valid for ``grace_ms``
-        and is then rejected as expired (or sooner, if it already expired sooner)."""
+    def rotate(
+        self,
+        key_id: str,
+        *,
+        grace_ms: float,
+        label: str | None = None,
+        expires_at_ms: float | None = None,
+    ) -> IssuedKey:
+        """Issue a new key for the same application (expiring at ``expires_at_ms``, if
+        given); the old one stays valid for ``grace_ms`` and is then rejected as expired (or
+        sooner, if it already expired sooner)."""
         if grace_ms < 0:
             raise ValueError("grace_ms must not be negative")
         old = self._store.get_key(key_id)
         if old is None or old.revoked:
             raise ValueError(f"no active key {key_id!r}")
-        new = self.issue(old.application_id, label if label is not None else old.label)
+        new = self.issue(
+            old.application_id,
+            label if label is not None else old.label,
+            expires_at_ms=expires_at_ms,
+        )
         ends_ms = self._epoch.epoch_ms() + grace_ms
         if old.expires_at_ms is None or ends_ms < old.expires_at_ms:
             self._store.set_key_expiry(key_id, ends_ms)

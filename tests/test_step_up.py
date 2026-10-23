@@ -150,7 +150,7 @@ def _window(accounts: Accounts, session: tuple[str, str]) -> float | None:
 
 
 async def test_every_flagged_action_needs_step_up_and_passes_with_it(accounts: Accounts) -> None:
-    assert len(FLAGGED) == 18
+    assert len(FLAGGED) == 19
     async with console(accounts) as c:
         for action in FLAGGED:
             session = await c.login(_who(action))

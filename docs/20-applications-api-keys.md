@@ -73,9 +73,10 @@ their own migration; migration 2 has no organization column.
   one to expire after a grace period (default 24 hours), never later than an expiry it
   already had. After the grace period the old key is refused like any other bad key.
   `revoke-key` stops a key at once.
-- **Issuance is only through `scripts/manage.py`.** There is no admin HTTP endpoint (A2
-  adds authenticated ones). The CLI prints a new key once, alone on standard output, with
-  everything else on standard error; it never logs it.
+- **Issuance is through `scripts/manage.py`**, and since identity step 7 also through the
+  management endpoints, by a logged-in user within that user's roles, with step-up, limits and
+  an expiry on every key (docs/30). The CLI prints a new key once, alone on standard output,
+  with everything else on standard error; it never logs it. Both are audited by key id.
 
 ```sh
 export GATEWAY_KEY_PEPPER=...            # the same value the server has

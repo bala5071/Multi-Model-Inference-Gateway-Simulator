@@ -78,15 +78,16 @@ resource from a missing one (tested). The window was read with the session, so t
 no query. The window is half-open: at 4 minutes 59.999 seconds the action passes, at exactly 5
 minutes it is refused (tested under `SimClock`).
 
-The 18 flagged actions are the table's `step_up` column (docs/28): organizations created,
-disabled or enabled; users created, disabled, enabled or their password reset; roles assigned
+The 19 flagged actions are the table's `step_up` column (docs/28): organizations created,
+disabled or enabled; users created, disabled, enabled, unlocked (from step 7: unlocking lifts a
+lockout, a defense; note 30) or their password reset; roles assigned
 or revoked; application keys issued, rotated or revoked; application roles defined or deleted;
 provider keys added, replaced or deleted, and the mode changed (A5).
 
 ## It cannot be forgotten
 
 - **Every flagged action, through a real route**: `test_every_flagged_action_needs_step_up_and_
-  passes_with_it` reads the table and, for each of the 18, adds a route through `requires` with
+  passes_with_it` reads the table and, for each of the 19, adds a route through `requires` with
   a user the table allows, and shows it answers `step_up_required` without a window, reaches
   the handler with one, and is refused again once the window has passed.
 - **No declaration without `requires`**: `local_only_route` raises for a flagged action, and the

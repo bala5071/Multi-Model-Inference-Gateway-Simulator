@@ -34,6 +34,8 @@ DEFAULT_UNKNOWN_USER_ROWS_PER_MINUTE = 60
 ID_PATTERN = re.compile(r"(usr|ses)_[0-9a-f]{16}")
 # Organization ids are chosen by an operator; an entry stores them only in this form.
 ORGANIZATION_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
+# An API key's id: the visible part of the key, never the key (gateway.apikeys).
+KEY_ID_PATTERN = re.compile(r"[0-9a-f]{16}")
 SCOPE_TYPES = frozenset({"platform", "organization", "application"})
 
 
@@ -56,6 +58,12 @@ class AuditAction(StrEnum):
     STEP_UP_GRANTED = "step_up_granted"
     STEP_UP_FAILED = "step_up_failed"
     STEP_UP_REQUIRED = "step_up_required"
+    APPLICATION_CREATED = "application_created"
+    KEY_ISSUED = "key_issued"
+    KEY_ROTATED = "key_rotated"
+    KEY_REVOKED = "key_revoked"
+    # A management request refused for a conflict or a cap (docs/30): its reason and action.
+    MANAGEMENT_REFUSED = "management_refused"
 
 
 class Outcome(StrEnum):
@@ -69,6 +77,9 @@ class TargetType(StrEnum):
     SESSION = "session"
     UNKNOWN_USER = "unknown_user"
     AUDIT_LOG = "audit_log"
+    ORGANIZATION = "organization"
+    APPLICATION = "application"
+    API_KEY = "api_key"
 
 
 class Reason(StrEnum):
@@ -87,6 +98,18 @@ class Reason(StrEnum):
     UNKNOWN_USER_CAP = "unknown_user_cap"
     SESSION_CAP = "session_cap"
     MUST_CHANGE_PASSWORD = "must_change_password"
+    # A user created over HTTP with a password the server made (docs/30).
+    TEMPORARY_PASSWORD = "temporary_password"
+    # Management refusals (docs/30): each is the error code of its answer.
+    USERNAME_TAKEN = "username_taken"
+    ORGANIZATION_FULL = "organization_full"
+    ORGANIZATION_DISABLED = "organization_disabled"
+    APPLICATION_NAME_TAKEN = "application_name_taken"
+    LAST_ADMIN = "last_admin"
+    OWN_ACCOUNT = "own_account"
+    KEY_LIMIT = "key_limit"
+    KEY_NOT_ACTIVE = "key_not_active"
+    USER_CREATION_LIMITED = "user_creation_limited"
 
 
 # The only keys ``details`` may have, and the type of each value.
@@ -107,6 +130,11 @@ DETAIL_FIELDS: Mapping[str, type] = {
     "acting_as": str,
     "action": str,
     "step_up_until_ms": float,
+    "application_id": str,
+    "plan": str,
+    "key_id": str,
+    "expires_at_ms": float,
+    "grace_ms": float,
 }
 
 
@@ -144,7 +172,11 @@ def _checked_details(details: Mapping[str, object]) -> dict[str, object]:
             if not isinstance(value, str) or not re.fullmatch(r"usr_[0-9a-f]{16}", value):
                 raise ValueError("audit detail 'acting_as' must be a user id")
             checked[key] = value
-        else:  # organization_id, role, scope_id: ids, never free text
+        elif key == "key_id":
+            if not isinstance(value, str) or not KEY_ID_PATTERN.fullmatch(value):
+                raise ValueError("audit detail 'key_id' must be a key id")
+            checked[key] = value
+        else:  # organization_id, application_id, plan, role, scope_id: ids, never free text
             ok = isinstance(value, str) and (
                 ORGANIZATION_ID_PATTERN.fullmatch(value) is not None
                 or (key == "scope_id" and value == "*")
@@ -158,6 +190,23 @@ def _checked_details(details: Mapping[str, object]) -> dict[str, object]:
 def _checked_id(value: str | None, what: str) -> str | None:
     if value is not None and not ID_PATTERN.fullmatch(value):
         raise ValueError(f"audit {what} must be a user id or a session handle")
+    return value
+
+
+# What each kind of target may be named by: an id in its own form, never free text.
+_TARGET_PATTERNS: Mapping[TargetType, re.Pattern[str]] = {
+    TargetType.ORGANIZATION: ORGANIZATION_ID_PATTERN,
+    TargetType.APPLICATION: ORGANIZATION_ID_PATTERN,
+    TargetType.API_KEY: KEY_ID_PATTERN,
+}
+
+
+def _checked_target(target_type: TargetType, value: str | None) -> str | None:
+    pattern = _TARGET_PATTERNS.get(target_type)
+    if pattern is None:
+        return _checked_id(value, "target_id")
+    if value is not None and not pattern.fullmatch(value):
+        raise ValueError(f"audit target_id of a {target_type.value} must be in the form of its id")
     return value
 
 
@@ -175,8 +224,7 @@ class AuditEvent:
     def __post_init__(self) -> None:
         AuditAction(self.action)
         Outcome(self.outcome)
-        TargetType(self.target_type)
-        _checked_id(self.target_id, "target_id")
+        _checked_target(TargetType(self.target_type), self.target_id)
         _checked_id(self.actor_user_id, "actor_user_id")
         if self.target_type is TargetType.UNKNOWN_USER and self.target_id is not None:
             raise ValueError("an unknown user has no id to record")

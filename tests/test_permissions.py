@@ -407,6 +407,7 @@ def _variants() -> Iterator[tuple[str, FastAPI]]:
 
 def test_every_route_of_every_app_declares_itself() -> None:
     seen_lists: set[str] = set()
+    requires_routes: set[tuple[str, str]] = set()
     checked = 0
     for variant, app in _variants():
         for route in app.routes:
@@ -421,6 +422,12 @@ def test_every_route_of_every_app_declares_itself() -> None:
                 if declaration.kind == "local_only":
                     assert is_local_only(path), (variant, path)
                     assert declaration.action in PERMISSIONS
+                elif declaration.kind == "requires":
+                    # The management endpoints (docs/30): checked, and local only until A8.
+                    assert path.startswith("/v1/admin/"), (variant, path)
+                    assert is_local_only(path), (variant, path)
+                    assert declaration.action in PERMISSIONS
+                    requires_routes.add((variant, path))
                 else:
                     assert declaration.kind == "public", (variant, path)
                 checked += 1
@@ -436,6 +443,9 @@ def test_every_route_of_every_app_declares_itself() -> None:
     assert checked > 50
     # The explicit lists match real routes, so they cannot go stale.
     assert seen_lists >= DOCUMENTATION
+    # With accounts, the user endpoints; with applications too, all thirteen (docs/30).
+    assert len({p for v, p in requires_routes if v == "accounts"}) == 5
+    assert len({p for v, p in requires_routes if v == "default server"}) == 10
 
 
 def test_a_route_without_a_declaration_is_found() -> None:

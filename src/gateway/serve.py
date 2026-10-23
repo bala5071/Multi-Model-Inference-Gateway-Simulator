@@ -5,9 +5,10 @@ See docs/25-local-only.md. A thin launcher around uvicorn that:
 - turns uvicorn's proxy headers off, so the client address is always the socket peer (the
   app's local-only guard refuses forwarded headers anyway, so plain ``uvicorn`` is safe too);
 - refuses to bind a non-loopback address while monitoring, load control and the dashboard are
-  unauthenticated, unless ``GATEWAY_ALLOW_NETWORK_BIND=1`` (the Docker image sets it, because
-  it must bind 0.0.0.0 inside the container and is published on 127.0.0.1 only); then it
-  starts and prints a warning naming the open endpoints.
+  unauthenticated (and console login and management are local only), unless
+  ``GATEWAY_ALLOW_NETWORK_BIND=1`` (the Docker image sets it, because it must bind 0.0.0.0
+  inside the container and is published on 127.0.0.1 only); then it starts and prints a
+  warning naming the local-only endpoints.
 
     uv run python -m gateway.serve                     # 127.0.0.1:8000, the default server
     uv run python -m gateway.serve --port 8123
@@ -49,16 +50,16 @@ def bind_decision(host: str, environ: Mapping[str, str]) -> tuple[bool, str | No
     if environ.get(ALLOW_NETWORK_BIND_ENV) == "1":
         return True, (
             f"WARNING: binding {host}, which is not loopback, because "
-            f"{ALLOW_NETWORK_BIND_ENV}=1. These endpoints have no user authentication: "
-            f"{endpoints}. The app still serves them only to loopback peers and to "
-            "GATEWAY_LOCAL_NETWORKS, but make sure nothing outside this machine can reach "
-            "this port (in Docker: publish it on 127.0.0.1 only)."
+            f"{ALLOW_NETWORK_BIND_ENV}=1. These endpoints are local only until A8, and most "
+            f"have no user authentication: {endpoints}. The app still serves them only to "
+            "loopback peers and to GATEWAY_LOCAL_NETWORKS, but make sure nothing outside this "
+            "machine can reach this port (in Docker: publish it on 127.0.0.1 only)."
         )
     return False, (
-        f"Refusing to bind {host}: it is not a loopback address, and these endpoints have no "
-        f"user authentication yet: {endpoints}. Bind 127.0.0.1 (the default), or set "
-        f"{ALLOW_NETWORK_BIND_ENV}=1 if something else (such as Docker publishing on "
-        "127.0.0.1 only) keeps the port local. See docs/25-local-only.md."
+        f"Refusing to bind {host}: it is not a loopback address, and these endpoints are local "
+        f"only until A8 (most have no user authentication): {endpoints}. Bind 127.0.0.1 "
+        f"(the default), or set {ALLOW_NETWORK_BIND_ENV}=1 if something else (such as Docker "
+        "publishing on 127.0.0.1 only) keeps the port local. See docs/25-local-only.md."
     )
 
 
