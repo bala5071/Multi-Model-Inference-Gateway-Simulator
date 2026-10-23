@@ -9,10 +9,13 @@ pepper, admin and application key. Then, interleaved round by round, from a clie
 machine:
 
 - "mock directly": the streaming request the adapter sends, read to the end;
-- "through the gateway": ``POST /v1/chat/completions`` (not streamed) for the same tier.
+- "through the gateway": ``POST /v1/chat/completions`` (not streamed) for the same tier;
+- "first text, mock" and "first text, gateway": the same two, streamed, timed to the first
+  chunk that carries text.
 
-The difference is the gateway's own work: the key check, routing, the adapter, metrics and the
-ledger. It says nothing about any real provider's latency.
+The overheads are the gateway's figure minus the mock's, p50 against p50: the gateway's own
+call to the mock is part of the gateway's figure. They say nothing about any real provider's
+latency: the provider is a mock.
 
     uv run python -m benchmarks.chat_overhead
     uv run python -m benchmarks.chat_overhead --rounds 500 --runs 3
@@ -45,7 +48,16 @@ from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.routing import load_plans
 
 WARMUP_ROUNDS = 20
-KINDS = ("mock directly", "through the gateway")
+KINDS = (
+    "mock directly",
+    "through the gateway",
+    "first text, mock",
+    "first text, gateway",
+)
+DIFFERENCES = {
+    "overhead, total": ("through the gateway", "mock directly"),
+    "overhead, first text": ("first text, gateway", "first text, mock"),
+}
 REQUEST = {"model": "economy", "messages": [{"role": "user", "content": "Say hello."}]}
 
 
@@ -97,6 +109,32 @@ def _prepare(path: Path, pepper: str) -> str:
     return key
 
 
+def _text_of(data: str) -> str:
+    """The text a chunk carries, if any."""
+    choices = json.loads(data).get("choices") or [{}]
+    delta = choices[0].get("delta") or {}
+    text = delta.get("content")
+    return text if isinstance(text, str) else ""
+
+
+async def _first_content_ms(
+    client: httpx.AsyncClient, clock: WallClock, url: str, body: dict[str, object], **kw: object
+) -> tuple[float, float]:
+    """(time to the first chunk carrying text, time to the end) of a streamed request."""
+    started = clock.now_ms()
+    first: float | None = None
+    async with client.stream("POST", url, json=body, **kw) as response:  # type: ignore[arg-type]
+        if response.status_code != 200:
+            raise RuntimeError(f"{url} answered {response.status_code}")
+        async for line in response.aiter_lines():
+            if first is None and line.startswith("data: {") and _text_of(line[6:]):
+                first = clock.now_ms() - started
+    total = clock.now_ms() - started
+    if first is None:
+        raise RuntimeError(f"{url} sent no text")
+    return first, total
+
+
 async def _measure(mock: str, gateway: str, key: str, rounds: int) -> dict[str, list[float]]:
     clock = WallClock()
     results: dict[str, list[float]] = {kind: [] for kind in KINDS}
@@ -106,25 +144,29 @@ async def _measure(mock: str, gateway: str, key: str, rounds: int) -> dict[str, 
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    auth = {"Authorization": f"Bearer {key}"}
     async with httpx.AsyncClient(timeout=60.0) as client:
         for round_ in range(WARMUP_ROUNDS + rounds):
-            started = clock.now_ms()
-            async with client.stream("POST", f"{mock}/v1/chat/completions", json=upstream) as r:
-                async for _ in r.aiter_bytes():
-                    pass
-            direct = clock.now_ms() - started
-            started = clock.now_ms()
-            answer = await client.post(
-                f"{gateway}/v1/chat/completions",
-                json=REQUEST,
-                headers={"Authorization": f"Bearer {key}"},
+            first_direct, direct = await _first_content_ms(
+                client, clock, f"{mock}/v1/chat/completions", upstream
             )
+            started = clock.now_ms()
+            answer = await client.post(f"{gateway}/v1/chat/completions", json=REQUEST, headers=auth)
             through = clock.now_ms() - started
             if answer.status_code != 200:
                 raise RuntimeError(f"the gateway answered {answer.status_code}")
+            first_through, _ = await _first_content_ms(
+                client,
+                clock,
+                f"{gateway}/v1/chat/completions",
+                {**REQUEST, "stream": True},
+                headers=auth,
+            )
             if round_ >= WARMUP_ROUNDS:
-                results["mock directly"].append(direct)
-                results["through the gateway"].append(through)
+                for kind, value in zip(
+                    KINDS, (direct, through, first_direct, first_through), strict=True
+                ):
+                    results[kind].append(value)
     return results
 
 
@@ -209,7 +251,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"{args.runs} runs of {args.rounds} rounds each, after {WARMUP_ROUNDS} warm-up rounds;"
         " times in ms; percentiles: nearest rank"
     )
-    p50s: dict[str, list[float]] = {kind: [] for kind in (*KINDS, "difference")}
+    p50s: dict[str, list[float]] = {kind: [] for kind in (*KINDS, *DIFFERENCES)}
     for run in range(1, args.runs + 1):
         results = _run(args.rounds, environ)
         print(f"run {run}")
@@ -217,14 +259,15 @@ def main(argv: Sequence[str] | None = None) -> None:
             times = results[kind]
             p50s[kind].append(percentile(times, 50))
             print(
-                f"  {kind:<20} p50 {percentile(times, 50):>7.2f}  p90 {percentile(times, 90):>7.2f}"
+                f"  {kind:<22} p50 {percentile(times, 50):>7.2f}  p90 {percentile(times, 90):>7.2f}"
                 f"  mean {sum(times) / len(times):>7.2f}  max {max(times):>7.2f}"
             )
-        p50s["difference"].append(p50s["through the gateway"][-1] - p50s["mock directly"][-1])
-        print(f"  p50 difference       {p50s['difference'][-1]:>7.2f}")
+        for name, (gateway_kind, mock_kind) in DIFFERENCES.items():
+            p50s[name].append(p50s[gateway_kind][-1] - p50s[mock_kind][-1])
+            print(f"  {name:<22} p50 {p50s[name][-1]:>7.2f}")
     print("p50 across runs (min to max)")
     for kind, values in p50s.items():
-        print(f"  {kind:<20} {min(values):>7.2f} to {max(values):>7.2f}")
+        print(f"  {kind:<22} {min(values):>7.2f} to {max(values):>7.2f}")
 
 
 if __name__ == "__main__":

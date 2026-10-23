@@ -112,12 +112,25 @@ speak at `/v1/chat/completions`; or `ollama`, its own `/api/chat`). `/v1/generat
 
 ## The OpenAI wire format, without the SDK
 
+**What was checked, and what was not.** Wire compatibility was checked against OpenAI's
+published API description and the examples recorded from it, and nothing else: **no client
+library has been run against the endpoint**, the OpenAI SDK included.
+
 The OpenAI Python SDK was not added: its `httpx2` and `httpcore2` dependencies could not be shown
-to be canonical (docs/provider-plan.md, section 8). Instead `tests/test_chat_api.py` sends
-OpenAI's own documented example requests ("Default", "Streaming", "Functions", from the
-published `openai-openapi` description at a pinned commit; docs/licenses.md) to the gateway, with
-only the model replaced by a tier, and checks every answer, chunk, tool call, usage and error
-against the `required` field lists of the same description.
+to be canonical (docs/provider-plan.md, section 8; neither appears in `pyproject.toml` or
+`uv.lock`). Instead `tests/test_chat_api.py` sends OpenAI's own documented example requests
+("Default", "Streaming", "Functions", from the published `openai-openapi` description at a pinned
+commit; docs/licenses.md) to the gateway, with only the model replaced by a tier, and checks every
+answer, chunk, tool call, usage and error against the `required` field lists of the same
+description. A client that relies on something those lists do not require could still differ.
+
+## Try it with the local Ollama
+
+The README's "Try the chat endpoint with Ollama" gives exact Git Bash commands: the backends
+file (`examples/backends.ollama.yaml`, `chat_api: ollama`), the variables, a key read without
+echo into an unexported variable, six requests (plain, streamed, a tool with `tool_choice` auto,
+an unsupported field, a wrong key, `tool_choice` required) and the cleanup. They were run as
+written on this machine against Ollama 0.12.6 and gave the answers the README shows.
 
 ## Live tests
 
@@ -130,23 +143,35 @@ adapter with `llama3.2:1b-instruct-q4_K_M`, passed.
 
 ## Measured
 
-MEASURED on this machine (Intel Core Ultra 7 155H, 22 logical cores, 15.4 GB RAM, Windows 11
-10.0.26200, Python 3.12.10): `uv run python -m benchmarks.chat_overhead --rounds 500 --runs 3`,
-on the code of this step's commit. Two processes on this machine: a mock OpenAI-compatible
-provider that answers at once with a short streamed answer, and the real gateway
-(`gateway.serve`, `backend: llamacpp`, `chat_api: openai_compatible`, every tier pointed at the
-mock). Interleaved round by round from a client on the same machine; p50 of each run in ms, as
-the range over the three runs (500 rounds each, after 20 warm-up rounds):
+MEASURED on this machine, **against a mock provider**: Intel Core Ultra 7 155H, 22 logical
+cores, 15.4 GB RAM, Windows 11 10.0.26200, Python 3.12.10.
+`uv run python -m benchmarks.chat_overhead --rounds 500 --runs 3`; the gateway's code as of
+`15e4192` (A5 step 1), the benchmark as of the follow-up commit that added the streamed timing.
+Two processes on this machine: a mock OpenAI-compatible provider that answers at once with a
+short streamed answer, and the real gateway (`gateway.serve`, `backend: llamacpp`,
+`chat_api: openai_compatible`, every tier pointed at the mock). Interleaved round by round from a
+client on the same machine; the p50 of each run, in ms, as the range over the three runs (500
+rounds each, after 20 warm-up rounds).
+
+**The gateway's overhead, one figure: 3.40 to 3.51 ms** at p50, the gateway's total minus the
+direct call to the mock (not streamed). **For a streamed response, the first-token overhead is
+2.84 to 2.94 ms** at p50: the time to the first chunk that carries text through the gateway,
+minus the same from the mock directly.
 
 | Request | p50, ms |
 |---|---|
-| the mock directly (the streaming request the adapter sends, read to the end) | 1.70 to 1.74 |
-| `POST /v1/chat/completions` through the gateway, not streamed | 5.78 to 6.10 |
-| difference | 4.08 to 4.38 |
+| the mock directly (the streaming request the adapter sends, read to the end) | 1.57 to 1.60 |
+| `POST /v1/chat/completions` through the gateway, not streamed | 4.97 to 5.11 |
+| first text, the mock directly | 1.09 to 1.12 |
+| first text, through the gateway, streamed | 3.93 to 4.06 |
+| **overhead, total** | **3.40 to 3.51** |
+| **overhead, first text** | **2.84 to 2.94** |
 
-The difference contains the gateway's own call to the mock, a request that on its own takes the
-first row's time, plus the key check, routing, the adapter, metrics and the ledger's usage write.
-It is not a provider's latency: the provider here is a mock.
+Each overhead contains the gateway's own call to the mock (a request like the one in the first
+row) plus the key check, routing, the adapter, metrics and the ledger's usage write. It is not a
+provider's latency: the provider is a mock. An earlier run of the first version of the
+benchmark, which did not interleave the streamed requests, gave 4.08 to 4.38 ms for the total
+overhead; the figures above replace it.
 
 ## Threat model (this step)
 
