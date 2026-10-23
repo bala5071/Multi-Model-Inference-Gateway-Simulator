@@ -299,3 +299,20 @@ def test_as_only_narrows_what_the_operator_may_do(
     # Every command works for the operator; --as refuses some to every user.
     assert {actor for _, actor in narrowed} == {"alice", "bob", "root", "sid"}
     assert ("grant-role --username bob --role platform_admin --platform", "root") in narrowed
+
+
+def test_a_role_is_held_only_within_the_users_own_organization(
+    world: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        run(world, "create-application --id south-shop --name Shop --plan pro --organization south")
+        == 0
+    )
+    capsys.readouterr()
+    # bob is in north: neither south itself nor an application of south, even by the operator.
+    assert run(world, "grant-role --username bob --role viewer --organization south") == 1
+    assert run(world, "grant-role --username bob --role app_admin --application south-shop") == 1
+    assert capsys.readouterr().err.count("only within the user's own organization") == 2
+    # In his own organization, both are fine.
+    assert run(world, "grant-role --username bob --role viewer --organization north") == 0
+    assert run(world, "grant-role --username bob --role app_admin --application north-shop") == 0

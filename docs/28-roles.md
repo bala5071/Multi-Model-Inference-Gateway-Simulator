@@ -180,8 +180,12 @@ the endpoint, so `/v1/generate` and every route of the no-applications path run 
 
 Each rule about who may do what is enforced in one place, and each place was broken on purpose
 to show its tests fail. Every time, the file was restored and found byte-for-byte as before,
-and all 39 tests of `tests/test_permissions.py`, `tests/test_manage_roles.py` and
-`tests/test_last_admin.py` passed again.
+and the tests of `tests/test_permissions.py`, `tests/test_manage_roles.py` and
+`tests/test_last_admin.py` (39, then 40 with the scope test) passed again. The scope check (a role
+is held only within the user's own organization, in `_assignment`) is a fourth mechanism, apart
+from the granting rules: the granting-rules mutation's 3 failures were all those two rules
+(platform_admin granted only by the operator; a platform_admin appointing only org_admins) and
+the narrowing test that relies on them.
 
 | Broken on purpose | Tests that failed |
 |---|---|
@@ -189,6 +193,8 @@ and all 39 tests of `tests/test_permissions.py`, `tests/test_manage_roles.py` an
 | The granting rules (`_check_granting`) allow everything | 3: platform_admin granted only by the operator; a platform_admin appointing only org_admins; `--as` only narrowing |
 | The last-admin guard does nothing | 6: the last org_admin, the last platform_admin, the individual organization's member, and the three of `tests/test_last_admin.py` |
 | No transaction around the count and the change | 2: a revocation and a disabling from another connection slipping in between |
+| The scope check, organization branch (any organization accepted) | 2: `test_grant_list_and_revoke`, `test_a_role_is_held_only_within_the_users_own_organization` |
+| The scope check, application branch (any organization's application accepted) | 1: `test_a_role_is_held_only_within_the_users_own_organization`, added in this review: before it, nothing caught this mutation |
 
 **The 13 that still pass with `authorize` allowing everything**, and why none of them depends
 on it:

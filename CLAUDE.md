@@ -268,6 +268,11 @@ gives the same events and snapshots at any speed (`tests/test_live_sim.py`). Not
 it may read real time; `PacedSimClock` uses real time only to decide when simulated
 time may move, never what it moves to. Never present anything from it as a measurement.
 
+`.gitignore` ignores `*.db` and `*.db-*` everywhere (databases and their backups hold key HMACs
+and password hashes). So **no tracked file, test fixture included, may use a `.db` extension**:
+it would be ignored, never committed, and a test passing locally would fail in CI. Build test
+databases in `tmp_path` at run time instead.
+
 Tests that need a real model server are marked `real_models` and skipped unless
 `GATEWAY_REAL_MODELS=1`; CI never runs them.
 
