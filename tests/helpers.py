@@ -117,6 +117,8 @@ def unique_tokens(request_id: str, count: int) -> tuple[int, ...]:
 
 # A test pepper: not a secret, and never used outside tests.
 TEST_PEPPER = b"test-pepper-not-a-secret-0123456789abcdef"
+# The vault's master key in tests (docs/32): 32 bytes, base64url. A test value, not a secret.
+TEST_VAULT_KEY = "dGVzdC12YXVsdC1rZXktbm90LWEtc2VjcmV0LTAxMjM"
 
 
 def application_access(

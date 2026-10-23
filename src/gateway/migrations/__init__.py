@@ -12,6 +12,8 @@ from gateway.migrations import (
     m0007_audit_log,
     m0008_roles,
     m0009_step_up,
+    m0010_provider_configs,
+    m0011_provider_keys,
 )
 from gateway.migrations.runner import (
     Migration,
@@ -32,6 +34,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     m0007_audit_log.MIGRATION,
     m0008_roles.MIGRATION,
     m0009_step_up.MIGRATION,
+    m0010_provider_configs.MIGRATION,
+    m0011_provider_keys.MIGRATION,
 )
 
 __all__ = [

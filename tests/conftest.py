@@ -9,7 +9,8 @@ import pytest
 from gateway.apikeys import PEPPER_ENV
 from gateway.auth import ADMIN_PASSWORD_ENV, ADMIN_USERNAME_ENV
 from gateway.passwords import CHEAP, MEMORY_ENV, PARALLELISM_ENV, TIME_COST_ENV
-from helpers import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME, TEST_PEPPER
+from gateway.vault import VAULT_KEY_ENV
+from helpers import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME, TEST_PEPPER, TEST_VAULT_KEY
 
 REAL_MODELS_ENV = "GATEWAY_REAL_MODELS"
 # Live calls to hosted providers (docs/31): never in CI, never by default.
@@ -50,6 +51,7 @@ def default_server_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     """
     monkeypatch.setenv("GATEWAY_DATABASE", str(tmp_path / "gateway.db"))
     monkeypatch.setenv(PEPPER_ENV, TEST_PEPPER.decode())
+    monkeypatch.setenv(VAULT_KEY_ENV, TEST_VAULT_KEY)
     # Its bootstrap admin, and argon2 at the lowest cost, so starting it stays fast.
     monkeypatch.setenv(ADMIN_USERNAME_ENV, TEST_ADMIN_USERNAME)
     monkeypatch.setenv(ADMIN_PASSWORD_ENV, TEST_ADMIN_PASSWORD)

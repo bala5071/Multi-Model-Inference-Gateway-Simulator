@@ -53,7 +53,8 @@ the session's next request (tested).
 `src/gateway/permissions.py` holds it; this copy is checked against it by
 `test_the_documented_table_is_the_table`, every cell. Allowed pairs are `role@relation`.
 **Step-up** is enforced by `requires` since step 6 (docs/29): a flagged action is refused with
-`step_up_required` unless the session's step-up window is open. **Wired**: `now` (enforced today, through
+`step_up_required` unless the session's step-up window is open. **`consume`** (A5, docs/32): step-up that one successful
+call uses up, so each such change needs a fresh password. **Wired**: `now` (enforced today, through
 the CLI's `--as`), `step 7` (the management endpoints), `A5` (provider keys and modes), `A8`
 (monitoring, control and the Playground: local only until then), `later` (declared, no endpoint
 planned in A2).
@@ -77,6 +78,17 @@ planned in A2).
 | `applications.create` | organization | `org_admin@own_organization` | | step 7 |
 | `applications.list` | organization | `org_admin@own_organization`, `viewer@own_organization` | | step 7 |
 | `usage.read_organization` | organization | `org_admin@own_organization`, `viewer@own_organization` | | later |
+| `providers.list` | organization | `org_admin@own_organization` | | A5 |
+| `providers.status` | organization | `org_admin@own_organization`, `platform_admin@platform` | | A5 |
+| `providers.create` | organization | `org_admin@own_organization` | yes | A5 |
+| `providers.update` | organization | `org_admin@own_organization` | yes | A5 |
+| `providers.disable` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | A5 |
+| `providers.enable` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | A5 |
+| `providers.delete` | organization | `org_admin@own_organization` | consume | A5 |
+| `providers.test` | organization | `org_admin@own_organization` | | A5 |
+| `provider_keys.set` | organization | `org_admin@own_organization` | consume | A5 |
+| `provider_keys.delete` | organization | `org_admin@own_organization` | consume | A5 |
+| `mode.set_organization` | organization | `org_admin@own_organization` | yes | A5 |
 | `audit.read_organization` | organization | `org_admin@own_organization`, `platform_admin@platform` | | later |
 | `applications.read` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@application_in_own_organization`, `viewer@own_application` | | step 7 |
 | `usage.read_application` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@application_in_own_organization`, `viewer@own_application` | | later |
@@ -88,11 +100,7 @@ planned in A2).
 | `application_roles.delete` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | yes | later |
 | `application_roles.list` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | | later |
 | `audit.read_application` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | | later |
-| `provider_keys.add` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | yes | A5 |
-| `provider_keys.replace` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | yes | A5 |
-| `provider_keys.delete` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | yes | A5 |
-| `provider_keys.read` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | | A5 |
-| `mode.change` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | yes | A5 |
+| `mode.set_application` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | yes | A5 |
 | `monitoring.read` | platform | `platform_admin@platform` | | A8 |
 | `control.write` | platform | `platform_admin@platform` | | A8 |
 | `playground.use` | platform | `platform_admin@platform` | | A8 |
