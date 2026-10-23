@@ -202,7 +202,11 @@ Step 5 builds this section (note 28); the management endpoints that use it are s
   A5 or A8). Actions cover users, passwords, roles, organizations, applications, application
   API keys, application roles, the audit log and usage. It also declares `provider_keys.*`
   and `mode.change` (step-up; A5 adds the endpoints), and `monitoring.*` and `control.*`,
-  marked "local only until A8" (section 10).
+  marked "local only until A8" (section 10). **A5 (docs/provider-plan.md, proposed) replaces the
+  `provider_keys.*` and `mode.change` rows**: providers belong to the organization, so their
+  actions move to organization level (`providers.*`, `provider_keys.set|delete`, org_admin
+  only for keys; platform_admin may disable a provider), `provider_keys.read` goes (no endpoint
+  returns a key), and the mode splits into `mode.set_organization` and `mode.set_application`.
 - **`authorize(actor, action, resource) -> Decision`**, deny by default. A resource carries its
   application and organization, so a request that crosses organizations is denied whatever
   the role (platform_admin excepted, by design, for its platform-level actions only).
@@ -343,7 +347,10 @@ step 7, which cannot add a flagged action without enforcement.
   (with the action's name) on every refusal; the audit retention keeps the table bounded.
 - **Consume-on-use** (a step-up used up by one successful call of the most dangerous actions,
   provider keys in A5) is described in note 29 and not built; a test asserts the table has no
-  `consume` column yet, so adding it is a deliberate change.
+  `consume` column yet, so adding it is a deliberate change. A5's second pull request builds it
+  (docs/provider-plan.md, section 4): `requires` claims the window with one conditional update
+  before the handler, so two concurrent changes cannot share a window, and restores it if the
+  handler fails.
 
 Flagged in A2: changing roles, creating, disabling, enabling or unlocking users and resetting
 their passwords, and issuing, rotating or revoking application API keys; provider keys and modes are flagged now and wired in A5. Step-up through
@@ -467,7 +474,10 @@ control (local only, not authenticated, until A8); no TLS; no multi-factor authe
 limits per source address; **the lockout can be abused to lock a known username out**; no
 token revocation before expiry (roles and disabling take up to 5 minutes for tokens); secrets
 in the process environment; a stolen database gives argon2 hashes, key HMACs and the audit
-log; timing side channels not measured; one process per database; **no breached-password
+log; timing side channels not measured; one process per database; the additions of A5
+(docs/provider-plan.md, section 11: prompts sent to a third party in a fallback mode, the vault
+master key in the environment, plaintext provider keys in memory during a request, SSRF residue,
+a lost master key); **no breached-password
 lookup** (checking a password against Have I Been Pwned or similar would send something
 derived from it to a third party, so only the bundled blocklist is used); **the audit log is
 not tamper-evident** (anyone who can write the database can change it); **the in-memory
@@ -532,6 +542,9 @@ Each step is its own pull request and stops for review.
    step-up everywhere it is written down.
 8. Access tokens, JWKS and `generate-signing-key`.
 9. The threat model, the leak scan across everything, and the docs.
+
+Proposed (docs/provider-plan.md, question 9): A5 is built before steps 8 and 9, which nothing in
+A5 depends on, so that step 9's threat model and leak scan cover A2 and A5 together.
 
 ## 14. Waiting for A8
 
