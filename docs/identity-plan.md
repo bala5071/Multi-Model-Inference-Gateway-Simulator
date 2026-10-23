@@ -229,6 +229,46 @@ Step 5 builds this section (note 28); the management endpoints that use it are s
   and never logged. The cost of reading assignments on each request is measured, and
   `/v1/generate`, the performance gate and the protected outputs are shown unaffected.
 
+  **Step 7's endpoints** (each declared and enforced by `requires(action, resolver)`, so
+  authorization and step-up come from one place; `/v1/admin` joins the local-only paths):
+
+  | Method and path under `/v1/admin/orgs/{org}` | Action | Step-up |
+  |---|---|---|
+  | `POST /users` (`username`, `password`) | `users.create` | yes |
+  | `GET /users` | `users.list` | |
+  | `POST /users/{username}/disable` | `users.disable` | yes |
+  | `POST /users/{username}/enable` | `users.enable` | yes |
+  | `POST /users/{username}/reset-password` (`new_password`) | `users.reset_password` | yes |
+  | `POST /users/{username}/unlock` | `users.unlock` | |
+  | `POST /applications` (`id`, `name`, `plan`) | `applications.create` | |
+  | `GET /applications` | `applications.list` | |
+  | `GET /applications/{app}` | `applications.read` | |
+  | `POST /applications/{app}/keys` (`label`, `expires_in_days`) | `application_keys.issue` | yes |
+  | `GET /applications/{app}/keys` | `application_keys.list` | |
+  | `POST /applications/{app}/keys/{key_id}/rotate` (`grace_hours`) | `application_keys.rotate` | yes |
+  | `POST /applications/{app}/keys/{key_id}/revoke` | `application_keys.revoke` | yes |
+
+  - **Resolvers** build the resource chain from the path and return nothing (403 `forbidden`,
+    byte for byte the same as a forbidden one) when the organization, the user, the
+    application or the key does not exist **or is not inside the organization named in the
+    path**: a user of `south` reached through `/orgs/north/...` is missing.
+  - **Users** go through the same `create_user` as the CLI (the policy, the individual
+    organization's one member, the outsider's `must_change_password`), hashing through the
+    `HashRunner` over HTTP; a response never carries a password or hash.
+  - **Application keys**: a new key (issue, rotate) is returned once, in that response's body,
+    with `Cache-Control: no-store`; a list shows key ids, labels and state, never a key or
+    its HMAC. platform_admin can reach none of these endpoints (the table gives it nothing at
+    application level).
+  - **Roles stay CLI-only** in A2: there is no endpoint to grant or revoke one, so the
+    escalation rules about granting (app_admin cannot grant org_admin, and the rest of note
+    28) stay tested on the shared service through the CLI; over HTTP the tests show no such
+    endpoint exists, an org_admin cannot act outside its organization, and platform_admin
+    cannot touch application keys.
+  - **The last org_admin** cannot be disabled over HTTP either (409 `last_admin`).
+  - **Audited**: user changes as before; new entries for applications created and for keys
+    issued, rotated and revoked (the key's id, never the key), from the HTTP endpoints and
+    the CLI alike.
+
 ## 8. Step-up
 
 Step 6 builds and proves the mechanism (note 29); the management endpoints that use it are
@@ -280,6 +320,10 @@ written. platform_admin reads organization-, user-, role- and login-level entrie
 about application keys and application roles are read only by the org_admin of that
 organization and the app_admin of that application. org_admin reads all of their
 organization's entries, including those about accounts a platform_admin created in it.
+
+Step 7 adds entries for applications created and for application keys issued, rotated and
+revoked (by key id, which is the visible part of a key; never the key or its HMAC), visible
+through `audit.read_application`.
 
 Step 4 writes the login entries. A failure for an unknown username is recorded with no
 identifier at all (one row per attempt, nothing of what was typed). Rows for unknown-user
@@ -431,9 +475,13 @@ Each step is its own pull request and stops for review.
 6. Done (note 29). Step-up, before the management endpoints so they enforce it from the start: migration 9,
    `POST /v1/auth/step-up`, enforcement in `requires`, the per-session cap, the synthetic route
    for every flagged action and the AST check, with their mutations; the audit entries.
-7. (Was 5b.) The management endpoints under `/v1/admin/orgs/{org}/...`: users, applications
-   and application keys, each declaring and enforcing its permission; the escalation and
-   last-admin tests, missing equals forbidden, and the cost of reading assignments.
+7. (Was 5b.) The management endpoints under `/v1/admin/orgs/{org}/...` (the table in section
+   7): users, applications and application keys, each through `requires`; key and application
+   audit entries; cross-organization attempts on every endpoint with two organizations and
+   same-named applications, missing equals forbidden for organization, user, application and
+   key, a user with no role, role revocation, step-up on every flagged endpoint, the last
+   admin, the leak scan with issued keys, mutations of every resolver's membership check, and
+   the measured cost per management request on the running server.
 8. Access tokens, JWKS and `generate-signing-key`.
 9. The threat model, the leak scan across everything, and the docs.
 
