@@ -8,6 +8,7 @@ dependency, or a new dependency of a dependency, fails this test until it is rec
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import tomllib
 from importlib import metadata
@@ -145,3 +146,13 @@ def test_the_blocklist_is_the_recorded_file_with_its_license() -> None:
 )
 def test_license_expressions(expression: str, allowed: bool) -> None:
     assert is_allowed(expression, allowed_licenses()) is allowed
+
+
+def test_the_openai_wire_fixture_is_the_recorded_extract() -> None:
+    folder = Path(__file__).parent / "fixtures" / "openai_wire"
+    fixture = json.loads((folder / "chat_completions.json").read_text(encoding="utf-8"))
+    doc = _doc()
+    assert fixture["commit"] in doc
+    assert fixture["sha256"] in doc
+    assert "MIT License" in (folder / "LICENSE-openai-openapi.txt").read_text(encoding="utf-8")
+    assert set(fixture["examples"]) == {"Default", "Streaming", "Functions"}

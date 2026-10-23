@@ -1,0 +1,257 @@
+{
+  "source": "https://github.com/openai/openai-openapi/blob/234829e2b634b8fb159df7fcddbffad204173ffd/openapi.json",
+  "commit": "234829e2b634b8fb159df7fcddbffad204173ffd",
+  "commit_date": "2026-10-07",
+  "sha256": "dde9abb7f7ca1e260fa05b4828984851e77f35ab89f60d0f7bbc1f44859f4724",
+  "license": "MIT (LICENSE-openai-openapi.txt beside this file)",
+  "note": "Only the documented examples of POST /chat/completions and the required-field lists of its schemas, extracted unchanged. Test data, not shipped.",
+  "examples": {
+    "Default": {
+      "request": {
+        "model": "gpt-6-astra",
+        "messages": [
+          {
+            "role": "developer",
+            "content": "You are a helpful assistant."
+          },
+          {
+            "role": "user",
+            "content": "Hello!"
+          }
+        ]
+      },
+      "response": {
+        "id": "chatcmpl-B9MBs8CjcvOU2jLn4n570S5qMJKcT",
+        "object": "chat.completion",
+        "created": 1741569952,
+        "model": "gpt-6-astra",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Hello! How can I assist you today?",
+              "refusal": null,
+              "annotations": []
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 19,
+          "completion_tokens": 10,
+          "total_tokens": 29,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "audio_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+          }
+        },
+        "service_tier": "default"
+      }
+    },
+    "Streaming": {
+      "request": {
+        "model": "gpt-6-astra",
+        "messages": [
+          {
+            "role": "developer",
+            "content": "You are a helpful assistant."
+          },
+          {
+            "role": "user",
+            "content": "Hello!"
+          }
+        ],
+        "stream": true
+      },
+      "chunks": [
+        {
+          "id": "chatcmpl-123",
+          "object": "chat.completion.chunk",
+          "created": 1694268190,
+          "model": "gpt-6-astra",
+          "system_fingerprint": "fp_44709d6fcb",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": ""
+              },
+              "logprobs": null,
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-123",
+          "object": "chat.completion.chunk",
+          "created": 1694268190,
+          "model": "gpt-6-astra",
+          "system_fingerprint": "fp_44709d6fcb",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "Hello"
+              },
+              "logprobs": null,
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-123",
+          "object": "chat.completion.chunk",
+          "created": 1694268190,
+          "model": "gpt-6-astra",
+          "system_fingerprint": "fp_44709d6fcb",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "logprobs": null,
+              "finish_reason": "stop"
+            }
+          ]
+        }
+      ]
+    },
+    "Functions": {
+      "request": {
+        "model": "gpt-6-astra",
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is the weather like in Boston today?"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_current_weather",
+              "description": "Get the current weather in a given location",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "location": {
+                    "type": "string",
+                    "description": "The city and state, e.g. San Francisco, CA"
+                  },
+                  "unit": {
+                    "type": "string",
+                    "enum": [
+                      "celsius",
+                      "fahrenheit"
+                    ]
+                  }
+                },
+                "required": [
+                  "location"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "auto"
+      },
+      "response": {
+        "id": "chatcmpl-abc123",
+        "object": "chat.completion",
+        "created": 1699896916,
+        "model": "gpt-6-astra",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_abc123",
+                  "type": "function",
+                  "function": {
+                    "name": "get_current_weather",
+                    "arguments": "{\n\"location\": \"Boston, MA\"\n}"
+                  }
+                }
+              ]
+            },
+            "logprobs": null,
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 82,
+          "completion_tokens": 17,
+          "total_tokens": 99,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+          }
+        }
+      }
+    }
+  },
+  "required": {
+    "response": [
+      "choices",
+      "created",
+      "id",
+      "model",
+      "object"
+    ],
+    "response_choice": [
+      "finish_reason",
+      "index",
+      "logprobs",
+      "message"
+    ],
+    "message": [
+      "content",
+      "role"
+    ],
+    "tool_call": [
+      "function",
+      "id",
+      "type"
+    ],
+    "chunk": [
+      "choices",
+      "created",
+      "id",
+      "model",
+      "object"
+    ],
+    "chunk_choice": [
+      "delta",
+      "index"
+    ],
+    "chunk_tool_call": [
+      "index"
+    ],
+    "usage": [
+      "completion_tokens",
+      "prompt_tokens",
+      "total_tokens"
+    ],
+    "error": [
+      "code",
+      "message",
+      "param",
+      "type"
+    ],
+    "error_response": [
+      "error"
+    ]
+  }
+}

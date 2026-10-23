@@ -14,6 +14,8 @@ from typing import Any, Literal, cast
 import httpx
 import yaml
 
+from gateway.adapters import OllamaAdapter, OpenAICompatibleAdapter
+from gateway.backends import Backend
 from gateway.backends.llamacpp import Endpoint, LlamaCppBackend
 from gateway.clock import Clock
 from gateway.passthrough import PassthroughWorker
@@ -21,6 +23,9 @@ from gateway.profiles import PROFILES, Tier
 from gateway.registry import ModelRegistry
 
 BackendKind = Literal["simulated", "llamacpp"]
+# How POST /v1/chat/completions talks to an operator's model server (docs/31): Ollama's own
+# /api/chat, or the OpenAI-compatible /v1/chat/completions that llama-server and Ollama share.
+ChatApi = Literal["ollama", "openai_compatible"]
 
 
 class BackendConfigError(ValueError):
@@ -40,6 +45,7 @@ class BackendConfig:
     endpoint: Endpoint = "completions"
     max_in_flight: int | None = None
     servers: Mapping[Tier, LlamaServer] = field(default_factory=dict)
+    chat_api: ChatApi = "openai_compatible"
     # A calibration file whose timing parameters replace the default (calibrated) ones in
     # the simulator. Only used by the simulated backend.
     profiles_path: Path | None = None
@@ -66,6 +72,11 @@ def parse_backend_config(data: object, *, kind_override: str | None = None) -> B
     if endpoint not in ("completions", "chat"):
         raise BackendConfigError(
             f"llamacpp.endpoint must be 'completions' or 'chat', not {endpoint!r}"
+        )
+    chat_api = section.get("chat_api", "openai_compatible")
+    if chat_api not in ("ollama", "openai_compatible"):
+        raise BackendConfigError(
+            f"llamacpp.chat_api must be 'ollama' or 'openai_compatible', not {chat_api!r}"
         )
     max_in_flight = section.get("max_in_flight")
     if max_in_flight is not None and (
@@ -105,6 +116,7 @@ def parse_backend_config(data: object, *, kind_override: str | None = None) -> B
         endpoint=cast(Endpoint, endpoint),
         max_in_flight=max_in_flight,
         servers=servers,
+        chat_api=cast(ChatApi, chat_api),
         profiles_path=Path(profiles) if profiles else None,
     )
 
@@ -151,3 +163,19 @@ def build_llamacpp_registry(
         worker = PassthroughWorker(profile, backend, clock, max_in_flight=config.max_in_flight)
         registry.register(tier.value, worker, aliases=[profile.name])
     return registry
+
+
+def build_chat_adapters(
+    config: BackendConfig, *, client: httpx.AsyncClient | None = None
+) -> dict[str, Backend]:
+    """The chat adapter of each tier's model server (docs/31), as ``chat_api`` says. These are
+    the operator's own servers: their URLs come from this file, never from an organization, and
+    they take no key. A server with no ``model`` is asked for ``default``."""
+    adapters: dict[str, Backend] = {}
+    for tier, server in config.servers.items():
+        kind = OllamaAdapter if config.chat_api == "ollama" else OpenAICompatibleAdapter
+        base_url = server.url if config.chat_api == "ollama" else server.url.rstrip("/") + "/v1"
+        adapters[tier.value] = kind(
+            name=tier.value, base_url=base_url, model=server.model or "default", client=client
+        )
+    return adapters

@@ -17,6 +17,9 @@ backend: simulated
 llamacpp:
   # completions -> POST /v1/completions; chat -> POST /v1/chat/completions
   endpoint: completions
+  # How POST /v1/chat/completions (docs/31) reaches each server: openai_compatible
+  # (/v1/chat/completions, llama-server and Ollama) or ollama (Ollama's own /api/chat).
+  chat_api: openai_compatible
   # Requests the gateway will have open against one tier at once; more get 429.
   max_in_flight: 32
   # One llama-server per tier. scripts/run_local_models.sh starts them on these ports.

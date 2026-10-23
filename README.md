@@ -396,6 +396,12 @@ curl -s -X POST http://127.0.0.1:8000/v1/generate -H "Content-Type: application/
 curl -s -N -X POST http://127.0.0.1:8000/v1/generate -H "$KEY" -H "Content-Type: application/json" \
   -d '{"model": "economy", "prompt": "hello", "max_tokens": 4, "stream": true}'
 
+# The same tiers in the OpenAI chat format (docs/31): an OpenAI-compatible client can use
+# http://127.0.0.1:8000/v1 as its base URL with the key. Tools need a tier served by a real model.
+curl -s -X POST http://127.0.0.1:8000/v1/chat/completions -H "$KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "economy", "messages": [{"role": "user", "content": "hello"}], "max_tokens": 8}'
+
 # What this application has used this month, and the gateway's own view of latency and load.
 curl -s http://127.0.0.1:8000/v1/applications/me/usage -H "$KEY"
 curl -s http://127.0.0.1:8000/metrics/summary

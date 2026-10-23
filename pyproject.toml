@@ -82,4 +82,5 @@ addopts = "-ra --strict-markers --strict-config"
 xfail_strict = true
 markers = [
     "real_models: needs real model servers running locally; skipped unless GATEWAY_REAL_MODELS=1",
+    "live_provider: calls a hosted model provider and can cost money; skipped unless GATEWAY_LIVE_PROVIDERS=1",
 ]
