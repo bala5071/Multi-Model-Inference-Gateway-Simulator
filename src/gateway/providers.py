@@ -1,0 +1,605 @@
+"""An organization's model providers, their sealed keys, and test-connection.
+
+See docs/32-provider-settings-and-vault.md and docs/provider-plan.md, sections 3 and 4.
+
+- **A provider belongs to an organization**: type (``openai_compatible`` or ``anthropic``; an
+  organization never configures Ollama, which is the operator's), an ``https`` base URL checked
+  by the egress guard, a model, the plan tier it can serve, a role, prices it entered, and two
+  switches: the organization's and the platform's. It is enabled when both are on.
+- **Its key** is sealed by the vault, bound to the organization, provider, type and URL origin.
+  Changing the type or URL deletes the key in the same transaction; changing the model resets
+  the probed capabilities.
+- **Test-connection** runs only when an org_admin asks, spends tokens on the organization's
+  account, is rate-limited per provider, and goes through the egress guard. It records each
+  capability with its source, when it was probed and the model it was probed with, and answers
+  only with them or a mapped error code: never the provider's text or error body.
+- **A key the loaded master keys cannot read** (``key_unreadable``) is shown as such, logged as a
+  warning once per provider at startup and once at first use, and never tried with another key.
+
+Store calls are synchronous, for the reason given in ``gateway.usage``.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import secrets
+import sqlite3
+from collections import deque
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
+from typing import Any, Protocol
+
+import httpx
+
+from gateway.adapters import AnthropicAdapter, OpenAICompatibleAdapter
+from gateway.adapters.base import HttpAdapter
+from gateway.audit import (
+    ORGANIZATION_ID_PATTERN,
+    AuditAction,
+    AuditEvent,
+    AuditLog,
+    Outcome,
+    Reason,
+    TargetType,
+)
+from gateway.chat import (
+    ChatDelta,
+    ChatMessage,
+    ChatRequest,
+    ProviderError,
+    ProviderErrorCode,
+    Source,
+    ToolSpec,
+)
+from gateway.clock import Clock, EpochSource
+from gateway.egress import check_base_url
+from gateway.management import ManagementRefusal, Stores
+from gateway.overload import RequestTimeoutError, run_with_timeout
+from gateway.permissions import Actor, Resource
+from gateway.redaction import Redactor
+from gateway.vault import Binding, KeyUnreadableError, SealedKey, Vault, VaultIntegrityError
+
+PROVIDER_TYPES = ("openai_compatible", "anthropic")
+TIERS = ("economy", "standard", "premium")
+ROLES = ("primary", "fallback")
+PROVIDER_ID_BYTES = 8
+KEY_MIN_LENGTH = 8
+KEY_MAX_LENGTH = 512
+TESTS_PER_HOUR = 5
+HOUR_MS = 60 * 60 * 1000.0
+PROBE_TIMEOUT_MS = 30_000.0
+PING = ToolSpec("ping", "Answers pong.", {"type": "object", "properties": {}})
+LOG = logging.getLogger("gateway.providers")
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderConfig:
+    id: str
+    organization_id: str
+    type: str
+    base_url: str
+    model: str
+    serves_tier: str
+    role: str
+    enabled: bool
+    platform_enabled: bool
+    price_input_per_mtok: float | None
+    price_output_per_mtok: float | None
+    # Each capability: {"value", "source", "probed_at_ms", "model", "reason"}.
+    capabilities: Mapping[str, Mapping[str, Any]]
+    first_token_budget_ms: float | None
+    created_at_ms: float
+
+    @property
+    def is_enabled(self) -> bool:
+        return self.enabled and self.platform_enabled
+
+    @property
+    def binding(self) -> Binding:
+        return Binding(self.organization_id, self.id, self.type, self.base_url)
+
+
+@dataclass(frozen=True, slots=True)
+class StoredKey:
+    provider_id: str
+    sealed: SealedKey
+    created_at_ms: float
+    updated_at_ms: float
+
+
+_COLUMNS = (
+    "id, organization_id, type, base_url, model, serves_tier, role, enabled, platform_enabled, "
+    "price_input_per_mtok, price_output_per_mtok, capabilities, first_token_budget_ms, "
+    "created_at_ms"
+)
+
+
+def _config(row: tuple[Any, ...]) -> ProviderConfig:
+    (pid, org, kind, url, model, tier, role, on, platform_on, p_in, p_out, caps, budget, at) = row
+    return ProviderConfig(
+        pid, org, kind, url, model, tier, role, bool(on), bool(platform_on), p_in, p_out,
+        json.loads(caps), budget, at,
+    )  # fmt: skip
+
+
+class ProviderStore:
+    """The tables of migrations 10 and 11."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        found = connection.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table'"
+            " AND name IN ('provider_configs', 'provider_keys')"
+        ).fetchone()
+        if found[0] != 2:
+            raise RuntimeError("provider_configs and provider_keys do not exist; run migrations")
+        self._connection = connection
+
+    @contextmanager
+    def immediate(self) -> Iterator[None]:
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._connection.execute("ROLLBACK")
+            raise
+        self._connection.execute("COMMIT")
+
+    def add(self, config: ProviderConfig) -> None:
+        c = config
+        try:
+            self._connection.execute(
+                f"INSERT INTO provider_configs ({_COLUMNS})"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    c.id, c.organization_id, c.type, c.base_url, c.model, c.serves_tier, c.role,
+                    int(c.enabled), int(c.platform_enabled), c.price_input_per_mtok,
+                    c.price_output_per_mtok, json.dumps(dict(c.capabilities)),
+                    c.first_token_budget_ms, c.created_at_ms,
+                ),
+            )  # fmt: skip
+        except sqlite3.IntegrityError as exc:
+            raise ManagementRefusal(
+                Reason.PROVIDER_EXISTS,
+                "this organization already has a provider of that type, URL and model",
+            ) from exc
+
+    def get(self, provider_id: str) -> ProviderConfig | None:
+        row = self._connection.execute(
+            f"SELECT {_COLUMNS} FROM provider_configs WHERE id = ?", (provider_id,)
+        ).fetchone()
+        return _config(row) if row is not None else None
+
+    def list_for(self, organization_id: str) -> list[ProviderConfig]:
+        rows = self._connection.execute(
+            f"SELECT {_COLUMNS} FROM provider_configs WHERE organization_id = ? ORDER BY id",
+            (organization_id,),
+        ).fetchall()
+        return [_config(row) for row in rows]
+
+    def list_all(self) -> list[ProviderConfig]:
+        rows = self._connection.execute(
+            f"SELECT {_COLUMNS} FROM provider_configs ORDER BY id"
+        ).fetchall()
+        return [_config(row) for row in rows]
+
+    def replace(self, config: ProviderConfig) -> None:
+        c = config
+        try:
+            self._connection.execute(
+                "UPDATE provider_configs SET type = ?, base_url = ?, model = ?, serves_tier = ?,"
+                " role = ?, enabled = ?, platform_enabled = ?, price_input_per_mtok = ?,"
+                " price_output_per_mtok = ?, capabilities = ?, first_token_budget_ms = ?"
+                " WHERE id = ?",
+                (
+                    c.type, c.base_url, c.model, c.serves_tier, c.role, int(c.enabled),
+                    int(c.platform_enabled), c.price_input_per_mtok, c.price_output_per_mtok,
+                    json.dumps(dict(c.capabilities)), c.first_token_budget_ms, c.id,
+                ),
+            )  # fmt: skip
+        except sqlite3.IntegrityError as exc:
+            raise ManagementRefusal(
+                Reason.PROVIDER_EXISTS,
+                "this organization already has a provider of that type, URL and model",
+            ) from exc
+
+    def delete(self, provider_id: str) -> None:
+        self._connection.execute("DELETE FROM provider_keys WHERE provider_id = ?", (provider_id,))
+        self._connection.execute("DELETE FROM provider_configs WHERE id = ?", (provider_id,))
+
+    def get_key(self, provider_id: str) -> StoredKey | None:
+        row = self._connection.execute(
+            "SELECT provider_id, key_id, nonce, ciphertext, last4, created_at_ms, updated_at_ms"
+            " FROM provider_keys WHERE provider_id = ?",
+            (provider_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        pid, key_id, nonce, ciphertext, last4, created, updated = row
+        return StoredKey(
+            pid, SealedKey(key_id, bytes(nonce), bytes(ciphertext), last4), created, updated
+        )
+
+    def put_key(self, provider_id: str, sealed: SealedKey, at_ms: float) -> None:
+        """Insert or overwrite the key (in the caller's transaction, if any)."""
+        self._connection.execute(
+            "INSERT INTO provider_keys (provider_id, key_id, nonce, ciphertext, last4,"
+            " created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (provider_id) DO UPDATE SET key_id = excluded.key_id,"
+            " nonce = excluded.nonce, ciphertext = excluded.ciphertext, last4 = excluded.last4,"
+            " updated_at_ms = excluded.updated_at_ms",
+            (
+                provider_id,
+                sealed.key_id,
+                sealed.nonce,
+                sealed.ciphertext,
+                sealed.last4,
+                at_ms,
+                at_ms,
+            ),
+        )
+
+    def delete_key(self, provider_id: str) -> bool:
+        cursor = self._connection.execute(
+            "DELETE FROM provider_keys WHERE provider_id = ?", (provider_id,)
+        )
+        return cursor.rowcount == 1
+
+    def all_keys(self) -> list[StoredKey]:
+        ids = [r[0] for r in self._connection.execute("SELECT provider_id FROM provider_keys")]
+        return [k for k in (self.get_key(i) for i in ids) if k is not None]
+
+
+def resolve_provider(
+    stores: Stores, providers: ProviderStore, organization_id: str, provider_id: str
+) -> Resource | None:
+    """The organization, as the resource a provider action acts on, if the provider exists
+    **and belongs to it**."""
+    if stores.organizations.get_organization(organization_id) is None:
+        return None
+    found = providers.get(provider_id)
+    if found is None or found.organization_id != organization_id:
+        return None
+    return Resource.organization(organization_id)
+
+
+class ChangeMarker(Protocol):
+    """What a consume-on-use handler is given to mark that it changed something (docs/32):
+    ``requires``' token. Marked in the transaction that makes the change."""
+
+    def changed(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class KeyState:
+    present: bool
+    readable: bool
+    last4: str | None
+    updated_at_ms: float | None
+
+
+class ProviderService:
+    """Providers below HTTP. ``client_factory`` makes the HTTP client test-connection uses: the
+    egress guard's (``gateway.egress.organization_client``) in the server."""
+
+    def __init__(
+        self,
+        store: ProviderStore,
+        vault: Vault,
+        audit: AuditLog,
+        clock: Clock,
+        epoch: EpochSource,
+        redactor: Redactor,
+        client_factory: Callable[[], httpx.AsyncClient],
+        *,
+        tests_per_hour: int = TESTS_PER_HOUR,
+        random_bytes: Callable[[int], bytes] = secrets.token_bytes,
+    ) -> None:
+        self.store = store
+        self.vault = vault
+        self.audit = audit
+        self.redactor = redactor
+        self._clock = clock
+        self._epoch = epoch
+        self._client_factory = client_factory
+        self._tests_per_hour = tests_per_hour
+        self._random_bytes = random_bytes
+        self._tests: dict[str, deque[float]] = {}
+        self._warned_at_use: set[str] = set()
+
+    def __repr__(self) -> str:
+        return "ProviderService(<vault redacted>)"
+
+    def _now(self) -> float:
+        return self._epoch.epoch_ms()
+
+    def _record(
+        self,
+        action: AuditAction,
+        config: ProviderConfig,
+        actor: Actor,
+        outcome: Outcome = Outcome.SUCCESS,
+        **details: object,
+    ) -> None:
+        org = config.organization_id
+        extra: dict[str, object] = {"provider_type": config.type, **details}
+        if ORGANIZATION_ID_PATTERN.fullmatch(org):
+            extra["organization_id"] = org
+        self.audit.write(
+            AuditEvent(action, outcome, TargetType.PROVIDER, config.id, actor.user_id, extra),
+            self._now(),
+        )
+
+    # --- reading ---------------------------------------------------------------------------
+
+    def key_state(self, config: ProviderConfig) -> KeyState:
+        stored = self.store.get_key(config.id)
+        if stored is None:
+            return KeyState(False, False, None, None)
+        return KeyState(
+            True, self.vault.readable(stored.sealed), stored.sealed.last4, stored.updated_at_ms
+        )
+
+    def warn_unreadable(self) -> int:
+        """At startup: a warning for each provider whose key no loaded master key can read (the
+        provider id and the missing key id, nothing else). Returns how many."""
+        count = 0
+        for stored in self.store.all_keys():
+            if not self.vault.readable(stored.sealed):
+                LOG.warning(
+                    "provider %s: its key was sealed under master key %s, which is not loaded; "
+                    "the key is unreadable until it is entered again (docs/32)",
+                    stored.provider_id,
+                    stored.sealed.key_id,
+                )
+                count += 1
+        return count
+
+    # --- changing --------------------------------------------------------------------------
+
+    def create(
+        self,
+        organization_id: str,
+        *,
+        type: str,
+        base_url: str,
+        model: str,
+        serves_tier: str,
+        role: str,
+        price_input_per_mtok: float | None,
+        price_output_per_mtok: float | None,
+        first_token_budget_ms: float | None,
+        actor: Actor,
+    ) -> ProviderConfig:
+        if type not in PROVIDER_TYPES:
+            # Ollama is the operator's, configured in backends.yaml, never an organization's.
+            raise ValueError(f"type must be one of {', '.join(PROVIDER_TYPES)}")
+        config = ProviderConfig(
+            id="prv_" + self._random_bytes(PROVIDER_ID_BYTES).hex(),
+            organization_id=organization_id,
+            type=type,
+            base_url=check_base_url(base_url),
+            model=model,
+            serves_tier=serves_tier,
+            role=role,
+            enabled=True,
+            platform_enabled=True,
+            price_input_per_mtok=price_input_per_mtok,
+            price_output_per_mtok=price_output_per_mtok,
+            capabilities={},
+            first_token_budget_ms=first_token_budget_ms,
+            created_at_ms=self._now(),
+        )
+        self.store.add(config)
+        self._record(AuditAction.PROVIDER_CREATED, config, actor)
+        return config
+
+    def update(
+        self, config: ProviderConfig, changes: Mapping[str, Any], *, actor: Actor
+    ) -> tuple[ProviderConfig, bool]:
+        """Apply ``changes``; returns the provider and whether its key was deleted (a type or
+        URL change: the key is bound to them and could not be used anyway)."""
+        if "type" in changes and changes["type"] not in PROVIDER_TYPES:
+            raise ValueError(f"type must be one of {', '.join(PROVIDER_TYPES)}")
+        if "base_url" in changes:
+            changes = {**changes, "base_url": check_base_url(changes["base_url"])}
+        updated = replace(config, **changes)
+        rebound = (updated.type, updated.base_url) != (config.type, config.base_url)
+        if updated.model != config.model or rebound:
+            updated = replace(updated, capabilities={})  # probed with another model: unknown
+        with self.store.immediate():
+            self.store.replace(updated)
+            key_deleted = self.store.delete_key(config.id) if rebound else False
+            self._record(AuditAction.PROVIDER_UPDATED, updated, actor, key_deleted=key_deleted)
+        return updated, key_deleted
+
+    def set_switch(
+        self, config: ProviderConfig, on: bool, *, platform: bool, actor: Actor
+    ) -> ProviderConfig:
+        updated = replace(config, platform_enabled=on) if platform else replace(config, enabled=on)
+        self.store.replace(updated)
+        self._record(
+            AuditAction.PROVIDER_ENABLED if on else AuditAction.PROVIDER_DISABLED,
+            updated,
+            actor,
+            switch="platform" if platform else "organization",
+        )
+        return updated
+
+    def delete(self, config: ProviderConfig, *, actor: Actor, marker: ChangeMarker) -> None:
+        with self.store.immediate():
+            self.store.delete(config.id)
+            self._record(AuditAction.PROVIDER_DELETED, config, actor, step_up_consumed=True)
+            marker.changed()
+
+    def set_key(
+        self, config: ProviderConfig, key: str, *, actor: Actor, marker: ChangeMarker
+    ) -> KeyState:
+        """Seal and store ``key`` as it arrived; the API never returns it."""
+        if (
+            not KEY_MIN_LENGTH <= len(key) <= KEY_MAX_LENGTH
+            or not key.isprintable()
+            or not key.isascii()
+        ):
+            raise ValueError(
+                f"a key is {KEY_MIN_LENGTH} to {KEY_MAX_LENGTH} printable ASCII characters"
+            )
+        with self.redactor.watching(key):
+            sealed = self.vault.seal(key, config.binding)
+        with self.store.immediate():
+            self.store.put_key(config.id, sealed, self._now())
+            self._record(AuditAction.PROVIDER_KEY_SET, config, actor, step_up_consumed=True)
+            marker.changed()
+        return self.key_state(config)
+
+    def delete_key(self, config: ProviderConfig, *, actor: Actor, marker: ChangeMarker) -> None:
+        with self.store.immediate():
+            if not self.store.delete_key(config.id):
+                raise ManagementRefusal(Reason.NO_KEY, "this provider has no key to delete")
+            self._record(AuditAction.PROVIDER_KEY_DELETED, config, actor, step_up_consumed=True)
+            marker.changed()
+
+    # --- test-connection -------------------------------------------------------------------
+
+    def _count_test(self, provider_id: str) -> None:
+        now = self._clock.now_ms()
+        times = self._tests.setdefault(provider_id, deque())
+        while times and now - times[0] >= HOUR_MS:
+            times.popleft()
+        if len(times) >= self._tests_per_hour:
+            raise ManagementRefusal(
+                Reason.TEST_RATE_LIMITED,
+                f"at most {self._tests_per_hour} tests of a provider an hour; try again later",
+            )
+        times.append(now)
+
+    def adapter(self, config: ProviderConfig, client: httpx.AsyncClient) -> HttpAdapter:
+        kind = AnthropicAdapter if config.type == "anthropic" else OpenAICompatibleAdapter
+        return kind(name=config.id, base_url=config.base_url, model=config.model, client=client)
+
+    async def test(self, config: ProviderConfig, *, actor: Actor) -> dict[str, Any]:
+        """Probe the provider with its key: one short answer (streaming), one tool round trip.
+        Spends tokens on the organization's account. Returns the capabilities recorded, or
+        raises ``ProviderError`` (mapped, never the provider's text) or ``ManagementRefusal``."""
+        self._count_test(config.id)
+        stored = self.store.get_key(config.id)
+        if stored is None:
+            self._record(
+                AuditAction.PROVIDER_TESTED, config, actor, Outcome.FAILURE, outcome_code="no_key"
+            )
+            raise ManagementRefusal(Reason.NO_KEY, "this provider has no key: set one first")
+        if not self.vault.readable(stored.sealed):
+            if config.id not in self._warned_at_use:
+                self._warned_at_use.add(config.id)
+                LOG.warning(
+                    "provider %s: its key is unreadable (master key %s not loaded); not used",
+                    config.id,
+                    stored.sealed.key_id,
+                )
+            self._record(
+                AuditAction.PROVIDER_TESTED,
+                config,
+                actor,
+                Outcome.FAILURE,
+                outcome_code="key_unreadable",
+            )
+            raise ManagementRefusal(
+                Reason.KEY_UNREADABLE, "this provider's key cannot be read: enter it again"
+            )
+        try:
+            capabilities = await self._probe(config, stored)
+        except (KeyUnreadableError, VaultIntegrityError):
+            self._record(
+                AuditAction.PROVIDER_TESTED,
+                config,
+                actor,
+                Outcome.FAILURE,
+                outcome_code="key_unreadable",
+            )
+            raise ManagementRefusal(
+                Reason.KEY_UNREADABLE, "this provider's key cannot be read: enter it again"
+            ) from None
+        except ProviderError as exc:
+            self._record(
+                AuditAction.PROVIDER_TESTED,
+                config,
+                actor,
+                Outcome.FAILURE,
+                outcome_code=exc.code.value,
+            )
+            raise
+        current = self.store.get(config.id)
+        if current is not None and current.model == config.model:
+            self.store.replace(replace(current, capabilities=capabilities))
+        self._record(AuditAction.PROVIDER_TESTED, config, actor, outcome_code="ok")
+        return capabilities
+
+    async def _probe(self, config: ProviderConfig, stored: StoredKey) -> dict[str, Any]:
+        now = self._now()
+
+        def flag(value: object, reason: str | None = None) -> dict[str, Any]:
+            return {
+                "value": value,
+                "source": Source.PROBED.value if value is not None else Source.UNKNOWN.value,
+                "probed_at_ms": now,
+                "model": config.model,
+                "reason": reason,
+            }
+
+        async with self._client_factory() as client:
+            adapter = self.adapter(config, client)
+            with self.vault.lease(stored.sealed, config.binding, self.redactor) as key:
+                deltas: list[ChatDelta] = []
+                ask = ChatRequest(
+                    "probe-1", config.serves_tier,
+                    (ChatMessage("user", "Reply with the word OK."),), max_tokens=8,
+                )  # fmt: skip
+                await self._timed(adapter.chat(ask, credential=key, on_delta=deltas.append))
+                streaming = flag(sum(1 for d in deltas if d.text) >= 1)
+                tools: dict[str, Any]
+                try:
+                    called = await self._timed(
+                        adapter.chat(
+                            ChatRequest(
+                                "probe-2", config.serves_tier,
+                                (ChatMessage("user", "Call the ping tool."),),
+                                tools=(PING,), max_tokens=16,
+                            ),
+                            credential=key,
+                        )
+                    )  # fmt: skip
+                    if not called.tool_calls:
+                        tools = flag(None, "no_tool_call_in_probe")
+                    else:
+                        call = called.tool_calls[0]
+                        await self._timed(
+                            adapter.chat(
+                                ChatRequest(
+                                    "probe-3", config.serves_tier,
+                                    (
+                                        ChatMessage("user", "Call the ping tool."),
+                                        ChatMessage("assistant", None, (call,)),
+                                        ChatMessage("tool", "pong", tool_call_id=call.id),
+                                    ),
+                                    tools=(PING,), max_tokens=8,
+                                ),
+                                credential=key,
+                            )
+                        )  # fmt: skip
+                        tools = flag(True)
+                except ProviderError as exc:
+                    if exc.code is not ProviderErrorCode.TOOLS_NOT_SUPPORTED:
+                        raise
+                    tools = flag(False, exc.detail or "tools_not_supported")
+        return {
+            "supports_streaming": streaming,
+            "supports_tools": tools,
+            "context_window": flag(None, "not_reported_by_provider"),
+        }
+
+    async def _timed(self, work: Any) -> Any:
+        try:
+            return await run_with_timeout(self._clock, work, PROBE_TIMEOUT_MS)
+        except RequestTimeoutError:
+            raise ProviderError(ProviderErrorCode.UPSTREAM_TIMEOUT, detail="probe") from None

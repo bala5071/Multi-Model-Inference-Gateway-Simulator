@@ -4,6 +4,7 @@ docs/27-users-and-sessions.md."""
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import sys
@@ -307,3 +308,89 @@ async def test_no_temporary_password_or_issued_key_leaks_and_the_scan_would_see_
         ("logs", "temporary password, reset"),
         ("stdout", "issued key"),
     ]
+
+
+# --- provider keys through the vault (docs/32) ---------------------------------------------------
+
+
+async def test_a_provider_key_appears_only_in_the_requests_that_carry_it(
+    caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A key set through the admin endpoint, used by test-connection against a provider that
+    answers, one that answers 401 echoing the key (as real providers do), and one whose stream
+    breaks: it is in no response, log, audit row, table (other than sealed), repr or output.
+    The planted control is found; with the redaction layer installed it is scrubbed."""
+    from gateway.redaction import install
+    from mock_network import http_response, sse_response
+    from mock_providers import openai_text, openai_tools
+    from test_providers_api import KEY, NEW, rig
+
+    caplog.set_level(logging.DEBUG)
+    responses: dict[str, str] = {}
+    async with rig() as r:
+        alice = await r.login("alice")
+        await r.step_up(alice)
+        made = await r.call(alice, "POST", "/north/providers", NEW)
+        provider_id = made.json()["provider_id"]
+        await r.step_up(alice)
+        responses["set key"] = _response(
+            await r.call(alice, "PUT", f"/north/providers/{provider_id}/key", {"key": KEY})
+        )
+        echo = json.dumps({"error": {"message": f"Incorrect API key provided: {KEY}"}}).encode()
+        broken = sse_response(openai_text("He", "llo").chunks)[:-40]
+        r.network.responses = [
+            sse_response(openai_text("OK").chunks),
+            sse_response(openai_tools(("call_1", "ping", ["{}"])).chunks),
+            sse_response(openai_text("pong").chunks),
+            http_response(echo, "401 Unauthorized", Content_Type="application/json"),
+            broken,
+        ]
+        for name in ("test ok", "test 401", "test broken"):
+            responses[name] = _response(
+                await r.call(alice, "POST", f"/north/providers/{provider_id}/test")
+            )
+        responses["list"] = _response(await r.call(alice, "GET", "/north/providers"))
+        responses["status"] = _response(await r.call(alice, "GET", "/north/providers/status"))
+        connection = r.world.accounts.connection
+        objects = [
+            r.service,
+            r.service.vault,
+            r.store.get(provider_id),
+            r.store.get_key(provider_id),
+        ]
+        sent = b"".join(bytes(c.written) for c in r.network.connections)
+
+    def corpus() -> dict[str, str]:
+        out, err = capsys.readouterr()
+        texts = {
+            "logs": "\n".join(
+                f"{rec.name} {rec.getMessage()} {rec.args!r} {rec.exc_text or ''}"
+                for rec in caplog.records
+            ),
+            "stdout": out,
+            "stderr": err,
+            "audit_log": _table(connection, "audit_log", set()),
+            "provider_configs": _table(connection, "provider_configs", set()),
+            "provider_keys": _table(connection, "provider_keys", {"nonce", "ciphertext"}),
+            "reprs": "\n".join(repr(o) for o in objects),
+        }
+        texts.update({f"response: {name}": text for name, text in responses.items()})
+        return texts
+
+    # Where it must be: the Authorization header of each request test-connection sent.
+    assert sent.count(f"Bearer {KEY}".encode()) == 5  # 3 for the good test, 1 each after
+    assert find_leaks(corpus(), {"provider key": KEY}) == []
+    assert '"provider_auth_failed"' in responses["test 401"]
+
+    # The control: logged by mistake, it is found.
+    logging.getLogger("gateway").warning("oops, logged: %s", KEY)
+    assert find_leaks(corpus(), {"provider key": KEY}) == [("logs", "provider key")]
+    # With the redaction layer installed (as the server does), the same mistake is scrubbed.
+    caplog.clear()
+    remove = install(r.service.redactor)
+    try:
+        logging.getLogger("gateway").warning("oops, logged: %s", KEY)
+    finally:
+        remove()
+    assert find_leaks(corpus(), {"provider key": KEY}) == []
+    assert "[redacted]" in caplog.records[0].getMessage()

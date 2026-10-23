@@ -194,6 +194,7 @@ def _run(rounds: int, environ: dict[str, str]) -> dict[str, list[float]]:
             **environ,
             "GATEWAY_DATABASE": str(Path(folder) / "gateway.db"),
             "GATEWAY_KEY_PEPPER": pepper,
+            "GATEWAY_VAULT_KEY": secrets.token_urlsafe(32),
             "GATEWAY_BACKENDS": str(backends),
             "GATEWAY_ADMIN_USERNAME": "benchadmin",
             "GATEWAY_ADMIN_PASSWORD": secrets.token_urlsafe(18),

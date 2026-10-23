@@ -167,7 +167,12 @@ def _run(rounds: int, environ: dict[str, str]) -> dict[str, list[float]]:
         pepper = secrets.token_urlsafe(32)
         password, app_id = _prepare(path, pepper.encode(), environ)
         port = _free_port()
-        server_env = {**environ, "GATEWAY_DATABASE": str(path), "GATEWAY_KEY_PEPPER": pepper}
+        server_env = {
+            **environ,
+            "GATEWAY_DATABASE": str(path),
+            "GATEWAY_KEY_PEPPER": pepper,
+            "GATEWAY_VAULT_KEY": secrets.token_urlsafe(32),
+        }
         process = subprocess.Popen(
             [sys.executable, "-m", "gateway.serve", "--port", str(port), "--log-level", "warning"],
             env=server_env,

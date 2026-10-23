@@ -153,6 +153,8 @@ class ProviderErrorCode(StrEnum):
     UPSTREAM_MALFORMED = "upstream_malformed"
     UPSTREAM_REJECTED = "upstream_rejected"
     TOOLS_NOT_SUPPORTED = "tools_not_supported"
+    # The provider's address is not one the gateway may connect to (docs/32).
+    EGRESS_REFUSED = "egress_refused"
 
 
 # The answer the gateway gives for each, and its fixed message. Nothing a provider wrote.
@@ -168,6 +170,10 @@ _ERRORS: Mapping[ProviderErrorCode, tuple[int, str]] = {
     ProviderErrorCode.UPSTREAM_MALFORMED: (502, "The model provider sent a malformed answer."),
     ProviderErrorCode.UPSTREAM_REJECTED: (502, "The model provider rejected the request."),
     ProviderErrorCode.TOOLS_NOT_SUPPORTED: (422, "This model cannot be used with tools here."),
+    ProviderErrorCode.EGRESS_REFUSED: (
+        502,
+        "The provider's address is not one the gateway may connect to.",
+    ),
 }
 
 
