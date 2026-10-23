@@ -235,13 +235,13 @@ def test_the_gateway_migrations_create_exactly_their_tables(tmp_path: Path) -> N
     assert _columns(db, "applications")[-1] == "organization_id"
 
     # Migrations 5 to 7: users, sessions and the audit log (docs/27-users-and-sessions.md).
-    assert runner.migrate() == (5, 6, 7, 8)
+    assert runner.migrate() == (5, 6, 7, 8, 9)
     accounts = {"users", "sessions", "audit_log", "role_assignments", "app_roles"}
     assert _tables(db) == every_table | {"organizations"} | accounts
 
-    assert runner.rollback(1) == (8, 7, 6, 5, 4, 3, 2)
+    assert runner.rollback(1) == (9, 8, 7, 6, 5, 4, 3, 2)
     assert _tables(db) == {"schema_migrations", "usage_events"}
     assert runner.rollback(0) == (1,)
     assert _tables(db) == {"schema_migrations"}
-    assert runner.migrate() == (1, 2, 3, 4, 5, 6, 7, 8)
+    assert runner.migrate() == (1, 2, 3, 4, 5, 6, 7, 8, 9)
     assert _tables(db) == every_table | {"organizations"} | accounts

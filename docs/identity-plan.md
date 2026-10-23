@@ -428,7 +428,7 @@ Each step is its own pull request and stops for review.
    per-route declarations (`requires` enforcing, `local_only`, `public`), the generated matrix
    and the documented table, and the CLI for roles (`grant-role`, `revoke-role`,
    `list-roles`). No new endpoint.
-6. Step-up, before the management endpoints so they enforce it from the start: migration 9,
+6. Done (note 29). Step-up, before the management endpoints so they enforce it from the start: migration 9,
    `POST /v1/auth/step-up`, enforcement in `requires`, the per-session cap, the synthetic route
    for every flagged action and the AST check, with their mutations; the audit entries.
 7. (Was 5b.) The management endpoints under `/v1/admin/orgs/{org}/...`: users, applications

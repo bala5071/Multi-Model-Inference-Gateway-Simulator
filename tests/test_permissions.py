@@ -239,7 +239,11 @@ async def _admin(accounts: Accounts) -> AsyncIterator[httpx.AsyncClient]:
     async def read_probe(org: str) -> dict[str, str]:
         return {"read": org}
 
-    @app.post("/v1/admin/orgs/{org}/probe", dependencies=[requires("users.create", organization)])
+    @app.post(
+        "/v1/admin/orgs/{org}/probe",
+        # A change not flagged for step-up: step-up has its own tests (test_step_up.py).
+        dependencies=[requires("applications.create", organization)],
+    )
     async def write_probe(org: str) -> dict[str, str]:
         return {"wrote": org}
 
@@ -411,6 +415,9 @@ def test_every_route_of_every_app_declares_itself() -> None:
                 declarations = declaration_of(route)
                 assert len(declarations) == 1, (variant, path, declarations)
                 declaration = declarations[0]
+                if declaration.action is not None and PERMISSIONS[declaration.action].step_up:
+                    # A flagged action is declared only through requires, which enforces it.
+                    assert declaration.kind == "requires", (variant, path, declaration)
                 if declaration.kind == "local_only":
                     assert is_local_only(path), (variant, path)
                     assert declaration.action in PERMISSIONS

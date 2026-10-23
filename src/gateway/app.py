@@ -52,6 +52,8 @@ from gateway.auth import (
     CSRF_HEADER,
     LOGIN_FAILED_MESSAGE,
     SESSION_COOKIE,
+    STEP_UP_FAILED_MESSAGE,
+    STEP_UP_REQUIRED_MESSAGE,
     AccountAccess,
     AccountService,
     BootstrapOutcome,
@@ -61,9 +63,12 @@ from gateway.auth import (
     PasswordUnchangedError,
     SessionContext,
     SessionInvalidError,
+    StepUpFailedError,
+    StepUpRequiredError,
     audit_retention_ms,
     run_account_retention,
     session_cookie,
+    step_up_settings,
 )
 from gateway.backend_config import build_llamacpp_registry, load_backend_config
 from gateway.backends import BackendError
@@ -100,7 +105,7 @@ from gateway.passwords import (
     ThreadHashRunner,
     parameters_from,
 )
-from gateway.permissions import PERMISSIONS, Actor, Resource, authorize
+from gateway.permissions import PERMISSIONS, Actor, Resource
 from gateway.profiles import PROFILES, Tier, load_calibrated_profiles
 from gateway.ratelimit import RateLimitedError, RequestRateLimiter
 from gateway.registry import ModelRegistry, UnknownModelError
@@ -397,6 +402,8 @@ def local_only_route(action: str) -> Callable[[Endpoint], Endpoint]:
     """A route of a declared action that the local-only guard enforces until A8 (docs/25)."""
     if action not in PERMISSIONS:
         raise ValueError(f"unknown action {action!r}")
+    if PERMISSIONS[action].step_up:
+        raise ValueError(f"{action} needs step-up: only requires() can enforce it (docs/29)")
     return _declare(RouteDeclaration("local_only", action, "local only until A8"))
 
 
@@ -410,7 +417,13 @@ def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
     reads the session (401 without one), the CSRF token on a state-changing method, refuses a
     password that must be changed first, reads the actor's roles afresh, resolves the
     resource and calls ``authorize``; a resource that does not exist is refused exactly as a
-    forbidden one."""
+    forbidden one. Then, for an action the table flags for step-up, it refuses unless this
+    session's step-up window is open (docs/29): after authorization, so step-up never tells a
+    forbidden resource from a missing one.
+
+    ``authorize`` is imported here and nowhere else in this module: a test reads the source
+    and fails on any other import or call of it, or any read of a session's step-up window."""
+    from gateway.permissions import authorize
 
     def requires(action: str, resolver: Resolver) -> Any:
         if action not in PERMISSIONS:
@@ -428,6 +441,7 @@ def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
             resource = resolver(request)
             if resource is None or not authorize(actor, action, resource).allowed:
                 raise ForbiddenError()
+            service.check_step_up(context, action)
             return actor
 
         setattr(check, DECLARATION, RouteDeclaration("requires", action, "authorize"))
@@ -453,6 +467,12 @@ class LoginBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     username: str = Field(max_length=256)
+    password: str = Field(max_length=MAX_LENGTH)
+
+
+class StepUpBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     password: str = Field(max_length=MAX_LENGTH)
 
 
@@ -507,6 +527,15 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
     async def forbidden(_: Request, exc: ForbiddenError) -> JSONResponse:
         # One answer for "not permitted" and "does not exist", byte for byte (docs/28).
         return _error(403, "forbidden", "Not permitted, or not found.", headers=_NO_STORE)
+
+    @app.exception_handler(StepUpFailedError)
+    async def step_up_failed(_: Request, exc: StepUpFailedError) -> JSONResponse:
+        # One answer for every refused step-up, byte for byte (docs/29).
+        return _error(403, "step_up_failed", STEP_UP_FAILED_MESSAGE, headers=_NO_STORE)
+
+    @app.exception_handler(StepUpRequiredError)
+    async def step_up_required(_: Request, exc: StepUpRequiredError) -> JSONResponse:
+        return _error(403, "step_up_required", STEP_UP_REQUIRED_MESSAGE, headers=_NO_STORE)
 
     @app.exception_handler(LoginFailedError)
     async def login_failed(_: Request, exc: LoginFailedError) -> JSONResponse:
@@ -566,9 +595,23 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
     @public_route("the session's own endpoint: the route checks the session itself")
     async def me(context: SessionContext = Depends(session)) -> JSONResponse:
         return JSONResponse(
-            {"user": user_view(context), "csrf_token": service.csrf_token(context)},
+            {
+                "user": user_view(context),
+                "csrf_token": service.csrf_token(context),
+                "step_up_until_ms": service.step_up_until(context),
+            },
             headers=_NO_STORE,
         )
+
+    @app.post("/v1/auth/step-up")
+    @public_route("the session's own endpoint: the route checks the session and the password")
+    async def step_up(
+        body: StepUpBody, context: SessionContext = Depends(session_with_csrf)
+    ) -> JSONResponse:
+        # The session and its CSRF token (and, before them, the Origin check of the
+        # local-only guard) are checked before this runs: without them no password is verified.
+        until = await service.step_up(context, body.password)
+        return JSONResponse({"step_up_until_ms": until}, headers=_NO_STORE)
 
     @app.post("/v1/auth/change-password")
     @public_route("the session's own endpoint: the route checks the session itself")
@@ -1569,6 +1612,7 @@ def build_accounts(
     passwords = Passwords(
         PasswordHasher(parameters_from(environ, PRODUCTION)), ThreadHashRunner(max_workers=2)
     )
+    step_up_minutes, step_up_session_failures = step_up_settings(environ)
     service = AccountService(
         AccountStore(connection),
         AuditLog(connection),
@@ -1579,6 +1623,8 @@ def build_accounts(
         epoch=epoch,
         secret=pepper,
         audit_retention_ms=audit_retention_ms(environ),
+        step_up_minutes=step_up_minutes,
+        step_up_session_failures=step_up_session_failures,
     )
     if service.bootstrap_admin(environ) is BootstrapOutcome.EXISTS_WITH_VARIABLES:
         still_set = [name for name in (ADMIN_USERNAME_ENV, ADMIN_PASSWORD_ENV) if name in environ]

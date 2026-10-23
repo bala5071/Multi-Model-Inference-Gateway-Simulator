@@ -337,7 +337,10 @@ starting this version (it backs the database up first).
 session cookie and returns a CSRF token, which `POST /v1/auth/logout` and
 `POST /v1/auth/change-password` need in `X-CSRF-Token`; `GET /v1/auth/me` and
 `GET /v1/auth/sessions` read. Until roles arrive in the next identity step, that is all a
-session can do: nothing else in the gateway looks at it.
+session can do: nothing else in the gateway looks at it. Sensitive actions (creating or
+disabling users, changing roles, application keys) will also need a recent password:
+`POST /v1/auth/step-up` opens a 5-minute window for that one session
+([docs/29](docs/29-step-up.md)).
 
 ### Real-model mode
 

@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from gateway.permissions import PERMISSIONS
+
 MINUTE_MS = 60_000.0
 DEFAULT_UNKNOWN_USER_ROWS_PER_MINUTE = 60
 # User ids and session handles: what an entry may name.
@@ -51,6 +53,9 @@ class AuditAction(StrEnum):
     ROWS_DROPPED = "audit_rows_dropped"
     ROLE_GRANTED = "role_granted"
     ROLE_REVOKED = "role_revoked"
+    STEP_UP_GRANTED = "step_up_granted"
+    STEP_UP_FAILED = "step_up_failed"
+    STEP_UP_REQUIRED = "step_up_required"
 
 
 class Outcome(StrEnum):
@@ -80,6 +85,8 @@ class Reason(StrEnum):
     BOOTSTRAP = "bootstrap"
     CLI = "cli"
     UNKNOWN_USER_CAP = "unknown_user_cap"
+    SESSION_CAP = "session_cap"
+    MUST_CHANGE_PASSWORD = "must_change_password"
 
 
 # The only keys ``details`` may have, and the type of each value.
@@ -98,6 +105,8 @@ DETAIL_FIELDS: Mapping[str, type] = {
     "scope_type": str,
     "scope_id": str,
     "acting_as": str,
+    "action": str,
+    "step_up_until_ms": float,
 }
 
 
@@ -126,6 +135,10 @@ def _checked_details(details: Mapping[str, object]) -> dict[str, object]:
         elif key == "scope_type":
             if value not in SCOPE_TYPES:
                 raise ValueError("audit detail 'scope_type' must be a scope type")
+            checked[key] = value
+        elif key == "action":
+            if value not in PERMISSIONS:
+                raise ValueError("audit detail 'action' must be an action of the permission table")
             checked[key] = value
         elif key == "acting_as":
             if not isinstance(value, str) or not re.fullmatch(r"usr_[0-9a-f]{16}", value):

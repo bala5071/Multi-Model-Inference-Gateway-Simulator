@@ -76,7 +76,7 @@ def v7(tmp_path: Path) -> sqlite3.Connection:
 
 def test_the_backfill_gives_roles_only_where_the_data_says(v7: sqlite3.Connection) -> None:
     users_before = _rows(v7, "SELECT id, username, organization_id FROM users ORDER BY rowid")
-    assert MigrationRunner(v7, MIGRATIONS, _epoch()).migrate() == (8,)
+    assert MigrationRunner(v7, MIGRATIONS, _epoch()).migrate(8) == (8,)
     assert _rows(
         v7,
         "SELECT user_id, role, scope_type, scope_id, granted_by, granted_at_ms"
@@ -123,15 +123,15 @@ def test_apply_reverse_and_apply_again(v7: sqlite3.Connection) -> None:
     columns = _columns(v7, "users")
     admins = _rows(v7, "SELECT id, platform_admin FROM users ORDER BY rowid")
     runner = MigrationRunner(v7, MIGRATIONS, _epoch())
-    assert runner.migrate() == (8,)
-    assert runner.migrate() == ()
+    assert runner.migrate(8) == (8,)
+    assert runner.migrate(8) == ()
     assert runner.rollback(7) == (8,)
     assert _columns(v7, "users") == columns
     assert _rows(v7, "SELECT id, platform_admin FROM users ORDER BY rowid") == admins
     tables = {r[0] for r in _rows(v7, "SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert not {"role_assignments", "app_roles"} & tables
     assert v7.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-    assert runner.migrate() == (8,)
+    assert runner.migrate(8) == (8,)
 
 
 @pytest.mark.parametrize("extra", ["viewer", "app role"])

@@ -56,6 +56,7 @@ from gateway.organizations import (
 )
 from gateway.passwords import PasswordPolicy, Passwords, load_blocklist
 from gateway.permissions import (
+    PERMISSIONS,
     PLATFORM_SCOPE_ID,
     ROLE_SCOPES,
     Actor,
@@ -91,6 +92,13 @@ PRUNE_BATCH = 1000
 # Looked up when the username is not even well formed: no user can have it.
 _NO_SUCH_USERNAME = ""
 LOGIN_FAILED_MESSAGE = "The username or password is not correct, or the account cannot log in."
+STEP_UP_MINUTES_ENV = "GATEWAY_STEP_UP_MINUTES"
+DEFAULT_STEP_UP_MINUTES = 5.0
+STEP_UP_SESSION_FAILURES_ENV = "GATEWAY_STEP_UP_SESSION_FAILURES"
+DEFAULT_STEP_UP_SESSION_FAILURES = 3
+STEP_UP_SESSION_WINDOW_MS = 5 * MINUTE_MS
+STEP_UP_FAILED_MESSAGE = "Step-up was refused: the password was not accepted."
+STEP_UP_REQUIRED_MESSAGE = "This action needs a recent password: POST /v1/auth/step-up."
 
 
 class LoginFailedError(Exception):
@@ -118,6 +126,14 @@ class PasswordUnchangedError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("The new password must differ from the current one.")
+
+
+class StepUpFailedError(Exception):
+    """Every refused step-up, whatever the reason. It carries nothing about the reason."""
+
+
+class StepUpRequiredError(Exception):
+    """An action flagged for step-up, on a session whose window is not open."""
 
 
 class BootstrapError(Exception):
@@ -251,7 +267,13 @@ class AccountService:
         policy: PasswordPolicy | None = None,
         random_bytes: Callable[[int], bytes] = secrets.token_bytes,
         audit_retention_ms: float | None = None,
+        step_up_minutes: float = DEFAULT_STEP_UP_MINUTES,
+        step_up_session_failures: int = DEFAULT_STEP_UP_SESSION_FAILURES,
     ) -> None:
+        if not 1 <= step_up_minutes <= 60:
+            raise ValueError("step-up lasts from 1 to 60 minutes")
+        if step_up_session_failures < 1:
+            raise ValueError("step_up_session_failures must be at least 1")
         self.store = store
         self.audit = audit
         self.roles = roles
@@ -266,6 +288,15 @@ class AccountService:
         self._csrf_key = derive_key(secret, KeyPurpose.CSRF_TOKEN)
         self.limiter = LoginLimiter(clock, derive_key(secret, KeyPurpose.LOGIN_LIMITER))
         self.audit_retention_ms = audit_retention_ms
+        self.step_up_ms = step_up_minutes * MINUTE_MS
+        # Failed step-ups per session (by its digest), in memory, on the injected clock:
+        # past the cap, the endpoint refuses without verifying.
+        self._step_up_failures = LoginLimiter(
+            clock,
+            derive_key(secret, KeyPurpose.LOGIN_LIMITER),
+            max_failures=step_up_session_failures,
+            window_ms=STEP_UP_SESSION_WINDOW_MS,
+        )
         # A real argon2 hash at the current parameters, of a password nobody knows: what an
         # unknown username is verified against, so it costs what a real verify costs.
         self._dummy_hash = passwords.hasher.hash(_token(random_bytes(SESSION_BYTES)))
@@ -471,6 +502,7 @@ class AccountService:
         with self.store.immediate():
             self._guard_last_admin(user, self.roles.assignments_for(user.id))
             self.store.set_disabled(user.id, True)
+            self.store.clear_step_up(user.id)
             self._record(self._user_event(AuditAction.USER_DISABLED, user, actor))
             return self._revoke_all(user, Reason.USER_DISABLED)
 
@@ -536,6 +568,7 @@ class AccountService:
     def _grant(self, user: User, assignment: Assignment, actor: Actor | None) -> None:
         granted_by, _ = self._who(actor)
         self.roles.grant(user.id, assignment, granted_by, self._now())
+        self.store.clear_step_up(user.id)  # roles changed: a new step-up is needed
         self._record(self._role_event(AuditAction.ROLE_GRANTED, user, assignment, actor))
 
     def _role_event(
@@ -593,12 +626,92 @@ class AccountService:
             self._guard_last_admin(user, (assignment,))
             if not self.roles.revoke(user.id, assignment):
                 raise ValueError(f"{user.username!r} does not hold that role in that scope")
+            self.store.clear_step_up(user.id)  # roles changed: a new step-up is needed
             self._record(self._role_event(AuditAction.ROLE_REVOKED, user, assignment, actor))
 
     def list_roles(self, username: str, *, actor: Actor | None = None) -> tuple[Assignment, ...]:
         user = self._user_by_name(username)
         self._require(actor, "roles.list", Resource.organization(user.organization_id))
         return self.roles.assignments_for(user.id)
+
+    # --- step-up -------------------------------------------------------------------------
+
+    def _session_event(
+        self, event: AuditAction, outcome: Outcome, context: SessionContext, **details: object
+    ) -> AuditEvent:
+        return AuditEvent(
+            event, outcome, TargetType.SESSION, context.session.handle, context.user.id, details
+        )
+
+    async def step_up(self, context: SessionContext, password: str) -> float:
+        """Open this session's step-up window, or ``StepUpFailedError`` for any refusal.
+
+        Past the per-session cap of failed attempts it refuses at once, without verifying:
+        faster than the other refusals, which is acceptable because the caller is already
+        authenticated (docs/29). Otherwise the same steps whatever is wrong: one verify of the
+        session user's password through the runner, then the decision. A wrong password counts
+        toward the account lockout and the login limiter, exactly like a failed login, and
+        toward this session's cap. Returns the window's end (epoch ms)."""
+        user, session = context.user, context.session
+        if self._step_up_failures.blocked(session.id_hash):
+            self._record(
+                self._session_event(
+                    AuditAction.STEP_UP_FAILED,
+                    Outcome.FAILURE,
+                    context,
+                    reason=Reason.SESSION_CAP,
+                )
+            )
+            raise StepUpFailedError()
+        verification = await self._passwords.check(user.password_hash, password)
+        now = self._now()
+        key = self.limiter.key(user.username)
+        reason: Reason | None = None
+        if user.must_change_password:
+            reason = Reason.MUST_CHANGE_PASSWORD
+        elif user.locked_until_ms is not None and now < user.locked_until_ms:
+            reason = Reason.LOCKED
+        elif not verification.valid:
+            reason = Reason.WRONG_PASSWORD
+        elif self.limiter.blocked(key):
+            reason = Reason.RATE_LIMITED
+        if reason is not None:
+            details: dict[str, object] = {"reason": reason}
+            self._step_up_failures.record_failure(session.id_hash)
+            if reason is Reason.WRONG_PASSWORD:
+                details["failures"] = self._count_failure(user, now)
+                self.limiter.record_failure(key)
+            self._record(
+                self._session_event(AuditAction.STEP_UP_FAILED, Outcome.FAILURE, context, **details)
+            )
+            raise StepUpFailedError()
+        if verification.upgraded_hash is not None:
+            self.store.set_password_hash(user.id, verification.upgraded_hash)
+        until = now + self.step_up_ms
+        self.store.set_step_up(session.id_hash, until)
+        self._record(
+            self._session_event(
+                AuditAction.STEP_UP_GRANTED, Outcome.SUCCESS, context, step_up_until_ms=until
+            )
+        )
+        return until
+
+    def step_up_until(self, context: SessionContext) -> float | None:
+        """The end of this session's open step-up window, or None."""
+        until = context.session.step_up_until_ms
+        return until if until is not None and self._now() < until else None
+
+    def check_step_up(self, context: SessionContext, action: str) -> None:
+        """For ``requires``: an action the table flags needs this session's window open;
+        otherwise audit it and raise ``StepUpRequiredError``."""
+        if not PERMISSIONS[action].step_up or self.step_up_until(context) is not None:
+            return
+        self._record(
+            self._session_event(
+                AuditAction.STEP_UP_REQUIRED, Outcome.FAILURE, context, action=action
+            )
+        )
+        raise StepUpRequiredError()
 
     # --- login ---------------------------------------------------------------------------
 
@@ -684,6 +797,7 @@ class AccountService:
         locked_until = now + LOCK_MS if failures >= LOCK_FAILURES else None
         if locked_until is not None:
             self.store.set_login_state(user.id, 0, None, locked_until)
+            self.store.clear_step_up(user.id)  # a lockout closes every open step-up window
             self._record(
                 AuditEvent(
                     AuditAction.LOGIN_LOCKED,
@@ -789,6 +903,7 @@ class AccountService:
         new_hash = await self._passwords.hash(new)
         self.store.set_password(user.id, new_hash, must_change=False, bootstrap=Bootstrap.NONE)
         self.store.set_login_state(user.id, 0, None, None)
+        self.store.set_step_up(context.session.id_hash, None)  # this session's window too
         self._record(
             AuditEvent(
                 AuditAction.PASSWORD_CHANGED, Outcome.SUCCESS, TargetType.USER, user.id, user.id
@@ -828,6 +943,24 @@ def session_cookie(value: str, *, secure: bool, clear: bool = False) -> str:
     if clear:
         parts.append("Max-Age=0")
     return "; ".join(parts)
+
+
+def step_up_settings(environ: Mapping[str, str]) -> tuple[float, int]:
+    """(minutes a step-up lasts, failed step-ups a session may make in 5 minutes), from
+    ``GATEWAY_STEP_UP_MINUTES`` (default 5, 1 to 60) and ``GATEWAY_STEP_UP_SESSION_FAILURES``
+    (default 3)."""
+    try:
+        minutes = float(environ.get(STEP_UP_MINUTES_ENV, DEFAULT_STEP_UP_MINUTES))
+        failures = int(environ.get(STEP_UP_SESSION_FAILURES_ENV, DEFAULT_STEP_UP_SESSION_FAILURES))
+    except ValueError:
+        raise ValueError(
+            f"{STEP_UP_MINUTES_ENV} and {STEP_UP_SESSION_FAILURES_ENV} must be numbers"
+        ) from None
+    if not 1 <= minutes <= 60:
+        raise ValueError(f"{STEP_UP_MINUTES_ENV} must be from 1 to 60")
+    if failures < 1:
+        raise ValueError(f"{STEP_UP_SESSION_FAILURES_ENV} must be at least 1")
+    return minutes, failures
 
 
 def audit_retention_ms(environ: Mapping[str, str]) -> float:
