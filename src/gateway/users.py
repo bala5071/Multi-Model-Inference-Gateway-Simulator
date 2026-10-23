@@ -169,6 +169,16 @@ class AccountStore:
         ).fetchone()
         return _user(row) if row is not None else None
 
+    def page_users(self, organization_id: str, after: str | None, limit: int) -> list[User]:
+        """Up to ``limit`` users of an organization by username, after ``after`` (compared,
+        never looked up)."""
+        rows = self._connection.execute(
+            f"SELECT {_USER_COLUMNS} FROM users WHERE organization_id = ? AND username > ?"
+            " ORDER BY username LIMIT ?",
+            (organization_id, after or "", limit),
+        ).fetchall()
+        return [_user(row) for row in rows]
+
     def count_members(self, organization_id: str) -> int:
         row = self._connection.execute(
             "SELECT count(*) FROM users WHERE organization_id = ?", (organization_id,)

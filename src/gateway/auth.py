@@ -49,12 +49,20 @@ from gateway.audit import (
 )
 from gateway.clock import Clock, EpochSource
 from gateway.keyderivation import KeyPurpose, derive_key
+from gateway.management import (
+    ManagementRefusal,
+    NotPermittedError,
+    Page,
+    check_page_size,
+    page_of,
+)
 from gateway.organizations import (
     DEFAULT_ORGANIZATION_ID,
+    Organization,
     OrganizationKind,
     membership_decision,
 )
-from gateway.passwords import PasswordPolicy, Passwords, load_blocklist
+from gateway.passwords import PasswordPolicy, PasswordPolicyError, Passwords, load_blocklist
 from gateway.permissions import (
     PERMISSIONS,
     PLATFORM_SCOPE_ID,
@@ -99,6 +107,14 @@ DEFAULT_STEP_UP_SESSION_FAILURES = 3
 STEP_UP_SESSION_WINDOW_MS = 5 * MINUTE_MS
 STEP_UP_FAILED_MESSAGE = "Step-up was refused: the password was not accepted."
 STEP_UP_REQUIRED_MESSAGE = "This action needs a recent password: POST /v1/auth/step-up."
+# User-creation attempts a session may make in an hour (docs/30): a cap on probing which
+# usernames exist, since usernames are unique across organizations.
+USER_CREATE_ATTEMPTS_ENV = "GATEWAY_USER_CREATE_ATTEMPTS"
+DEFAULT_USER_CREATE_ATTEMPTS = 10
+USER_CREATE_WINDOW_MS = 60 * MINUTE_MS
+# A temporary password: 18 random bytes, 24 characters of base64url.
+TEMPORARY_PASSWORD_BYTES = 18
+TEMPORARY_PASSWORD_DRAWS = 100
 
 
 class LoginFailedError(Exception):
@@ -236,13 +252,12 @@ class SessionContext:
         return f"SessionContext(user={self.user!r}, session={self.session!r})"
 
 
-class NotPermittedError(Exception):
-    """The actor may not do this."""
-
-
-class LastAdminError(ValueError):
+class LastAdminError(ManagementRefusal):
     """Disabling or revoking would leave an organization without an org_admin, or the platform
     without a platform_admin."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(Reason.LAST_ADMIN, message)
 
 
 class AccountService:
@@ -269,11 +284,14 @@ class AccountService:
         audit_retention_ms: float | None = None,
         step_up_minutes: float = DEFAULT_STEP_UP_MINUTES,
         step_up_session_failures: int = DEFAULT_STEP_UP_SESSION_FAILURES,
+        user_create_attempts: int = DEFAULT_USER_CREATE_ATTEMPTS,
     ) -> None:
         if not 1 <= step_up_minutes <= 60:
             raise ValueError("step-up lasts from 1 to 60 minutes")
         if step_up_session_failures < 1:
             raise ValueError("step_up_session_failures must be at least 1")
+        if not 1 <= user_create_attempts <= 1000:
+            raise ValueError("user_create_attempts must be from 1 to 1000")
         self.store = store
         self.audit = audit
         self.roles = roles
@@ -297,12 +315,24 @@ class AccountService:
             max_failures=step_up_session_failures,
             window_ms=STEP_UP_SESSION_WINDOW_MS,
         )
+        # User-creation attempts per session (by its digest), in memory: every attempt counts,
+        # whatever its outcome, so the cap bounds how many usernames a session can probe.
+        self._creation_attempts = LoginLimiter(
+            clock,
+            derive_key(secret, KeyPurpose.LOGIN_LIMITER),
+            max_failures=user_create_attempts,
+            window_ms=USER_CREATE_WINDOW_MS,
+        )
         # A real argon2 hash at the current parameters, of a password nobody knows: what an
         # unknown username is verified against, so it costs what a real verify costs.
         self._dummy_hash = passwords.hasher.hash(_token(random_bytes(SESSION_BYTES)))
 
     def __repr__(self) -> str:
         return "AccountService(<secrets redacted>)"
+
+    @property
+    def organizations(self) -> ApplicationStore:
+        return self._organizations
 
     def _now(self) -> float:
         return self._epoch.epoch_ms()
@@ -354,6 +384,33 @@ class AccountService:
 
     # --- users ---------------------------------------------------------------------------
 
+    def _check_new_user(
+        self, name: str, organization_id: str, actor: Actor | None, platform_admin: bool
+    ) -> Organization:
+        """Whether ``name`` may be created in the organization by ``actor``: the actor may
+        create users there, the organization exists and is enabled, its kind takes another
+        member, and the username is free (in every organization)."""
+        organization = self._organizations.get_organization(organization_id)
+        if organization is None:
+            raise ValueError(f"no organization {organization_id!r}")
+        self._require(actor, "users.create", Resource.organization(organization.id))
+        if platform_admin and actor is not None:
+            raise NotPermittedError("platform_admin is granted only by the operator, at the CLI")
+        if organization.disabled:
+            raise ManagementRefusal(
+                Reason.ORGANIZATION_DISABLED, f"organization {organization_id!r} is disabled"
+            )
+        decision = membership_decision(organization.kind, self.store.count_members(organization.id))
+        if not decision.allowed:
+            raise ManagementRefusal(
+                Reason.ORGANIZATION_FULL,
+                f"organization {organization_id!r} is an individual organization and already "
+                "has its one member",
+            )
+        if self.store.find_user(name) is not None:
+            raise ManagementRefusal(Reason.USERNAME_TAKEN, f"username {name!r} is taken")
+        return organization
+
     def create_user(
         self,
         username: str,
@@ -366,41 +423,86 @@ class AccountService:
         bootstrap: Bootstrap = Bootstrap.NONE,
         reason: Reason = Reason.CLI,
     ) -> User:
-        """Create an account: the actor may create users there, the organization exists and
-        is enabled, its kind takes another member (an individual organization takes one, who
-        becomes its org_admin), the username is free and the password passes the policy.
+        """Create an account: the checks of ``_check_new_user`` (an individual organization
+        takes one member, who becomes its org_admin), and the password passes the policy.
 
         An account made by a platform_admin who is not a member of its organization, or by
         the operator at the CLI, must change its password at first login: whoever made it
         knows that password. Hashes synchronously (CLI and startup only)."""
         name = normalize_username(username)
-        organization = self._organizations.get_organization(organization_id)
-        if organization is None:
-            raise ValueError(f"no organization {organization_id!r}")
-        self._require(actor, "users.create", Resource.organization(organization.id))
-        if platform_admin and actor is not None:
-            raise NotPermittedError("platform_admin is granted only by the operator, at the CLI")
-        if organization.disabled:
-            raise ValueError(f"organization {organization_id!r} is disabled")
-        decision = membership_decision(organization.kind, self.store.count_members(organization.id))
-        if not decision.allowed:
-            raise ValueError(
-                f"organization {organization_id!r} is an individual organization and already "
-                "has its one member"
-            )
-        if self.store.find_user(name) is not None:
-            raise ValueError(f"username {name!r} is taken")
+        organization = self._check_new_user(name, organization_id, actor, platform_admin)
         self._policy.check(password, name)
         outsider = actor is None or (
             actor.holds(Role.PLATFORM_ADMIN) and actor.organization_id != organization.id
         )
+        return self._add_user(
+            name,
+            self._passwords.hasher.hash(password),
+            organization,
+            actor,
+            platform_admin=platform_admin,
+            must_change_password=must_change_password or outsider,
+            bootstrap=bootstrap,
+            reason=reason,
+        )
+
+    async def create_user_with_temporary_password(
+        self, username: str, organization_id: str, *, actor: Actor
+    ) -> tuple[User, str]:
+        """Create an account with a temporary password the server makes (the management
+        endpoint, docs/30): the same checks as ``create_user``, hashing through the runner, and
+        the account must change the password at first login. Returns the user and the
+        password, which the caller shows once and nowhere else."""
+        name = normalize_username(username)
+        self._check_new_user(name, organization_id, actor, False)
+        temporary = self._temporary_password(name)
+        password_hash = await self._passwords.hash(temporary)
+        # Checked again with the insert, in one transaction: the hash may have let another
+        # request in (the thread runner yields), and it may have taken the name or the seat.
+        with self.store.immediate():
+            organization = self._check_new_user(name, organization_id, actor, False)
+            user = self._add_user(
+                name,
+                password_hash,
+                organization,
+                actor,
+                platform_admin=False,
+                must_change_password=True,
+                bootstrap=Bootstrap.NONE,
+                reason=Reason.TEMPORARY_PASSWORD,
+            )
+        return user, temporary
+
+    def _temporary_password(self, username: str) -> str:
+        """A password nobody chose: random, drawn again until the policy accepts it."""
+        for _ in range(TEMPORARY_PASSWORD_DRAWS):
+            candidate = _token(self._random_bytes(TEMPORARY_PASSWORD_BYTES))
+            try:
+                self._policy.check(candidate, username)
+            except PasswordPolicyError:
+                continue
+            return candidate
+        raise RuntimeError("no temporary password the policy accepts was drawn")
+
+    def _add_user(
+        self,
+        name: str,
+        password_hash: str,
+        organization: Organization,
+        actor: Actor | None,
+        *,
+        platform_admin: bool,
+        must_change_password: bool,
+        bootstrap: Bootstrap,
+        reason: Reason,
+    ) -> User:
         user = User(
             id="usr_" + self._random_bytes(ID_BYTES).hex(),
             username=name,
-            password_hash=self._passwords.hasher.hash(password),
+            password_hash=password_hash,
             organization_id=organization.id,
             created_at_ms=self._now(),
-            must_change_password=must_change_password or outsider,
+            must_change_password=must_change_password,
             bootstrap=bootstrap,
         )
         details: dict[str, object] = {
@@ -492,11 +594,24 @@ class AccountService:
                     "to someone else first"
                 )
 
+    @staticmethod
+    def _not_own_account(actor: Actor | None, user: User) -> None:
+        """A user acting for itself may not disable or reset its own account (docs/30); the
+        operator at the CLI, also with --as, may."""
+        if actor is not None and not actor.via_operator and actor.user_id == user.id:
+            raise ManagementRefusal(
+                Reason.OWN_ACCOUNT,
+                "this cannot be done to your own account: ask another admin, or change your "
+                "password at POST /v1/auth/change-password",
+            )
+
     def disable_user(self, username: str, *, actor: Actor | None = None) -> int:
         """Disable an account and revoke all its sessions. Returns how many were revoked.
-        Refused for the last org_admin of an organization or the last platform_admin."""
+        Refused for the last org_admin of an organization or the last platform_admin, and for
+        an actor's own account."""
         user = self._user_by_name(username)
         self._require(actor, "users.disable", Resource.organization(user.organization_id))
+        self._not_own_account(actor, user)
         # The count of the other admins and the change are one transaction: no other
         # connection can remove the last other admin in between.
         with self.store.immediate():
@@ -519,13 +634,26 @@ class AccountService:
         session. Hashes synchronously (CLI only). Returns how many sessions were revoked."""
         user = self._user_by_name(username)
         self._require(actor, "users.reset_password", Resource.organization(user.organization_id))
+        self._not_own_account(actor, user)
         self._policy.check(new_password, user.username)
-        self.store.set_password(
-            user.id,
-            self._passwords.hasher.hash(new_password),
-            must_change=True,
-            bootstrap=Bootstrap.NONE,
-        )
+        return self._apply_reset(user, self._passwords.hasher.hash(new_password), actor)
+
+    async def reset_to_temporary_password(self, username: str, *, actor: Actor) -> tuple[int, str]:
+        """``reset_password`` with a password the server makes (the management endpoint,
+        docs/30), hashed through the runner. Returns how many sessions were revoked and the
+        password, which the caller shows once and nowhere else."""
+        user = self._user_by_name(username)
+        self._require(actor, "users.reset_password", Resource.organization(user.organization_id))
+        self._not_own_account(actor, user)
+        temporary = self._temporary_password(user.username)
+        password_hash = await self._passwords.hash(temporary)
+        return self._apply_reset(user, password_hash, actor), temporary
+
+    def _apply_reset(self, user: User, password_hash: str, actor: Actor | None) -> int:
+        """The new hash, to be changed at the next login; no lock; every session revoked, which
+        closes every step-up window with it (``revoke_sessions`` clears them in the same
+        update)."""
+        self.store.set_password(user.id, password_hash, must_change=True, bootstrap=Bootstrap.NONE)
         self.store.set_login_state(user.id, 0, None, None)
         self._record(self._user_event(AuditAction.PASSWORD_RESET, user, actor))
         return self._revoke_all(user, Reason.PASSWORD_RESET)
@@ -535,6 +663,51 @@ class AccountService:
         self._require(actor, "users.unlock", Resource.organization(user.organization_id))
         self.store.set_login_state(user.id, 0, None, None)
         self._record(self._user_event(AuditAction.USER_UNLOCKED, user, actor))
+
+    def page_users(
+        self, organization_id: str, after: str | None, limit: int, *, actor: Actor | None = None
+    ) -> Page[User]:
+        """One page of an organization's users, by username."""
+        self._require(actor, "users.list", Resource.organization(organization_id))
+        found = self.store.page_users(organization_id, after, check_page_size(limit) + 1)
+        return page_of(found, limit, lambda u: u.username)
+
+    def is_locked(self, user: User) -> bool:
+        return user.locked_until_ms is not None and self._now() < user.locked_until_ms
+
+    # --- management requests -------------------------------------------------------------
+
+    def count_user_creation(self, context: SessionContext) -> None:
+        """Count one user-creation attempt by this session, or refuse it past the cap
+        (``GATEWAY_USER_CREATE_ATTEMPTS`` an hour): every attempt counts, whatever its outcome,
+        so a session cannot probe many usernames."""
+        key = context.session.id_hash
+        if self._creation_attempts.blocked(key):
+            raise ManagementRefusal(
+                Reason.USER_CREATION_LIMITED,
+                "this session has tried to create too many users this hour; try again later",
+            )
+        self._creation_attempts.record_failure(key)
+
+    def record_refusal(
+        self, actor: Actor, action: str, organization_id: str | None, reason: Reason
+    ) -> None:
+        """Audit a management request refused for a conflict or a cap: who, which action,
+        which organization, and why; never anything that was typed."""
+        who, acting = self._who(actor)
+        target = organization_id
+        if target is not None and not ORGANIZATION_ID_PATTERN.fullmatch(target):
+            target = None
+        self._record(
+            AuditEvent(
+                AuditAction.MANAGEMENT_REFUSED,
+                Outcome.FAILURE,
+                TargetType.ORGANIZATION,
+                target,
+                who,
+                {"reason": reason, "action": action, **acting},
+            )
+        )
 
     # --- roles ---------------------------------------------------------------------------
 
@@ -961,6 +1134,19 @@ def step_up_settings(environ: Mapping[str, str]) -> tuple[float, int]:
     if failures < 1:
         raise ValueError(f"{STEP_UP_SESSION_FAILURES_ENV} must be at least 1")
     return minutes, failures
+
+
+def user_create_attempts(environ: Mapping[str, str]) -> int:
+    """``GATEWAY_USER_CREATE_ATTEMPTS``: user-creation attempts a session may make in an hour
+    (default 10, 1 to 1000)."""
+    raw = environ.get(USER_CREATE_ATTEMPTS_ENV, str(DEFAULT_USER_CREATE_ATTEMPTS))
+    try:
+        attempts = int(raw)
+    except ValueError:
+        raise ValueError(f"{USER_CREATE_ATTEMPTS_ENV} must be a whole number") from None
+    if not 1 <= attempts <= 1000:
+        raise ValueError(f"{USER_CREATE_ATTEMPTS_ENV} must be from 1 to 1000")
+    return attempts
 
 
 def audit_retention_ms(environ: Mapping[str, str]) -> float:

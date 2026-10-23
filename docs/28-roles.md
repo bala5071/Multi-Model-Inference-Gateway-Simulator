@@ -69,7 +69,7 @@ planned in A2).
 | `users.disable` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | now |
 | `users.enable` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | now |
 | `users.reset_password` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | now |
-| `users.unlock` | organization | `org_admin@own_organization`, `platform_admin@platform` | | now |
+| `users.unlock` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | now |
 | `users.list` | organization | `org_admin@own_organization`, `platform_admin@platform` | | step 7 |
 | `roles.assign` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | now |
 | `roles.revoke` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | now |

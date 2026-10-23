@@ -127,6 +127,13 @@ class ApplicationStore(Protocol):
         added."""
         ...
 
+    def page_applications(
+        self, organization_id: str, after: str | None, limit: int
+    ) -> list[Application]:
+        """Up to ``limit`` applications of an organization by id, after ``after`` (compared,
+        never looked up)."""
+        ...
+
     def add_key(self, record: ApiKeyRecord) -> None:
         """Raise ``ValueError`` if the key id exists or the application does not."""
         ...
@@ -138,6 +145,10 @@ class ApplicationStore(Protocol):
         ...
 
     def list_keys(self, application_id: str) -> list[ApiKeyRecord]: ...
+
+    def page_keys(self, application_id: str, after: str | None, limit: int) -> list[ApiKeyRecord]:
+        """Up to ``limit`` key records of an application by key id, after ``after``."""
+        ...
 
     def set_key_expiry(self, key_id: str, expires_at_ms: float) -> None: ...
 
@@ -217,6 +228,15 @@ class InMemoryApplicationStore:
             if organization_id is None or a.organization_id == organization_id
         ]
 
+    def page_applications(
+        self, organization_id: str, after: str | None, limit: int
+    ) -> list[Application]:
+        found = sorted(
+            (a for a in self.list_applications(organization_id) if a.id > (after or "")),
+            key=lambda a: a.id,
+        )
+        return found[:limit]
+
     def add_key(self, record: ApiKeyRecord) -> None:
         if record.key_id in self._keys:
             raise ValueError("key id exists")
@@ -238,6 +258,13 @@ class InMemoryApplicationStore:
 
     def list_keys(self, application_id: str) -> list[ApiKeyRecord]:
         return [k for k in self._keys.values() if k.application_id == application_id]
+
+    def page_keys(self, application_id: str, after: str | None, limit: int) -> list[ApiKeyRecord]:
+        found = sorted(
+            (k for k in self.list_keys(application_id) if k.key_id > (after or "")),
+            key=lambda k: k.key_id,
+        )
+        return found[:limit]
 
     def _update(self, key_id: str, **changes: Any) -> None:
         record = self._keys.get(key_id)
@@ -405,6 +432,16 @@ class SqliteApplicationStore:
             ).fetchall()
         return [_application(row) for row in rows]
 
+    def page_applications(
+        self, organization_id: str, after: str | None, limit: int
+    ) -> list[Application]:
+        rows = self._connection.execute(
+            f"SELECT {_APP_COLUMNS} FROM applications WHERE organization_id = ? AND id > ?"
+            " ORDER BY id LIMIT ?",
+            (organization_id, after or "", limit),
+        ).fetchall()
+        return [_application(row) for row in rows]
+
     def add_key(self, record: ApiKeyRecord) -> None:
         r = record
         try:
@@ -451,6 +488,14 @@ class SqliteApplicationStore:
         rows = self._connection.execute(
             f"SELECT {_KEY_COLUMNS} FROM api_keys WHERE application_id = ? ORDER BY rowid",
             (application_id,),
+        ).fetchall()
+        return [_key(row) for row in rows]
+
+    def page_keys(self, application_id: str, after: str | None, limit: int) -> list[ApiKeyRecord]:
+        rows = self._connection.execute(
+            f"SELECT {_KEY_COLUMNS} FROM api_keys WHERE application_id = ? AND key_id > ?"
+            " ORDER BY key_id LIMIT ?",
+            (application_id, after or "", limit),
         ).fetchall()
         return [_key(row) for row in rows]
 

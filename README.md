@@ -336,11 +336,15 @@ starting this version (it backs the database up first).
 `POST /v1/auth/login` with `{"username", "password"}` sets an `HttpOnly`, `SameSite=Strict`
 session cookie and returns a CSRF token, which `POST /v1/auth/logout` and
 `POST /v1/auth/change-password` need in `X-CSRF-Token`; `GET /v1/auth/me` and
-`GET /v1/auth/sessions` read. Until roles arrive in the next identity step, that is all a
-session can do: nothing else in the gateway looks at it. Sensitive actions (creating or
-disabling users, changing roles, application keys) will also need a recent password:
-`POST /v1/auth/step-up` opens a 5-minute window for that one session
-([docs/29](docs/29-step-up.md)).
+`GET /v1/auth/sessions` read. Sensitive actions (creating, disabling, enabling, unlocking or
+resetting users, application keys) also need a recent password: `POST /v1/auth/step-up`
+opens a 5-minute window for that one session ([docs/29](docs/29-step-up.md)).
+
+A session manages users, applications and application keys under
+`/v1/admin/orgs/{org}/...`, within its roles ([docs/30](docs/30-management-endpoints.md)).
+These endpoints never take a password: creating a user or resetting one returns a temporary
+password once, which must be changed at the first login; a new key is returned once too. Roles
+and organizations stay in the CLI.
 
 ### Real-model mode
 
@@ -576,6 +580,7 @@ These are not built, and the server is not ready for a network until they are:
   | `/v1/playground` | Sends requests as an application, with keys the server holds |
   | `/dashboard` | The dashboard, which shows all of the above |
   | `/v1/auth` | Console login, logout and sessions ([docs/27](docs/27-users-and-sessions.md)); a password is needed, but logins come only from this machine |
+  | `/v1/admin` | Users, applications and their keys ([docs/30](docs/30-management-endpoints.md)); a session, a role and step-up are needed, and only from this machine |
 
   The gateway refuses other peers, forwarded requests, foreign Host names (DNS rebinding) and
   cross-site requests ([docs/25](docs/25-local-only.md)), but any process on this machine can

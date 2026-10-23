@@ -87,7 +87,7 @@ The table it comes from, and what each relation means, are in docs/28-roles.md.
 | app_admin | n/a | n/a | n/a | n/a | deny |
 | viewer | n/a | deny | n/a | n/a | deny |
 
-## `users.unlock` (level organization, wired now)
+## `users.unlock` (level organization, wired now, step-up)
 
 | role | platform | own_organization | application_in_own_organization | own_application | other |
 |---|---|---|---|---|---|

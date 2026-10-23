@@ -1,7 +1,9 @@
 """Create organizations and applications, and issue, rotate and revoke their API keys.
 
-The only way to issue a key (there is no admin HTTP endpoint; A2 adds authenticated
-endpoints). See docs/20-applications-api-keys.md and docs/26-organizations.md.
+The operator's way in; logged-in users have the management endpoints, within their roles
+(docs/30). Applications and keys go through the same service as those endpoints and are
+audited the same way, by key id, without their limits. See docs/20-applications-api-keys.md,
+docs/26-organizations.md and docs/30-management-endpoints.md.
 
     uv run python scripts/manage.py migrate --dry-run
     uv run python scripts/manage.py migrate
@@ -59,11 +61,10 @@ from gateway.apikeys import ApiKeyService, load_pepper
 from gateway.applications import (
     ApiKeyRecord,
     SqliteApplicationStore,
-    application_from_template,
     seed_demo_applications,
 )
 from gateway.audit import AuditLog
-from gateway.auth import AccountService, NotPermittedError
+from gateway.auth import AccountService
 from gateway.clock import EpochSource, SystemEpoch, WallClock
 from gateway.database import (
     DatabaseInUseError,
@@ -75,6 +76,7 @@ from gateway.database import (
     restore_database,
 )
 from gateway.ledger import CostLedger
+from gateway.management import ManagementService, NotPermittedError
 from gateway.migrations import (
     MIGRATIONS,
     MigrationError,
@@ -93,7 +95,7 @@ from gateway.passwords import (
 )
 from gateway.permissions import PLATFORM_SCOPE_ID, ScopeType
 from gateway.roles import RoleStore
-from gateway.routing import load_plans
+from gateway.routing import PlansConfig, load_plans
 from gateway.usage import SqliteUsageStore
 from gateway.users import AccountStore
 
@@ -253,6 +255,22 @@ def _accounts(
         epoch=SystemEpoch(),
         secret=secrets.token_bytes(32),
     )
+
+
+def _management(
+    connection: sqlite3.Connection,
+    store: SqliteApplicationStore,
+    templates: PlansConfig,
+    env: dict[str, str],
+    *,
+    pepper: bytes | None = None,
+) -> ManagementService:
+    """Applications and keys as the operator changes them: audited, with no HTTP limits (a
+    key expires only if asked). Without ``pepper`` (creating an application, revoking) no key
+    can be issued, and none is needed; a throwaway one fills the slot."""
+    epoch = SystemEpoch()
+    keys = ApiKeyService(store, pepper if pepper is not None else secrets.token_bytes(32), epoch)
+    return ManagementService(keys, templates, AuditLog(connection), epoch)
 
 
 ACCOUNT_COMMANDS = frozenset(
@@ -505,15 +523,9 @@ def main(
                     f"organization={application.organization_id}"
                 )
         elif args.command == "create-application":
-            store.add_application(
-                application_from_template(
-                    args.id,
-                    args.name,
-                    templates,
-                    args.plan,
-                    organization_id=args.organization,
-                    created_at_ms=epoch.epoch_ms(),
-                )
+            # Audited, as over HTTP; the operator names the id (docs/30).
+            _management(connection, store, templates, env).create_application(
+                args.organization, args.name, args.plan, application_id=args.id
             )
             _note(
                 f"created application {args.id!r} on plan {args.plan!r} in organization "
@@ -523,19 +535,16 @@ def main(
             for key in store.list_keys(args.application):
                 print(_describe(key))
         elif args.command == "revoke-key":
-            store.revoke_key(args.key_id)
+            _management(connection, store, templates, env).revoke_key(args.key_id)
             _note(f"revoked key {args.key_id}")
         else:
-            service = ApiKeyService(store, load_pepper(env), epoch)
+            service = _management(connection, store, templates, env, pepper=load_pepper(env))
             if args.command == "create-key":
-                expires = (
-                    epoch.epoch_ms() + args.expires_in_days * DAY_MS
-                    if args.expires_in_days is not None
-                    else None
+                issued = service.issue_key(
+                    args.application, args.label, expires_in_days=args.expires_in_days
                 )
-                issued = service.issue(args.application, args.label, expires_at_ms=expires)
             else:
-                issued = service.rotate(args.key_id, grace_ms=args.grace_hours * HOUR_MS)
+                issued = service.rotate_key(args.key_id, grace_hours=args.grace_hours)
                 _note(f"key {args.key_id} stops working in {args.grace_hours:g} hours")
             _note(
                 f"key id {issued.record.key_id} for application {issued.record.application_id!r}. "

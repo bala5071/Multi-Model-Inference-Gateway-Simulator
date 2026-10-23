@@ -59,6 +59,7 @@ def make_service(
     audit_retention_ms: float | None = None,
     unknown_user_rows_per_minute: int = 60,
     secret: bytes = TEST_PEPPER,
+    user_create_attempts: int = 10,
 ) -> AccountService:
     return AccountService(
         AccountStore(connection),
@@ -71,6 +72,7 @@ def make_service(
         secret=secret,
         random_bytes=random.Random(seed).randbytes,
         audit_retention_ms=audit_retention_ms,
+        user_create_attempts=user_create_attempts,
     )
 
 

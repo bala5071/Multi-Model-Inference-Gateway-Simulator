@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from fastapi import Depends, FastAPI, Header, Query, Request, Response
+from fastapi import Path as Path_
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -35,16 +36,18 @@ from gateway.apikeys import (
     ApiKeyService,
     ApplicationAccess,
     InvalidApiKeyError,
+    IssuedKey,
     load_pepper,
 )
 from gateway.applications import (
+    ApiKeyRecord,
     Application,
     ApplicationStore,
     InMemoryApplicationStore,
     SqliteApplicationStore,
     seed_demo_applications,
 )
-from gateway.audit import AuditLog
+from gateway.audit import AuditLog, Reason
 from gateway.auth import (
     ADMIN_PASSWORD_ENV,
     ADMIN_USERNAME_ENV,
@@ -69,6 +72,7 @@ from gateway.auth import (
     run_account_retention,
     session_cookie,
     step_up_settings,
+    user_create_attempts,
 )
 from gateway.backend_config import build_llamacpp_registry, load_backend_config
 from gateway.backends import BackendError
@@ -84,9 +88,29 @@ from gateway.localonly import (
     LocalOnlyPolicy,
     policy_from,
 )
+from gateway.management import (
+    DEFAULT_GRACE_HOURS,
+    DEFAULT_KEY_DAYS,
+    DEFAULT_PAGE_SIZE,
+    LABEL_PATTERN,
+    MAX_GRACE_HOURS,
+    MAX_KEY_DAYS,
+    MAX_PAGE_SIZE,
+    KeyLimits,
+    ManagementRefusal,
+    ManagementService,
+    NotPermittedError,
+    Stores,
+    UnknownPlanError,
+    resolve_application,
+    resolve_key,
+    resolve_member,
+    resolve_organization,
+)
 from gateway.metrics import Distribution, MetricsStore
 from gateway.migrations import MIGRATIONS, MigrationError, MigrationRunner
 from gateway.monitoring import Monitor, Snapshot, render_prometheus
+from gateway.organizations import MAX_NAME_LENGTH
 from gateway.overload import (
     OverloadPolicy,
     QueueFullError,
@@ -114,7 +138,7 @@ from gateway.routing import ModelNotAllowedError, Quality, Router, load_plans, p
 from gateway.schema import GenerateRequest, RequestResult
 from gateway.timeseries import TimeSeriesStore
 from gateway.usage import SqliteUsageStore, UsageStore
-from gateway.users import AccountStore
+from gateway.users import AccountStore, User
 from gateway.workload import PlannedRequest
 
 # How often /v1/monitor/stream pushes a snapshot, on the injected clock.
@@ -411,6 +435,16 @@ class ForbiddenError(Exception):
     """Not permitted, or no such resource: the same answer for both."""
 
 
+@dataclass(frozen=True, slots=True)
+class Authorized:
+    """What ``requires`` let through: who, with which session, for which action, on what."""
+
+    actor: Actor
+    context: SessionContext
+    action: str
+    resource: Resource
+
+
 def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
     """``requires(action, resolver)``: a dependency that declares a route's action and
     enforces it, so a route cannot be declared without being checked. On every request it
@@ -431,7 +465,7 @@ def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
 
         async def check(
             request: Request, csrf: str | None = Header(default=None, alias=CSRF_HEADER)
-        ) -> Actor:
+        ) -> Authorized:
             context = service.authenticate(request.cookies.get(SESSION_COOKIE))
             if request.method.upper() in STATE_CHANGING:
                 service.check_csrf(context, csrf)
@@ -442,7 +476,10 @@ def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
             if resource is None or not authorize(actor, action, resource).allowed:
                 raise ForbiddenError()
             service.check_step_up(context, action)
-            return actor
+            authorized = Authorized(actor, context, action, resource)
+            # For the refusal handler, which audits a conflict with who, what and where.
+            request.state.authorized = authorized
+            return authorized
 
         setattr(check, DECLARATION, RouteDeclaration("requires", action, "authorize"))
         return Depends(check)
@@ -527,6 +564,25 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
     async def forbidden(_: Request, exc: ForbiddenError) -> JSONResponse:
         # One answer for "not permitted" and "does not exist", byte for byte (docs/28).
         return _error(403, "forbidden", "Not permitted, or not found.", headers=_NO_STORE)
+
+    @app.exception_handler(NotPermittedError)
+    async def not_permitted(_: Request, exc: NotPermittedError) -> JSONResponse:
+        # A service's own check of the record, behind requires: the same answer (docs/30).
+        return _error(403, "forbidden", "Not permitted, or not found.", headers=_NO_STORE)
+
+    @app.exception_handler(ManagementRefusal)
+    async def refused(request: Request, exc: ManagementRefusal) -> JSONResponse:
+        # Every conflict and cap is audited: who, which action, which organization, why.
+        authorized: Authorized | None = getattr(request.state, "authorized", None)
+        if authorized is not None:
+            service.record_refusal(
+                authorized.actor,
+                authorized.action,
+                authorized.resource.organization_id,
+                exc.reason,
+            )
+        status = 429 if exc.reason is Reason.USER_CREATION_LIMITED else 409
+        return _error(status, exc.reason.value, str(exc), headers=_NO_STORE)
 
     @app.exception_handler(StepUpFailedError)
     async def step_up_failed(_: Request, exc: StepUpFailedError) -> JSONResponse:
@@ -642,6 +698,285 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
             },
             headers=_NO_STORE,
         )
+
+
+class CreateUserBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # No password: the server makes a temporary one (docs/30).
+    username: str = Field(pattern=r"^[A-Za-z0-9._-]{3,64}$")
+
+
+class CreateApplicationBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=MAX_NAME_LENGTH)
+    # The name of a plan template in the plans file, never raw numbers.
+    plan: str = Field(min_length=1, max_length=64)
+
+
+class IssueKeyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(pattern=f"^{LABEL_PATTERN.pattern}$")
+    expires_in_days: float = Field(
+        default=DEFAULT_KEY_DAYS, ge=1, le=MAX_KEY_DAYS, allow_inf_nan=False
+    )
+
+
+class RotateKeyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    grace_hours: float = Field(
+        default=DEFAULT_GRACE_HOURS, ge=0, le=MAX_GRACE_HOURS, allow_inf_nan=False
+    )
+    expires_in_days: float = Field(
+        default=DEFAULT_KEY_DAYS, ge=1, le=MAX_KEY_DAYS, allow_inf_nan=False
+    )
+
+
+ADMIN_PREFIX = "/v1/admin"
+ORG_PREFIX = ADMIN_PREFIX + "/orgs/{org}"
+
+
+class NoStoreMiddleware:
+    """``Cache-Control: no-store`` on every answer under ``prefix``, errors and validation
+    failures included (docs/30): an admin answer may carry a key or a temporary password, and
+    every other one names users, applications and keys."""
+
+    def __init__(self, app: Any, prefix: str = ADMIN_PREFIX) -> None:
+        self.app = app
+        self.prefix = prefix
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        path = scope.get("path", "") if scope["type"] == "http" else ""
+        if not (path == self.prefix or path.startswith(self.prefix + "/")):
+            await self.app(scope, receive, send)
+            return
+
+        async def no_store(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                headers = [
+                    (k, v) for k, v in message.get("headers", []) if k.lower() != b"cache-control"
+                ]
+                message = {**message, "headers": [*headers, (b"cache-control", b"no-store")]}
+            await send(message)
+
+        await self.app(scope, receive, no_store)
+
+
+def _page_body(name: str, items: list[dict[str, object]], next_cursor: str | None) -> JSONResponse:
+    return JSONResponse({name: items, "next": next_cursor})
+
+
+def _admin_routes(
+    app: FastAPI, accounts: AccountAccess, management: ManagementService | None
+) -> None:
+    """The management endpoints under /v1/admin/orgs/{org} (docs/30): users, and with
+    applications, applications and their keys. Every one through ``requires`` with a
+    resolver that answers a resource outside the path's organization as missing."""
+    service = accounts.service
+    requires = app.state.requires
+    stores = Stores(service.organizations, service.store)
+
+    def organization(request: Request) -> Resource | None:
+        return resolve_organization(stores, request.path_params["org"])
+
+    def member(request: Request) -> Resource | None:
+        p = request.path_params
+        return resolve_member(stores, p["org"], p["username"])
+
+    # Each route's declaration: its action and the resolver of what it acts on (docs/30).
+    creating_users = requires("users.create", organization)
+    listing_users = requires("users.list", organization)
+    disabling_users = requires("users.disable", member)
+    enabling_users = requires("users.enable", member)
+    resetting_passwords = requires("users.reset_password", member)
+    unlocking_users = requires("users.unlock", member)
+
+    def user_view(user: User) -> dict[str, object]:
+        return {
+            "user_id": user.id,
+            "username": user.username,
+            "organization_id": user.organization_id,
+            "disabled": user.disabled,
+            "must_change_password": user.must_change_password,
+            "locked": service.is_locked(user),
+            "created_at_ms": user.created_at_ms,
+        }
+
+    @app.post(ORG_PREFIX + "/users")
+    async def create_user(
+        org: str, body: CreateUserBody, auth: Authorized = creating_users
+    ) -> JSONResponse:
+        service.count_user_creation(auth.context)
+        user, temporary = await service.create_user_with_temporary_password(
+            body.username, org, actor=auth.actor
+        )
+        # The one place the temporary password is shown; never logged or stored.
+        return JSONResponse(
+            {"user": user_view(user), "temporary_password": temporary}, status_code=201
+        )
+
+    @app.get(ORG_PREFIX + "/users")
+    async def list_users(
+        org: str,
+        limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+        after: str | None = Query(default=None, max_length=64),
+        auth: Authorized = listing_users,
+    ) -> JSONResponse:
+        page = service.page_users(org, after, limit, actor=auth.actor)
+        return _page_body("users", [user_view(u) for u in page.items], page.next)
+
+    @app.post(ORG_PREFIX + "/users/{username}/disable")
+    async def disable_user(username: str, auth: Authorized = disabling_users) -> JSONResponse:
+        revoked = service.disable_user(username, actor=auth.actor)
+        return JSONResponse({"disabled": True, "sessions_revoked": revoked})
+
+    @app.post(ORG_PREFIX + "/users/{username}/enable")
+    async def enable_user(username: str, auth: Authorized = enabling_users) -> JSONResponse:
+        service.enable_user(username, actor=auth.actor)
+        return JSONResponse({"enabled": True})
+
+    @app.post(ORG_PREFIX + "/users/{username}/reset-password")
+    async def reset_password(username: str, auth: Authorized = resetting_passwords) -> JSONResponse:
+        revoked, temporary = await service.reset_to_temporary_password(username, actor=auth.actor)
+        # The one place the temporary password is shown; never logged or stored.
+        return JSONResponse({"temporary_password": temporary, "sessions_revoked": revoked})
+
+    @app.post(ORG_PREFIX + "/users/{username}/unlock")
+    async def unlock_user(username: str, auth: Authorized = unlocking_users) -> JSONResponse:
+        service.unlock_user(username, actor=auth.actor)
+        return JSONResponse({"unlocked": True})
+
+    if management is None:
+        return
+    keys = management
+
+    def application(request: Request) -> Resource | None:
+        p = request.path_params
+        return resolve_application(stores, p["org"], p["app"])
+
+    def key(request: Request) -> Resource | None:
+        p = request.path_params
+        return resolve_key(stores, p["org"], p["app"], p["key_id"])
+
+    creating_applications = requires("applications.create", organization)
+    listing_applications = requires("applications.list", organization)
+    reading_applications = requires("applications.read", application)
+    issuing_keys = requires("application_keys.issue", application)
+    listing_keys = requires("application_keys.list", application)
+    rotating_keys = requires("application_keys.rotate", key)
+    revoking_keys = requires("application_keys.revoke", key)
+
+    def application_view(a: Application) -> dict[str, object]:
+        return {
+            "application_id": a.id,
+            "name": a.name,
+            "organization_id": a.organization_id,
+            "plan": a.plan.name,
+            "allowed_models": list(a.plan.models),
+            "max_tokens": a.max_tokens,
+            "requests_per_minute": a.requests_per_minute,
+            "created_at_ms": a.created_at_ms,
+        }
+
+    def key_view(record: ApiKeyRecord) -> dict[str, object]:
+        # Never the key, never its HMAC.
+        return {
+            "key_id": record.key_id,
+            "label": record.label,
+            "state": keys.key_state(record),
+            "created_at_ms": record.created_at_ms,
+            "expires_at_ms": record.expires_at_ms,
+            "last_used_at_ms": record.last_used_at_ms,
+        }
+
+    def issued_view(issued: IssuedKey) -> JSONResponse:
+        # The one place a new key is shown; never logged or stored.
+        return JSONResponse({"key": issued.key, **key_view(issued.record)}, status_code=201)
+
+    @app.post(ORG_PREFIX + "/applications")
+    async def create_application(
+        org: str,
+        body: CreateApplicationBody,
+        auth: Authorized = creating_applications,
+    ) -> JSONResponse:
+        try:
+            made = keys.create_application(org, body.name, body.plan, actor=auth.actor)
+        except UnknownPlanError as exc:
+            return _invalid("plan", str(exc))
+        except ManagementRefusal:
+            raise
+        except ValueError as exc:  # the name: normalize_name says why, never echoing more
+            return _invalid("name", str(exc))
+        return JSONResponse(application_view(made), status_code=201)
+
+    @app.get(ORG_PREFIX + "/applications")
+    async def list_applications(
+        org: str,
+        limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+        after: str | None = Query(default=None, max_length=64),
+        auth: Authorized = listing_applications,
+    ) -> JSONResponse:
+        page = keys.page_applications(org, after, limit, actor=auth.actor)
+        return _page_body("applications", [application_view(a) for a in page.items], page.next)
+
+    @app.get(ORG_PREFIX + "/applications/{app}")
+    async def read_application(
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = reading_applications,
+    ) -> JSONResponse:
+        return JSONResponse(application_view(keys.read_application(app_id, actor=auth.actor)))
+
+    @app.post(ORG_PREFIX + "/applications/{app}/keys")
+    async def issue_key(
+        body: IssueKeyBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = issuing_keys,
+    ) -> JSONResponse:
+        issued = keys.issue_key(
+            app_id, body.label, actor=auth.actor, expires_in_days=body.expires_in_days
+        )
+        return issued_view(issued)
+
+    @app.get(ORG_PREFIX + "/applications/{app}/keys")
+    async def list_keys(
+        app_id: str = Path_(alias="app"),
+        limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+        after: str | None = Query(default=None, max_length=64),
+        auth: Authorized = listing_keys,
+    ) -> JSONResponse:
+        page = keys.page_keys(app_id, after, limit, actor=auth.actor)
+        return _page_body("keys", [key_view(k) for k in page.items], page.next)
+
+    @app.post(ORG_PREFIX + "/applications/{app}/keys/{key_id}/rotate")
+    async def rotate_key(
+        key_id: str,
+        body: RotateKeyBody,
+        auth: Authorized = rotating_keys,
+    ) -> JSONResponse:
+        issued = keys.rotate_key(
+            key_id,
+            grace_hours=body.grace_hours,
+            actor=auth.actor,
+            expires_in_days=body.expires_in_days,
+        )
+        return issued_view(issued)
+
+    @app.post(ORG_PREFIX + "/applications/{app}/keys/{key_id}/revoke")
+    async def revoke_key(key_id: str, auth: Authorized = revoking_keys) -> JSONResponse:
+        keys.revoke_key(key_id, actor=auth.actor)
+        return JSONResponse({"key_id": key_id, "state": "revoked"})
+
+
+def _invalid(field: str, message: str) -> JSONResponse:
+    return _error(
+        422,
+        "invalid_request",
+        "The request is not valid.",
+        details=[{"field": field, "message": message}],
+    )
 
 
 def create_app(
@@ -777,6 +1112,21 @@ def create_app(
     if accounts is not None:
         app.state.accounts = accounts
         _auth_routes(app, accounts)
+        # Applications and keys over HTTP need both: a session to act, applications to act on.
+        management = (
+            ManagementService(
+                applications.keys,
+                applications.templates,
+                accounts.service.audit,
+                epoch if epoch is not None else ClockEpoch(clock),
+                limits=KeyLimits(),
+            )
+            if applications is not None
+            else None
+        )
+        _admin_routes(app, accounts, management)
+        # Outermost, so even the local-only guard's refusals of /v1/admin are not cached.
+        app.add_middleware(NoStoreMiddleware)
     app.state.slo_monitor = monitor
     app.state.monitoring = monitoring
     app.state.clock = clock
@@ -1625,6 +1975,7 @@ def build_accounts(
         audit_retention_ms=audit_retention_ms(environ),
         step_up_minutes=step_up_minutes,
         step_up_session_failures=step_up_session_failures,
+        user_create_attempts=user_create_attempts(environ),
     )
     if service.bootstrap_admin(environ) is BootstrapOutcome.EXISTS_WITH_VARIABLES:
         still_set = [name for name in (ADMIN_USERNAME_ENV, ADMIN_PASSWORD_ENV) if name in environ]

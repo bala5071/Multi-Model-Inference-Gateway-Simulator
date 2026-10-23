@@ -124,7 +124,8 @@ def _rows() -> list[Permission]:
         ("users.disable", o, (_PLATFORM, _ORG_ADMIN), True, w.NOW),
         ("users.enable", o, (_PLATFORM, _ORG_ADMIN), True, w.NOW),
         ("users.reset_password", o, (_PLATFORM, _ORG_ADMIN), True, w.NOW),
-        ("users.unlock", o, (_PLATFORM, _ORG_ADMIN), False, w.NOW),
+        # Unlocking lifts a lockout, a defense: step-up, like the other user changes.
+        ("users.unlock", o, (_PLATFORM, _ORG_ADMIN), True, w.NOW),
         ("users.list", o, (_PLATFORM, _ORG_ADMIN), False, w.STEP_7),
         # Roles (which roles each may grant is checked when granting: docs/28).
         ("roles.assign", o, (_PLATFORM, _ORG_ADMIN), True, w.NOW),
