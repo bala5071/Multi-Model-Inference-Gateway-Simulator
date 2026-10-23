@@ -10,6 +10,8 @@ backend: llamacpp
 
 llamacpp:
   endpoint: completions
+  # POST /v1/chat/completions through Ollama's own /api/chat, with tools (docs/31).
+  chat_api: ollama
   max_in_flight: 8
   servers:
     economy:

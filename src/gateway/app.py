@@ -21,14 +21,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from fastapi import Depends, FastAPI, Header, Query, Request, Response
 from fastapi import Path as Path_
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from gateway.apikeys import (
     INVALID_KEY_MESSAGE,
@@ -74,8 +74,26 @@ from gateway.auth import (
     step_up_settings,
     user_create_attempts,
 )
-from gateway.backend_config import build_llamacpp_registry, load_backend_config
-from gateway.backends import BackendError
+from gateway.backend_config import (
+    build_chat_adapters,
+    build_llamacpp_registry,
+    load_backend_config,
+)
+from gateway.backends import Backend, BackendError
+from gateway.chat import (
+    TOOL_NAME_PATTERN,
+    ChatDelta,
+    ChatInputError,
+    ChatMessage,
+    ChatRequest,
+    NamedTool,
+    ProviderError,
+    ToolCall,
+    ToolChoice,
+    ToolSpec,
+    json_object,
+)
+from gateway.chatservice import ChatOutcome, ChatService
 from gateway.clock import Clock, ClockEpoch, EpochSource, PacedSimClock, SystemEpoch, WallClock
 from gateway.continuous import RequestTooLargeError, build_continuous_registry
 from gateway.database import ProcessLock, database_path, open_database
@@ -296,6 +314,182 @@ class UsageTotals(BaseModel):
 class Period(BaseModel):
     start_ms: float
     end_ms: float
+
+
+class ChatTextPart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["text"]
+    text: str
+
+
+class ChatFunctionCallIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=f"^{TOOL_NAME_PATTERN.pattern}$")
+    arguments: str
+
+
+class ChatToolCallIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=128)
+    type: Literal["function"]
+    function: ChatFunctionCallIn
+
+
+class ChatMessageIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # "developer" is OpenAI's newer name for a system message.
+    role: Literal["system", "developer", "user", "assistant", "tool"]
+    content: str | list[ChatTextPart] | None = None
+    tool_calls: list[ChatToolCallIn] | None = None
+    tool_call_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ChatFunctionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=f"^{TOOL_NAME_PATTERN.pattern}$")
+    description: str = ""
+    parameters: dict[str, Any] = Field(default_factory=lambda: {"type": "object", "properties": {}})
+
+
+class ChatToolIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["function"]
+    function: ChatFunctionIn
+
+
+class ChatToolChoiceFunction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+
+
+class ChatToolChoiceIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["function"]
+    function: ChatToolChoiceFunction
+
+
+class StreamOptionsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    include_usage: bool = False
+
+
+class ChatCompletionBody(BaseModel):
+    """``POST /v1/chat/completions`` in the OpenAI-compatible shape (docs/31). Any other field
+    is refused by name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # A tier or one of its aliases, as for /v1/generate; or a quality instead.
+    model: str | None = Field(default=None, min_length=1)
+    quality: Quality | None = None
+    messages: list[ChatMessageIn] = Field(min_length=1)
+    tools: list[ChatToolIn] | None = None
+    tool_choice: Literal["auto", "none", "required"] | ChatToolChoiceIn | None = None
+    max_tokens: int | None = Field(default=None, ge=1)
+    temperature: float | None = Field(default=None, ge=0, le=2, allow_inf_nan=False)
+    stream: bool = False
+    stream_options: StreamOptionsIn | None = None
+
+
+def chat_request(body: ChatCompletionBody, request_id: str, tier: str) -> ChatRequest:
+    """The request in the common chat format, or ``ChatInputError`` naming the field."""
+    messages: list[ChatMessage] = []
+    calls_so_far: set[str] = set()
+    for i, raw in enumerate(body.messages):
+        content = raw.content
+        if isinstance(content, list):
+            content = "".join(part.text for part in content)
+        calls = tuple(
+            ToolCall(c.id, c.function.name, c.function.arguments) for c in raw.tool_calls or ()
+        )
+        if calls and raw.role != "assistant":
+            raise ChatInputError("Only an assistant message has tool calls.", f"messages[{i}]")
+        for j, call in enumerate(calls):
+            if json_object(call.arguments) is None:
+                raise ChatInputError(
+                    "Tool call arguments must be a JSON object.",
+                    f"messages[{i}].tool_calls[{j}].function.arguments",
+                )
+        calls_so_far.update(c.id for c in calls)
+        if raw.role == "tool":
+            if raw.tool_call_id is None or raw.tool_call_id not in calls_so_far:
+                raise ChatInputError(
+                    "A tool message needs the tool_call_id of an earlier tool call.",
+                    f"messages[{i}].tool_call_id",
+                )
+        elif raw.tool_call_id is not None:
+            raise ChatInputError("Only a tool message has a tool_call_id.", f"messages[{i}]")
+        role: Literal["system", "user", "assistant", "tool"] = (
+            "system" if raw.role == "developer" else raw.role
+        )
+        messages.append(ChatMessage(role, content, calls, raw.tool_call_id))
+    tools = []
+    for i, tool in enumerate(body.tools or ()):
+        parameters = tool.function.parameters
+        if parameters.get("type") != "object":
+            raise ChatInputError(
+                'Tool parameters must be a JSON Schema with "type": "object".',
+                f"tools[{i}].function.parameters",
+            )
+        tools.append(ToolSpec(tool.function.name, tool.function.description, parameters))
+    choice: ToolChoice = "auto"
+    if isinstance(body.tool_choice, ChatToolChoiceIn):
+        if body.tool_choice.function.name not in {t.name for t in tools}:
+            raise ChatInputError("tool_choice names a tool that is not given.", "tool_choice")
+        choice = NamedTool(body.tool_choice.function.name)
+    elif body.tool_choice is not None:
+        choice = body.tool_choice
+    if body.tool_choice is not None and not tools:
+        raise ChatInputError("tool_choice needs tools.", "tool_choice")
+    if body.stream_options is not None and not body.stream:
+        raise ChatInputError("stream_options needs stream: true.", "stream_options")
+    return ChatRequest(
+        request_id,
+        tier,
+        tuple(messages),
+        tuple(tools),
+        choice,
+        body.max_tokens,
+        body.temperature,
+    )
+
+
+def _openai_error(
+    status_code: int,
+    code: str,
+    message: str,
+    *,
+    kind: str = "invalid_request_error",
+    param: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    """An error in the OpenAI format (``{"error": {message, type, param, code}}``), so clients
+    of that format raise their own typed errors."""
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"message": message, "type": kind, "param": param, "code": code}},
+        headers=headers,
+    )
+
+
+# How a chat request can fail with an answer the client should see; anything else is a bug.
+CHAT_FAILURES = (ProviderError, ChatInputError, QueueFullError, RequestTimeoutError)
+
+
+def _provider_error(exc: ProviderError) -> JSONResponse:
+    headers = {"Retry-After": str(exc.retry_after_s)} if exc.retry_after_s is not None else None
+    kind = {422: "invalid_request_error", 429: "rate_limit_error"}.get(exc.status, "api_error")
+    message = exc.message + (f" ({exc.detail})" if exc.detail else "")
+    return _openai_error(exc.status, exc.code.value, message, kind=kind, headers=headers)
 
 
 class PlaygroundBody(GenerateBody):
@@ -998,6 +1192,7 @@ def create_app(
     playground_keys: bool = False,
     local_only: LocalOnlyPolicy | None = None,
     accounts: AccountAccess | None = None,
+    chat_adapters: Mapping[str, Backend] | None = None,
 ) -> FastAPI:
     """Build the API around an already wired registry.
 
@@ -1524,6 +1719,316 @@ def create_app(
             caller: Application = Depends(authenticate),
         ) -> ApplicationUsageResponse:
             return usage_body(caller)
+
+        chat = ChatService(registry, clock, chat_adapters)
+        chat_epoch = epoch if epoch is not None else ClockEpoch(clock)
+
+        def account_chat(
+            outcome: ChatOutcome, caller: Application, multiplier: float, model: str
+        ) -> None:
+            """What ``settle`` records for a generate request, for a chat one: metrics, the
+            SLO monitor, the ledger and monitoring. No cost is computed for chat: only prices
+            an organization enters will be (docs/31), so the ledger records 0."""
+            # Keyed by the routed tier, as for /v1/generate (a worker's result names its
+            # profile instead).
+            timing = outcome.timing
+            metrics.record(model, timing)
+            if monitor is not None:
+                monitor.record(model, timing.latency_ms)
+            billed = ledger.record(caller.id, timing, model=model, price_multiplier=multiplier)
+            monitoring.completed(
+                model,
+                caller.id,
+                timing,
+                billed_cost_usd=billed,
+                live_tokens=timing.tokens_out,
+            )
+
+        def chat_headers(outcome: ChatOutcome, model: str) -> dict[str, str]:
+            headers = {"X-Model-Used": model, "X-Provider": outcome.provider}
+            if outcome.result.usage.estimated:
+                headers["X-Usage-Estimated"] = "true"
+            if outcome.result.thinking_blocks_omitted:
+                headers["X-Thinking-Blocks-Omitted"] = str(outcome.result.thinking_blocks_omitted)
+            return headers
+
+        def usage_view(outcome: ChatOutcome) -> dict[str, object]:
+            usage = outcome.result.usage
+            view: dict[str, object] = {
+                "prompt_tokens": usage.input_tokens,
+                "completion_tokens": usage.output_tokens,
+                "total_tokens": usage.input_tokens + usage.output_tokens,
+            }
+            if usage.estimated:
+                view["usage_estimated"] = True
+            if outcome.result.thinking_blocks_omitted:
+                view["thinking_blocks_omitted"] = outcome.result.thinking_blocks_omitted
+            return view
+
+        def tool_call_view(call: ToolCall, index: int | None = None) -> dict[str, object]:
+            view: dict[str, object] = {
+                "id": call.id,
+                "type": "function",
+                "function": {"name": call.name, "arguments": call.arguments},
+            }
+            return {"index": index, **view} if index is not None else view
+
+        @app.post("/v1/chat/completions", response_model=None)
+        @public_route("an application API key, checked by the route")
+        async def chat_completions(
+            request: Request, authorization: str | None = Header(default=None)
+        ) -> Response:
+            """The OpenAI-compatible chat endpoint (docs/31). Every refusal is in the OpenAI
+            error format."""
+            scheme, _, credentials = (authorization or "").strip().partition(" ")
+            if scheme.lower() != "bearer" or not credentials.strip():
+                return _openai_error(
+                    401,
+                    "api_key_required",
+                    str(ApiKeyRequiredError()),
+                    kind="authentication_error",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            try:
+                caller = keys.authenticate(credentials.strip())
+            except InvalidApiKeyError:
+                return _openai_error(
+                    401,
+                    "invalid_api_key",
+                    INVALID_KEY_MESSAGE,
+                    kind="authentication_error",
+                    headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
+                )
+            try:
+                raw = await request.json()
+            except ValueError:
+                return _openai_error(400, "invalid_json", "The body is not valid JSON.")
+            try:
+                body = ChatCompletionBody.model_validate(raw)
+            except ValidationError as exc:
+                problem = exc.errors()[0]
+                param = ".".join(str(part) for part in problem["loc"]) or None
+                if problem["type"] == "extra_forbidden":
+                    return _openai_error(
+                        422,
+                        "unsupported_field",
+                        f"The field {param!r} is not supported by this gateway.",
+                        param=param,
+                    )
+                return _openai_error(422, "invalid_request", problem["msg"], param=param)
+            if (body.model is None) == (body.quality is None):
+                return _openai_error(
+                    422, "invalid_request", "Give either a model or a quality.", param="model"
+                )
+            assert router is not None
+            assert rate_limiter is not None
+            if caller.max_tokens is not None and (body.max_tokens or 0) > caller.max_tokens:
+                return _openai_error(
+                    422,
+                    "invalid_request",
+                    f"At most {caller.max_tokens} on this application's plan.",
+                    param="max_tokens",
+                )
+            try:
+                rate_limiter.admit(caller.id, caller.requests_per_minute)
+            except RateLimitedError as exc:
+                monitoring.rate_limited(caller.id)
+                seconds = max(1, math.ceil(exc.retry_after_ms / 1000))
+                return _openai_error(
+                    429,
+                    "rate_limited",
+                    f"{exc} Retry in {seconds} seconds.",
+                    kind="rate_limit_error",
+                    headers={"Retry-After": str(seconds)},
+                )
+            try:
+                route = router.route(caller, model=body.model, quality=body.quality)
+            except UnknownModelError as exc:
+                return _openai_error(
+                    404, "unknown_model", f"Unknown model {exc.model!r}.", param="model"
+                )
+            except ModelNotAllowedError as exc:
+                return _openai_error(
+                    403, "model_not_in_plan", str(exc), kind="permission_error", param="model"
+                )
+            try:
+                ledger.check_budget(caller.id, route.plan.monthly_token_budget)
+            except BudgetExceededError as exc:
+                monitoring.budget_exhausted(route.model, exc)
+                seconds = max(1, math.ceil(exc.retry_after_ms / 1000))
+                return _openai_error(
+                    429,
+                    "budget_exhausted",
+                    f"{exc} The budget resets in {seconds} seconds.",
+                    kind="rate_limit_error",
+                    headers={"Retry-After": str(seconds)},
+                )
+            request_id = f"req-{next(request_numbers)}"
+            try:
+                chat_req = chat_request(body, request_id, route.model)
+                if chat_req.max_tokens is None and caller.max_tokens is not None:
+                    chat_req = dataclasses.replace(chat_req, max_tokens=caller.max_tokens)
+            except ChatInputError as exc:
+                return _openai_error(422, "invalid_request", str(exc), param=exc.param)
+            capabilities = chat.capabilities(route.model)
+            if chat_req.tools and capabilities.supports_tools is False:
+                reason = capabilities.reasons.get("supports_tools", "")
+                return _openai_error(
+                    422,
+                    "tools_not_supported",
+                    f"Model {route.model!r} cannot be used with tools here"
+                    + (f" ({reason})." if reason else "."),
+                    param="tools",
+                )
+            completion_id = "chatcmpl-" + request_id.removeprefix("req-")
+            created = int(chat_epoch.epoch_ms() // 1000)
+            multiplier = route.plan.price_multiplier
+
+            def chunk(choice: dict[str, object], **extra: object) -> str:
+                body_ = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": route.model,
+                    "choices": [choice] if choice else [],
+                    **extra,
+                }
+                return f"data: {json.dumps(body_)}\n\n"
+
+            def failure(exc: Exception) -> JSONResponse:
+                if isinstance(exc, ProviderError):
+                    return _provider_error(exc)
+                if isinstance(exc, ChatInputError):
+                    return _openai_error(422, "invalid_request", str(exc), param=exc.param)
+                if isinstance(exc, QueueFullError):
+                    seconds = max(1, math.ceil(exc.retry_after_ms / 1000))
+                    return _openai_error(
+                        429,
+                        "queue_full",
+                        f"Model {route.model!r} is overloaded. Retry in {seconds} seconds.",
+                        kind="rate_limit_error",
+                        headers={"Retry-After": str(seconds)},
+                    )
+                if isinstance(exc, RequestTimeoutError):
+                    return _openai_error(
+                        504, "request_timeout", "The request timed out.", kind="api_error"
+                    )
+                raise exc
+
+            async def tracked(on_delta: Callable[[ChatDelta], None] | None) -> ChatOutcome:
+                monitoring.request_started(route.model)
+                try:
+                    work = chat.run(chat_req, on_delta)
+                    if timeout_ms is not None:
+                        return await run_with_timeout(clock, work, timeout_ms)
+                    return await work
+                finally:
+                    monitoring.request_ended(route.model)
+
+            if not body.stream:
+                try:
+                    outcome = await tracked(None)
+                except CHAT_FAILURES as exc:
+                    return failure(exc)
+                account_chat(outcome, caller, multiplier, route.model)
+                result = outcome.result
+                message: dict[str, object] = {
+                    "role": "assistant",
+                    "content": result.content or (None if result.tool_calls else ""),
+                    "refusal": None,
+                }
+                if result.tool_calls:
+                    message["tool_calls"] = [tool_call_view(c) for c in result.tool_calls]
+                return JSONResponse(
+                    {
+                        "id": completion_id,
+                        "object": "chat.completion",
+                        "created": created,
+                        "model": route.model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": message,
+                                "finish_reason": result.finish_reason,
+                                "logprobs": None,
+                            }
+                        ],
+                        "usage": usage_view(outcome),
+                    },
+                    headers=chat_headers(outcome, route.model),
+                )
+
+            # Streaming. Deltas go to a queue; None marks the end of the work.
+            deltas: asyncio.Queue[ChatDelta | None] = asyncio.Queue()
+            task = asyncio.ensure_future(tracked(deltas.put_nowait))
+            task.add_done_callback(lambda _: deltas.put_nowait(None))
+            try:
+                first = await deltas.get()
+            except asyncio.CancelledError:
+                task.cancel()
+                raise
+            if first is None:
+                # It ended before any output, so nothing has been sent: answer as JSON.
+                failed = task.exception()
+                if isinstance(failed, CHAT_FAILURES):
+                    return failure(failed)
+                outcome = task.result()  # an answer with no delta at all
+                account_chat(outcome, caller, multiplier, route.model)
+            include_usage = body.stream_options is not None and body.stream_options.include_usage
+
+            async def events(item: ChatDelta | None) -> AsyncIterator[str]:
+                try:
+                    yield chunk(
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": ""},
+                            "finish_reason": None,
+                        }
+                    )
+                    tool_index = 0
+                    while item is not None:
+                        if item.tool_call is not None:
+                            delta: dict[str, object] = {
+                                "tool_calls": [tool_call_view(item.tool_call, tool_index)]
+                            }
+                            tool_index += 1
+                        else:
+                            delta = {"content": item.text}
+                        yield chunk({"index": 0, "delta": delta, "finish_reason": None})
+                        item = await deltas.get()
+                    failed = task.exception() if not task.cancelled() else None
+                    if task.cancelled() or failed is not None:
+                        error = (
+                            failure(failed)
+                            if isinstance(failed, CHAT_FAILURES)
+                            else _openai_error(
+                                500, "internal_error", "The request failed.", kind="api_error"
+                            )
+                        )
+                        # After output has started the status cannot change: the error goes
+                        # in the stream, and it ends without [DONE].
+                        yield f"data: {bytes(error.body).decode()}\n\n"
+                        return
+                    outcome = task.result()
+                    if first is not None:
+                        account_chat(outcome, caller, multiplier, route.model)
+                    yield chunk(
+                        {"index": 0, "delta": {}, "finish_reason": outcome.result.finish_reason}
+                    )
+                    if include_usage:
+                        yield chunk({}, usage=usage_view(outcome))
+                    yield "data: [DONE]\n\n"
+                finally:
+                    # The client went away or the stream ended early: stop the upstream work.
+                    if not task.done():
+                        task.cancel()
+
+            headers = {"Cache-Control": "no-cache"}
+            if task.done() and not task.cancelled() and task.exception() is None:
+                headers.update(chat_headers(task.result(), route.model))
+            else:
+                headers.update({"X-Model-Used": route.model, "X-Provider": "local"})
+            return StreamingResponse(events(first), media_type="text/event-stream", headers=headers)
 
     # Throwaway keys for the Playground: in memory, never printed, logged or returned.
     playground: dict[str, str] = {}
@@ -2075,8 +2580,10 @@ def create_default_app() -> FastAPI:
         Path(backends_path) if backends_path else None,
         kind_override=os.environ.get("GATEWAY_BACKEND"),
     )
+    chat_adapters = None
     if backends.kind == "llamacpp":
         registry = build_llamacpp_registry(backends, clock)
+        chat_adapters = build_chat_adapters(backends)
     else:
         profiles_path = os.environ.get("GATEWAY_PROFILES") or backends.profiles_path
         registry = build_continuous_registry(
@@ -2099,6 +2606,7 @@ def create_default_app() -> FastAPI:
         load_control=os.environ.get("GATEWAY_LOAD_CONTROL") == "1",
         seed=seed,
         local_only=policy_from(os.environ),
+        chat_adapters=chat_adapters,
     )
     # Held for the life of the process; released when it exits, however it exits.
     app.state.database_lock = lock

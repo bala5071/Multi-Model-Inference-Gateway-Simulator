@@ -6,7 +6,16 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from gateway.chat import (
+    UNKNOWN_CAPABILITIES,
+    Capabilities,
+    ChatDeltaCallback,
+    ChatNotSupportedError,
+    ChatRequest,
+    ChatResult,
+)
 from gateway.schema import GenerateRequest
+from gateway.secret import Secret
 
 # Called by a backend that really generates, as each piece of output arrives:
 # (index of the piece, its text). Backends that only simulate never call it.
@@ -69,3 +78,19 @@ class Backend(ABC):
     async def aclose(self) -> None:
         """Release anything the backend holds, such as network connections."""
         return None
+
+    async def chat(
+        self,
+        request: ChatRequest,
+        *,
+        credential: Secret | None = None,
+        on_delta: ChatDeltaCallback | None = None,
+    ) -> ChatResult:
+        """Answer a chat request in the common format (docs/31). ``credential`` is passed for
+        each call, never held by the backend. Backends that only take a prompt do not speak
+        it."""
+        raise ChatNotSupportedError(type(self).__name__)
+
+    def capabilities(self) -> Capabilities:
+        """What the configured model can do; unknown unless the backend knows better."""
+        return UNKNOWN_CAPABILITIES
