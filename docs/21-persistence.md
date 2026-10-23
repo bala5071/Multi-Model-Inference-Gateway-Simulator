@@ -137,6 +137,15 @@ application, restores, and finds the applications, the key and the usage exactly
 were; it also checks refusals (a running server, a damaged file, a non-gateway file, an
 existing target) and the CLI round trip.
 
+- **A backup holds what the database holds: key HMACs and, since identity step 4, users'
+  argon2id password hashes**, with the audit log and usage. **Never commit one.** `.gitignore`
+  ignores `*.db` and `*.db-*` anywhere in the tree (`tests/test_database.py` checks backup
+  names, the copy taken before a migration included). A backup is created owner-only like the
+  database: on POSIX the file is 0600 (and a folder it creates 0700; `tests/test_backup.py`
+  checks it on POSIX); on Windows it inherits the folder's permissions, so keep backups in a
+  folder only you can read. `manage.py backup` has no default location (`--to` is required);
+  the copy `manage.py migrate` takes before a table rebuild goes beside the database, which by
+  default is in the user's data folder, outside the working tree.
 - **The pepper is not in a backup and must be backed up separately** (note 20): a restored
   database without the same pepper checks no key. Keep the two apart: either alone is
   useless to whoever takes it.

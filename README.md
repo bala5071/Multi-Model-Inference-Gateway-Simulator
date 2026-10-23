@@ -277,6 +277,8 @@ Then open <http://127.0.0.1:8000/docs>. The dashboard is at `/dashboard/` once i
 been built (`cd frontend && npm ci && npm run build`, Node 20;
 [docs/16-dashboard.md](docs/16-dashboard.md)). More keys, rotation, revocation, backup and
 restore: `uv run python scripts/manage.py --help` and [docs/21](docs/21-persistence.md).
+A backup holds key HMACs and password hashes: never commit one (`*.db` is git-ignored), and
+keep it where only you can read it (it is created owner-only on Linux and macOS).
 
 Applications belong to organizations ([docs/26](docs/26-organizations.md)). The ones above
 are in `default`, which every database has; others are created with the CLI. Application
@@ -306,7 +308,8 @@ People log in to a console with a username and password ([docs/27](docs/27-users
 There is no sign-up: the first admin comes from `GATEWAY_ADMIN_USERNAME` and
 `GATEWAY_ADMIN_PASSWORD` (as in the quickstart's `gateway.env`) when none exists, and must
 change that password at its first login; the server refuses to start without an admin.
-Further accounts come from the CLI, which asks for the password and never prints it:
+Further accounts come from the CLI, which asks for the password and never prints it; one the
+operator creates must change its password at first login:
 
 ```sh
 uv run python scripts/manage.py create-user --username alice --organization north
@@ -314,6 +317,21 @@ uv run python scripts/manage.py reset-password --username alice   # a temporary 
 uv run python scripts/manage.py unlock-user --username alice      # after 5 failed logins
 uv run python scripts/manage.py disable-user --username alice     # ends every session
 ```
+
+Roles decide what an account may do ([docs/28](docs/28-roles.md)): `platform_admin`
+(organizations; users in any organization), `org_admin` (its organization), `app_admin` (its
+application) and `viewer` (usage, read only). Membership alone grants nothing. Roles are granted
+from the CLI; `--as USERNAME` keeps the operator within that user's roles (it can only
+narrow what the operator may do), and the audit log records the operator as having acted,
+with that user as `acting_as`:
+
+```sh
+uv run python scripts/manage.py grant-role --username alice --role org_admin --organization north
+uv run python scripts/manage.py list-roles --username alice
+```
+
+Upgrading a database from before roles: run `uv run python scripts/manage.py migrate` once before
+starting this version (it backs the database up first).
 
 `POST /v1/auth/login` with `{"username", "password"}` sets an `HttpOnly`, `SameSite=Strict`
 session cookie and returns a CSRF token, which `POST /v1/auth/logout` and

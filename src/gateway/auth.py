@@ -49,8 +49,23 @@ from gateway.audit import (
 )
 from gateway.clock import Clock, EpochSource
 from gateway.keyderivation import KeyPurpose, derive_key
-from gateway.organizations import DEFAULT_ORGANIZATION_ID, membership_decision
+from gateway.organizations import (
+    DEFAULT_ORGANIZATION_ID,
+    OrganizationKind,
+    membership_decision,
+)
 from gateway.passwords import PasswordPolicy, Passwords, load_blocklist
+from gateway.permissions import (
+    PLATFORM_SCOPE_ID,
+    ROLE_SCOPES,
+    Actor,
+    Assignment,
+    Resource,
+    Role,
+    ScopeType,
+    authorize,
+)
+from gateway.roles import RoleStore
 from gateway.users import AccountStore, Bootstrap, Session, User, normalize_username
 
 MINUTE_MS = 60_000.0
@@ -205,8 +220,22 @@ class SessionContext:
         return f"SessionContext(user={self.user!r}, session={self.session!r})"
 
 
+class NotPermittedError(Exception):
+    """The actor may not do this."""
+
+
+class LastAdminError(ValueError):
+    """Disabling or revoking would leave an organization without an org_admin, or the platform
+    without a platform_admin."""
+
+
 class AccountService:
-    """Everything about console accounts, below HTTP."""
+    """Everything about console accounts, below HTTP.
+
+    Methods that change accounts or roles take an ``actor``: the user acting, checked with
+    ``authorize``; or None for the operator at the CLI, who has the database anyway and is a
+    member of no organization.
+    """
 
     def __init__(
         self,
@@ -214,6 +243,7 @@ class AccountService:
         audit: AuditLog,
         passwords: Passwords,
         *,
+        roles: RoleStore,
         organizations: ApplicationStore,
         clock: Clock,
         epoch: EpochSource,
@@ -224,6 +254,7 @@ class AccountService:
     ) -> None:
         self.store = store
         self.audit = audit
+        self.roles = roles
         self._passwords = passwords
         self._organizations = organizations
         self._clock = clock
@@ -248,6 +279,48 @@ class AccountService:
     def _record(self, event: AuditEvent) -> None:
         self.audit.write(event, self._now())
 
+    # --- actors --------------------------------------------------------------------------
+
+    def actor_for(self, user: User) -> Actor:
+        """The user as ``authorize`` sees them, read now: a removed role is already gone."""
+        organization = self._organizations.get_organization(user.organization_id)
+        return Actor(
+            user.id,
+            user.organization_id,
+            self.roles.assignments_for(user.id),
+            disabled=user.disabled,
+            organization_disabled=organization is None or organization.disabled,
+        )
+
+    def actor_named(self, username: str) -> Actor:
+        return self.actor_for(self._user_by_name(username))
+
+    @staticmethod
+    def _who(actor: Actor | None) -> tuple[str | None, dict[str, object]]:
+        """Whom an audit entry names as its actor, and any ``acting_as``: a user acting
+        for itself is the actor; the operator at the CLI is recorded as no user, and when it
+        acts within a user's roles (--as) that user is ``acting_as``, never the actor."""
+        if actor is None:
+            return None, {}
+        if actor.via_operator:
+            return None, {"acting_as": actor.user_id}
+        return actor.user_id, {}
+
+    def _user_event(
+        self, action: AuditAction, user: User, actor: Actor | None, **details: object
+    ) -> AuditEvent:
+        who, acting = self._who(actor)
+        return AuditEvent(
+            action, Outcome.SUCCESS, TargetType.USER, user.id, who, {**details, **acting}
+        )
+
+    @staticmethod
+    def _require(actor: Actor | None, action: str, resource: Resource) -> None:
+        if actor is None:
+            return  # the operator at the CLI
+        if not authorize(actor, action, resource).allowed:
+            raise NotPermittedError(f"not permitted: {action}")
+
     # --- users ---------------------------------------------------------------------------
 
     def create_user(
@@ -256,18 +329,26 @@ class AccountService:
         password: str,
         organization_id: str,
         *,
+        actor: Actor | None = None,
         platform_admin: bool = False,
         must_change_password: bool = False,
         bootstrap: Bootstrap = Bootstrap.NONE,
         reason: Reason = Reason.CLI,
     ) -> User:
-        """Create an account: the organization must exist and be enabled, its kind must take
-        another member (an individual organization takes one), the username must be free and
-        the password must pass the policy. Hashes synchronously (CLI and startup only)."""
+        """Create an account: the actor may create users there, the organization exists and
+        is enabled, its kind takes another member (an individual organization takes one, who
+        becomes its org_admin), the username is free and the password passes the policy.
+
+        An account made by a platform_admin who is not a member of its organization, or by
+        the operator at the CLI, must change its password at first login: whoever made it
+        knows that password. Hashes synchronously (CLI and startup only)."""
         name = normalize_username(username)
         organization = self._organizations.get_organization(organization_id)
         if organization is None:
             raise ValueError(f"no organization {organization_id!r}")
+        self._require(actor, "users.create", Resource.organization(organization.id))
+        if platform_admin and actor is not None:
+            raise NotPermittedError("platform_admin is granted only by the operator, at the CLI")
         if organization.disabled:
             raise ValueError(f"organization {organization_id!r} is disabled")
         decision = membership_decision(organization.kind, self.store.count_members(organization.id))
@@ -279,24 +360,35 @@ class AccountService:
         if self.store.find_user(name) is not None:
             raise ValueError(f"username {name!r} is taken")
         self._policy.check(password, name)
+        outsider = actor is None or (
+            actor.holds(Role.PLATFORM_ADMIN) and actor.organization_id != organization.id
+        )
         user = User(
             id="usr_" + self._random_bytes(ID_BYTES).hex(),
             username=name,
             password_hash=self._passwords.hasher.hash(password),
             organization_id=organization.id,
             created_at_ms=self._now(),
-            must_change_password=must_change_password,
+            must_change_password=must_change_password or outsider,
             bootstrap=bootstrap,
-            platform_admin=platform_admin,
         )
-        details: dict[str, object] = {"platform_admin": platform_admin, "reason": reason}
+        details: dict[str, object] = {
+            "platform_admin": platform_admin,
+            "must_change_password": user.must_change_password,
+            "reason": reason,
+        }
         if ORGANIZATION_ID_PATTERN.fullmatch(organization.id):
             details["organization_id"] = organization.id
-        event = AuditEvent(
-            AuditAction.USER_CREATED, Outcome.SUCCESS, TargetType.USER, user.id, details=details
-        )
+        event = self._user_event(AuditAction.USER_CREATED, user, actor, **details)
         self.store.add_user(user)
         self._record(event)
+        if platform_admin:
+            platform = Assignment(Role.PLATFORM_ADMIN.value, ScopeType.PLATFORM, "*")
+            self._grant(user, platform, None)
+        if organization.kind is OrganizationKind.INDIVIDUAL:
+            # The one member of an individual organization is its org_admin.
+            org_admin = Assignment(Role.ORG_ADMIN.value, ScopeType.ORGANIZATION, organization.id)
+            self._grant(user, org_admin, actor)
         return user
 
     def bootstrap_admin(self, environ: Mapping[str, str]) -> BootstrapOutcome:
@@ -304,7 +396,7 @@ class AccountService:
         touches an existing one."""
         username = environ.get(ADMIN_USERNAME_ENV)
         password = environ.get(ADMIN_PASSWORD_ENV)
-        if self.store.platform_admin_exists():
+        if self.roles.platform_admin_exists():
             if username is not None or password is not None:
                 return BootstrapOutcome.EXISTS_WITH_VARIABLES
             return BootstrapOutcome.EXISTS
@@ -351,26 +443,50 @@ class AccountService:
             )
         return revoked
 
-    def disable_user(self, username: str) -> int:
-        """Disable an account and revoke all its sessions. Returns how many were revoked."""
-        user = self._user_by_name(username)
-        self.store.set_disabled(user.id, True)
-        self._record(
-            AuditEvent(AuditAction.USER_DISABLED, Outcome.SUCCESS, TargetType.USER, user.id)
-        )
-        return self._revoke_all(user, Reason.USER_DISABLED)
+    def _guard_last_admin(self, user: User, losing: tuple[Assignment, ...]) -> None:
+        """Refuse if ``user`` losing ``losing`` leaves an organization with no enabled
+        org_admin, or the platform with no enabled platform_admin."""
+        for assignment in losing:
+            if assignment.role not in (Role.ORG_ADMIN.value, Role.PLATFORM_ADMIN.value):
+                continue
+            holders = self.roles.enabled_holders(assignment)
+            if user.id in holders and len(holders) == 1:
+                where = (
+                    "the platform"
+                    if assignment.scope_type is ScopeType.PLATFORM
+                    else f"organization {assignment.scope_id!r}"
+                )
+                raise LastAdminError(
+                    f"{user.username!r} is the last {assignment.role} of {where}: grant the role "
+                    "to someone else first"
+                )
 
-    def enable_user(self, username: str) -> None:
+    def disable_user(self, username: str, *, actor: Actor | None = None) -> int:
+        """Disable an account and revoke all its sessions. Returns how many were revoked.
+        Refused for the last org_admin of an organization or the last platform_admin."""
         user = self._user_by_name(username)
+        self._require(actor, "users.disable", Resource.organization(user.organization_id))
+        # The count of the other admins and the change are one transaction: no other
+        # connection can remove the last other admin in between.
+        with self.store.immediate():
+            self._guard_last_admin(user, self.roles.assignments_for(user.id))
+            self.store.set_disabled(user.id, True)
+            self._record(self._user_event(AuditAction.USER_DISABLED, user, actor))
+            return self._revoke_all(user, Reason.USER_DISABLED)
+
+    def enable_user(self, username: str, *, actor: Actor | None = None) -> None:
+        user = self._user_by_name(username)
+        self._require(actor, "users.enable", Resource.organization(user.organization_id))
         self.store.set_disabled(user.id, False)
-        self._record(
-            AuditEvent(AuditAction.USER_ENABLED, Outcome.SUCCESS, TargetType.USER, user.id)
-        )
+        self._record(self._user_event(AuditAction.USER_ENABLED, user, actor))
 
-    def reset_password(self, username: str, new_password: str) -> int:
+    def reset_password(
+        self, username: str, new_password: str, *, actor: Actor | None = None
+    ) -> int:
         """Set a temporary password the user must change, clear any lock and revoke every
         session. Hashes synchronously (CLI only). Returns how many sessions were revoked."""
         user = self._user_by_name(username)
+        self._require(actor, "users.reset_password", Resource.organization(user.organization_id))
         self._policy.check(new_password, user.username)
         self.store.set_password(
             user.id,
@@ -379,17 +495,110 @@ class AccountService:
             bootstrap=Bootstrap.NONE,
         )
         self.store.set_login_state(user.id, 0, None, None)
-        self._record(
-            AuditEvent(AuditAction.PASSWORD_RESET, Outcome.SUCCESS, TargetType.USER, user.id)
-        )
+        self._record(self._user_event(AuditAction.PASSWORD_RESET, user, actor))
         return self._revoke_all(user, Reason.PASSWORD_RESET)
 
-    def unlock_user(self, username: str) -> None:
+    def unlock_user(self, username: str, *, actor: Actor | None = None) -> None:
         user = self._user_by_name(username)
+        self._require(actor, "users.unlock", Resource.organization(user.organization_id))
         self.store.set_login_state(user.id, 0, None, None)
-        self._record(
-            AuditEvent(AuditAction.USER_UNLOCKED, Outcome.SUCCESS, TargetType.USER, user.id)
+        self._record(self._user_event(AuditAction.USER_UNLOCKED, user, actor))
+
+    # --- roles ---------------------------------------------------------------------------
+
+    def _assignment(
+        self, user: User, role: str, scope_type: str, scope_id: str, *, defined: bool
+    ) -> Assignment:
+        """The assignment, checked: the role may be held in that scope, and the scope lies in
+        the user's own organization (the platform scope aside). With ``defined``, an
+        application-defined role must be defined by that application."""
+        kind = ScopeType(scope_type)
+        if kind is ScopeType.PLATFORM:
+            if scope_id != PLATFORM_SCOPE_ID:
+                raise ValueError("the platform scope has no id")
+        elif kind is ScopeType.ORGANIZATION:
+            if scope_id != user.organization_id:
+                raise ValueError("a role is held only within the user's own organization")
+        else:
+            application = self._organizations.get_application(scope_id)
+            if application is None or application.organization_id != user.organization_id:
+                raise ValueError("a role is held only within the user's own organization")
+        if role in {r.value for r in Role}:
+            if kind not in ROLE_SCOPES[Role(role)]:
+                raise ValueError(f"{role} is not held at {kind} scope")
+        else:
+            if kind is not ScopeType.APPLICATION:
+                raise ValueError("an application-defined role is held at application scope")
+            if defined and role not in self.roles.app_roles(scope_id):
+                raise ValueError(f"application {scope_id!r} defines no role {role!r}")
+        return Assignment(role, kind, scope_id)
+
+    def _grant(self, user: User, assignment: Assignment, actor: Actor | None) -> None:
+        granted_by, _ = self._who(actor)
+        self.roles.grant(user.id, assignment, granted_by, self._now())
+        self._record(self._role_event(AuditAction.ROLE_GRANTED, user, assignment, actor))
+
+    def _role_event(
+        self, action: AuditAction, user: User, assignment: Assignment, actor: Actor | None
+    ) -> AuditEvent:
+        details: dict[str, object] = {"scope_type": assignment.scope_type.value}
+        for key, value in (("role", assignment.role), ("scope_id", assignment.scope_id)):
+            if ORGANIZATION_ID_PATTERN.fullmatch(value) or value == PLATFORM_SCOPE_ID:
+                details[key] = value
+        return self._user_event(action, user, actor, **details)
+
+    def _check_granting(self, actor: Actor | None, role: str) -> None:
+        """Which roles an actor may grant or revoke, beyond the table's ``roles.*`` rows."""
+        if actor is None:
+            return  # the operator at the CLI may grant anything, platform_admin included
+        if role == Role.PLATFORM_ADMIN.value:
+            raise NotPermittedError("platform_admin is granted and revoked only by the operator")
+        org_admin_here = any(
+            a.role == Role.ORG_ADMIN.value and a.scope_type is ScopeType.ORGANIZATION
+            for a in actor.assignments
         )
+        if not org_admin_here and role != Role.ORG_ADMIN.value:
+            # A platform_admin outside an organization only appoints its org_admin.
+            raise NotPermittedError("a platform_admin may grant only org_admin")
+
+    def grant_role(
+        self,
+        username: str,
+        role: str,
+        scope_type: str,
+        scope_id: str,
+        *,
+        actor: Actor | None = None,
+    ) -> None:
+        user = self._user_by_name(username)
+        self._require(actor, "roles.assign", Resource.organization(user.organization_id))
+        self._check_granting(actor, role)
+        assignment = self._assignment(user, role, scope_type, scope_id, defined=True)
+        self._grant(user, assignment, actor)
+
+    def revoke_role(
+        self,
+        username: str,
+        role: str,
+        scope_type: str,
+        scope_id: str,
+        *,
+        actor: Actor | None = None,
+    ) -> None:
+        user = self._user_by_name(username)
+        self._require(actor, "roles.revoke", Resource.organization(user.organization_id))
+        self._check_granting(actor, role)
+        assignment = self._assignment(user, role, scope_type, scope_id, defined=False)
+        with self.store.immediate():  # the count and the revocation together
+            self._guard_last_admin(user, (assignment,))
+            if not self.roles.revoke(user.id, assignment):
+                raise ValueError(f"{user.username!r} does not hold that role in that scope")
+            self._record(self._role_event(AuditAction.ROLE_REVOKED, user, assignment, actor))
+
+    def list_roles(self, username: str, *, actor: Actor | None = None) -> tuple[Assignment, ...]:
+        user = self._user_by_name(username)
+        self._require(actor, "roles.list", Resource.organization(user.organization_id))
+        return self.roles.assignments_for(user.id)
 
     # --- login ---------------------------------------------------------------------------
 

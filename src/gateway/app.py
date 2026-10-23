@@ -19,7 +19,9 @@ import secrets
 import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, TypeVar
 
 from fastapi import Depends, FastAPI, Header, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -71,7 +73,12 @@ from gateway.database import ProcessLock, database_path, open_database
 from gateway.events import EventBus
 from gateway.ledger import BudgetExceededError, CostLedger, ModelUsage, run_retention
 from gateway.loadcontrol import PRESETS, LoadController, UnknownPresetError
-from gateway.localonly import LocalOnlyMiddleware, LocalOnlyPolicy, policy_from
+from gateway.localonly import (
+    STATE_CHANGING,
+    LocalOnlyMiddleware,
+    LocalOnlyPolicy,
+    policy_from,
+)
 from gateway.metrics import Distribution, MetricsStore
 from gateway.migrations import MIGRATIONS, MigrationError, MigrationRunner
 from gateway.monitoring import Monitor, Snapshot, render_prometheus
@@ -93,9 +100,11 @@ from gateway.passwords import (
     ThreadHashRunner,
     parameters_from,
 )
+from gateway.permissions import PERMISSIONS, Actor, Resource, authorize
 from gateway.profiles import PROFILES, Tier, load_calibrated_profiles
 from gateway.ratelimit import RateLimitedError, RequestRateLimiter
 from gateway.registry import ModelRegistry, UnknownModelError
+from gateway.roles import RoleStore
 from gateway.routing import ModelNotAllowedError, Quality, Router, load_plans, pick_by_quality
 from gateway.schema import GenerateRequest, RequestResult
 from gateway.timeseries import TimeSeriesStore
@@ -351,6 +360,95 @@ def _error(
     )
 
 
+# --- route declarations (docs/28) ---------------------------------------------------------
+
+DECLARATION = "__gateway_declaration__"
+Endpoint = TypeVar("Endpoint", bound=Callable[..., Any])
+# Finds the resource a request acts on, or None if it does not exist (answered exactly as a
+# forbidden one is).
+Resolver = Callable[[Request], "Resource | None"]
+
+
+@dataclass(frozen=True, slots=True)
+class RouteDeclaration:
+    """What a route declares: ``requires`` (checked by ``authorize`` on every request),
+    ``local_only`` (an action the local-only guard enforces until A8) or ``public``."""
+
+    kind: str
+    action: str | None
+    reason: str
+
+
+def _declare(declaration: RouteDeclaration) -> Callable[[Endpoint], Endpoint]:
+    def mark(endpoint: Endpoint) -> Endpoint:
+        setattr(endpoint, DECLARATION, declaration)
+        return endpoint
+
+    return mark
+
+
+def public_route(reason: str) -> Callable[[Endpoint], Endpoint]:
+    """A route anyone may call, for the reason given (it may check a key or a session
+    itself). Only a label: nothing runs per request."""
+    return _declare(RouteDeclaration("public", None, reason))
+
+
+def local_only_route(action: str) -> Callable[[Endpoint], Endpoint]:
+    """A route of a declared action that the local-only guard enforces until A8 (docs/25)."""
+    if action not in PERMISSIONS:
+        raise ValueError(f"unknown action {action!r}")
+    return _declare(RouteDeclaration("local_only", action, "local only until A8"))
+
+
+class ForbiddenError(Exception):
+    """Not permitted, or no such resource: the same answer for both."""
+
+
+def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
+    """``requires(action, resolver)``: a dependency that declares a route's action and
+    enforces it, so a route cannot be declared without being checked. On every request it
+    reads the session (401 without one), the CSRF token on a state-changing method, refuses a
+    password that must be changed first, reads the actor's roles afresh, resolves the
+    resource and calls ``authorize``; a resource that does not exist is refused exactly as a
+    forbidden one."""
+
+    def requires(action: str, resolver: Resolver) -> Any:
+        if action not in PERMISSIONS:
+            raise ValueError(f"unknown action {action!r}")
+
+        async def check(
+            request: Request, csrf: str | None = Header(default=None, alias=CSRF_HEADER)
+        ) -> Actor:
+            context = service.authenticate(request.cookies.get(SESSION_COOKIE))
+            if request.method.upper() in STATE_CHANGING:
+                service.check_csrf(context, csrf)
+            if context.user.must_change_password:
+                raise PasswordChangeRequiredError()
+            actor = service.actor_for(context.user)
+            resource = resolver(request)
+            if resource is None or not authorize(actor, action, resource).allowed:
+                raise ForbiddenError()
+            return actor
+
+        setattr(check, DECLARATION, RouteDeclaration("requires", action, "authorize"))
+        return Depends(check)
+
+    return requires
+
+
+def declaration_of(route: object) -> list[RouteDeclaration]:
+    """Every declaration a route carries: on its endpoint, and on its dependencies."""
+    found = []
+    endpoint = getattr(route, "endpoint", None)
+    if hasattr(endpoint, DECLARATION):
+        found.append(getattr(endpoint, DECLARATION))
+    dependant = getattr(route, "dependant", None)
+    for dependency in getattr(dependant, "dependencies", []):
+        if hasattr(dependency.call, DECLARATION):
+            found.append(getattr(dependency.call, DECLARATION))
+    return found
+
+
 class LoginBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -403,6 +501,13 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
             "must_change_password": user.must_change_password,
         }
 
+    app.state.requires = make_requires(service)
+
+    @app.exception_handler(ForbiddenError)
+    async def forbidden(_: Request, exc: ForbiddenError) -> JSONResponse:
+        # One answer for "not permitted" and "does not exist", byte for byte (docs/28).
+        return _error(403, "forbidden", "Not permitted, or not found.", headers=_NO_STORE)
+
     @app.exception_handler(LoginFailedError)
     async def login_failed(_: Request, exc: LoginFailedError) -> JSONResponse:
         # One answer, byte for byte, for every refused login (docs/27).
@@ -441,6 +546,7 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
         return _error(400, "password_rejected", str(exc), problem="same_as_current")
 
     @app.post("/v1/auth/login")
+    @public_route("console login: the route checks the password")
     async def login(body: LoginBody) -> JSONResponse:
         # A session cookie sent with the request is ignored: every login makes a new session.
         result = await service.login(body.username, body.password)
@@ -451,11 +557,13 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
         return with_cookie(response, result.session_id)
 
     @app.post("/v1/auth/logout")
+    @public_route("the session's own endpoint: the route checks the session itself")
     async def logout(context: SessionContext = Depends(session_with_csrf)) -> JSONResponse:
         service.logout(context)
         return with_cookie(JSONResponse({"logged_out": True}, headers=_NO_STORE), "", clear=True)
 
     @app.get("/v1/auth/me")
+    @public_route("the session's own endpoint: the route checks the session itself")
     async def me(context: SessionContext = Depends(session)) -> JSONResponse:
         return JSONResponse(
             {"user": user_view(context), "csrf_token": service.csrf_token(context)},
@@ -463,6 +571,7 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
         )
 
     @app.post("/v1/auth/change-password")
+    @public_route("the session's own endpoint: the route checks the session itself")
     async def change_password(
         body: ChangePasswordBody, context: SessionContext = Depends(session_with_csrf)
     ) -> JSONResponse:
@@ -470,6 +579,7 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
         return JSONResponse({"changed": True, "sessions_revoked": revoked}, headers=_NO_STORE)
 
     @app.get("/v1/auth/sessions")
+    @public_route("the session's own endpoint: the route checks the session itself")
     async def sessions(context: SessionContext = Depends(session)) -> JSONResponse:
         if context.user.must_change_password:
             raise PasswordChangeRequiredError()
@@ -982,12 +1092,14 @@ def create_app(
     if applications is None:
         # No applications: the request path has no key check at all.
         @app.post("/v1/generate", response_model=GenerateResponse)
+        @public_route("an application API key, checked by the route")
         async def generate(
             body: GenerateBody, response: Response
         ) -> GenerateResponse | JSONResponse | StreamingResponse:
             return await serve(body, response, None)
 
         @app.get("/v1/applications/me/usage")
+        @public_route("an application API key, checked by the route")
         async def usage_disabled() -> JSONResponse:
             return _error(
                 404, "applications_disabled", "This gateway has no applications configured."
@@ -1005,6 +1117,7 @@ def create_app(
             return keys.authenticate(credentials.strip())
 
         @app.post("/v1/generate", response_model=GenerateResponse)
+        @public_route("an application API key, checked by the route")
         async def generate_for_application(
             body: GenerateBody,
             response: Response,
@@ -1013,6 +1126,7 @@ def create_app(
             return await serve(body, response, caller)
 
         @app.get("/v1/applications/me/usage", response_model=ApplicationUsageResponse)
+        @public_route("an application API key, checked by the route")
         async def application_usage(
             caller: Application = Depends(authenticate),
         ) -> ApplicationUsageResponse:
@@ -1028,6 +1142,7 @@ def create_app(
             playground[application.id] = issued.key
 
     @app.post("/v1/playground/generate", response_model=GenerateResponse)
+    @local_only_route("playground.use")
     async def playground_generate(
         body: PlaygroundBody, response: Response
     ) -> GenerateResponse | JSONResponse | StreamingResponse:
@@ -1046,6 +1161,7 @@ def create_app(
         return await serve(request, response, caller)
 
     @app.get("/")
+    @public_route("an index of the API")
     async def index() -> dict[str, object]:
         """A signpost for someone who opens the server's address in a browser."""
         return {
@@ -1067,6 +1183,7 @@ def create_app(
         }
 
     @app.get("/v1/overload")
+    @local_only_route("monitoring.read")
     async def overload_status() -> OverloadStatus:
         status = {}
         for name in registry.names:
@@ -1091,6 +1208,7 @@ def create_app(
         return OverloadStatus(request_timeout_ms=timeout_ms, models=status)
 
     @app.get("/v1/models")
+    @public_route("the models served")
     async def models() -> ModelList:
         return ModelList(
             models=[
@@ -1100,12 +1218,14 @@ def create_app(
         )
 
     @app.get("/healthz")
+    @public_route("health")
     async def healthz() -> Health:
         return Health(
             status="ok", models=len(registry.names), uptime_ms=clock.now_ms() - started_ms
         )
 
     @app.get("/metrics/summary")
+    @local_only_route("monitoring.read")
     async def metrics_summary() -> MetricsSummary:
         summaries = {name: metrics.summary(name) for name in registry.names}
         return MetricsSummary(
@@ -1126,6 +1246,7 @@ def create_app(
         )
 
     @app.get("/metrics/detail")
+    @local_only_route("monitoring.read")
     async def metrics_detail() -> MetricsDetail:
         summaries = {name: metrics.summary(name) for name in registry.names}
         return MetricsDetail(
@@ -1233,10 +1354,12 @@ def create_app(
         )
 
     @app.get("/v1/control")
+    @local_only_route("monitoring.read")
     async def control() -> dict[str, object]:
         return control_status()
 
     @app.post("/v1/control/load/start")
+    @local_only_route("control.write")
     async def load_start(body: LoadStartBody) -> JSONResponse:
         if load is None:
             return load_disabled()
@@ -1247,6 +1370,7 @@ def create_app(
         return JSONResponse(control_status())
 
     @app.post("/v1/control/load/stop")
+    @local_only_route("control.write")
     async def load_stop() -> JSONResponse:
         if load is None:
             return load_disabled()
@@ -1254,6 +1378,7 @@ def create_app(
         return JSONResponse(control_status())
 
     @app.post("/v1/control/speed")
+    @local_only_route("control.write")
     async def set_speed(body: SpeedBody) -> JSONResponse:
         if not isinstance(clock, PacedSimClock):
             return _error(
@@ -1282,6 +1407,7 @@ def create_app(
         )
 
     @app.get("/v1/monitor/snapshot")
+    @local_only_route("monitoring.read")
     async def monitor_snapshot(
         history_s: float = Query(default=0.0, ge=0.0),
         events: int = Query(default=50, ge=0),
@@ -1290,6 +1416,7 @@ def create_app(
         return JSONResponse(dataclasses.asdict(snapshot))
 
     @app.get("/v1/monitor/stream")
+    @local_only_route("monitoring.read")
     async def monitor_stream(
         request: Request,
         history_s: float = Query(default=0.0, ge=0.0),
@@ -1334,6 +1461,7 @@ def create_app(
         )
 
     @app.get("/metrics")
+    @local_only_route("monitoring.read")
     async def prometheus_metrics() -> Response:
         return Response(render_prometheus(take_snapshot()), media_type=PROMETHEUS_CONTENT_TYPE)
 
@@ -1343,6 +1471,7 @@ def create_app(
 
         @app.get("/dashboard")
         @app.get("/dashboard/{path:path}")
+        @local_only_route("monitoring.read")
         async def dashboard_not_built(path: str = "") -> JSONResponse:
             return _error(
                 404,
@@ -1444,6 +1573,7 @@ def build_accounts(
         AccountStore(connection),
         AuditLog(connection),
         passwords,
+        roles=RoleStore(connection),
         organizations=organizations,
         clock=clock,
         epoch=epoch,

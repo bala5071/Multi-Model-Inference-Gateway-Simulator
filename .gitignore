@@ -236,9 +236,12 @@ frontend/e2e/results/
 frontend/test-results/
 frontend/playwright-report/
 
-# The gateway's database (applications, key HMACs, usage) if pointed into the tree, and the
-# env file holding the pepper: never committed.
+# The gateway's database (applications, key HMACs, password hashes, usage) if pointed into
+# the tree, every backup of it (manage.py backup, and the copy taken before a migration that
+# rebuilds a table), and the env file holding the pepper: never committed.
 gateway.db
 gateway.db-*
+*.db
+*.db-*
 *.sqlite3
 gateway.env

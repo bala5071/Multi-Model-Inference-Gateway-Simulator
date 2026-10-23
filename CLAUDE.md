@@ -90,6 +90,11 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   at most once a minute), CSRF (an HMAC of the session id under a derived key), password
   change, retention;
   `AccountAccess` is what `create_app` takes for `/v1/auth` (exists)
+- `permissions.py` — `Role`, `ScopeType`, scope `Relation`s, `PERMISSIONS` (one table: action,
+  level, allowed role@relation pairs, step-up, wired), `Actor`, `Resource`, and `authorize`, deny
+  by default; `python -m gateway.permissions --matrix` writes `docs/permission-matrix.md` (exists)
+- `roles.py` — `RoleStore` over migration 8: role assignments and application-defined roles
+  (exists)
 - `keyderivation.py` — `derive_key(pepper, KeyPurpose)`: one key per purpose (CSRF tokens, the
   login limiter), each with its own label; API key HMACs keep the pepper itself (exists)
 - `audit.py` — `AuditEvent` through a field allowlist, `AuditLog` with the per-minute cap on
@@ -115,7 +120,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `applications.organization_id` (a table rebuild: the runner turns foreign keys off around
   it and checks them; `plan_migrations` previews without writing; the server refuses a
   rebuild on a database with data, `scripts/manage.py migrate` backs up first); 5 `users`, 6
-  `sessions`, 7 `audit_log`. The default database is in the user's data folder,
+  `sessions`, 7 `audit_log`, 8 `role_assignments` and `app_roles` (a rebuild of `users` without
+  `platform_admin`). The default database is in the user's data folder,
   owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
   `restore_database` use SQLite's backup API (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),
@@ -261,6 +267,11 @@ Simulated live mode (`docs/17-playground-load-replay.md`) is the simulated wirin
 gives the same events and snapshots at any speed (`tests/test_live_sim.py`). Nothing in
 it may read real time; `PacedSimClock` uses real time only to decide when simulated
 time may move, never what it moves to. Never present anything from it as a measurement.
+
+`.gitignore` ignores `*.db` and `*.db-*` everywhere (databases and their backups hold key HMACs
+and password hashes). So **no tracked file, test fixture included, may use a `.db` extension**:
+it would be ignored, never committed, and a test passing locally would fail in CI. Build test
+databases in `tmp_path` at run time instead.
 
 Tests that need a real model server are marked `real_models` and skipped unless
 `GATEWAY_REAL_MODELS=1`; CI never runs them.

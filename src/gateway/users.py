@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
@@ -49,7 +51,6 @@ class User:
     failed_logins: int = 0
     first_failure_at_ms: float | None = None
     locked_until_ms: float | None = None
-    platform_admin: bool = False
 
     def __repr__(self) -> str:
         return f"User(id={self.id!r}, username={self.username!r}, <hash redacted>)"
@@ -74,8 +75,7 @@ class Session:
 
 _USER_COLUMNS = (
     "id, username, password_hash, organization_id, created_at_ms, disabled, "
-    "must_change_password, bootstrap, failed_logins, first_failure_at_ms, locked_until_ms, "
-    "platform_admin"
+    "must_change_password, bootstrap, failed_logins, first_failure_at_ms, locked_until_ms"
 )
 _SESSION_COLUMNS = (
     "id_hash, handle, user_id, csrf_hash, created_at_ms, last_seen_at_ms, expires_at_ms, revoked"
@@ -83,7 +83,7 @@ _SESSION_COLUMNS = (
 
 
 def _user(row: tuple[Any, ...]) -> User:
-    (uid, name, pw, org, created, disabled, must, boot, fails, first, locked, admin) = row
+    (uid, name, pw, org, created, disabled, must, boot, fails, first, locked) = row
     return User(
         uid,
         name,
@@ -96,7 +96,6 @@ def _user(row: tuple[Any, ...]) -> User:
         fails,
         first,
         locked,
-        bool(admin),
     )
 
 
@@ -106,7 +105,7 @@ def _session(row: tuple[Any, ...]) -> Session:
 
 
 class AccountStore:
-    """Users and sessions in the tables of migrations 5 and 6."""
+    """Users and sessions in the tables of migrations 5, 6 and 8."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         found = connection.execute(
@@ -117,13 +116,25 @@ class AccountStore:
             raise RuntimeError("users and sessions do not exist; run the migrations first")
         self._connection = connection
 
+    @contextmanager
+    def immediate(self) -> Iterator[None]:
+        """One write transaction, taken at once (``BEGIN IMMEDIATE``): another connection
+        cannot write until it ends. Rolled back if the block raises."""
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._connection.execute("ROLLBACK")
+            raise
+        self._connection.execute("COMMIT")
+
     # --- users ---------------------------------------------------------------------------
 
     def add_user(self, user: User) -> None:
         u = user
         try:
             self._connection.execute(
-                f"INSERT INTO users ({_USER_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO users ({_USER_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     u.id,
                     u.username,
@@ -136,7 +147,6 @@ class AccountStore:
                     u.failed_logins,
                     u.first_failure_at_ms,
                     u.locked_until_ms,
-                    int(u.platform_admin),
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -159,12 +169,6 @@ class AccountStore:
             "SELECT count(*) FROM users WHERE organization_id = ?", (organization_id,)
         ).fetchone()
         return int(row[0])
-
-    def platform_admin_exists(self) -> bool:
-        row = self._connection.execute(
-            "SELECT 1 FROM users WHERE platform_admin = 1 LIMIT 1"
-        ).fetchone()
-        return row is not None
 
     def _set(self, user_id: str, sql: str, params: tuple[Any, ...]) -> None:
         cursor = self._connection.execute(

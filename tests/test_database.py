@@ -80,6 +80,11 @@ def test_opening_tightens_a_file_that_others_could_read(tmp_path: Path) -> None:
         "data/gateway.db",
         "gateway.env",
         "x.sqlite3",
+        # Backups: any name, anywhere in the tree, and the copy taken before a migration.
+        "backup.db",
+        "backups/gateway-2025-06-01.db",
+        "gateway.db.before-migration-8-1792700000000.db",
+        "copy.db-wal",
     ],
 )
 def test_git_ignores_the_database_and_the_env_file(name: str) -> None:
