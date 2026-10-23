@@ -229,36 +229,74 @@ Step 5 builds this section (note 28); the management endpoints that use it are s
   and never logged. The cost of reading assignments on each request is measured, and
   `/v1/generate`, the performance gate and the protected outputs are shown unaffected.
 
-  **Step 7's endpoints** (each declared and enforced by `requires(action, resolver)`, so
-  authorization and step-up come from one place; `/v1/admin` joins the local-only paths):
+  **Step 7's endpoints** (approved 2026-10-22 with the changes folded in here; each declared and
+  enforced by `requires(action, resolver)`, so authorization and step-up come from one place;
+  `/v1/admin` joins the local-only paths):
 
-  | Method and path under `/v1/admin/orgs/{org}` | Action | Step-up |
-  |---|---|---|
-  | `POST /users` (`username`, `password`) | `users.create` | yes |
-  | `GET /users` | `users.list` | |
-  | `POST /users/{username}/disable` | `users.disable` | yes |
-  | `POST /users/{username}/enable` | `users.enable` | yes |
-  | `POST /users/{username}/reset-password` (`new_password`) | `users.reset_password` | yes |
-  | `POST /users/{username}/unlock` | `users.unlock` | |
-  | `POST /applications` (`id`, `name`, `plan`) | `applications.create` | |
-  | `GET /applications` | `applications.list` | |
-  | `GET /applications/{app}` | `applications.read` | |
-  | `POST /applications/{app}/keys` (`label`, `expires_in_days`) | `application_keys.issue` | yes |
-  | `GET /applications/{app}/keys` | `application_keys.list` | |
-  | `POST /applications/{app}/keys/{key_id}/rotate` (`grace_hours`) | `application_keys.rotate` | yes |
-  | `POST /applications/{app}/keys/{key_id}/revoke` | `application_keys.revoke` | yes |
+  | Method and path under `/v1/admin/orgs/{org}` | Action | Step-up | Success |
+  |---|---|---|---|
+  | `POST /users` (`username`) | `users.create` | yes | 201 |
+  | `GET /users` (`limit`, `after`) | `users.list` | | 200 |
+  | `POST /users/{username}/disable` | `users.disable` | yes | 200 |
+  | `POST /users/{username}/enable` | `users.enable` | yes | 200 |
+  | `POST /users/{username}/reset-password` | `users.reset_password` | yes | 200 |
+  | `POST /users/{username}/unlock` | `users.unlock` | yes | 200 |
+  | `POST /applications` (`name`, `plan`) | `applications.create` | | 201 |
+  | `GET /applications` (`limit`, `after`) | `applications.list` | | 200 |
+  | `GET /applications/{app}` | `applications.read` | | 200 |
+  | `POST /applications/{app}/keys` (`label`, `expires_in_days`) | `application_keys.issue` | yes | 201 |
+  | `GET /applications/{app}/keys` (`limit`, `after`) | `application_keys.list` | | 200 |
+  | `POST /applications/{app}/keys/{key_id}/rotate` (`grace_hours`, `expires_in_days`) | `application_keys.rotate` | yes | 201 |
+  | `POST /applications/{app}/keys/{key_id}/revoke` | `application_keys.revoke` | yes | 200 |
 
+  - **`users.unlock` needs step-up.** It lifts a lockout, which is a defense; the table, the
+    code (`permissions.py`), the documented table (note 28), the generated matrix and note
+    29's list of flagged actions change together (19 flagged actions, from 18).
   - **Resolvers** build the resource chain from the path and return nothing (403 `forbidden`,
     byte for byte the same as a forbidden one) when the organization, the user, the
     application or the key does not exist **or is not inside the organization named in the
     path**: a user of `south` reached through `/orgs/north/...` is missing.
-  - **Users** go through the same `create_user` as the CLI (the policy, the individual
-    organization's one member, the outsider's `must_change_password`), hashing through the
-    `HashRunner` over HTTP; a response never carries a password or hash.
+  - **Passwords never travel to the server on these endpoints.** `POST /users` and
+    `POST /users/{username}/reset-password` accept no password. The server generates a
+    temporary one (24 characters from 18 random bytes, checked against the policy and drawn
+    again if the policy refuses it), returns it once in that response's body
+    (`temporary_password`), and sets `must_change_password`. A reset also revokes every
+    session of that user and closes any step-up window. The temporary password gets the same
+    leak-scan treatment as a new API key: allowed in that one response, found by the scan
+    anywhere else, with a planted control. Hashing goes through the `HashRunner` over HTTP. The
+    CLI keeps its prompt (the operator types the password, twice).
+  - **Users** go through the same `create_user` as the CLI (the individual organization's one
+    member, the username free, the organization enabled). **Usernames stay globally unique**,
+    so `409 username_taken` tells an org_admin that a name exists in some organization: a
+    username oracle, recorded in the threat model (section 12). It is narrowed, not closed:
+    every 409 is audited, and user-creation attempts are capped per session (10 an hour,
+    `GATEWAY_USER_CREATE_ATTEMPTS`, 1 to 1000; past it `429 user_creation_limited`, audited).
+  - **An admin cannot disable or reset their own account** through these endpoints (`409
+    own_account`); the CLI and the password change are the ways for one's own account.
+  - **Applications**: the server generates the id on the HTTP path (`app_` and 16 hex
+    characters); the name stays unique within its organization (`409 application_name_taken`).
+    Creation takes a plan template's name from the plans file, never raw numbers (an unknown
+    one is `422`). The CLI keeps `--id`.
   - **Application keys**: a new key (issue, rotate) is returned once, in that response's body,
     with `Cache-Control: no-store`; a list shows key ids, labels and state, never a key or
     its HMAC. platform_admin can reach none of these endpoints (the table gives it nothing at
-    application level).
+    application level). Limits on the HTTP path: at most **10 active keys** per application
+    (`409 key_limit`; a rotation counts its old key out, so rotating at the limit works);
+    a label of 1 to 64 characters of `A-Z a-z 0-9 space . _ -`, no space at either end;
+    every key **expires**, `expires_in_days` 1 to 365, default 90; `grace_hours` 0 to 168,
+    default 24. Rotating a revoked or expired key is `409 key_not_active`. The CLI keeps its
+    behaviour (no expiry unless asked; no limit), being the operator.
+  - **Lists paginate**: `limit` 1 to 100 (default 50) and `after`, the last id of the previous
+    page; the answer has `next` (null on the last page). Users are ordered by username,
+    applications and keys by id. A cursor is only compared, never looked up, so it reveals
+    nothing about other organizations. `GET /users` shows no roles (roles are CLI-only).
+  - **Every admin response carries `Cache-Control: no-store`**, errors and validation
+    failures included (a small ASGI middleware on `/v1/admin`, installed only with accounts).
+  - **Status codes**: 401 `session_required`; 403 `csrf_failed`, `password_change_required`,
+    `forbidden` (missing or not permitted, one body), `step_up_required`; 409 `username_taken`,
+    `organization_full`, `organization_disabled`, `application_name_taken`, `last_admin`,
+    `own_account`, `key_limit`, `key_not_active`; 422 `invalid_request`; 429
+    `user_creation_limited`.
   - **Roles stay CLI-only** in A2: there is no endpoint to grant or revoke one, so the
     escalation rules about granting (app_admin cannot grant org_admin, and the rest of note
     28) stay tested on the shared service through the CLI; over HTTP the tests show no such
@@ -267,7 +305,8 @@ Step 5 builds this section (note 28); the management endpoints that use it are s
   - **The last org_admin** cannot be disabled over HTTP either (409 `last_admin`).
   - **Audited**: user changes as before; new entries for applications created and for keys
     issued, rotated and revoked (the key's id, never the key), from the HTTP endpoints and
-    the CLI alike.
+    the CLI alike; every 409 and 429 above as `management_refused` with its reason and the
+    action, naming the organization, never what was typed.
 
 ## 8. Step-up
 
@@ -306,8 +345,8 @@ step 7, which cannot add a flagged action without enforcement.
   provider keys in A5) is described in note 29 and not built; a test asserts the table has no
   `consume` column yet, so adding it is a deliberate change.
 
-Flagged in A2: changing roles, creating or disabling users, and issuing, rotating or revoking
-application API keys; provider keys and modes are flagged now and wired in A5. Step-up through
+Flagged in A2: changing roles, creating, disabling, enabling or unlocking users and resetting
+their passwords, and issuing, rotating or revoking application API keys; provider keys and modes are flagged now and wired in A5. Step-up through
 a token is not possible: tokens are for other applications, and sensitive actions need a
 session.
 
@@ -441,7 +480,12 @@ attacker who has the password**; a step-up window is a bearer state of the sessi
 holds the cookie while it is open can use it; **a platform_admin who creates an account knows its
 first password** (mitigated: an account a platform_admin creates must change its password at
 first login, and the creation is in the audit log, visible to that organization's
-org_admin); the measured timing difference between a failed
+org_admin); **usernames are global, so creating a user is a username oracle** (step 7: an
+org_admin learns from `409 username_taken` that a name exists in some organization;
+narrowed by the per-session cap on creation attempts and an audit entry for every 409, not
+closed); **a temporary password is shown once to the admin who made it**, who knows it until
+the user changes it at first login (step 7; the same as the platform_admin case above); the
+measured timing difference between a failed
 login for a known and an unknown username (note 27); **two hashing
 threads bound login throughput**, so a flood of logins can delay legitimate ones (logins are
 limited per username; limits per source address wait for A8). For the local-only endpoints it states what the checks of
@@ -480,8 +524,12 @@ Each step is its own pull request and stops for review.
    audit entries; cross-organization attempts on every endpoint with two organizations and
    same-named applications, missing equals forbidden for organization, user, application and
    key, a user with no role, role revocation, step-up on every flagged endpoint, the last
-   admin, the leak scan with issued keys, mutations of every resolver's membership check, and
-   the measured cost per management request on the running server.
+   admin, the leak scan with issued keys and temporary passwords (and a mutation where a
+   handler logs one, caught by the scan, restored byte for byte), mutations of every
+   resolver's membership check, a route declared with a weaker action, the last-admin guard
+   over HTTP, an admin refused on their own account, the limits and pagination, and the
+   measured cost per management request on the running server. `users.unlock` flagged for
+   step-up everywhere it is written down.
 8. Access tokens, JWKS and `generate-signing-key`.
 9. The threat model, the leak scan across everything, and the docs.
 
