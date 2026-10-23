@@ -1,8 +1,10 @@
 # Provider plan, A5: provider adapters, the chat endpoint, the key vault and fallback modes
 
-Status: **proposed 2026-10-22, waiting for approval** (it handles secrets and opens a new
-network surface: the gateway starts calling hosts an organization chooses). Nothing is built
-yet. Branch `provider/step-1`, from `main` at `b5787ec` (identity step 7 merged).
+Status: **approved 2026-10-22**, with the answers and changes folded in below (it handles
+secrets and opens a new network surface: the gateway starts calling hosts an organization
+chooses). Branch `provider/step-1`, from `main` at `b5787ec` (identity step 7 merged). Identity
+steps 8 and 9 come after A5; each A5 pull request's note has its own threat-model section, and
+step 9 consolidates them.
 
 A5 lets the gateway talk to real model providers in one chat format: the operator's local
 Ollama, any OpenAI-compatible endpoint, and Anthropic's Messages API. Organizations bring their
@@ -84,13 +86,27 @@ environment), `follow_redirects=False`, and the egress transport of section 5 fr
 Checked against the current documentation on 2026-10-22: Ollama's `/api/chat` and tool-calling
 pages, and Anthropic's Messages, streaming and errors pages. Two details that shape the design:
 
-- **Ollama gives tool calls no id.** The adapter assigns `call_<n>` ids, and on the next turn maps
-  each `tool` message's `tool_call_id` back to a `tool_name` from the assistant message earlier in
-  the same request. Nothing is stored between requests (hard rule 7).
+- **Ollama gives tool calls no id.** The adapter assigns each call an id unique to it
+  (`call_` and 24 random hex characters, never a counter that could repeat across turns). On
+  the next turn each `tool` message is matched to its call by `tool_call_id` within the
+  assistant message earlier in the same request, which gives both the call's **position** and
+  its **name**; the tool results are sent to Ollama in the calls' order, each with its
+  `tool_name`. So the same tool called twice in one turn gets two ids, and each result goes back
+  in the place of the call it answers (tested). A `tool` message whose id matches no call is a
+  422. Nothing is stored between requests (hard rule 7).
 - **Anthropic system prompts are top-level** (`system`), consecutive same-role turns are merged,
   `max_tokens` is required (the gateway sends the application's limit when the request has none),
   and `tool_choice: required` and a named tool map to `{"type": "any"}` and `{"type": "tool"}`,
-  which some current models refuse with 400. See question 8 for thinking blocks.
+  which some current models refuse with 400.
+- **Anthropic thinking blocks** (approved answer): the adapter asks for thinking off where the
+  model allows it (the provider's `thinking` setting, default `{"type": "disabled"}`). Blocks
+  are **never dropped silently**: if an answer carries thinking blocks together with a tool
+  call, that model needs its thinking blocks sent back with the tool result, which the
+  OpenAI-compatible shape cannot carry; the request is answered with 422 `tools_not_supported`
+  (reason `thinking_blocks_required`) and the model is recorded `supports_tools: false` with
+  that reason. Thinking blocks in an answer without a tool call are not part of the OpenAI
+  shape; their count is reported in `X-Thinking-Blocks-Omitted` and in the usage
+  (`thinking_blocks_omitted`), so nothing disappears unannounced. No extension field.
 
 ### Capability flags
 
@@ -157,7 +173,7 @@ the messages flattened to a prompt, and `supports_tools` is `false`; with
 
 | Table | Columns |
 |---|---|
-| `provider_configs` (10) | `id` (`prv_` + 16 hex), `organization_id`, `type` (`ollama`, `openai_compatible`, `anthropic`), `base_url`, `model`, `serves_tier` (the plan tier it can serve: `economy`, `standard`, `premium`), `role` (`primary`, `fallback`), `enabled`, `disabled_by_platform`, `price_input_per_mtok`, `price_output_per_mtok` (both optional, entered by the organization), `capabilities` (JSON with the source of each flag), `probed_at_ms`, `first_token_budget_ms`, `created_at_ms`. Unique per organization: (`type`, `base_url`, `model`) |
+| `provider_configs` (10) | `id` (`prv_` + 16 hex), `organization_id`, `type` (`openai_compatible`, `anthropic`: an organization cannot create `ollama`, see section 4), `base_url`, `model`, `serves_tier` (the plan tier it can serve: `economy`, `standard`, `premium`), `role` (`primary`, `fallback`), `enabled`, `disabled_by_platform`, `price_input_per_mtok`, `price_output_per_mtok` (both optional, entered by the organization), `capabilities` (JSON with the source of each flag), `probed_at_ms`, `first_token_budget_ms`, `created_at_ms`. Unique per organization: (`type`, `base_url`, `model`) |
 | `provider_keys` (11) | `provider_id` (primary key, references `provider_configs`), `key_id` (which master key), `nonce`, `ciphertext`, `last4`, `created_at_ms`, `updated_at_ms` |
 
 A key is in its own table so **delete removes the row** (ciphertext, nonce and last 4 gone), not
@@ -189,9 +205,16 @@ a column set to null. `serves_tier` is how a provider meets the plan rule (secti
   server restarted. Tested: rotate, decrypt everything, old key no longer needed.
 - **If the master key is lost**, every stored provider key is unrecoverable. That is the design:
   nothing else can decrypt them. The server still starts (one organization's lost key must not
-  stop everyone's gateway): rows whose `key_id` matches no available key are reported as
-  `key_unreadable` in the provider list, requests to those providers fail with
-  `provider_auth_failed`, and the organization's admin re-enters the key.
+  stop everyone's gateway). A row whose `key_id` matches no available master key is
+  **`key_unreadable`**: shown as such in `GET /providers` and `/providers/status`, and logged
+  as a warning once per provider at startup and at first use (the provider id and the missing
+  `key_id`, nothing else). It is **never tried with another master key**: the vault decrypts a
+  row only with the key its `key_id` names, so there is no trial decryption. A provider with an
+  unreadable key is **not a candidate**: routing skips it (reason `key_unreadable`, visible in
+  the fallback headers if another candidate answers), and skipping it never brings in a
+  candidate the effective mode forbids (the candidates are computed from the mode first; an
+  unreadable key only removes one). Tested, including with `local_only` and a hosted provider
+  whose key is unreadable. The organization's admin re-enters the key.
   `manage.py vault-drop-unreadable` deletes such rows. The backup of the master key is the
   operator's responsibility, separate from the database backup (as for the pepper).
 
@@ -262,8 +285,9 @@ asked, so those rows are **replaced**: `providers.list|status|create|update|disa
 delete|test`, `provider_keys.set|delete` at organization level, and `mode.set_organization`
 (organization level, org_admin, step-up) and `mode.set_application` (application level,
 org_admin of its organization and app_admin of the application, step-up). `provider_keys.read`
-is removed: no endpoint returns a key. The documented table, the matrix and their tests change
-with it.
+is removed: no endpoint returns a key. `permissions.py`, note 28's documented table, the
+generated matrix and their tests change **together, in one commit**, and PR 2's description
+shows the generated matrix's diff.
 
 ### Consume-on-use in `requires()`
 
@@ -282,12 +306,26 @@ Note 29 described it; this builds it, with one change for a race note 29 did not
   failed change does not cost the password. A test pins that FastAPI (0.142.2, the locked
   version) runs this exit before the answer is sent; if an upgrade changes that, the test fails.
 - The audit entry of a consume action records `step_up_consumed: true`.
-- Tests: a second key change in the same window is refused; a failed change keeps the window;
-  two changes sent concurrently, one passes; a non-consume flagged action leaves the window
-  open; the synthetic route for every consume action. Mutations: no claim, no restore, claim
-  without the time condition.
+- **The window is given back only when the handler failed before changing anything.** The
+  handler receives a token from `requires` and marks it changed in the same transaction that
+  writes the key (`token.changed()` just before commit). On an exception the window is restored
+  only if the token is unmarked; a failure after the write (the audit row, the answer) keeps the
+  window consumed.
+- Tests: two key changes sent **simultaneously** with one window produce **exactly one
+  success** and one `step_up_required` (both requests in flight together, the order not
+  fixed); a second change after the first is refused; a handler that fails before writing gives
+  the window back; one that fails after writing does not; a non-consume flagged action leaves
+  the window open; the synthetic route for every consume action. Mutations: no claim, claim
+  without the time condition, restore always, restore never.
 
 ### Test-connection and probing
+
+**It runs only when an org_admin asks for it**, never when a provider or key is saved. The docs
+and the endpoint's description say plainly that **it spends tokens on the organization's account
+with that provider**. Changing a provider's model resets its probed capabilities to `unknown`
+until it is tested again (re-probe on model change); each capability records the time it was
+probed and **the model it was probed with**, and a probe of another model is never shown as
+this one's.
 
 `POST /providers/{id}/test` decrypts the key (if any) through the lease and sends, through the
 egress guard: (1) one non-streaming request, "Reply with the word OK.", `max_tokens` 8; (2) the
@@ -316,9 +354,16 @@ check, not a quality measurement.
 Every adapter's client uses one `httpcore` network backend whose `connect_tcp(host, port)` is
 the single point where a connection is opened. For each connection, redirects included:
 
-1. The URL must be `https`, unless `host:port` is on the operator's allow-list
-   `GATEWAY_PROVIDER_LOCAL_ALLOW` (for example `localhost:11434,127.0.0.1:11434`), which is the
-   only way to reach local Ollama and the only way to use plain `http`.
+1. **Who may point the gateway where.** Provider type `ollama` is **operator-configured
+   only** (`backends.yaml`, or `GATEWAY_BACKENDS`), never created by an organization. The
+   operator's allow-list `GATEWAY_PROVIDER_LOCAL_ALLOW` (for example `localhost:11434`) applies
+   only to the operator's own configuration: it is the only way to reach a loopback or internal
+   address and the only way to use plain `http`. **Anything an organization supplies** must be
+   `https`, resolve only to public addresses and pass every check below, with no allow-list
+   exception: an org_admin cannot point the gateway at loopback, a private network, link-local,
+   metadata or the gateway itself, whatever the operator's list says. Tested for every range,
+   with mutations (the organization path consulting the operator's list; `http` accepted;
+   `ollama` accepted from an organization).
 2. The host is resolved through an injected resolver (the system resolver in the server, a fake
    in tests), and **every** returned address is checked; one bad address refuses the request.
 3. Refused unless allow-listed: loopback (`127.0.0.0/8`, `::1`), private (`10/8`, `172.16/12`,
@@ -443,21 +488,34 @@ routed tier (plan) that the effective mode allows (mode), in the mode's order. C
 
 ## 8. Dependencies
 
-| Package | Version | License | Kind | Why | Alternative |
-|---|---|---|---|---|---|
-| `openai` | 3.26.0 (2026-10-06, the newest at least two weeks old) | Apache-2.0 | dev only | The official SDK against the in-process app (you asked for it) | None: that is the point of the test |
-| `httpx2` | resolved by the lock (2.16.0 today) | BSD-3-Clause | dev only, required by `openai` 3.x | | |
-| `jiter` | resolved by the lock | MIT | dev only, required by `openai` | | |
+**None is added.** AES-GCM is in `cryptography` (already pinned).
 
-No new runtime dependency: AES-GCM is in `cryptography` (pinned). `openai` 3.x moved from
-`httpx` to `httpx2`; the in-process test therefore needs `httpx2`'s ASGI transport (or a
-uvicorn server on a free port if `httpx2` has none). That is checked before PR 1 adds it, and the
-dev section of `docs/licenses.md` records every package it pulls in with its license, checked by
-`tests/test_licenses.py` (which gains a dev-dependency table).
+The OpenAI Python SDK was checked first, as asked, from the package metadata on 2026-10-22:
+
+| Package | Evidence | Verdict |
+|---|---|---|
+| `openai` 3.26.0 | Apache-2.0; author `OpenAI <support@openai.com>`; project URL `github.com/openai/openai-python`; uploaded 2026-10-06 (two weeks old); wheel sha256 `050597ff71ff4025177405a41fa4019d4f9feae5826645b63b8e35b6e9a3c88b`, sdist `73b470c09cf2171dce930e36af01c6632241adda0120ad84302ad229f9130a5a`; PyPI provenance attestation: published by GitHub `openai/openai-python`, workflow `create-releases.yml`, environment `publish`; the repository's `pyproject.toml` at tag `v3.26.0` declares the same dependencies as the metadata, including `httpx2>=2.12.0, <3` | canonical |
+| `httpx2` (2.13.1 is the newest two weeks old; 2.16.0 was uploaded 2026-10-21) | BSD-3-Clause; the metadata names httpx's original author as author and "Pydantic Services Inc." as maintainer; project URL `github.com/pydantic/httpx2`, a repository created 2026-05-11, not a fork, whose README calls it a continuation of HTTPX under Pydantic's stewardship; **no PyPI provenance attestation** (404); `encode/httpx`'s README does not mention it; first release 2026-05-11, 22 releases since, four in the last week | **doubtful** |
+| `httpcore2` (required by `httpx2`, the same versions) | no repository under `pydantic` (404); no attestation | **doubtful** |
+| `jiter`, `anyio`, `sniffio`, `pydantic`, `typing-extensions` | `jiter` MIT, `github.com/pydantic/jiter`; `anyio` attested from `agronholm/anyio`; the rest already installed for FastAPI | not reached: the chain stops at `httpx2` |
+
+So, as instructed, **nothing is added**: the OpenAI wire format is tested with plain `httpx`
+against recorded fixtures. The fixtures are the documented examples of `POST /chat/completions`
+("Default", "Streaming", "Functions": request bodies, responses and stream chunks) and the
+`required` field lists of the response, chunk, message, tool-call and error schemas, taken from
+OpenAI's published API description, `github.com/openai/openai-openapi`, `openapi.json` at commit
+`234829e2b634b8fb159df7fcddbffad204173ffd` (2026-10-07; the file's sha256
+`dde9abb7f7ca1e260fa05b4828984851e77f35ab89f60d0f7bbc1f44859f4724`), MIT license. Only the
+extracted examples and field lists are committed, under `tests/fixtures/openai_wire/`, with the
+source, commit, sha256 and the license text, and recorded in `docs/licenses.md` (test data,
+not shipped). Tests check that the gateway accepts each documented request and that each answer
+and chunk it sends has every required field with the documented types. If the SDK is wanted
+later, the evidence above is the starting point, and `httpx2` needs its own review first.
 
 ## 9. Live tests
 
-Marked `live_provider`, skipped unless `GATEWAY_LIVE_PROVIDERS=1`, never run by CI. Each
+Marked `live_provider`, skipped unless `GATEWAY_LIVE_PROVIDERS=1`, never run by CI. They use
+the gateway's own adapters (no SDK). Each
 provider's are skipped unless its own variables are set: `GATEWAY_LIVE_OPENAI_BASE_URL`,
 `GATEWAY_LIVE_OPENAI_MODEL`, `GATEWAY_LIVE_OPENAI_KEY`; `GATEWAY_LIVE_ANTHROPIC_MODEL`,
 `GATEWAY_LIVE_ANTHROPIC_KEY`. They need an account with each provider and a key the operator
@@ -521,20 +579,14 @@ For `docs/threat-model.md` (identity plan section 12):
    their own environment, network access, at most 4 tiny requests per provider; the cost is the
    provider's list price for those tokens, not estimated here.
 6. **How consume-on-use fits `requires()`**: section 4. A `consume` column; `requires` claims
-   the window with one conditional `UPDATE` before the handler (race-free) and restores it if
-   the handler fails, as a `yield` dependency; pinned to the FastAPI version by a test.
+   the window with one conditional `UPDATE` before the handler (race-free: two simultaneous
+   changes give exactly one success) and gives it back only if the handler failed before
+   changing anything, as a `yield` dependency; pinned to the FastAPI version by a test.
 7. **How the mode rule interacts with plans**: section 7. Plans choose tiers, modes choose
    where; candidates are their intersection, in the mode's order; fallback never changes tier.
-8. **A question back to you: Anthropic thinking blocks.** On current Anthropic models where
-   thinking cannot be turned off, a tool-use conversation must send every thinking block back
-   unchanged with the tool result. The OpenAI-compatible shape has no place for them, and the
-   gateway may not store responses (hard rule 7). Proposal: the Anthropic adapter asks for
-   thinking off where the model allows it; test-connection's tool round trip (two turns) is
-   what records `supports_tools`, so a model that refuses the second turn is marked
-   `supports_tools: false` and tool requests to it get a clear 422 instead of a failure halfway.
-   Carrying signed thinking blocks through the client as an extension field is possible but not
-   proposed: clients would have to return a field they do not know about. Approve the proposal,
-   or say if you want the extension field.
-9. **A question back to you: identity steps 8 and 9.** Access tokens (step 8) and the threat
-   model and full leak scan (step 9) are not built. Proposal: A5 now, then steps 8 and 9, so
-   the threat model collects A2 and A5 together. Nothing in A5 depends on access tokens.
+8. **Anthropic thinking blocks** (answered): thinking off where the model allows it; a model
+   that needs its thinking blocks sent back and cannot disable them is recorded
+   `supports_tools: false` with the reason, and tool requests to it get 422; blocks are never
+   dropped silently; no extension field (section 2).
+9. **Identity steps 8 and 9** (answered): after A5. Each A5 pull request's note has its own
+   threat-model section; step 9 consolidates them into `docs/threat-model.md`.

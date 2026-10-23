@@ -202,7 +202,7 @@ Step 5 builds this section (note 28); the management endpoints that use it are s
   A5 or A8). Actions cover users, passwords, roles, organizations, applications, application
   API keys, application roles, the audit log and usage. It also declares `provider_keys.*`
   and `mode.change` (step-up; A5 adds the endpoints), and `monitoring.*` and `control.*`,
-  marked "local only until A8" (section 10). **A5 (docs/provider-plan.md, proposed) replaces the
+  marked "local only until A8" (section 10). **A5 (docs/provider-plan.md, approved) replaces the
   `provider_keys.*` and `mode.change` rows**: providers belong to the organization, so their
   actions move to organization level (`providers.*`, `provider_keys.set|delete`, org_admin
   only for keys; platform_admin may disable a provider), `provider_keys.read` goes (no endpoint
@@ -543,8 +543,9 @@ Each step is its own pull request and stops for review.
 8. Access tokens, JWKS and `generate-signing-key`.
 9. The threat model, the leak scan across everything, and the docs.
 
-Proposed (docs/provider-plan.md, question 9): A5 is built before steps 8 and 9, which nothing in
-A5 depends on, so that step 9's threat model and leak scan cover A2 and A5 together.
+Decided 2026-10-22 (docs/provider-plan.md, question 9): A5 is built before steps 8 and 9, which
+nothing in A5 depends on. Each A5 pull request's note carries its own threat-model section, and
+step 9 consolidates them with A2's into `docs/threat-model.md`.
 
 ## 14. Waiting for A8
 
