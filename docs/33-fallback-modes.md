@@ -93,8 +93,8 @@ router and at the guard, where the mode changes while the name is being resolved
 test found the guard asked only before resolving, fixed). An answer already streaming from a
 hosted provider is not cut: the prompt has already been sent. Every attempt at an organization
 provider uses a new client, so no pooled connection carries a request past these checks; the
-server gives them all one TLS context, because building one loads the certificate bundle (about
-300 ms each on this machine before the fix, measured below).
+server gives them all one TLS context, because building one loads the certificate bundle:
+145 to 148 ms on this machine, and each client used to build two (measured below).
 
 **The test that local_only reaches nothing hosted**: hosted providers configured for the tier, the
 local tier failing every way that would be a trigger in another mode (refused, 5xx, no first
@@ -127,7 +127,25 @@ answer, byte for byte. The application answer includes its `effective_mode`.
 
 ## Measured
 
-PENDING
+MEASURED on this machine: Intel Core Ultra 7 155H, 22 logical cores, 15.4 GB RAM, Windows 11
+10.0.26200, Python 3.12.10. `uv run python -m benchmarks.chat_routing --rounds 200 --runs 3`, on
+`8b70249`, nothing else running. In process: each request goes through the whole app
+(`httpx.ASGITransport`: key, plan, rate limit, budget, router, adapter, ledger); the providers
+are scripted behind the real egress guard, with no sockets, so this is the gateway's own work,
+never a provider's latency. p50 in ms, the range over three runs of 200 requests after 20
+warm-up:
+
+| What | p50, ms |
+|---|---|
+| the economy tier served by the operator's server, `local_only` (PR 1's path, now through the router) | 2.497 to 2.553 |
+| the same answer from an organization's provider (candidates, breaker, key decrypted for the call, a new guarded client, the guard's checks, the provider's prices) | 2.877 to 2.915 |
+| a fallback: the first provider refuses the connection at once, the second answers | 4.166 to 4.254 |
+| building one TLS context (`httpx.create_ssl_context()`): what each organization request paid twice before the server shared one | 145.372 to 147.841 |
+
+So routing to an organization's provider adds about 0.4 ms per request (0.32 to 0.42 ms between
+the two rows' ranges) to the gateway's own work, and a fallback after an immediate refusal about
+1.3 ms more. A real provider adds its own network and TLS time, which is not measured here and is
+not a property of the gateway.
 
 ## Threat model (this step)
 
