@@ -5,10 +5,13 @@ the base-URL check at entry. See docs/32-provider-settings-and-vault.md. No netw
 from __future__ import annotations
 
 import ipaddress
+import re
+from pathlib import Path
 
 import httpx
 import pytest
 
+from gateway.audit import FIXED_VALUES
 from gateway.chat import ProviderErrorCode
 from gateway.egress import EgressRefused, check_base_url, organization_client, refusal
 from mock_network import FakeResolver, ScriptedNetwork, http_response
@@ -163,3 +166,20 @@ def test_a_base_url_an_organization_cannot_enter(url: str) -> None:
 
 def test_a_public_https_base_url_is_kept_without_its_trailing_slash() -> None:
     assert check_base_url("https://api.example.com/v1/") == "https://api.example.com/v1"
+
+
+def test_every_reason_the_guard_gives_can_be_audited() -> None:
+    """Test-connection records why it did not reach a host; the audit takes only fixed words,
+    so each reason in gateway.egress (and the transport's) must be one of them."""
+    source = (Path(__file__).resolve().parent.parent / "src" / "gateway" / "egress.py").read_text(
+        encoding="utf-8"
+    )
+    given = set(re.findall(r'EgressRefused\("([a-z_]+)"\)', source))
+    given |= set(re.findall(r'detail="([a-z_]+)"', source))
+    addressed = set(re.findall(r'return "([a-z_]+)"', source))
+    assert addressed == {
+        "metadata", "loopback", "link_local", "private", "multicast", "reserved", "not_global",
+    }  # fmt: skip
+    allowed = FIXED_VALUES["outcome_detail"]
+    assert given | addressed | {f"embedded_{a}" for a in addressed} <= allowed
+    assert {"connect", "connection_lost", "probe"} <= allowed

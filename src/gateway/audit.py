@@ -153,10 +153,21 @@ DETAIL_FIELDS: Mapping[str, type] = {
     "grace_ms": float,
     "provider_type": str,
     "outcome_code": str,
+    "outcome_detail": str,
     "switch": str,
     "step_up_consumed": bool,
     "key_deleted": bool,
 }
+# gateway.egress.refusal's reasons for an address.
+_ADDRESS_REFUSALS = (
+    "metadata",
+    "loopback",
+    "link_local",
+    "private",
+    "multicast",
+    "reserved",
+    "not_global",
+)
 # The string details that take only these values.
 FIXED_VALUES: Mapping[str, frozenset[str]] = {
     "provider_type": frozenset({"openai_compatible", "anthropic"}),
@@ -175,6 +186,22 @@ FIXED_VALUES: Mapping[str, frozenset[str]] = {
             "upstream_rejected",
             "tools_not_supported",
             "egress_refused",
+        }
+    ),
+    # Why a test-connection did not reach its host (gateway.egress, gateway.adapters.http):
+    # fixed words, never anything the host sent.
+    "outcome_detail": frozenset(
+        {
+            "connect",
+            "connection_lost",
+            "dns_failure",
+            "probe",
+            "unresolved",
+            "bad_address",
+            "unix_socket",
+            "not_https",
+            *_ADDRESS_REFUSALS,
+            *(f"embedded_{reason}" for reason in _ADDRESS_REFUSALS),
         }
     ),
 }

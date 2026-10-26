@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import httpcore
 import httpx
 import pytest
 from fastapi.routing import APIRoute
@@ -28,9 +29,15 @@ from gateway.continuous import build_continuous_registry
 from gateway.egress import organization_client
 from gateway.localonly import LocalOnlyPolicy
 from gateway.permissions import PERMISSIONS
-from gateway.providers import ProviderConfig, ProviderService, ProviderStore
+from gateway.providers import (
+    TESTS_PER_HOUR,
+    TESTS_PER_ORGANIZATION_HOUR,
+    ProviderConfig,
+    ProviderService,
+    ProviderStore,
+)
 from gateway.redaction import Redactor
-from gateway.vault import Vault
+from gateway.vault import Vault, VaultIntegrityError
 from mock_network import FakeResolver, ScriptedNetwork, http_response, sse_response
 from mock_providers import openai_text, openai_tools
 from test_management_api import FORBIDDEN, World, make_world
@@ -154,8 +161,8 @@ async def _created(r: Rig, session: tuple[str, str], org: str = "north", **extra
     return str(made.json()["provider_id"])
 
 
-async def _with_key(r: Rig, session: tuple[str, str], org: str = "north") -> str:
-    provider_id = await _created(r, session, org)
+async def _with_key(r: Rig, session: tuple[str, str], org: str = "north", **extra: Any) -> str:
+    provider_id = await _created(r, session, org, **extra)
     await r.step_up(session)
     put = await r.call(session, "PUT", f"/{org}/providers/{provider_id}/key", {"key": KEY})
     assert put.status_code == 200, put.text
@@ -373,6 +380,64 @@ async def test_a_new_url_deletes_the_key_and_a_new_model_resets_capabilities() -
         assert bad.status_code == 422
 
 
+async def test_a_new_url_or_type_deletes_the_key_in_the_same_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The key is deleted inside the transaction that changes the URL: when anything after
+    the delete fails, neither the new URL nor the deletion is kept."""
+    async with rig() as r:
+        alice = await r.login("alice")
+        provider_id = await _with_key(r, alice)
+        before = r.store.get(provider_id)
+        assert before is not None
+        delete_key = r.store.delete_key
+
+        def delete_then_fail(found: str) -> bool:
+            assert delete_key(found)  # the row is gone inside the transaction ...
+            assert r.store.get_key(found) is None
+            raise RuntimeError("the audit write failed")
+
+        monkeypatch.setattr(r.store, "delete_key", delete_then_fail)
+        await r.step_up(alice)
+        with pytest.raises(RuntimeError, match="audit write failed"):
+            await r.call(
+                alice,
+                "PATCH",
+                f"/north/providers/{provider_id}",
+                {"base_url": "https://other.provider.test/v1"},
+            )
+        # ... and back after the rollback, with the old URL.
+        assert r.store.get(provider_id) == before
+        assert r.store.get_key(provider_id) is not None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"base_url": "https://other.provider.test/v1"}, {"type": "anthropic"}],
+    ids=["url", "type"],
+)
+async def test_the_old_ciphertext_cannot_be_opened_for_the_new_origin_or_type(
+    change: dict[str, str],
+) -> None:
+    async with rig() as r:
+        alice = await r.login("alice")
+        provider_id = await _with_key(r, alice)
+        old = r.store.get(provider_id)
+        stored = r.store.get_key(provider_id)
+        assert old is not None
+        assert stored is not None
+        await r.step_up(alice)
+        moved = await r.call(alice, "PATCH", f"/north/providers/{provider_id}", change)
+        assert moved.json()["key_deleted"] is True
+        assert r.store.get_key(provider_id) is None
+        new = r.store.get(provider_id)
+        assert new is not None
+    vault = Vault(MASTER)
+    assert vault.open(stored.sealed, old.binding).reveal() == KEY  # the ciphertext is sound
+    with pytest.raises(VaultIntegrityError):
+        vault.open(stored.sealed, new.binding)  # but bound to where it was entered
+
+
 # --- keys and consume-on-use --------------------------------------------------------------------
 
 
@@ -544,8 +609,98 @@ async def test_test_connection_cannot_reach_inside() -> None:
         r.resolver.table[HOST] = ["10.0.0.7"]
         r.network.responses = _probe_replies()
         refused = await r.call(alice, "POST", f"/north/providers/{provider_id}/test")
-        assert (refused.status_code, refused.json()["error"]["code"]) == (502, "egress_refused")
+        assert (refused.status_code, refused.json()["error"]["code"]) == (
+            502,
+            "provider_unreachable",
+        )
         assert r.network.connections == []
+
+
+UNREACHED = (
+    b'{"error":{"code":"provider_unreachable","message":"The provider could not be reached."}}'
+)
+
+
+async def test_test_connection_is_not_a_network_scanner() -> None:
+    """A blocked address, a refused connection, a timeout and a name that does not resolve
+    answer the same status and the same bytes; which it was is in the audit log only, and
+    never the key. A host that answered gets its code and fixed message, nothing from its
+    body."""
+    async with rig() as r:
+        alice = await r.login("alice")
+        provider_id = await _with_key(r, alice)
+        answers = []
+
+        r.resolver.table[HOST] = ["10.0.0.7"]  # blocked: a private address
+        answers.append(await r.call(alice, "POST", f"/north/providers/{provider_id}/test"))
+        r.resolver.table[HOST] = [PUBLIC]
+        r.network.failure = httpcore.ConnectError("[Errno 111] Connection refused")
+        answers.append(await r.call(alice, "POST", f"/north/providers/{provider_id}/test"))
+        r.network.failure = httpcore.ConnectTimeout("timed out")
+        answers.append(await r.call(alice, "POST", f"/north/providers/{provider_id}/test"))
+        r.network.failure = None
+        r.resolver.missing.add(HOST)  # the name does not resolve
+        answers.append(await r.call(alice, "POST", f"/north/providers/{provider_id}/test"))
+
+        assert [a.status_code for a in answers] == [502] * 4
+        assert [a.content for a in answers] == [UNREACHED] * 4
+        assert [dict(a.headers) for a in answers[1:]] == [dict(answers[0].headers)] * 3
+
+        # A host that answered, with its own words in the body: the code and fixed message.
+        r.resolver.missing.clear()
+        said = json.dumps(
+            {"error": {"type": "invalid_request_error", "message": f"no such model; {KEY}"}}
+        ).encode()
+        r.network.responses = [
+            http_response(said, "400 Bad Request", Content_Type="application/json")
+        ]
+        answered = await r.call(alice, "POST", f"/north/providers/{provider_id}/test")
+    assert answered.status_code == 502
+    assert answered.json() == {
+        "error": {
+            "code": "upstream_rejected",
+            "message": "The model provider rejected the request.",
+        }
+    }
+    tested = [
+        e.event.details
+        for e in r.world.accounts.audit.entries()
+        if e.event.action is AuditAction.PROVIDER_TESTED
+    ]
+    assert [(d["outcome_code"], d.get("outcome_detail")) for d in tested] == [
+        ("egress_refused", "private"),
+        ("upstream_unavailable", "connect"),
+        ("upstream_timeout", "connect"),
+        ("upstream_unavailable", "dns_failure"),
+        ("upstream_rejected", None),  # nothing derived from the host's body
+    ]
+    logged = json.dumps([e.event.details for e in r.world.accounts.audit.entries()])
+    assert KEY not in logged
+    assert "no such model" not in logged
+
+
+async def test_test_connection_is_limited_per_organization_too() -> None:
+    """One provider per address would get round the per-provider limit."""
+    async with rig(tests_per_hour=2, tests_per_organization_hour=3) as r:
+        alice = await r.login("alice")
+        first = await _with_key(r, alice)
+        second = await _with_key(r, alice, model="model-second")
+        statuses = []
+        for provider_id in (first, first, second, second):
+            r.network.responses = _probe_replies()
+            statuses.append(
+                (await r.call(alice, "POST", f"/north/providers/{provider_id}/test")).status_code
+            )
+        refused = await r.call(alice, "POST", f"/north/providers/{second}/test")
+    assert statuses == [200, 200, 200, 429]
+    assert refused.json()["error"] == {
+        "code": "test_rate_limited",
+        "message": "at most 3 tests of an organization's providers an hour; try again later",
+    }
+
+
+def test_the_rate_limit_values() -> None:
+    assert (TESTS_PER_HOUR, TESTS_PER_ORGANIZATION_HOUR) == (5, 20)
 
 
 async def test_test_connection_is_rate_limited() -> None:

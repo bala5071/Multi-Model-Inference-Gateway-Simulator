@@ -8,6 +8,7 @@ can change its answer between calls (DNS rebinding). Test values, not secrets.
 
 from __future__ import annotations
 
+import socket
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -56,6 +57,8 @@ class RecordingStream(httpcore.AsyncMockStream):
 class ScriptedNetwork(httpcore.AsyncNetworkBackend):
     responses: list[bytes] = field(default_factory=list)
     connections: list[Connection] = field(default_factory=list)
+    # Raised on connecting, when set: a refused connection, a connect timeout.
+    failure: Exception | None = None
 
     async def connect_tcp(
         self,
@@ -67,6 +70,8 @@ class ScriptedNetwork(httpcore.AsyncNetworkBackend):
     ) -> httpcore.AsyncNetworkStream:
         connection = Connection(host, port)
         self.connections.append(connection)
+        if self.failure is not None:
+            raise self.failure
         if not self.responses:
             raise httpcore.ConnectError("nothing scripted")
         response = self.responses.pop(0)
@@ -86,9 +91,13 @@ class FakeResolver:
     table: dict[str, list[str]]
     then: dict[str, list[str]] = field(default_factory=dict)
     calls: list[str] = field(default_factory=list)
+    # Names that do not resolve: the system resolver's error for them.
+    missing: set[str] = field(default_factory=set)
 
     async def __call__(self, host: str, port: int) -> list[str]:
         self.calls.append(host)
+        if host in self.missing:
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
         if host in self.then and self.calls.count(host) > 1:
             return list(self.then[host])
         return list(self.table.get(host, []))

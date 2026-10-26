@@ -317,17 +317,21 @@ async def test_a_provider_key_appears_only_in_the_requests_that_carry_it(
     caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A key set through the admin endpoint, used by test-connection against a provider that
-    answers, one that answers 401 echoing the key (as real providers do), and one whose stream
-    breaks: it is in no response, log, audit row, table (other than sealed), repr or output.
+    answers, one that answers 401 echoing the key (as real providers do), one whose stream
+    breaks, and four it never reaches (a blocked address, a refused connection, a timeout, a
+    name that does not resolve): it is in no response, log, audit row, table (other than
+    sealed), repr or output.
     The planted control is found; with the redaction layer installed it is scrubbed."""
+    import httpcore
+
     from gateway.redaction import install
     from mock_network import http_response, sse_response
     from mock_providers import openai_text, openai_tools
-    from test_providers_api import KEY, NEW, rig
+    from test_providers_api import HOST, KEY, NEW, PUBLIC, rig
 
     caplog.set_level(logging.DEBUG)
     responses: dict[str, str] = {}
-    async with rig() as r:
+    async with rig(tests_per_hour=10) as r:
         alice = await r.login("alice")
         await r.step_up(alice)
         made = await r.call(alice, "POST", "/north/providers", NEW)
@@ -346,6 +350,20 @@ async def test_a_provider_key_appears_only_in_the_requests_that_carry_it(
             broken,
         ]
         for name in ("test ok", "test 401", "test broken"):
+            responses[name] = _response(
+                await r.call(alice, "POST", f"/north/providers/{provider_id}/test")
+            )
+        unreached = [
+            ("test blocked", ["10.0.0.7"], None, False),
+            ("test refused", [PUBLIC], httpcore.ConnectError("refused"), False),
+            ("test timeout", [PUBLIC], httpcore.ConnectTimeout("timed out"), False),
+            ("test dns", [PUBLIC], None, True),
+        ]
+        for name, addresses, failure, missing in unreached:
+            r.resolver.table[HOST] = addresses
+            r.network.failure = failure
+            if missing:
+                r.resolver.missing.add(HOST)
             responses[name] = _response(
                 await r.call(alice, "POST", f"/north/providers/{provider_id}/test")
             )
@@ -381,6 +399,8 @@ async def test_a_provider_key_appears_only_in_the_requests_that_carry_it(
     assert sent.count(f"Bearer {KEY}".encode()) == 5  # 3 for the good test, 1 each after
     assert find_leaks(corpus(), {"provider key": KEY}) == []
     assert '"provider_auth_failed"' in responses["test 401"]
+    for name in ("test blocked", "test refused", "test timeout", "test dns"):
+        assert '"provider_unreachable"' in responses[name], name
 
     # The control: logged by mistake, it is found.
     logging.getLogger("gateway").warning("oops, logged: %s", KEY)

@@ -87,12 +87,22 @@ transaction (it is bound to them and could not be used anyway; the answer says
 `uv run python scripts/manage.py rotate-vault-key`: it backs the database up beside itself, then
 re-seals every key under the new master key in one transaction, and reports how many (and any it
 could not read). Remove `GATEWAY_VAULT_KEY_PREVIOUS` and restart. Tested.
+The backup it makes holds the keys sealed under the old master key: delete it with the old key,
+or keep the two apart.
 
 **If the master key is lost, every stored provider key is lost.** That is the design: nothing
 else can decrypt them. The server still starts (one lost key must not stop the gateway); the keys
 show as `key_unreadable`, each organization's admin enters them again, and
 `manage.py vault-drop-unreadable` deletes the dead rows. Back the master key up apart from the
 database, as the pepper.
+
+**A backup holds every sealed provider key** (`manage.py backup`, the copy `rotate-vault-key`
+makes, any copy of the database file). Sealed is only as safe as the master key is far away:
+never store a backup with `GATEWAY_VAULT_KEY` (or the env file that holds it), nor with the
+pepper. A backup restored and started under another master key does not crash the server: it
+starts, warns once per provider, and shows each key `key_unreadable` until it is entered again;
+started with the master key it was sealed under, the same rows open (tested, through
+`backup_database`, `restore_database` and `create_default_app`).
 
 ## Where a key is decrypted, and how plaintext is kept out of everything
 
@@ -108,6 +118,14 @@ database, as the pepper.
   patterns (`Bearer ...`, `x-api-key: ...`, `sk-...`, `sk-ant-...`, the gateway's `gwk_...`), and
   exception text. It is a log-record factory installed by the server for its lifetime, so it
   covers every logger (uvicorn's included) before any handler formats a record.
+- **A record that fails to format.** When a handler cannot format a record, logging's own error
+  handling (`Handler.handleError`) prints the message and `Arguments: ` with each argument's
+  `repr` to stderr. Arguments are scrubbed when the record is made, and if a secret would still
+  show, in the formatted message or in the arguments' `repr` (an object whose `str` is safe but
+  whose `repr` is not), the record keeps only the scrubbed message and no arguments. Tested
+  through a handler whose format always fails: without the layer the planted key reaches stderr
+  (the control); with it, neither a string argument, a watched value, such an object, nor a
+  message that cannot be formatted shows it.
 - **Provider bodies are never passed on** (note 31): a 401 that echoes the key is answered
   `provider_auth_failed` with a fixed message.
 - **The leak scan**: a key set through the endpoint, used by test-connection against a provider
@@ -154,18 +172,31 @@ DNS rebinding (public at the check, private afterwards: the connection goes to t
 with one resolution); a redirect to the metadata address not followed; `http` refused; a proxy
 variable ignored; the base-URL checks at entry; test-connection to a name that now resolves
 inside is refused with no connection made. Tests use a scripted network in place of sockets.
+A name that does not resolve is answered `upstream_unavailable` (detail `dns_failure`) rather
+than escaping as a socket error.
 
 ## Test-connection
 
 **It spends tokens on the organization's account with that provider.** It runs only when an
 org_admin asks (`POST .../test`), never when a provider or key is saved, at most 5 times per
-provider per hour (`429 test_rate_limited`). It sends, through the guard: a short answer
+provider per hour and 20 times per organization per hour, all its providers together (one
+provider per address would get round the first; both `429 test_rate_limited`; chosen values,
+`TESTS_PER_HOUR` and `TESTS_PER_ORGANIZATION_HOUR`). It sends, through the guard: a short answer
 ("Reply with the word OK.", `max_tokens` 8, streamed), and a tool round trip (a `ping` tool,
 then its result and one more turn). It records `supports_streaming`, `supports_tools` and
 `context_window`, each with its source (`probed`, or `unknown` with a reason), **when** it was
 probed and **with which model**; a model change resets them. It answers only with the
 capabilities or a mapped error code: never the provider's text or error body. Audited with the
 outcome code.
+
+**Not a network scanner.** Every failure to reach the host gets one answer, the same status and
+the same bytes: `502 provider_unreachable`, "The provider could not be reached." That covers an
+address the guard refuses, a name that does not resolve, a refused or failed connection, a lost
+connection and no answer in time. Which one it was goes to the audit entry only
+(`outcome_code` and `outcome_detail`, fixed words such as `private`, `dns_failure`, `connect`).
+A host that answered over TLS gets its mapped code and fixed message, with no detail derived
+from its body (and none in the audit). Tested: the four cases give identical status, headers
+and bytes, distinct audit entries, and neither the key nor the host's words in any of them.
 
 ## Audit
 
@@ -192,9 +223,11 @@ MEASURED on this machine: Intel Core Ultra 7 155H, 22 logical cores, 15.4 GB RAM
 | `GET .../providers/status` on the running server | 1.756 to 1.836 |
 | `PUT .../providers/{id}/key` (claim the window, seal, store, audit) on the running server | 2.925 to 3.012 |
 
-The step-up before each key change uses argon2 and is not timed here (notes 24, 29). The guard's
-figure includes the system resolver answering from this machine; a name resolved over the
-network takes what the network takes.
+The step-up before each key change uses argon2 and is not timed here (notes 24, 29). **The
+guard's figure used no stub**: `GuardedBackend(system_resolver)`, the real `getaddrinfo`, asked
+for `localhost`, which the system answers on this machine without a DNS server (Windows resolves
+it itself). It is the guard's own cost plus a local lookup. A lookup that goes to a DNS server
+was **not measured**; it takes what the network takes and adds to the first connection.
 
 ## Threat model (this step)
 
@@ -210,6 +243,12 @@ For step 9's `docs/threat-model.md`:
 - **SSRF residue**: the guard trusts the resolver at the moment it asks; it checks every address
   and connects to the checked one, but a public address that forwards inward is beyond it.
 - **Test-connection spends the organization's money** (rate-limited, audited).
+- **Test-connection as a probe of the network**: inside addresses are refused before any
+  connection, and every failure to reach a host has one answer. What is left: a public host
+  that answers over TLS is told apart from one that does not (that is the purpose of the test),
+  and timing differs (a refused address answers at once, a timeout after the connect timeout).
+  Both are bounded by 5 tests per provider and 20 per organization an hour, each audited.
+- **A backup holds the sealed keys**: with the master key beside it, it holds the keys.
 - **`last4` is shown to org_admins** (only for keys of 20 or more characters).
 - **The redaction layer scrubs patterns and watched values**: a key in a shape it does not know,
   logged outside a lease, would not be caught; keys are never logged on purpose, and the leak

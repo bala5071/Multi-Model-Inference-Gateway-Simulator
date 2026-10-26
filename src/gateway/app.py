@@ -150,7 +150,13 @@ from gateway.passwords import (
 )
 from gateway.permissions import PERMISSIONS, Actor, Resource
 from gateway.profiles import PROFILES, Tier, load_calibrated_profiles
-from gateway.providers import ProviderConfig, ProviderService, ProviderStore, resolve_provider
+from gateway.providers import (
+    ProviderConfig,
+    ProviderService,
+    ProviderStore,
+    ProviderUnreachedError,
+    resolve_provider,
+)
 from gateway.ratelimit import RateLimitedError, RequestRateLimiter
 from gateway.redaction import Redactor
 from gateway.redaction import install as install_redaction
@@ -1405,12 +1411,13 @@ def _provider_routes(app: FastAPI, accounts: AccountAccess, providers: ProviderS
         """Spends tokens on the organization's account with this provider (docs/32)."""
         try:
             capabilities = await providers.test(found(provider_id), actor=auth.actor)
+        except ProviderUnreachedError:
+            # One answer for a refused address, no such name, no connection and no answer in
+            # time: not a way to map a network (docs/32). The audit entry says which.
+            return _error(502, "provider_unreachable", "The provider could not be reached.")
         except ProviderError as exc:
-            return _error(
-                exc.status if exc.status != 422 else 502,
-                exc.code.value,
-                exc.message + (f" ({exc.detail})" if exc.detail else ""),
-            )
+            # The host answered: the code and its fixed message, nothing derived from its body.
+            return _error(exc.status if exc.status != 422 else 502, exc.code.value, exc.message)
         return JSONResponse({"ok": True, "capabilities": capabilities})
 
     @app.exception_handler(ProviderKeyRejectedError)
@@ -1588,6 +1595,7 @@ def create_app(
         )
         _admin_routes(app, accounts, management)
         if providers is not None:
+            app.state.providers = providers
             _provider_routes(app, accounts, providers)
         # Outermost, so even the local-only guard's refusals of /v1/admin are not cached.
         app.add_middleware(NoStoreMiddleware)

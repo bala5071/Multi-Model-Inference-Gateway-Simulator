@@ -87,8 +87,12 @@ def install(redactor: Redactor) -> Callable[[], None]:
         except Exception:  # a broken format string: keep what there is, scrubbed
             message = redactor.scrub(str(record.msg))
             record.msg, record.args = message, ()
-        if redactor.scrub(message) != message:
-            # Something still shows a secret (an argument's repr): give up the arguments.
+        # If a secret would still show, give up the arguments and keep the scrubbed message:
+        # in the formatted message (an argument's str), or in the arguments' repr, which is
+        # what logging prints to stderr ("Arguments: ...") when a handler fails to format the
+        # record (Handler.handleError).
+        shown = repr(record.args) if record.args else ""
+        if redactor.scrub(message) != message or redactor.scrub(shown) != shown:
             record.msg, record.args = redactor.scrub(message), ()
         if record.exc_info and record.exc_info[0] is not None:
             text = "".join(traceback.format_exception(*record.exc_info))

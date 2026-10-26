@@ -139,7 +139,15 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
             literal: Address | None = ipaddress.ip_address(host.strip("[]"))
         except ValueError:
             literal = None
-        names = [str(literal)] if literal is not None else await self._resolver(host, port)
+        if literal is not None:
+            names = [str(literal)]
+        else:
+            try:
+                names = await self._resolver(host, port)
+            except OSError:  # socket.gaierror among them: the name did not resolve
+                raise ProviderError(
+                    ProviderErrorCode.UPSTREAM_UNAVAILABLE, detail="dns_failure"
+                ) from None
         if not names:
             raise EgressRefused("unresolved")
         addresses = []

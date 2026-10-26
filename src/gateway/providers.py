@@ -68,10 +68,27 @@ PROVIDER_ID_BYTES = 8
 KEY_MIN_LENGTH = 8
 KEY_MAX_LENGTH = 512
 TESTS_PER_HOUR = 5
+TESTS_PER_ORGANIZATION_HOUR = 20
 HOUR_MS = 60 * 60 * 1000.0
 PROBE_TIMEOUT_MS = 30_000.0
 PING = ToolSpec("ping", "Answers pong.", {"type": "object", "properties": {}})
 LOG = logging.getLogger("gateway.providers")
+# The failures that mean "the host was not reached": refused by the guard, no such name, no
+# connection, the connection lost, no answer in time. Test-connection answers them all the
+# same way, so it cannot be used to map which addresses and ports exist (docs/32); which one
+# it was goes to the audit log only.
+UNREACHED_DETAILS = frozenset({"connect", "connection_lost", "dns_failure"})
+
+
+def unreached(exc: ProviderError) -> bool:
+    """Whether a provider failure happened before any HTTP answer came back."""
+    if exc.code in (ProviderErrorCode.EGRESS_REFUSED, ProviderErrorCode.UPSTREAM_TIMEOUT):
+        return True
+    return exc.code is ProviderErrorCode.UPSTREAM_UNAVAILABLE and exc.detail in UNREACHED_DETAILS
+
+
+class ProviderUnreachedError(Exception):
+    """Test-connection's one answer for every failure to reach the host."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,6 +311,7 @@ class ProviderService:
         client_factory: Callable[[], httpx.AsyncClient],
         *,
         tests_per_hour: int = TESTS_PER_HOUR,
+        tests_per_organization_hour: int = TESTS_PER_ORGANIZATION_HOUR,
         random_bytes: Callable[[int], bytes] = secrets.token_bytes,
     ) -> None:
         self.store = store
@@ -305,7 +323,9 @@ class ProviderService:
         self._client_factory = client_factory
         self._tests_per_hour = tests_per_hour
         self._random_bytes = random_bytes
+        self._tests_per_organization_hour = tests_per_organization_hour
         self._tests: dict[str, deque[float]] = {}
+        self._organization_tests: dict[str, deque[float]] = {}
         self._warned_at_use: set[str] = set()
 
     def __repr__(self) -> str:
@@ -462,17 +482,28 @@ class ProviderService:
 
     # --- test-connection -------------------------------------------------------------------
 
-    def _count_test(self, provider_id: str) -> None:
+    def _count_test(self, config: ProviderConfig) -> None:
+        """At most so many tests of one provider an hour, and of all an organization's
+        providers together (one provider per address would get round the first)."""
         now = self._clock.now_ms()
-        times = self._tests.setdefault(provider_id, deque())
-        while times and now - times[0] >= HOUR_MS:
-            times.popleft()
-        if len(times) >= self._tests_per_hour:
-            raise ManagementRefusal(
-                Reason.TEST_RATE_LIMITED,
-                f"at most {self._tests_per_hour} tests of a provider an hour; try again later",
-            )
-        times.append(now)
+        windows = (
+            (self._tests.setdefault(config.id, deque()), self._tests_per_hour, "a provider"),
+            (
+                self._organization_tests.setdefault(config.organization_id, deque()),
+                self._tests_per_organization_hour,
+                "an organization's providers",
+            ),
+        )
+        for times, limit, what in windows:
+            while times and now - times[0] >= HOUR_MS:
+                times.popleft()
+            if len(times) >= limit:
+                raise ManagementRefusal(
+                    Reason.TEST_RATE_LIMITED,
+                    f"at most {limit} tests of {what} an hour; try again later",
+                )
+        for times, _, _ in windows:
+            times.append(now)
 
     def adapter(self, config: ProviderConfig, client: httpx.AsyncClient) -> HttpAdapter:
         kind = AnthropicAdapter if config.type == "anthropic" else OpenAICompatibleAdapter
@@ -481,8 +512,10 @@ class ProviderService:
     async def test(self, config: ProviderConfig, *, actor: Actor) -> dict[str, Any]:
         """Probe the provider with its key: one short answer (streaming), one tool round trip.
         Spends tokens on the organization's account. Returns the capabilities recorded, or
-        raises ``ProviderError`` (mapped, never the provider's text) or ``ManagementRefusal``."""
-        self._count_test(config.id)
+        raises ``ProviderUnreachedError`` when the host was not reached (which way goes to the
+        audit only), ``ProviderError`` (mapped, never the provider's text) when it answered, or
+        ``ManagementRefusal``."""
+        self._count_test(config)
         stored = self.store.get_key(config.id)
         if stored is None:
             self._record(
@@ -521,13 +554,17 @@ class ProviderService:
                 Reason.KEY_UNREADABLE, "this provider's key cannot be read: enter it again"
             ) from None
         except ProviderError as exc:
+            detail = {"outcome_detail": exc.detail} if unreached(exc) and exc.detail else {}
             self._record(
                 AuditAction.PROVIDER_TESTED,
                 config,
                 actor,
                 Outcome.FAILURE,
                 outcome_code=exc.code.value,
+                **detail,
             )
+            if unreached(exc):
+                raise ProviderUnreachedError from None
             raise
         current = self.store.get(config.id)
         if current is not None and current.model == config.model:

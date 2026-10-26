@@ -266,3 +266,99 @@ def test_redaction_keeps_uvicorn_access_lines_working_and_reprs_scrubbed(
     assert formatted.startswith("127.0.0.1:5000 GET /healthz?k=[redacted]")
     assert "sk-0123456789abcdefghijkl" not in formatted
     assert "sk-0123456789abcdefghijkl" not in caplog.records[1].getMessage()
+
+
+def test_a_record_that_fails_to_format_prints_no_secret_to_stderr(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When a handler cannot format a record, logging prints the record's message and
+    arguments to stderr (Handler.handleError, "Arguments: ..."), with each argument's repr.
+    The control, without the redaction layer, prints the planted secret; with it, neither a
+    string argument, nor a watched value, nor an object whose repr (not its str) shows the
+    secret, reaches stderr."""
+    planted = "sk-planted-format-0123456789abcdef"
+    watched = "plain-watched-value-for-format-test"
+
+    class Holder:
+        def __str__(self) -> str:
+            return "a holder"
+
+        def __repr__(self) -> str:
+            return f"Holder({planted})"
+
+    handler = logging.StreamHandler()  # stderr, as logging's default error report is
+    handler.setFormatter(logging.Formatter("%(message)s %(field_that_is_missing)s"))
+    log = logging.getLogger("gateway.test.formatfail")
+    log.addHandler(handler)
+    log.propagate = False
+    try:
+        log.warning("control %s", planted)
+        control = capsys.readouterr().err
+        assert "--- Logging error ---" in control
+        assert planted in control  # what the layer must stop
+
+        redactor = Redactor()
+        remove = install(redactor)
+        try:
+            with redactor.watching(watched):
+                log.warning("string %s", planted)
+                log.warning("watched %s", watched)
+                log.warning("holder %s", Holder())
+                log.warning("broken %d", Holder())  # the message itself cannot be formatted
+        finally:
+            remove()
+        err = capsys.readouterr().err
+    finally:
+        log.removeHandler(handler)
+    assert err.count("--- Logging error ---") == 4  # the handler still fails; nothing leaks
+    assert planted not in err
+    assert watched not in err
+
+
+async def test_a_backup_restored_under_another_master_key_starts_with_keys_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A backup holds the sealed keys, not the master key. Restored and started with the
+    wrong master key, the server starts, warns, and shows the provider's key as unreadable;
+    with the right one, the same restored key opens."""
+    import httpx
+
+    from gateway.clock import ClockEpoch, SimClock
+    from gateway.database import backup_database, open_database, restore_database
+    from gateway.migrations import MIGRATIONS, MigrationRunner
+    from gateway.providers import ProviderService, ProviderStore
+    from test_providers_api import seed_provider
+
+    original = open_database(tmp_path / "original.db")
+    MigrationRunner(original, MIGRATIONS, ClockEpoch(SimClock())).migrate()
+    config = seed_provider(original)
+    ProviderStore(original).put_key(config.id, Vault(MASTER).seal(KEY, config.binding), 1.0)
+    backup_database(original, tmp_path / "backup.db")
+    original.close()
+    served = tmp_path / "restored.db"
+    restore_database(tmp_path / "backup.db", served)
+    monkeypatch.setenv("GATEWAY_DATABASE", str(served))
+
+    async def start(master: bytes) -> tuple[int, bool, bool]:
+        monkeypatch.setenv(VAULT_KEY_ENV, _key(master))
+        app = create_default_app()
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
+        try:
+            async with (
+                app.router.lifespan_context(app),
+                httpx.AsyncClient(transport=transport, base_url="http://localhost") as client,
+            ):
+                health = (await client.get("/healthz")).status_code
+                providers: ProviderService = app.state.providers
+                state = providers.key_state(config)
+        finally:
+            app.state.database_lock.release()
+        return health, state.present, state.readable
+
+    caplog.set_level(logging.WARNING, logger="gateway.providers")
+    assert await start(OTHER) == (200, True, False)  # starts; the key is there and unreadable
+    warnings = [r.getMessage() for r in caplog.records if r.name == "gateway.providers"]
+    assert len(warnings) == 1
+    assert config.id in warnings[0]
+    assert KEY not in warnings[0]
+    assert await start(MASTER) == (200, True, True)  # the right master key reads the same row
