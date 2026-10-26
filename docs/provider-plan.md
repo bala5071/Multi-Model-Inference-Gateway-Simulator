@@ -545,6 +545,44 @@ Settled before building, so they can be objected to:
    organization provider, against the same request served by an operator tier on the same
    scripted network, and with the first candidate failing at once.
 
+### PR 3 follow-up (requested 2026-10-26, after PR 3 merged)
+
+Requested:
+
+1. **The mode-change answers say** that an answer already streaming from a hosted provider is
+   not cut when the mode becomes stricter, and the README says it too. A test: the change made
+   through the endpoint while a hosted answer is streaming; that answer completes, and the next
+   request is refused by the guard even with the router's own checks bypassed.
+2. **`X-Provider` names the gateway's own tier `gateway`**, no longer `local`, so `local` is only
+   ever a class (`X-Provider-Class: local | hosted`, unchanged). An organization provider's id is
+   unchanged; `X-Fallback-From` says `gateway` too, and so does the usage record's `provider` for
+   new rows. **Stored rows are not rewritten**: rows written before this change keep `local`, and
+   the docs say from which change new rows say `gateway`. A grep for every other use of `local`
+   as a provider name, with the reason each one stays or changes.
+3. **The shared TLS context is pinned**: certificate verification on, host name checking on,
+   the default trust store, nothing per organization; a test fails if any of them changes.
+4. **The invalid-tool-JSON retry**: the second attempt is the one recorded and billed, at the
+   organization's prices for that provider, and there is never more than one retry; tested.
+5. **The "never" rules as invariants**, independent of the router: random plans, tiers, modes
+   and provider lists, and a check of what reaches the network that no request is ever sent to a
+   provider or a model outside them.
+
+Settled before building, so they can be objected to:
+
+1. **Both mode answers always carry the sentence** (`in_flight`), whether the change is stricter
+   or not: one fixed answer shape, and a client cannot misread its absence.
+2. **No migration for the rename**: `provider` is free text, and an organization provider's id
+   is always `prv_` and 16 hex digits, so `gateway` can never be one. Nothing in the code reads
+   the stored value back to decide anything.
+3. **"The default trust store" is httpx's own bundle (`certifi`) with the environment ignored**:
+   the context is built with `trust_env=False`, as every guarded client already is, so
+   `SSL_CERT_FILE` and `SSL_CERT_DIR` can no longer replace the certificates an organization's
+   provider is checked against. The operator's adapters get the same context by default.
+4. **The failed first attempt of an invalid-tool-JSON retry is not in the ledger**, as before:
+   the ledger records the attempt that answered. The provider may still charge the organization
+   for the failed one; note 33 says so.
+5. **The property test uses a seeded `random.Random`**, no new dependency.
+
 ## 6. What does not change
 
 `/v1/generate`, `create_app(registry, clock)` without accounts, the simulated backends and
