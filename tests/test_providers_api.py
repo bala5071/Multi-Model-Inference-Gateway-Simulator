@@ -19,6 +19,7 @@ from typing import Any
 import httpcore
 import httpx
 import pytest
+from fastapi import FastAPI
 from fastapi.routing import APIRoute
 
 from gateway.apikeys import ApplicationAccess
@@ -79,6 +80,7 @@ class Rig:
     network: ScriptedNetwork
     resolver: FakeResolver
     client: httpx.AsyncClient
+    app: FastAPI
 
     @property
     def store(self) -> ProviderStore:
@@ -142,7 +144,7 @@ async def rig(world: World | None = None, **service: Any) -> AsyncIterator[Rig]:
     )
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
-        yield Rig(world, providers, network, resolver, client)
+        yield Rig(world, providers, network, resolver, client, app)
     await registry.aclose()
 
 
@@ -439,6 +441,41 @@ async def test_the_old_ciphertext_cannot_be_opened_for_the_new_origin_or_type(
 
 
 # --- keys and consume-on-use --------------------------------------------------------------------
+
+
+async def test_the_documented_consume_sequence() -> None:
+    """Note 32's table, row by row: step-up actions use the window and leave it open, consume
+    actions close it, a refusal before any change gives it back."""
+    async with rig() as r:
+        alice = await r.login("alice")
+        seen: list[tuple[int, str | None]] = []
+
+        def note(response: httpx.Response) -> None:
+            body = response.json()
+            seen.append((response.status_code, (body.get("error") or {}).get("code")))
+
+        await r.step_up(alice)  # 1
+        made = await r.call(alice, "POST", "/north/providers", NEW)  # 2
+        note(made)
+        provider = f"/north/providers/{made.json()['provider_id']}"
+        note(await r.call(alice, "PATCH", provider, {"model": "model-y"}))  # 3
+        note(await r.call(alice, "PUT", provider + "/key", {"key": KEY}))  # 4
+        note(await r.call(alice, "PUT", provider + "/key", {"key": KEY + "2"}))  # 5
+        note(await r.call(alice, "PATCH", provider, {"model": "model-z"}))  # 6
+        await r.step_up(alice)  # 7
+        note(await r.call(alice, "PUT", provider + "/key", {"key": "abc"}))  # 8
+        note(await r.call(alice, "PUT", provider + "/key", {"key": KEY + "3"}))  # 9
+        note(await r.call(alice, "DELETE", provider + "/key"))  # 10
+    assert seen == [
+        (201, None),
+        (200, None),
+        (200, None),
+        (403, STEP_UP_REQUIRED),
+        (403, STEP_UP_REQUIRED),
+        (422, "invalid_request"),
+        (200, None),
+        (403, STEP_UP_REQUIRED),
+    ]
 
 
 async def test_a_key_is_never_returned_and_each_change_needs_a_fresh_password() -> None:

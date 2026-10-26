@@ -151,6 +151,29 @@ successful change uses up the step-up window, so each change needs the password 
 - Note 29 had described clearing the window after a successful handler; claiming first closes the
   race that would leave. The audit entry of each says `step_up_consumed: true`.
 
+**What "a fresh password per key change" means, exactly.** A password opens a window of 5
+minutes. Actions that only *require* step-up (create, update, enable, disable a provider) use the
+window and leave it open; actions that *consume* it (set or replace a key, delete a key, delete a
+provider) close it. So no two key changes ever share one password, but a password is not asked
+for every step-up action. One org_admin session, in order (the test
+`test_the_documented_consume_sequence` walks exactly this):
+
+| # | Request | Answer | Window afterwards |
+|---|---|---|---|
+| 1 | `POST /v1/auth/step-up` (password) | 200 | open for 5 minutes |
+| 2 | `POST .../providers` (create) | 201 | still open: create requires step-up, does not consume |
+| 3 | `PATCH .../providers/{id}` (a new model) | 200 | still open |
+| 4 | `PUT .../providers/{id}/key` | 200 | **closed**: the first key change used it |
+| 5 | `PUT .../providers/{id}/key` (replace the key) | 403 `step_up_required` | closed |
+| 6 | `PATCH .../providers/{id}` | 403 `step_up_required` | closed: nothing that needs step-up works now |
+| 7 | `POST /v1/auth/step-up` (password again) | 200 | open |
+| 8 | `PUT .../providers/{id}/key` with a 3-character key | 422 | **open again**: refused before any change, so the window came back |
+| 9 | `PUT .../providers/{id}/key` (a valid key) | 200 | closed |
+| 10 | `DELETE .../providers/{id}/key` | 403 `step_up_required` | closed: a third change needs a third password |
+
+Creating a provider and setting its first key therefore take one password (rows 1 to 4); every
+later key change takes one more.
+
 ## The egress guard
 
 Every connection to an organization's provider goes through one `httpcore` network backend whose
@@ -236,6 +259,20 @@ For step 9's `docs/threat-model.md`:
 - **The master key is in the process environment**, like the pepper: whoever can read the
   environment and the database can decrypt every provider key.
 - **A plaintext key is in memory during a test-connection**; Python cannot erase it.
+- **The set-key request body is plaintext in the process while it is parsed**: the raw bytes
+  uvicorn receives, the decoded JSON, the request model and the string handed to the vault are
+  all copies of the key, none of which Python can wipe; they live until the garbage collector
+  reuses their memory. Nothing logs, stores or returns a body: uvicorn's access log has the
+  method, path and status only; the 422 answer names the field and pydantic's message, never
+  the input; the service's refusals never repeat the key; and the key is watched by the
+  redaction layer while it is sealed. Tested through a real uvicorn server
+  (`test_a_set_key_request_body_is_logged_and_kept_nowhere`): accepted, refused in six ways,
+  refused before the key is used (no window, a missing provider: the body is still read and
+  parsed, since FastAPI does that before the dependencies run), and a server error with its
+  traceback logged;
+  the planted key, chosen with no credential shape so the patterns cannot be what hides it, is
+  in no log record, access or error log line, response, audit row or table, and the planted
+  control is found. A memory dump of the process, or swap, could still hold it.
 - **A lost master key loses every provider key** (by design); they must be entered again.
 - **An org_admin can point a provider at any public HTTPS host**, and so send its test prompts
   (and, from step 3, its organization's prompts) anywhere; that is its authority, and it is

@@ -414,3 +414,133 @@ async def test_a_provider_key_appears_only_in_the_requests_that_carry_it(
         remove()
     assert find_leaks(corpus(), {"provider key": KEY}) == []
     assert "[redacted]" in caplog.records[0].getMessage()
+
+
+async def test_a_set_key_request_body_is_logged_and_kept_nowhere(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The set-key body, served by a real uvicorn server with its access and error logs (as
+    uvicorn formats them): accepted, refused in each way a body can be refused, refused before
+    the key is used (the body is still read and parsed), and failing with a traceback while
+    being stored. The planted key
+    is in no log record, access or error log line, response, audit row, table or traceback.
+    It has no credential shape, so the redaction patterns cannot be what hides it; the
+    planted control is found."""
+    import io
+    from dataclasses import replace as replaced
+
+    import uvicorn
+    from uvicorn.logging import AccessFormatter, DefaultFormatter
+
+    from test_providers_api import NEW, rig
+
+    planted = "plain-provider-key-for-body-scan-0123456789"
+    caplog.set_level(logging.DEBUG)
+    streams = {"uvicorn access log": io.StringIO(), "uvicorn error log": io.StringIO()}
+    handlers = {
+        "uvicorn.access": logging.StreamHandler(streams["uvicorn access log"]),
+        "uvicorn.error": logging.StreamHandler(streams["uvicorn error log"]),
+    }
+    handlers["uvicorn.access"].setFormatter(
+        AccessFormatter('%(client_addr)s - "%(request_line)s" %(status_code)s', use_colors=False)
+    )
+    handlers["uvicorn.error"].setFormatter(DefaultFormatter("%(levelprefix)s %(message)s"))
+    for name, handler in handlers.items():
+        logging.getLogger(name).addHandler(handler)
+    responses: dict[str, str] = {}
+    try:
+        async with rig() as r:
+            config = uvicorn.Config(r.app, host="127.0.0.1", port=0, log_config=None)
+            config.load()
+            server = uvicorn.Server(config)
+            server.lifespan = config.lifespan_class(config)
+            await server.startup()  # bound and the app's lifespan run (redaction installed)
+            port = server.servers[0].sockets[0].getsockname()[1]
+            try:
+                async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
+                    live = replaced(r, client=client)
+                    alice = await live.login("alice")
+                    await live.step_up(alice)
+                    made = await live.call(alice, "POST", "/north/providers", NEW)
+                    path = f"/v1/admin/orgs/north/providers/{made.json()['provider_id']}/key"
+                    missing = "/v1/admin/orgs/north/providers/prv_00000000000000ff/key"
+
+                    async def put(
+                        name: str, content: str, step_up: bool = True, to: str = path
+                    ) -> None:
+                        if step_up:
+                            await live.step_up(alice)
+                        response = await client.put(
+                            to,
+                            content=content,
+                            headers={
+                                "Cookie": f"gw_session={alice[0]}",
+                                "X-CSRF-Token": alice[1],
+                                "Content-Type": "application/json",
+                            },
+                        )
+                        responses[name] = _response(response)
+
+                    await put("accepted", json.dumps({"key": planted}))
+                    await put("extra field", json.dumps({"key": planted, "note": planted}))
+                    await put("wrong type", json.dumps({"key": [planted]}))
+                    await put("not JSON", '{"key": "' + planted)
+                    await put("too long", json.dumps({"key": planted * 20}))
+                    await put("bad character", json.dumps({"key": planted + "\n"}))
+                    # Each refusal above changed nothing, so its window came back (docs/32);
+                    # let the last one pass.
+                    await r.world.accounts.clock.sleep_ms(r.world.accounts.service.step_up_ms)
+                    await put("no step-up", json.dumps({"key": planted}), step_up=False)
+                    # Missing and forbidden answer alike (403).
+                    await put(
+                        "a provider that does not exist", json.dumps({"key": planted}), to=missing
+                    )
+
+                    def broken(*args: object) -> None:
+                        raise sqlite3.OperationalError("disk I/O error")
+
+                    monkeypatch.setattr(r.store, "put_key", broken)
+                    await put("server error", json.dumps({"key": planted}))
+            finally:
+                await server.shutdown()
+            connection = r.world.accounts.connection
+            tables = {
+                table: _table(connection, table, {"nonce", "ciphertext"})
+                for table in ("audit_log", "provider_configs", "provider_keys", "sessions")
+            }
+    finally:
+        for name, handler in handlers.items():
+            logging.getLogger(name).removeHandler(handler)
+
+    statuses = {name: int(text.split(" ", 1)[0]) for name, text in responses.items()}
+    assert statuses == {
+        "accepted": 200,
+        "extra field": 422,
+        "wrong type": 422,
+        "not JSON": 422,
+        "too long": 422,
+        "bad character": 422,
+        "no step-up": 403,
+        "a provider that does not exist": 403,
+        "server error": 500,
+    }
+    access = streams["uvicorn access log"].getvalue()
+    assert access.count(' - "PUT /v1/admin/orgs/north/providers/') == 9  # it was written
+    assert "Traceback" in streams["uvicorn error log"].getvalue()  # the 500 was logged in full
+
+    def corpus() -> dict[str, str]:
+        texts = {
+            "log records": "\n".join(
+                f"{rec.name} {rec.getMessage()} {rec.args!r} {rec.exc_text or ''}"
+                for rec in caplog.records
+            ),
+            **{name: stream.getvalue() for name, stream in streams.items()},
+            **tables,
+        }
+        texts.update({f"response: {name}": text for name, text in responses.items()})
+        return texts
+
+    assert find_leaks(corpus(), {"provider key": planted}) == []
+    # The control: logged by mistake, it is found (it is not a known shape, and not watched).
+    logging.getLogger("gateway").warning("oops, the body: %s", planted)
+    assert find_leaks(corpus(), {"provider key": planted}) == [("log records", "provider key")]
