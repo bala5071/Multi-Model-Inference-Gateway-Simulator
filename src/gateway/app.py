@@ -23,7 +23,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
-import httpx
 from fastapi import Depends, FastAPI, Header, Query, Request, Response
 from fastapi import Path as Path_
 from fastapi.exceptions import RequestValidationError
@@ -97,7 +96,7 @@ from gateway.chat import (
     json_object,
 )
 from gateway.chatrouter import ChatRouter, NoCandidateError, RoutedOutcome, RouteTrace
-from gateway.chatservice import ChatOutcome, ChatService
+from gateway.chatservice import GATEWAY_PROVIDER, ChatOutcome, ChatService
 from gateway.clock import Clock, ClockEpoch, EpochSource, PacedSimClock, SystemEpoch, WallClock
 from gateway.continuous import RequestTooLargeError, build_continuous_registry
 from gateway.database import ProcessLock, database_path, open_database
@@ -106,6 +105,7 @@ from gateway.egress import (
     LocalDestinations,
     operator_client,
     organization_client,
+    provider_tls_context,
     system_resolver,
 )
 from gateway.events import EventBus
@@ -139,6 +139,7 @@ from gateway.management import (
 from gateway.metrics import Distribution, MetricsStore
 from gateway.migrations import MIGRATIONS, MigrationError, MigrationRunner
 from gateway.modes import (
+    IN_FLIGHT,
     InMemoryModeStore,
     Mode,
     ModeService,
@@ -1292,7 +1293,12 @@ def _mode_routes(app: FastAPI, accounts: AccountAccess, modes: ModeService) -> N
         assert auth.consumed is not None
         change = modes.set_organization(org, body.mode, actor=auth.actor, marker=auth.consumed)
         return JSONResponse(
-            {"organization_id": org, "mode": change.mode, "previous_mode": change.previous}
+            {
+                "organization_id": org,
+                "mode": change.mode,
+                "previous_mode": change.previous,
+                "in_flight": IN_FLIGHT,
+            }
         )
 
     @app.put(ORG_PREFIX + "/applications/{app}/mode")
@@ -1315,6 +1321,7 @@ def _mode_routes(app: FastAPI, accounts: AccountAccess, modes: ModeService) -> N
                 "effective_mode": effective_mode(
                     modes.store.organization_mode(org), modes.store.application_mode(app_id)
                 ),
+                "in_flight": IN_FLIGHT,
             }
         )
 
@@ -2164,10 +2171,10 @@ def create_app(
             )
 
         def source_headers(trace: RouteTrace | ChatSource) -> dict[str, str]:
-            """Where the answer came from: a provider id or ``local``, and its class; never a
-            URL. The fallback, when there was one (docs/33)."""
+            """Where the answer came from: a provider id or ``gateway`` (the gateway's own
+            tier), and its class; never a URL. The fallback, when there was one (docs/33)."""
             headers = {
-                "X-Provider": trace.provider or "local",
+                "X-Provider": trace.provider or GATEWAY_PROVIDER,
                 "X-Provider-Class": trace.provider_class or "local",
             }
             if trace.fallback_from is not None:
@@ -3041,7 +3048,7 @@ def create_default_app() -> FastAPI:
         LocalDestinations.loopback_of(s.url for s in backends.servers.values())
     )
     # One TLS context for every organization client (one is made per call, docs/33).
-    tls = httpx.create_ssl_context()
+    tls = provider_tls_context()
     if backends.kind == "llamacpp":
         registry = build_llamacpp_registry(backends, clock)
         chat_adapters = build_chat_adapters(

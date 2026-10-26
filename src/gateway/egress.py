@@ -302,6 +302,14 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
         await self._inner.sleep(seconds)
 
 
+def provider_tls_context() -> ssl.SSLContext:
+    """The TLS context provider calls are made with: certificates verified, host names checked,
+    against httpx's own trust store (``certifi``). ``trust_env=False``, as for every guarded
+    client: ``SSL_CERT_FILE`` and ``SSL_CERT_DIR`` cannot replace it. Nothing in it depends on
+    the organization; the server makes one and shares it (docs/33, tested)."""
+    return httpx.create_ssl_context(trust_env=False)
+
+
 class GuardedTransport(httpx.AsyncHTTPTransport):
     """httpx's transport, with every connection through ``GuardedBackend``. Each request is
     checked too, so a pooled connection never carries one past the locality rule: a hosted
@@ -316,7 +324,7 @@ class GuardedTransport(httpx.AsyncHTTPTransport):
     ) -> None:
         # One TLS context, given to httpx's own setup too, which would otherwise build another:
         # building one loads the certificate bundle, which costs more than a whole request.
-        tls = ssl_context if ssl_context is not None else httpx.create_ssl_context()
+        tls = ssl_context if ssl_context is not None else provider_tls_context()
         super().__init__(verify=tls, trust_env=False)
         self._local = local
         self._pool = httpcore.AsyncConnectionPool(
@@ -356,7 +364,7 @@ def organization_client(
 ) -> httpx.AsyncClient:
     """The client an adapter uses for an organization's provider: guarded, no redirects, no
     proxy from the environment. A new one is made for every call (docs/33), so the server
-    passes one ``ssl_context`` for all of them (``httpx.create_ssl_context()``, made once)."""
+    passes one ``ssl_context`` for all of them (``provider_tls_context()``, made once)."""
     return httpx.AsyncClient(
         transport=OrganizationTransport(resolver, inner, ssl_context),
         timeout=httpx.Timeout(None, connect=connect_timeout_s),

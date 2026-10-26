@@ -1,6 +1,7 @@
 """Migration 13: where a chat answer came from, in its usage event. See docs/33-fallback-modes.md.
 
-``provider`` (``local`` or an organization provider's id), ``provider_class`` (``local`` or
+``provider`` (the gateway's own tier, ``local`` in rows written before PR 20 and ``gateway``
+since, or an organization provider's id; never rewritten), ``provider_class`` (``local`` or
 ``hosted``), ``fallback_from`` and ``fallback_reason`` (set when another candidate was tried
 first) and ``usage_estimated`` (1 when the provider reported no usage). All NULL for
 ``/v1/generate`` and for events stored before this migration. ``ADD COLUMN``s, so no table is

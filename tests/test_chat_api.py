@@ -116,7 +116,8 @@ async def test_the_documented_default_request_gets_a_documented_answer() -> None
     assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
     # The documented request's "developer" message was taken as a system message.
     assert response.headers["x-model-used"] == "economy"
-    assert response.headers["x-provider"] == "local"
+    assert response.headers["x-provider"] == "gateway"
+    assert response.headers["x-provider-class"] == "local"
     assert "x-cost-usd" not in response.headers
 
 

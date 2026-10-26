@@ -41,7 +41,9 @@ from gateway.secret import Secret
 
 DEFAULT_FIRST_TOKEN_TIMEOUT_MS = 30_000.0
 DEFAULT_TOTAL_TIMEOUT_MS = 120_000.0
-LOCAL_PROVIDER = "local"
+# What X-Provider and the usage record call the gateway's own tier (docs/33). Its class, local
+# or hosted, is said separately; an organization provider's id is always prv_ and 16 hex digits.
+GATEWAY_PROVIDER = "gateway"
 SIMULATED_CAPABILITIES = Capabilities(
     supports_tools=False,
     supports_streaming=True,
@@ -118,7 +120,7 @@ class ChatService:
             else "stop"
         )
         result = ChatResult(text, (), finish, Usage(timing.tokens_in, timing.tokens_out))
-        return ChatOutcome(result, timing, LOCAL_PROVIDER)
+        return ChatOutcome(result, timing, GATEWAY_PROVIDER)
 
     async def attempt(
         self,
@@ -128,7 +130,7 @@ class ChatService:
         *,
         credential: Secret | None = None,
         first_token_timeout_ms: float | None = None,
-        provider: str = LOCAL_PROVIDER,
+        provider: str = GATEWAY_PROVIDER,
     ) -> ChatOutcome:
         """One request to one adapter, under the first-token and total timeouts."""
         first_token_ms = (
