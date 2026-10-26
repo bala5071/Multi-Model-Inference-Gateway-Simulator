@@ -363,9 +363,13 @@ choose a fallback mode ([docs/33](docs/33-fallback-modes.md)): `local_only` (the
 `PUT /v1/admin/orgs/{org}/mode` and `PUT .../applications/{app}/mode` (each change needs a
 fresh password). **A mode other than `local_only` sends prompts, and tool definitions and
 results, to a third party the organization chose, under that third party's terms**; the gateway
-stores none of it, but the provider may. Each answer says where it came from
-(`X-Provider`, `X-Provider-Class: local | hosted`, and `X-Fallback-From`/`X-Fallback-Reason`
-after a fallback), and so does the usage record. The operator's own model servers count as local
+stores none of it, but the provider may. An answer already streaming from a hosted provider is
+not cut when the mode becomes stricter: its prompt has already been sent (the mode change's
+answer says so too). Each answer says where it came from: `X-Provider` (`gateway` for the
+gateway's own tier, or the organization provider's id) and `X-Provider-Class: local | hosted`,
+which alone says whether it was local, and `X-Fallback-From`/`X-Fallback-Reason` after a
+fallback. The usage record says the same (rows stored before PR 20 call the gateway's tier
+`local`; see [docs/33](docs/33-fallback-modes.md)). The operator's own model servers count as local
 when they are on this machine (loopback in the backends file) or listed in
 `GATEWAY_PROVIDER_LOCAL_ALLOW` (`host:port`, comma-separated).
 
@@ -464,8 +468,9 @@ rm -rf -- "$TRY"; trap - EXIT; unset TRY
 
 What to look at, from a run on this machine (Ollama 0.12.6; the text is the model's and varies):
 
-- **4**: `HTTP/1.1 200 OK`, `x-model-used: economy`, `x-provider: local`, and
-  `"finish_reason":"stop"` with `"usage":{"prompt_tokens":31,"completion_tokens":10,...}` (the
+- **4**: `HTTP/1.1 200 OK`, `x-model-used: economy`, `x-provider: gateway` (the gateway's own
+  tier), `x-provider-class: local`, and
+  `"finish_reason":"stop"` with `"usage":{"prompt_tokens":31,"completion_tokens":7,...}` (the
   counts are Ollama's; `x-usage-estimated: true` would say they were estimated). No
   `x-cost-usd`: chat is priced only with prices an organization enters.
 - **5**: a first chunk `{"role": "assistant", "content": ""}`, then one chunk per piece of text,
