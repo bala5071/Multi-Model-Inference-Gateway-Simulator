@@ -86,7 +86,7 @@ one line in the real stream.)
   "applications": {"available": false, "applications": null},
   "events": {"available": true, "capacity": 1000, "retained": 0, "last_seq": 0,
              "counts": {"state_change": 0, "queue_full": 0, "timeout": 0, "downgrade": 0,
-                        "budget_exhausted": 0},
+                        "budget_exhausted": 0, "circuit_breaker": 0},
              "recent": []}
 }
 ```
@@ -247,6 +247,7 @@ it creates no series (`test_applications_show_spend_tokens_against_budget_and_re
 | `timeout` | A request was cancelled with 504 | `timeout_ms` |
 | `downgrade` | A request was moved to a cheaper model | `to_model` (`model` is the one it left) |
 | `budget_exhausted` | A request was refused with 429 `budget_exhausted` | `used_tokens`, `budget_tokens` |
+| `circuit_breaker` | An organization provider's circuit breaker moved (docs/33) | `provider`, `state` (`open`, `half_open`, `closed`), `open_ms` (how long it stays open; `null` otherwise) |
 
 Every event has `seq`, `at_ms`, `type`, `model` and `application_id` (`null` without
 applications). A rate-limit refusal is a rejection, not an event: it never reached a model.

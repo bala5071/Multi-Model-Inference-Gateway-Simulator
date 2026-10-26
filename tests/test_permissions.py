@@ -445,9 +445,10 @@ def test_every_route_of_every_app_declares_itself() -> None:
     # The explicit lists match real routes, so they cannot go stale.
     assert seen_lists >= DOCUMENTATION
     # With accounts, the user endpoints; with applications too, all thirteen (docs/30); the
-    # default server also has the provider endpoints (docs/32), on 7 more paths.
+    # default server also has the provider endpoints (docs/32), on 7 more paths, and the two
+    # mode endpoints (docs/33).
     assert len({p for v, p in requires_routes if v == "accounts"}) == 5
-    assert len({p for v, p in requires_routes if v == "default server"}) == 17
+    assert len({p for v, p in requires_routes if v == "default server"}) == 19
 
 
 def test_a_route_without_a_declaration_is_found() -> None:

@@ -153,6 +153,7 @@ export const EVENT_TYPES = [
   "timeout",
   "downgrade",
   "budget_exhausted",
+  "circuit_breaker",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];

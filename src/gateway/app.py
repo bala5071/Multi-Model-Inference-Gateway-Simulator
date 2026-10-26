@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from gateway.adapters.base import HttpAdapter
 from gateway.apikeys import (
     INVALID_KEY_MESSAGE,
     ApiKeyRequiredError,
@@ -80,6 +81,7 @@ from gateway.backend_config import (
     load_backend_config,
 )
 from gateway.backends import Backend, BackendError
+from gateway.breaker import Breakers, Transition
 from gateway.chat import (
     TOOL_NAME_PATTERN,
     ChatDelta,
@@ -93,11 +95,18 @@ from gateway.chat import (
     ToolSpec,
     json_object,
 )
+from gateway.chatrouter import ChatRouter, NoCandidateError, RoutedOutcome, RouteTrace
 from gateway.chatservice import ChatOutcome, ChatService
 from gateway.clock import Clock, ClockEpoch, EpochSource, PacedSimClock, SystemEpoch, WallClock
 from gateway.continuous import RequestTooLargeError, build_continuous_registry
 from gateway.database import ProcessLock, database_path, open_database
-from gateway.egress import organization_client, system_resolver
+from gateway.egress import (
+    LOCAL_ALLOW_ENV,
+    LocalDestinations,
+    operator_client,
+    organization_client,
+    system_resolver,
+)
 from gateway.events import EventBus
 from gateway.ledger import BudgetExceededError, CostLedger, ModelUsage, run_retention
 from gateway.loadcontrol import PRESETS, LoadController, UnknownPresetError
@@ -128,6 +137,14 @@ from gateway.management import (
 )
 from gateway.metrics import Distribution, MetricsStore
 from gateway.migrations import MIGRATIONS, MigrationError, MigrationRunner
+from gateway.modes import (
+    InMemoryModeStore,
+    Mode,
+    ModeService,
+    ModeStore,
+    SqliteModeStore,
+    effective_mode,
+)
 from gateway.monitoring import Monitor, Snapshot, render_prometheus
 from gateway.organizations import MAX_NAME_LENGTH
 from gateway.overload import (
@@ -165,7 +182,7 @@ from gateway.roles import RoleStore
 from gateway.routing import ModelNotAllowedError, Quality, Router, load_plans, pick_by_quality
 from gateway.schema import GenerateRequest, RequestResult
 from gateway.timeseries import TimeSeriesStore
-from gateway.usage import SqliteUsageStore, UsageStore
+from gateway.usage import ChatSource, SqliteUsageStore, UsageStore
 from gateway.users import AccountStore, User
 from gateway.vault import Vault, load_master_keys
 from gateway.workload import PlannedRequest
@@ -1244,7 +1261,66 @@ class SetProviderKeyBody(BaseModel):
     key: str
 
 
-def _provider_routes(app: FastAPI, accounts: AccountAccess, providers: ProviderService) -> None:
+class SetModeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Mode
+
+
+def _mode_routes(app: FastAPI, accounts: AccountAccess, modes: ModeService) -> None:
+    """``PUT .../mode`` for an organization and for one of its applications (docs/33), through
+    ``requires`` with consume-on-use step-up: each change needs its own password."""
+    service = accounts.service
+    requires = app.state.requires
+    stores = Stores(service.organizations, service.store)
+
+    def organization(request: Request) -> Resource | None:
+        return resolve_organization(stores, request.path_params["org"])
+
+    def application(request: Request) -> Resource | None:
+        p = request.path_params
+        return resolve_application(stores, p["org"], p["app"])
+
+    setting_organization = requires("mode.set_organization", organization)
+    setting_application = requires("mode.set_application", application)
+
+    @app.put(ORG_PREFIX + "/mode")
+    async def set_organization_mode(
+        org: str, body: SetModeBody, auth: Authorized = setting_organization
+    ) -> JSONResponse:
+        assert auth.consumed is not None
+        change = modes.set_organization(org, body.mode, actor=auth.actor, marker=auth.consumed)
+        return JSONResponse(
+            {"organization_id": org, "mode": change.mode, "previous_mode": change.previous}
+        )
+
+    @app.put(ORG_PREFIX + "/applications/{app}/mode")
+    async def set_application_mode(
+        org: str,
+        body: SetModeBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = setting_application,
+    ) -> JSONResponse:
+        assert auth.consumed is not None
+        change = modes.set_application(
+            org, app_id, body.mode, actor=auth.actor, marker=auth.consumed
+        )
+        return JSONResponse(
+            {
+                "application_id": app_id,
+                "mode": change.mode,
+                "previous_mode": change.previous,
+                # The stricter of the two, which is what its requests are served under.
+                "effective_mode": effective_mode(
+                    modes.store.organization_mode(org), modes.store.application_mode(app_id)
+                ),
+            }
+        )
+
+
+def _provider_routes(
+    app: FastAPI, accounts: AccountAccess, providers: ProviderService, breakers: Breakers
+) -> None:
     """The provider endpoints under /v1/admin/orgs/{org}/providers (docs/32), each through
     ``requires``; key changes are consume-on-use."""
     service = accounts.service
@@ -1301,6 +1377,17 @@ def _provider_routes(app: FastAPI, accounts: AccountAccess, providers: ProviderS
                 "updated_at_ms": key.updated_at_ms,
             },
             "created_at_ms": config.created_at_ms,
+            "circuit": breakers.state(config.organization_id, config.id),
+            **slow(config),
+        }
+
+    def slow(config: ProviderConfig) -> dict[str, object]:
+        """The slow-provider warning (docs/33): set after consecutive missed first-token
+        budgets, cleared by an answer within budget."""
+        warning = breakers.slow(config.organization_id, config.id)
+        return {
+            "slow_since_ms": warning.slow_since_ms,
+            "consecutive_misses": warning.consecutive_misses,
         }
 
     def invalid(exc: ValueError, field: str) -> JSONResponse:
@@ -1312,11 +1399,13 @@ def _provider_routes(app: FastAPI, accounts: AccountAccess, providers: ProviderS
 
     @app.get(ORG_PREFIX + "/providers/status")
     async def provider_status(org: str, auth: Authorized = statuses) -> JSONResponse:
-        # Only that each provider exists and whether it is enabled (docs/32).
+        # That each provider exists, whether it is enabled (docs/32), and whether it is slow
+        # (docs/33).
         return JSONResponse(
             {
                 "providers": [
-                    {"provider_id": c.id, "enabled": c.is_enabled} for c in store.list_for(org)
+                    {"provider_id": c.id, "enabled": c.is_enabled, **slow(c)}
+                    for c in store.list_for(org)
                 ]
             }
         )
@@ -1460,6 +1549,8 @@ def create_app(
     accounts: AccountAccess | None = None,
     chat_adapters: Mapping[str, Backend] | None = None,
     providers: ProviderService | None = None,
+    modes: ModeStore | None = None,
+    local_destinations: LocalDestinations | None = None,
 ) -> FastAPI:
     """Build the API around an already wired registry.
 
@@ -1509,6 +1600,12 @@ def create_app(
 
     On a ``PacedSimClock`` the gateway is in simulated live mode: ``/v1/control`` says so
     and ``/v1/control/speed`` changes how fast simulated time is let through.
+
+    ``modes`` keeps organizations' and applications' fallback modes (default: in memory, all
+    ``local_only``), and ``local_destinations`` are the operator's local destinations (default:
+    the loopback destinations of ``chat_adapters``, as the server takes them from its backends
+    file); with ``providers``, chat requests are routed among the tier and the organization's
+    providers under the effective mode (docs/33).
     """
     if metrics is None:
         metrics = MetricsStore(clock)
@@ -1522,13 +1619,14 @@ def create_app(
     ledger = CostLedger(clock, store=usage_store, epoch=epoch, retention_ms=usage_retention_ms)
     timeout_ms = overload.request_timeout_ms if overload is not None else None
     slo_policy = overload.slo if overload is not None else None
+    bus = events if events is not None else EventBus(clock)
     # Monitoring only watches: it is told what happened and decides nothing.
     monitoring = Monitor(
         clock,
         registry,
         metrics,
         series=series if series is not None else TimeSeriesStore(clock),
-        events=events if events is not None else EventBus(clock),
+        events=bus,
         ledger=ledger if applications is not None else None,
         applications=applications.store if applications is not None else None,
         slo_models=tuple(slo_policy.p99_ms) if slo_policy is not None else (),
@@ -1538,6 +1636,20 @@ def create_app(
         if slo_policy is not None
         else None
     )
+
+    # Fallback modes and the providers' circuit breakers (docs/33). The router owns the
+    # breakers and publishes their transitions; nothing reads them back from the bus.
+    mode_store = modes if modes is not None else InMemoryModeStore()
+
+    def breaker_moved(moved: Transition) -> None:
+        bus.publish(
+            "circuit_breaker",
+            provider=moved.provider_id,
+            state=moved.state.value,
+            open_ms=moved.open_ms,
+        )
+
+    breakers = Breakers(clock, breaker_moved)
 
     # Filled in further down, once the generate handler it sends through exists.
     load: LoadController | None = None
@@ -1596,7 +1708,17 @@ def create_app(
         _admin_routes(app, accounts, management)
         if providers is not None:
             app.state.providers = providers
-            _provider_routes(app, accounts, providers)
+            _provider_routes(app, accounts, providers, breakers)
+            if management is not None:
+                _mode_routes(
+                    app,
+                    accounts,
+                    ModeService(
+                        mode_store,
+                        accounts.service.audit,
+                        epoch if epoch is not None else ClockEpoch(clock),
+                    ),
+                )
         # Outermost, so even the local-only guard's refusals of /v1/admin are not cached.
         app.add_middleware(NoStoreMiddleware)
     app.state.slo_monitor = monitor
@@ -1998,10 +2120,27 @@ def create_app(
             return usage_body(caller)
 
         chat = ChatService(registry, clock, chat_adapters)
+        if local_destinations is None:
+            local_destinations = LocalDestinations.loopback_of(
+                a.base_url for a in (chat_adapters or {}).values() if isinstance(a, HttpAdapter)
+            )
+        chat_router = ChatRouter(
+            chat,
+            mode_store,
+            breakers,
+            local_destinations,
+            providers,
+            providers.client_factory if providers is not None else None,
+        )
+        app.state.chat_router = chat_router
         chat_epoch = epoch if epoch is not None else ClockEpoch(clock)
 
         def account_chat(
-            outcome: ChatOutcome, caller: Application, multiplier: float, model: str
+            outcome: ChatOutcome,
+            caller: Application,
+            multiplier: float,
+            model: str,
+            source: ChatSource,
         ) -> None:
             """What ``settle`` records for a generate request, for a chat one: metrics, the
             SLO monitor, the ledger and monitoring. No cost is computed for chat: only prices
@@ -2012,7 +2151,9 @@ def create_app(
             metrics.record(model, timing)
             if monitor is not None:
                 monitor.record(model, timing.latency_ms)
-            billed = ledger.record(caller.id, timing, model=model, price_multiplier=multiplier)
+            billed = ledger.record(
+                caller.id, timing, model=model, price_multiplier=multiplier, source=source
+            )
             monitoring.completed(
                 model,
                 caller.id,
@@ -2021,8 +2162,21 @@ def create_app(
                 live_tokens=timing.tokens_out,
             )
 
-        def chat_headers(outcome: ChatOutcome, model: str) -> dict[str, str]:
-            headers = {"X-Model-Used": model, "X-Provider": outcome.provider}
+        def source_headers(trace: RouteTrace | ChatSource) -> dict[str, str]:
+            """Where the answer came from: a provider id or ``local``, and its class; never a
+            URL. The fallback, when there was one (docs/33)."""
+            headers = {
+                "X-Provider": trace.provider or "local",
+                "X-Provider-Class": trace.provider_class or "local",
+            }
+            if trace.fallback_from is not None:
+                headers["X-Fallback-From"] = trace.fallback_from
+                headers["X-Fallback-Reason"] = trace.fallback_reason or "unknown"
+            return headers
+
+        def chat_headers(routed: RoutedOutcome, model: str) -> dict[str, str]:
+            outcome = routed.outcome
+            headers = {"X-Model-Used": model, **source_headers(routed.source)}
             if outcome.result.usage.estimated:
                 headers["X-Usage-Estimated"] = "true"
             if outcome.result.thinking_blocks_omitted:
@@ -2147,16 +2301,31 @@ def create_app(
                     chat_req = dataclasses.replace(chat_req, max_tokens=caller.max_tokens)
             except ChatInputError as exc:
                 return _openai_error(422, "invalid_request", str(exc), param=exc.param)
-            capabilities = chat.capabilities(route.model)
-            if chat_req.tools and capabilities.supports_tools is False:
-                reason = capabilities.reasons.get("supports_tools", "")
-                return _openai_error(
-                    422,
-                    "tools_not_supported",
-                    f"Model {route.model!r} cannot be used with tools here"
-                    + (f" ({reason})." if reason else "."),
-                    param="tools",
+            try:
+                # Only to answer at once when no candidate may serve it; the router asks again.
+                chat_router.candidates(
+                    caller.organization_id,
+                    caller.id,
+                    route.model,
+                    wants_tools=bool(chat_req.tools),
                 )
+            except NoCandidateError as exc:
+                if exc.code == "tools_not_supported":
+                    return _openai_error(
+                        422,
+                        "tools_not_supported",
+                        f"Model {route.model!r} cannot be used with tools here"
+                        + (f" ({exc.reason})." if exc.reason else "."),
+                        param="tools",
+                    )
+                return _openai_error(
+                    503,
+                    "no_local_provider",
+                    f"No local provider serves {route.model!r}, and this application's mode "
+                    "allows only local ones.",
+                    kind="api_error",
+                )
+            trace = RouteTrace()
             completion_id = "chatcmpl-" + request_id.removeprefix("req-")
             created = int(chat_epoch.epoch_ms() // 1000)
             multiplier = route.plan.price_multiplier
@@ -2192,10 +2361,12 @@ def create_app(
                     )
                 raise exc
 
-            async def tracked(on_delta: Callable[[ChatDelta], None] | None) -> ChatOutcome:
+            async def tracked(on_delta: Callable[[ChatDelta], None] | None) -> RoutedOutcome:
                 monitoring.request_started(route.model)
                 try:
-                    work = chat.run(chat_req, on_delta)
+                    work = chat_router.run(
+                        chat_req, caller.organization_id, caller.id, on_delta, trace
+                    )
                     if timeout_ms is not None:
                         return await run_with_timeout(clock, work, timeout_ms)
                     return await work
@@ -2204,10 +2375,11 @@ def create_app(
 
             if not body.stream:
                 try:
-                    outcome = await tracked(None)
+                    routed = await tracked(None)
                 except CHAT_FAILURES as exc:
                     return failure(exc)
-                account_chat(outcome, caller, multiplier, route.model)
+                outcome = routed.outcome
+                account_chat(outcome, caller, multiplier, route.model, routed.source)
                 result = outcome.result
                 message: dict[str, object] = {
                     "role": "assistant",
@@ -2232,7 +2404,7 @@ def create_app(
                         ],
                         "usage": usage_view(outcome),
                     },
-                    headers=chat_headers(outcome, route.model),
+                    headers=chat_headers(routed, route.model),
                 )
 
             # Streaming. Deltas go to a queue; None marks the end of the work.
@@ -2249,8 +2421,8 @@ def create_app(
                 failed = task.exception()
                 if isinstance(failed, CHAT_FAILURES):
                     return failure(failed)
-                outcome = task.result()  # an answer with no delta at all
-                account_chat(outcome, caller, multiplier, route.model)
+                routed = task.result()  # an answer with no delta at all
+                account_chat(routed.outcome, caller, multiplier, route.model, routed.source)
             include_usage = body.stream_options is not None and body.stream_options.include_usage
 
             async def events(item: ChatDelta | None) -> AsyncIterator[str]:
@@ -2286,9 +2458,10 @@ def create_app(
                         # in the stream, and it ends without [DONE].
                         yield f"data: {bytes(error.body).decode()}\n\n"
                         return
-                    outcome = task.result()
+                    routed = task.result()
+                    outcome = routed.outcome
                     if first is not None:
-                        account_chat(outcome, caller, multiplier, route.model)
+                        account_chat(outcome, caller, multiplier, route.model, routed.source)
                     yield chunk(
                         {"index": 0, "delta": {}, "finish_reason": outcome.result.finish_reason}
                     )
@@ -2304,7 +2477,8 @@ def create_app(
             if task.done() and not task.cancelled() and task.exception() is None:
                 headers.update(chat_headers(task.result(), route.model))
             else:
-                headers.update({"X-Model-Used": route.model, "X-Provider": "local"})
+                # Output has started, so the router knows who is answering (docs/33).
+                headers.update({"X-Model-Used": route.model, **source_headers(trace)})
             return StreamingResponse(events(first), media_type="text/event-stream", headers=headers)
 
     # Throwaway keys for the Playground: in memory, never printed, logged or returned.
@@ -2860,9 +3034,16 @@ def create_default_app() -> FastAPI:
         kind_override=os.environ.get("GATEWAY_BACKEND"),
     )
     chat_adapters = None
+    # The operator's local destinations: its list, and the loopback servers in its backends
+    # file (docs/33). Never consulted for an organization's provider.
+    local = LocalDestinations.parse(os.environ.get(LOCAL_ALLOW_ENV, "")) | (
+        LocalDestinations.loopback_of(s.url for s in backends.servers.values())
+    )
     if backends.kind == "llamacpp":
         registry = build_llamacpp_registry(backends, clock)
-        chat_adapters = build_chat_adapters(backends)
+        chat_adapters = build_chat_adapters(
+            backends, client=operator_client(system_resolver, local)
+        )
     else:
         profiles_path = os.environ.get("GATEWAY_PROFILES") or backends.profiles_path
         registry = build_continuous_registry(
@@ -2895,6 +3076,8 @@ def create_default_app() -> FastAPI:
             Redactor(),
             lambda: organization_client(system_resolver),
         ),
+        modes=SqliteModeStore(database),
+        local_destinations=local,
     )
     # Held for the life of the process; released when it exits, however it exits.
     app.state.database_lock = lock

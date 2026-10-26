@@ -1,13 +1,17 @@
 """A network for the egress guard to connect through, in tests: no sockets.
 
 ``ScriptedNetwork`` is an ``httpcore`` network backend. Each connection gets the next scripted
-raw HTTP response; it records the address the guard connected to, the TLS host name, and every
-byte written (the request, headers included). A fake resolver answers names from a table, and
-can change its answer between calls (DNS rebinding). Test values, not secrets.
+item: a raw HTTP response, an exception raised on connecting (a refused connection, a connect
+timeout), ``HANG`` (a server that accepts and never answers: on a ``SimClock`` the loop goes
+idle and time moves to the next timeout), or a ``Gate`` that waits for the test before going on.
+It records the address the guard connected to, the TLS host name, and every byte written (the
+request, headers included). A fake resolver answers names from a table, and can change its
+answer between calls (DNS rebinding). Test values, not secrets.
 """
 
 from __future__ import annotations
 
+import asyncio
 import socket
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -53,9 +57,35 @@ class RecordingStream(httpcore.AsyncMockStream):
         return self
 
 
+class HangingStream(RecordingStream):
+    """Accepts the request and never answers."""
+
+    def __init__(self, connection: Connection) -> None:
+        super().__init__([], connection)
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:  # noqa: ASYNC109
+        await asyncio.get_running_loop().create_future()  # never set: only cancelled
+        return b""
+
+
+HANG = object()
+
+
+@dataclass
+class Gate:
+    """Waits at the connection until the test opens it, then goes on as ``then``."""
+
+    then: bytes | Exception | object
+    reached: asyncio.Event = field(default_factory=asyncio.Event)
+    opened: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+Scripted = bytes | Exception | Gate | object
+
+
 @dataclass
 class ScriptedNetwork(httpcore.AsyncNetworkBackend):
-    responses: list[bytes] = field(default_factory=list)
+    responses: list[Scripted] = field(default_factory=list)
     connections: list[Connection] = field(default_factory=list)
     # Raised on connecting, when set: a refused connection, a connect timeout.
     failure: Exception | None = None
@@ -74,10 +104,17 @@ class ScriptedNetwork(httpcore.AsyncNetworkBackend):
             raise self.failure
         if not self.responses:
             raise httpcore.ConnectError("nothing scripted")
-        response = self.responses.pop(0)
-        return RecordingStream(
-            [response[i : i + 512] for i in range(0, len(response), 512)], connection
-        )
+        item = self.responses.pop(0)
+        if isinstance(item, Gate):
+            item.reached.set()
+            await item.opened.wait()
+            item = item.then
+        if isinstance(item, Exception):
+            raise item
+        if item is HANG:
+            return HangingStream(connection)
+        assert isinstance(item, bytes)
+        return RecordingStream([item[i : i + 512] for i in range(0, len(item), 512)], connection)
 
     async def sleep(self, seconds: float) -> None:
         return None

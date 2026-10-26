@@ -285,7 +285,8 @@
       "queue_full": 0,
       "timeout": 0,
       "downgrade": 0,
-      "budget_exhausted": 0
+      "budget_exhausted": 0,
+      "circuit_breaker": 0
     },
     "recent": []
   }

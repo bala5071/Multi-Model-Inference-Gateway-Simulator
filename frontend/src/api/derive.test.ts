@@ -172,6 +172,15 @@ describe("describeEvent", () => {
     expect(describeEvent(make("budget_exhausted", { used_tokens: 39, budget_tokens: 30 }))).toBe(
       "Refused: 39 of 30 budget tokens used.",
     );
+    const breaker = (state: string, open_ms: number | null) =>
+      make("circuit_breaker", { provider: "prv_00000000000000aa", state, open_ms });
+    expect(describeEvent(breaker("open", 30000))).toBe(
+      "prv_00000000000000aa is skipped for 30 s after repeated failures.",
+    );
+    expect(describeEvent(breaker("half_open", null))).toBe(
+      "prv_00000000000000aa is being tried again with one request.",
+    );
+    expect(describeEvent(breaker("closed", null))).toBe("prv_00000000000000aa is answering again.");
     expect(describeEvent(make("state_change", { degraded: false, p99_ms: null }))).toBe(
       "premium recovered: nothing finished in its SLO window.",
     );

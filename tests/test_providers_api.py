@@ -39,7 +39,7 @@ from gateway.providers import (
 )
 from gateway.redaction import Redactor
 from gateway.vault import Vault, VaultIntegrityError
-from mock_network import FakeResolver, ScriptedNetwork, http_response, sse_response
+from mock_network import FakeResolver, Scripted, ScriptedNetwork, http_response, sse_response
 from mock_providers import openai_text, openai_tools
 from test_management_api import FORBIDDEN, World, make_world
 
@@ -254,7 +254,17 @@ async def test_platform_admin_sees_existence_and_state_switches_and_never_a_key(
         root = await r.login("root")
         await r.step_up(root)
         status = await r.call(root, "GET", "/north/providers/status")
-        assert status.json() == {"providers": [{"provider_id": provider_id, "enabled": True}]}
+        # Existence, the switch, and the slow-provider warning (docs/33): nothing else.
+        assert status.json() == {
+            "providers": [
+                {
+                    "provider_id": provider_id,
+                    "enabled": True,
+                    "slow_since_ms": None,
+                    "consecutive_misses": 0,
+                }
+            ]
+        }
         for method, path, body in ENDPOINTS:
             if path.endswith(("/status", "/disable", "/enable")):
                 continue
@@ -572,8 +582,8 @@ async def test_deleting_a_provider_deletes_its_key() -> None:
 # --- test-connection ---------------------------------------------------------------------------
 
 
-def _probe_replies(*, tools: bool = True) -> list[bytes]:
-    replies = [sse_response(openai_text("OK").chunks)]
+def _probe_replies(*, tools: bool = True) -> list[Scripted]:
+    replies: list[Scripted] = [sse_response(openai_text("OK").chunks)]
     if tools:
         replies.append(sse_response(openai_tools(("call_1", "ping", ["{}"])).chunks))
         replies.append(sse_response(openai_text("pong").chunks))

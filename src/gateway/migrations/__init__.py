@@ -14,6 +14,8 @@ from gateway.migrations import (
     m0009_step_up,
     m0010_provider_configs,
     m0011_provider_keys,
+    m0012_modes,
+    m0013_usage_provider,
 )
 from gateway.migrations.runner import (
     Migration,
@@ -36,6 +38,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     m0009_step_up.MIGRATION,
     m0010_provider_configs.MIGRATION,
     m0011_provider_keys.MIGRATION,
+    m0012_modes.MIGRATION,
+    m0013_usage_provider.MIGRATION,
 )
 
 __all__ = [
