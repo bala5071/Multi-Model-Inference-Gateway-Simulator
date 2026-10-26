@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import dataclasses
+import inspect
 import json
-from collections.abc import AsyncIterator
+import ssl
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import certifi
 import httpcore
 import httpx
 import pytest
@@ -26,17 +30,23 @@ from gateway.app import create_app
 from gateway.audit import AuditAction
 from gateway.auth import AccountAccess
 from gateway.backends import Backend
-from gateway.chatrouter import ChatRouter
+from gateway.chatrouter import Candidate, ChatRouter
 from gateway.continuous import build_continuous_registry
-from gateway.egress import LocalDestinations, operator_client, organization_client
+from gateway.egress import (
+    GuardedTransport,
+    LocalDestinations,
+    operator_client,
+    organization_client,
+    provider_tls_context,
+)
 from gateway.events import EventBus
 from gateway.localonly import LocalOnlyPolicy
-from gateway.modes import Mode, SqliteModeStore, effective_mode, looser_than
+from gateway.modes import IN_FLIGHT, Mode, SqliteModeStore, effective_mode, looser_than
 from gateway.providers import ProviderConfig, ProviderService, ProviderStore
 from gateway.redaction import Redactor
 from gateway.usage import ChatSource, SqliteUsageStore
 from gateway.vault import Vault
-from mock_network import HANG, Breaks, FakeResolver, Gate, ScriptedNetwork, http_response
+from mock_network import HANG, Breaks, FakeResolver, Gate, Pauses, ScriptedNetwork, http_response
 from mock_network import sse_response as sse
 from mock_providers import openai_text, openai_tools
 from test_management_api import FORBIDDEN, World, make_world
@@ -46,6 +56,7 @@ MASTER = bytes(range(32))
 KEY = "sk-planted-routing-key-0123456789abcdefghij"
 OPERATOR = "http://127.0.0.1:8081/v1"
 LOCAL = LocalDestinations.parse("127.0.0.1:8081")
+TLS = provider_tls_context()
 HOSTS = {
     "a.provider.test": ["93.184.216.34"],
     "b.provider.test": ["93.184.216.35"],
@@ -184,10 +195,14 @@ def _headers(session: tuple[str, str]) -> dict[str, str]:
 
 @asynccontextmanager
 async def routing(
-    *, operator: str | None = OPERATOR, local: LocalDestinations = LOCAL
+    *,
+    operator: str | None = OPERATOR,
+    local: LocalDestinations = LOCAL,
+    operators: Mapping[str, str] | None = None,
 ) -> AsyncIterator[Routing]:
     """North's applications, the economy tier served by the operator's server at ``operator``
-    (the simulator when None), and the organization's providers on another scripted network."""
+    (the simulator when None), and the organization's providers on another scripted network.
+    ``operators`` (tier to URL, model ``local-<tier>``) replaces ``operator`` when given."""
     world = make_world()
     accounts = world.accounts
     clock = accounts.clock
@@ -200,10 +215,19 @@ async def routing(
         clock,
         accounts.epoch,
         Redactor(),
-        lambda: organization_client(resolver, inner=org_net),
+        # One TLS context for all of them, as the server does (building one is slow).
+        lambda: organization_client(resolver, inner=org_net, ssl_context=TLS),
     )
     adapters: dict[str, Backend] = {}
-    if operator is not None:
+    if operators is not None:
+        for tier, url in operators.items():
+            adapters[tier] = OpenAICompatibleAdapter(
+                name=tier,
+                base_url=url,
+                model=f"local-{tier}",
+                client=operator_client(resolver, local, inner=op_net),
+            )
+    elif operator is not None:
         adapters["economy"] = OpenAICompatibleAdapter(
             name="economy",
             base_url=operator,
@@ -286,8 +310,8 @@ async def test_local_only_is_the_default_and_answers_locally() -> None:
         response = await r.chat()
         source = r.last_source()
     assert response.status_code == 200, response.text
-    assert _source(response) == ("local", "local", None, None)
-    assert source == ChatSource("local", "local", None, None, False)
+    assert _source(response) == ("gateway", "local", None, None)
+    assert source == ChatSource("gateway", "local", None, None, False)
     assert r.hosted_contacted() == []
 
 
@@ -341,7 +365,7 @@ async def test_a_mode_made_stricter_mid_request_stops_the_fallback() -> None:
             assert r.hosted_contacted() == []
         else:
             assert response.status_code == 200, response.text
-            assert _source(response) == (B, "hosted", "local", "connect_error")
+            assert _source(response) == (B, "hosted", "gateway", "connect_error")
 
 
 async def test_a_mode_made_stricter_mid_request_is_refused_by_the_guard_too() -> None:
@@ -370,9 +394,63 @@ async def test_a_mode_made_stricter_mid_request_is_refused_by_the_guard_too() ->
     # The resolver ran (the router allowed it), the mode changed, the connect was refused,
     # and the request fell back to local: reason connect_error, nothing sent to A.
     assert response.status_code == 200, response.text
-    assert _source(response) == ("local", "local", A, "connect_error")
+    assert _source(response) == ("gateway", "local", A, "connect_error")
     assert r.org_net.connections == []
     assert not gate.reached.is_set()
+
+
+async def test_a_stricter_mode_does_not_cut_a_streaming_answer_and_the_guard_refuses_the_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A's answer is streaming ("He" already passed on) when alice makes north local_only
+    through the endpoint, whose answer says what that does to it: the answer is not cut, it
+    ends with "llo" and [DONE]. The next request is served locally without contacting A; and
+    with the router's own checks bypassed (A handed over as a candidate labelled local), the
+    guard refuses it before A's name is even resolved."""
+    async with routing() as r:
+        r.mode(PRIMARY)
+        config = r.provider(A, "a.provider.test", role="primary")
+        alice = await r.login("alice")
+        await r.step_up(alice)
+        chunks = openai_text("He", "llo").chunks
+        streaming = Pauses(
+            http_response(b"", Content_Type="text/event-stream") + chunks[0][1] + chunks[1][1],
+            b"".join(data for _, data in chunks[2:]),
+        )
+        r.org_net.responses = [streaming]
+        request = asyncio.ensure_future(r.chat(stream=True))
+        await streaming.paused.wait()
+        changed = await r.put_mode(alice, "/north/mode", "local_only")
+        streaming.resumed.set()
+        answer = await request
+        answered_source = r.last_source()
+        r.op_net.responses = [TEXT, TEXT]
+        next_ = await r.chat()
+        resolved = list(r.resolver.calls)
+        monkeypatch.setattr(
+            r.router,
+            "candidates",
+            lambda *a, **k: [Candidate(A, "local", config), Candidate("gateway", "local")],
+        )
+        bypassed = await r.chat()
+        resolved_after = list(r.resolver.calls)
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["in_flight"] == IN_FLIGHT
+    assert "not cut" in IN_FLIGHT
+    assert answer.status_code == 200
+    assert _source(answer) == (A, "hosted", None, None)
+    assert '"content": "He"' in answer.text
+    assert '"content": "llo"' in answer.text
+    assert answer.text.rstrip().endswith("data: [DONE]")
+    assert answered_source == ChatSource(A, "hosted", None, None, False)
+    # The router: local_only, so A is no candidate at all.
+    assert next_.status_code == 200, next_.text
+    assert _source(next_) == ("gateway", "local", None, None)
+    # The guard: A got through the router, and the connection was refused all the same.
+    assert bypassed.status_code == 200, bypassed.text
+    assert _source(bypassed) == ("gateway", "local", A, "connect_error")
+    assert len(r.org_net.connections) == 1  # the streaming answer's, and no other
+    assert resolved_after == resolved
 
 
 # --- the triggers ---------------------------------------------------------------------------
@@ -399,8 +477,8 @@ async def test_each_trigger_falls_back_from_local_to_hosted(
         response = await r.chat(tools=tools)
         source = r.last_source()
     assert response.status_code == 200, response.text
-    assert _source(response) == (B, "hosted", "local", reason)
-    assert source == ChatSource(B, "hosted", "local", reason, False)
+    assert _source(response) == (B, "hosted", "gateway", reason)
+    assert source == ChatSource(B, "hosted", "gateway", reason, False)
     assert len(r.op_net.connections) == len(scripted)  # invalid tool JSON: tried twice
 
 
@@ -413,7 +491,7 @@ async def test_an_open_breaker_skips_the_provider_without_contacting_it() -> Non
         r.op_net.responses = [TEXT]
         response = await r.chat()
     assert response.status_code == 200, response.text
-    assert _source(response) == ("local", "local", A, "circuit_open")
+    assert _source(response) == ("gateway", "local", A, "circuit_open")
     assert r.hosted_contacted() == []
 
 
@@ -431,6 +509,43 @@ async def test_invalid_tool_json_is_retried_once_on_the_same_provider() -> None:
     assert moved_on.status_code == 200, moved_on.text
     assert _source(moved_on) == (B, "hosted", A, "invalid_tool_json")
     assert [c.address for c in r.org_net.connections] == ["93.184.216.34"] * 4 + ["93.184.216.35"]
+
+
+async def test_the_invalid_tool_json_retry_is_recorded_once_at_the_organizations_prices() -> None:
+    """The retry that answers is the one recorded, with A's source and billed at A's prices;
+    after a second invalid answer the next provider's answer is billed at its own. One usage
+    row per answered request: a failed attempt is not in the ledger."""
+    async with routing(operator=None) as r:
+        r.mode(PRIMARY)
+        r.provider(A, "a.provider.test", role="primary", tools=True, prices=(2.0, 4.0))
+        r.provider(B, "b.provider.test", role="primary", tools=True, prices=(3.0, 5.0))
+        r.org_net.responses = [BAD_TOOL, GOOD_TOOL]
+        await r.chat(tools=True)
+        r.org_net.responses = [BAD_TOOL, BAD_TOOL, GOOD_TOOL]
+        await r.chat(tools=True)
+        events = [
+            e.event for e in SqliteUsageStore(r.world.accounts.connection).events("north-shop")
+        ]
+    retried, moved_on = events
+    assert retried.source == ChatSource(A, "hosted", None, None, False)
+    assert (retried.prompt_tokens, retried.completion_tokens) == (30, 8)
+    assert retried.base_cost_usd == pytest.approx((30 * 2.0 + 8 * 4.0) / 1_000_000)
+    assert moved_on.source == ChatSource(B, "hosted", A, "invalid_tool_json", False)
+    assert moved_on.base_cost_usd == pytest.approx((30 * 3.0 + 8 * 5.0) / 1_000_000)
+
+
+async def test_invalid_tool_json_is_never_retried_more_than_once() -> None:
+    """A alone, invalid every time: two attempts, then the request's answer; nothing billed."""
+    async with routing(operator=None) as r:
+        r.mode(PRIMARY)
+        r.provider(A, "a.provider.test", role="primary", tools=True, prices=(2.0, 4.0))
+        r.org_net.responses = [BAD_TOOL, BAD_TOOL, BAD_TOOL, GOOD_TOOL]
+        response = await r.chat(tools=True)
+        events = SqliteUsageStore(r.world.accounts.connection).events("north-shop")
+    assert (response.status_code, _code(response)) == (502, "upstream_malformed")
+    assert len(r.org_net.connections) == 2
+    assert len(r.org_net.responses) == 2  # the third invalid answer and the good one: unused
+    assert events == []
 
 
 @pytest.mark.parametrize(
@@ -490,8 +605,8 @@ async def test_never_another_tier() -> None:
         r.org_net.responses = [FIVE_XX, TEXT]
         r.op_net.responses = [TEXT]
         economy_failed = await r.chat()
-    assert _source(only_premium) == ("local", "local", None, None)
-    assert _source(economy_failed) == ("local", "local", A, "upstream_5xx")
+    assert _source(only_premium) == ("gateway", "local", None, None)
+    assert _source(economy_failed) == ("gateway", "local", A, "upstream_5xx")
     assert "93.184.216.36" not in r.hosted_contacted()
     assert "p.provider.test" not in r.hosted_contacted()
 
@@ -536,7 +651,7 @@ async def test_an_operator_tier_at_a_hosted_destination_is_hosted() -> None:
         served = await r.chat()
     assert (refused_.status_code, _code(refused_)) == (503, "no_local_provider")
     assert served.status_code == 200, served.text
-    assert _source(served) == ("local", "hosted", None, None)
+    assert _source(served) == ("gateway", "hosted", None, None)
     assert [c.address for c in r.op_net.connections] == ["93.184.216.40"]
 
 
@@ -548,7 +663,7 @@ async def test_streaming_headers_name_the_provider_and_the_fallback() -> None:
         r.org_net.responses = [TEXT]
         response = await r.chat(stream=True)
     assert response.status_code == 200
-    assert _source(response) == (B, "hosted", "local", "upstream_5xx")
+    assert _source(response) == (B, "hosted", "gateway", "upstream_5xx")
     assert "[DONE]" in response.text
 
 
@@ -570,7 +685,7 @@ async def test_the_breaker_opens_skips_probes_and_closes_with_events() -> None:
         probe = await r.chat()  # half-open: one request through, and it succeeds
         closing = await r.chat()  # the second success closes it
         states = [e.data["state"] for e in r.bus.recent(10) if e.type == "circuit_breaker"]
-    assert _source(skipped) == ("local", "local", A, "circuit_open")
+    assert _source(skipped) == ("gateway", "local", A, "circuit_open")
     assert _source(probe)[0] == A
     assert _source(closing)[0] == A
     assert states == ["open", "half_open", "closed"]
@@ -617,7 +732,13 @@ async def test_each_mode_change_needs_its_own_password_and_is_audited() -> None:
         "organization_id": "north",
         "mode": "local_with_hosted_fallback",
         "previous_mode": "local_only",
+        "in_flight": IN_FLIGHT,
     }
+    assert IN_FLIGHT == (
+        "A mode change applies to the next request, and to the next attempt of a request in"
+        " flight. An answer already streaming from a hosted provider is not cut when the mode"
+        " becomes stricter: its prompt has already been sent."
+    )
     assert (again.status_code, _code(again)) == (403, "step_up_required")
     [entry] = entries
     assert entry.target_id == "north"
@@ -648,6 +769,7 @@ async def test_an_application_may_not_be_looser_than_its_organization() -> None:
         "mode": "local_with_hosted_fallback",
         "previous_mode": "local_only",
         "effective_mode": "local_with_hosted_fallback",
+        "in_flight": IN_FLIGHT,
     }
 
 
@@ -661,7 +783,7 @@ async def test_an_organization_made_stricter_takes_its_applications_with_it() ->
         r.modes.set_organization_mode("north", LOCAL_ONLY, 1.0)
         after = await r.chat()
         stored = r.modes.application_mode("north-shop")
-    assert _source(before) == (B, "hosted", "local", "upstream_5xx")
+    assert _source(before) == (B, "hosted", "gateway", "upstream_5xx")
     assert (after.status_code, _code(after)) == (502, "upstream_unavailable")
     assert stored is FALLBACK  # its own value is unchanged; the stricter one applies
     assert len(r.org_net.connections) == 1
@@ -699,14 +821,14 @@ async def test_the_candidates_in_each_mode() -> None:
             found = r.router.candidates("north", "north-shop", "economy", wants_tools=tools)
             return [(c.provider, c.provider_class) for c in found]
 
-        assert names(LOCAL_ONLY) == [("local", "local")]
-        assert names(FALLBACK) == [("local", "local"), (B, "hosted")]
-        assert names(PRIMARY) == [(A, "hosted"), ("local", "local")]
+        assert names(LOCAL_ONLY) == [("gateway", "local")]
+        assert names(FALLBACK) == [("gateway", "local"), (B, "hosted")]
+        assert names(PRIMARY) == [(A, "hosted"), ("gateway", "local")]
         # A says it cannot take tools; the operator's server has not said.
-        assert names(PRIMARY, tools=True) == [("local", "local")]
+        assert names(PRIMARY, tools=True) == [("gateway", "local")]
         # A disabled, or without a key, is no candidate at all.
         r.service.store.delete_key(A)
-        assert names(PRIMARY) == [("local", "local")]
+        assert names(PRIMARY) == [("gateway", "local")]
 
 
 async def test_a_provider_whose_key_cannot_be_read_is_skipped_never_contacted() -> None:
@@ -718,7 +840,7 @@ async def test_a_provider_whose_key_cannot_be_read_is_skipped_never_contacted() 
         r.op_net.responses = [TEXT]
         response = await r.chat()
     assert response.status_code == 200, response.text
-    assert _source(response) == ("local", "local", A, "key_unreadable")
+    assert _source(response) == ("gateway", "local", A, "key_unreadable")
     assert r.hosted_contacted() == []
 
 
@@ -735,3 +857,43 @@ def test_the_server_shares_one_tls_context_across_its_organization_clients() -> 
     finally:
         app.state.database_lock.release()
     assert contexts[0] is contexts[1]
+
+
+# Every field a provider has. A new one fails here, to be checked for TLS settings: none may be
+# per organization.
+PROVIDER_FIELDS = (
+    "id", "organization_id", "type", "base_url", "model", "serves_tier", "role", "enabled",
+    "platform_enabled", "price_input_per_mtok", "price_output_per_mtok", "capabilities",
+    "first_token_budget_ms", "created_at_ms",
+)  # fmt: skip
+
+
+def test_the_shared_tls_context_is_pinned(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Certificates verified, host names checked, httpx's own trust store (certifi) whatever
+    the environment says (an empty SSL_CERT_DIR, and an SSL_CERT_FILE, would replace it), and
+    nothing per organization: the client factory takes no argument, and no provider field is
+    a TLS setting. The operator's adapters get the same by default."""
+    from gateway.app import create_default_app
+
+    certificates = tmp_path / "ca.pem"
+    certificates.write_text("not a certificate\n", encoding="ascii")
+    monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path))
+    monkeypatch.setenv("SSL_CERT_FILE", str(certificates))
+    app = create_default_app()
+    try:
+        factory = app.state.providers.client_factory
+        shared = factory()._transport._pool._ssl_context
+    finally:
+        app.state.database_lock.release()
+    operator_transport = operator_client(FakeResolver({}), LOCAL)._transport
+    assert isinstance(operator_transport, GuardedTransport)
+    operator = operator_transport._pool._ssl_context
+    trusted = ssl.create_default_context(cafile=certifi.where()).get_ca_certs()
+    assert len(trusted) > 100
+    for context in (shared, operator):
+        assert isinstance(context, ssl.SSLContext)
+        assert context.verify_mode is ssl.CERT_REQUIRED
+        assert context.check_hostname is True
+        assert context.get_ca_certs() == trusted
+    assert inspect.signature(factory).parameters == {}
+    assert tuple(f.name for f in dataclasses.fields(ProviderConfig)) == PROVIDER_FIELDS

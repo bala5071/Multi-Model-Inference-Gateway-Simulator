@@ -92,7 +92,9 @@ Authenticated with an application API key, with the same plan, rate limit, budge
 `max_completion_tokens`, `seed`, `user`, ...), as is an image or audio part. Every refusal uses
 the OpenAI error shape (`{"error": {"message", "type", "param", "code"}}`).
 
-Headers: `X-Model-Used` (the tier), `X-Provider` (`local` in this step), `X-Usage-Estimated`
+Headers: `X-Model-Used` (the tier), `X-Provider` (`gateway`, the gateway's own tier; it said
+`local` until PR 20, and whether that tier is local or hosted is `X-Provider-Class`, added in
+pull request 3: note 33), `X-Usage-Estimated`
 when the provider gave no usage (the body's usage then says `usage_estimated: true`; the
 estimate is one token per four characters), `X-Thinking-Blocks-Omitted`. **No `X-Cost-USD`**:
 chat is priced only with prices an organization enters (pull request 2), never with the

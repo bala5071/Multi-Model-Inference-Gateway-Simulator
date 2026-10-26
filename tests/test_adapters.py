@@ -580,7 +580,7 @@ async def test_timing_and_usage_of_a_served_answer() -> None:
     assert timing.first_token_ms == 20.0  # the role chunk at 10 ms carries no text
     assert timing.finish_ms > timing.first_token_ms
     assert (timing.tokens_in, timing.tokens_out) == (9, 2)
-    assert outcome.provider == "local"
+    assert outcome.provider == "gateway"
 
 
 # --- the rest -------------------------------------------------------------------------------------

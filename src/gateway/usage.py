@@ -65,6 +65,8 @@ class ModelUsage:
 class ChatSource:
     """Which provider answered a chat request, its class, and the fallback that led there."""
 
+    # "gateway" for the gateway's own tier ("local" in rows stored before PR 20; docs/33), or
+    # an organization provider's id.
     provider: str
     provider_class: str  # "local" or "hosted"
     fallback_from: str | None = None

@@ -65,7 +65,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   public, the socket connects to the checked address, no redirects, no proxy; and the locality
   rule (`LocalDestinations`, `GATEWAY_PROVIDER_LOCAL_ALLOW`): a hosted destination only under a
   request scope (`egress_scope`) that allows it when asked, at every request and connection;
-  fail closed without one; `operator_client` for the operator's own adapters (exists)
+  fail closed without one; `operator_client` for the operator's own adapters;
+  `provider_tls_context`, the one pinned TLS context (certifi, environment ignored) (exists)
 - `providers.py` — `ProviderConfig`, `ProviderStore` over migrations 10 and 11, `ProviderService`
   (create, update, the organization's and the platform's switches, keys, test-connection with
   probing, `key_unreadable`) and `resolve_provider` (exists)
@@ -76,7 +77,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   (consume-on-use, audited) (exists)
 - `chatrouter.py` — `ChatRouter`: a chat request's candidates (the tier, the organization's
   providers for that tier) in the mode's order, the five fallback triggers, never after output,
-  never another tier; `X-Provider-Class` and the usage record's source (exists)
+  never another tier; `X-Provider` (`gateway` for the gateway's own tier, `local` before PR 20),
+  `X-Provider-Class` and the usage record's source (exists)
 - `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
   warning, on the injected clock, `circuit_breaker` events (exists)
 - `passthrough.py` — `PassthroughWorker`: forwards to a backend that does its own

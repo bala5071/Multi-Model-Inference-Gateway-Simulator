@@ -43,6 +43,12 @@ class Mode(StrEnum):
 
 
 DEFAULT_MODE = Mode.LOCAL_ONLY
+# Said in every mode change's answer (docs/33), stricter or not.
+IN_FLIGHT = (
+    "A mode change applies to the next request, and to the next attempt of a request in flight."
+    " An answer already streaming from a hosted provider is not cut when the mode becomes"
+    " stricter: its prompt has already been sent."
+)
 # Strictest first.
 _STRICTNESS = (
     Mode.LOCAL_ONLY,

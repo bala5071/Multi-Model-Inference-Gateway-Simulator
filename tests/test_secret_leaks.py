@@ -625,7 +625,8 @@ async def test_a_provider_key_through_routed_chat_with_failures_and_fallbacks(
     assert find_leaks(corpus(), secrets) == []
     assert '"provider_auth_failed"' in responses["401 echoing the key"]
     assert "'x-fallback-reason', 'upstream_5xx'" in responses["5xx echoing the key, then b"]
-    assert "'x-provider', 'local'" in responses["both refused, then local"]
+    assert "'x-provider', 'gateway'" in responses["both refused, then local"]
+    assert "'x-provider-class', 'local'" in responses["both refused, then local"]
     # The control: logged by mistake, it is found.
     logging.getLogger("gateway").warning("oops: %s", key_b)
     assert find_leaks(corpus(), secrets) == [("logs", "b's key")]

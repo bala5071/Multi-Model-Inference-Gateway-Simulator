@@ -1,9 +1,9 @@
 """Routing one chat request among its candidates, with fallback. See docs/33-fallback-modes.md.
 
-The candidates for a request are the gateway's own tier it was routed to (``local``, or hosted
-when the operator configured that tier at a destination not on its local list) and the
-organization's providers **for that same tier** that are enabled and have a key, in the order
-the effective mode gives:
+The candidates for a request are the gateway's own tier it was routed to (``gateway``: of class
+local, or hosted when the operator configured that tier at a destination not on its local
+list) and the organization's providers **for that same tier** that are enabled and have a key,
+in the order the effective mode gives:
 
 - ``local_only``: the tier, if it is local;
 - ``local_with_hosted_fallback``: the tier, then the ``fallback`` providers;
@@ -41,7 +41,7 @@ from gateway.chat import (
     ProviderError,
     ProviderErrorCode,
 )
-from gateway.chatservice import ChatOutcome, ChatService
+from gateway.chatservice import GATEWAY_PROVIDER, ChatOutcome, ChatService
 from gateway.egress import LocalDestinations, egress_scope
 from gateway.modes import Mode, ModeStore, effective_mode, may_reach_hosted
 from gateway.providers import ProviderConfig, ProviderService
@@ -49,7 +49,6 @@ from gateway.usage import ChatSource
 
 LOCAL = "local"
 HOSTED = "hosted"
-LOCAL_PROVIDER = "local"
 DEFAULT_HOSTED_FIRST_TOKEN_MS = 10_000.0
 # Connection failures: the request never reached an answering server.
 _CONNECT_DETAILS = frozenset({"connect", "connection_lost", "dns_failure"})
@@ -206,7 +205,7 @@ class ChatRouter:
         """The candidates for a request routed to ``tier``, in the order its mode gives.
         Raises ``NoCandidateError`` when none may serve it."""
         mode = self.mode(organization_id, application_id)
-        local = Candidate(LOCAL_PROVIDER, self.tier_class(tier))
+        local = Candidate(GATEWAY_PROVIDER, self.tier_class(tier))
         if mode is Mode.LOCAL_ONLY:
             order = [local]
         elif mode is Mode.LOCAL_WITH_HOSTED_FALLBACK:

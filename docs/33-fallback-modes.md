@@ -38,7 +38,7 @@ that allows hosted, an organization client's `localhost` is still refused as loo
 
 ## Candidates and fallback
 
-The candidates of a request are the tier it was routed to (`X-Provider: local`) and the
+The candidates of a request are the tier it was routed to (`X-Provider: gateway`) and the
 organization's providers **serving that tier** that are enabled (both switches) and have a key,
 in the mode's order. A provider known not to take tools is left out of a request with tools; if
 none is left, 422 `tools_not_supported`. With no candidate the mode allows, 503
@@ -55,6 +55,14 @@ The router moves to the next candidate only on these:
 | Tool-call arguments that are not a JSON object: one retry on the same candidate, then the next | `invalid_tool_json` |
 | The provider's key cannot be read (skipped, never contacted) | `key_unreadable` |
 
+**The invalid-tool-JSON retry** is never more than one: a second invalid answer moves to the next
+candidate, or is the request's answer (502 `upstream_malformed`) when there is none. The attempt
+that answers is the one recorded, with its provider as the source, and billed at that provider's
+prices. A failed attempt is not in the ledger, but the provider may still charge the
+organization for it. Both are tested
+(`test_the_invalid_tool_json_retry_is_recorded_once_at_the_organizations_prices`,
+`test_invalid_tool_json_is_never_retried_more_than_once`).
+
 Not on 401/403 (answered `provider_auth_failed`), 429 (passed through), any other 4xx, a full
 local queue (429 `queue_full`) or the request's own overall timeout.
 
@@ -68,15 +76,34 @@ local queue (429 `queue_full`) or the request's own overall timeout.
 - **Never a model outside the plan.** The plan decides the tier before any candidate is
   considered; a provider serving a tier outside the plan changes nothing.
 
+The last two are also checked as invariants from outside the router
+(`tests/test_routing_invariants.py`): 400 seeded random cases of plans, requested tiers, modes,
+provider lists (north's and another organization's, enabled or not, with a key or not) and
+provider failures. Every connection that reaches the scripted networks is checked against the
+case alone: an operator server only for the requested tier, inside the plan, asked for its own
+model; an organization provider only when it is the organization's, serves the requested tier
+inside the plan, is enabled, has a key and the mode allows hosted, asked for its own model.
+
 ## Where the answer came from
 
-Every chat answer says `X-Provider` (`local` for the gateway's tier, or the provider's id) and
-`X-Provider-Class` (`local` or `hosted`): a class, never a URL. After a fallback,
-`X-Fallback-From` (the first candidate) and `X-Fallback-Reason` (why it was left). A streamed
+Every chat answer says `X-Provider` and `X-Provider-Class`. `X-Provider` names who answered:
+`gateway` for the gateway's own tier, or the organization provider's id. `X-Provider-Class` says
+where that is, `local` or `hosted`: a class, never a URL. **Only the class says local or hosted**:
+the gateway's tier is `X-Provider: gateway` with `X-Provider-Class: hosted` when the operator
+put it at a destination not on its local list. After a fallback, `X-Fallback-From` (the first
+candidate, `gateway` or a provider id) and `X-Fallback-Reason` (why it was left). A streamed
 answer has them too: they are known when the first output is sent. The usage record keeps the
 same (migration 13: `provider`, `provider_class`, `fallback_from`, `fallback_reason`,
 `usage_estimated`; NULL for `/v1/generate`). A hosted answer is charged at the organization's
 own prices for that provider (0 when it has none), never at placeholder prices.
+
+**`local` was the gateway tier's name until PR 20.** PR 19 (migration 13) wrote `local` in
+`provider` and `fallback_from` for the gateway's own tier, as `X-Provider` said. From PR 20 (written
+2026-10-26), a gateway writes `gateway` instead. There is no migration and stored rows are not
+rewritten: rows written by a gateway running PR 19's code keep `local`. Read `local` and `gateway`
+in those two columns as the same thing, the gateway's own tier, and take local or hosted from
+`provider_class`, which is unchanged. An organization provider's id is always `prv_` and 16 hex
+digits, so neither word can be one.
 
 ## Local-only, enforced twice, asked live
 
@@ -90,11 +117,23 @@ own prices for that provider (0 when it has none), never at placeholder prices.
 
 So a mode made stricter while a request is in flight stops its next attempt (tested both at the
 router and at the guard, where the mode changes while the name is being resolved; the second
-test found the guard asked only before resolving, fixed). An answer already streaming from a
-hosted provider is not cut: the prompt has already been sent. Every attempt at an organization
-provider uses a new client, so no pooled connection carries a request past these checks; the
-server gives them all one TLS context, because building one loads the certificate bundle:
-145 to 148 ms on this machine, and each client used to build two (measured below).
+test found the guard asked only before resolving, fixed). **An answer already streaming from a
+hosted provider is not cut when the mode becomes stricter: its prompt has already been sent.**
+Every mode change's answer says so (`in_flight`, below). Tested over HTTP: a hosted answer is
+streaming when an org_admin makes the organization `local_only` through the endpoint; that
+answer ends normally, with `[DONE]`. The next request is served locally without contacting the
+provider. With the router's own checks bypassed (the provider handed over as a candidate
+labelled local), the guard refuses it before the provider's name is even resolved.
+
+Every attempt at an organization provider uses a new client, so no pooled connection carries a
+request past these checks. The server gives them all one TLS context, because building one loads
+the certificate bundle: 145 to 148 ms on this machine, and each client used to build two
+(measured below). **That context is pinned** (`gateway.egress.provider_tls_context`):
+certificates verified, host names checked, httpx's own trust store (`certifi`), with the
+environment ignored (`SSL_CERT_FILE` and `SSL_CERT_DIR` cannot replace it, as no proxy setting
+can), and nothing per organization. The client factory takes no argument and no provider field
+is a TLS setting. A test fails if any of these changes. The operator's adapters get the same
+context by default.
 
 **The test that local_only reaches nothing hosted**: hosted providers configured for the tier, the
 local tier failing every way that would be a trigger in another mode (refused, 5xx, no first
@@ -123,7 +162,11 @@ Body `{"mode": "..."}`. Through `requires` with **consume-on-use** step-up (note
 needs its own password; a change refused before it is made (409) gives the window back. Each is
 audited (`mode_changed`, with `old_mode`, `new_mode` and `step_up_consumed`) in the same
 transaction as the change. A missing organization or application and a forbidden one get the same
-answer, byte for byte. The application answer includes its `effective_mode`.
+answer, byte for byte. The application answer includes its `effective_mode`. Both answers always
+include `in_flight`, the same fixed sentence whether the change is stricter or not: "A mode
+change applies to the next request, and to the next attempt of a request in flight. An answer
+already streaming from a hosted provider is not cut when the mode becomes stricter: its prompt
+has already been sent."
 
 ## Measured
 
@@ -163,6 +206,10 @@ For step 9's `docs/threat-model.md`:
 - **Timing**: a fallback is visible to the client in its headers and in latency; the reason is a
   fixed word, never a provider's text.
 - **Breakers are per process** and start closed after a restart.
+- **A mode made stricter does not stop a hosted answer already streaming**: that prompt is already
+  with the provider. The mode change's answer says so, so an administrator is not misled.
+- **The trust store for providers is fixed in code** (`certifi`, through httpx): an environment
+  variable cannot add a certificate authority that organization traffic would then trust.
 
 ## Not built
 

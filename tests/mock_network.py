@@ -2,7 +2,8 @@
 
 ``ScriptedNetwork`` is an ``httpcore`` network backend. Each connection gets the next scripted
 item: a raw HTTP response; an exception raised on connecting (a refused connection, a connect
-timeout); ``Breaks`` (part of an answer, then the connection breaks); ``HANG`` (a server that
+timeout); ``Breaks`` (part of an answer, then the connection breaks); ``Pauses`` (part of an
+answer, a wait for the test, then the rest); ``HANG`` (a server that
 accepts and never answers: on a ``SimClock`` the loop goes idle and time moves to the next
 timeout); or a ``Gate`` that waits for the test before going on. It records the address the
 guard connected to, the TLS host name, and every byte written (the request, headers included).
@@ -90,6 +91,32 @@ class Breaks:
 
 
 @dataclass
+class Pauses:
+    """A response that sends ``before`` (output on its way to the client), waits until the test
+    resumes it, then sends ``after``. ``paused`` is set once ``before`` has been read whole."""
+
+    before: bytes
+    after: bytes
+    paused: asyncio.Event = field(default_factory=asyncio.Event)
+    resumed: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+class PausingStream(RecordingStream):
+    def __init__(self, item: Pauses, connection: Connection) -> None:
+        super().__init__([item.before, item.after], connection)
+        self._item = item
+        self._reads = 0
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:  # noqa: ASYNC109
+        if self._reads == 1:
+            # Asked for more: everything in ``before`` has been parsed and passed on.
+            self._item.paused.set()
+            await self._item.resumed.wait()
+        self._reads += 1
+        return await super().read(max_bytes, timeout)
+
+
+@dataclass
 class Gate:
     """Waits at the connection until the test opens it, then goes on as ``then``."""
 
@@ -98,7 +125,7 @@ class Gate:
     opened: asyncio.Event = field(default_factory=asyncio.Event)
 
 
-Scripted = bytes | Exception | Gate | Breaks | object
+Scripted = bytes | Exception | Gate | Breaks | Pauses | object
 
 
 @dataclass
@@ -133,6 +160,8 @@ class ScriptedNetwork(httpcore.AsyncNetworkBackend):
             return HangingStream(connection)
         if isinstance(item, Breaks):
             return BreakingStream([item.data], connection)
+        if isinstance(item, Pauses):
+            return PausingStream(item, connection)
         assert isinstance(item, bytes)
         return RecordingStream([item[i : i + 512] for i in range(0, len(item), 512)], connection)
 
