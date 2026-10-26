@@ -36,6 +36,8 @@ ID_PATTERN = re.compile(r"(usr|ses)_[0-9a-f]{16}")
 ORGANIZATION_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
 # An API key's id: the visible part of the key, never the key (gateway.apikeys).
 KEY_ID_PATTERN = re.compile(r"[0-9a-f]{16}")
+# A provider's id (docs/32).
+PROVIDER_ID_PATTERN = re.compile(r"prv_[0-9a-f]{16}")
 SCOPE_TYPES = frozenset({"platform", "organization", "application"})
 
 
@@ -64,6 +66,15 @@ class AuditAction(StrEnum):
     KEY_REVOKED = "key_revoked"
     # A management request refused for a conflict or a cap (docs/30): its reason and action.
     MANAGEMENT_REFUSED = "management_refused"
+    # An organization's model providers and their keys (docs/32): never the key or last4.
+    PROVIDER_CREATED = "provider_created"
+    PROVIDER_UPDATED = "provider_updated"
+    PROVIDER_DISABLED = "provider_disabled"
+    PROVIDER_ENABLED = "provider_enabled"
+    PROVIDER_DELETED = "provider_deleted"
+    PROVIDER_KEY_SET = "provider_key_set"
+    PROVIDER_KEY_DELETED = "provider_key_deleted"
+    PROVIDER_TESTED = "provider_tested"
 
 
 class Outcome(StrEnum):
@@ -80,6 +91,7 @@ class TargetType(StrEnum):
     ORGANIZATION = "organization"
     APPLICATION = "application"
     API_KEY = "api_key"
+    PROVIDER = "provider"
 
 
 class Reason(StrEnum):
@@ -110,6 +122,10 @@ class Reason(StrEnum):
     KEY_LIMIT = "key_limit"
     KEY_NOT_ACTIVE = "key_not_active"
     USER_CREATION_LIMITED = "user_creation_limited"
+    PROVIDER_EXISTS = "provider_exists"
+    NO_KEY = "no_key"
+    KEY_UNREADABLE = "key_unreadable"
+    TEST_RATE_LIMITED = "test_rate_limited"
 
 
 # The only keys ``details`` may have, and the type of each value.
@@ -135,6 +151,59 @@ DETAIL_FIELDS: Mapping[str, type] = {
     "key_id": str,
     "expires_at_ms": float,
     "grace_ms": float,
+    "provider_type": str,
+    "outcome_code": str,
+    "outcome_detail": str,
+    "switch": str,
+    "step_up_consumed": bool,
+    "key_deleted": bool,
+}
+# gateway.egress.refusal's reasons for an address.
+_ADDRESS_REFUSALS = (
+    "metadata",
+    "loopback",
+    "link_local",
+    "private",
+    "multicast",
+    "reserved",
+    "not_global",
+)
+# The string details that take only these values.
+FIXED_VALUES: Mapping[str, frozenset[str]] = {
+    "provider_type": frozenset({"openai_compatible", "anthropic"}),
+    "switch": frozenset({"organization", "platform"}),
+    # "ok", or the code a provider failure or refusal maps to (gateway.chat, docs/32).
+    "outcome_code": frozenset(
+        {
+            "ok",
+            "no_key",
+            "key_unreadable",
+            "provider_auth_failed",
+            "upstream_rate_limited",
+            "upstream_unavailable",
+            "upstream_timeout",
+            "upstream_malformed",
+            "upstream_rejected",
+            "tools_not_supported",
+            "egress_refused",
+        }
+    ),
+    # Why a test-connection did not reach its host (gateway.egress, gateway.adapters.http):
+    # fixed words, never anything the host sent.
+    "outcome_detail": frozenset(
+        {
+            "connect",
+            "connection_lost",
+            "dns_failure",
+            "probe",
+            "unresolved",
+            "bad_address",
+            "unix_socket",
+            "not_https",
+            *_ADDRESS_REFUSALS,
+            *(f"embedded_{reason}" for reason in _ADDRESS_REFUSALS),
+        }
+    ),
 }
 
 
@@ -172,6 +241,10 @@ def _checked_details(details: Mapping[str, object]) -> dict[str, object]:
             if not isinstance(value, str) or not re.fullmatch(r"usr_[0-9a-f]{16}", value):
                 raise ValueError("audit detail 'acting_as' must be a user id")
             checked[key] = value
+        elif key in FIXED_VALUES:
+            if value not in FIXED_VALUES[key]:
+                raise ValueError(f"audit detail {key!r} must be one of its fixed values")
+            checked[key] = value
         elif key == "key_id":
             if not isinstance(value, str) or not KEY_ID_PATTERN.fullmatch(value):
                 raise ValueError("audit detail 'key_id' must be a key id")
@@ -198,6 +271,7 @@ _TARGET_PATTERNS: Mapping[TargetType, re.Pattern[str]] = {
     TargetType.ORGANIZATION: ORGANIZATION_ID_PATTERN,
     TargetType.APPLICATION: ORGANIZATION_ID_PATTERN,
     TargetType.API_KEY: KEY_ID_PATTERN,
+    TargetType.PROVIDER: PROVIDER_ID_PATTERN,
 }
 
 

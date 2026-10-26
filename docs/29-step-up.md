@@ -124,7 +124,13 @@ every refusal. Each names the session by its handle and the user by id; no passw
 or token. `step_up_required` can be repeated by an authenticated session; every row names that
 session's user, and the audit retention keeps the table bounded.
 
-## Consume-on-use (described, not built)
+## Consume-on-use (described here, built in A5: docs/32)
+
+**Built in A5's second pull request, with one change** (docs/32): instead of clearing the window
+after a successful handler, `requires` claims it with one transaction before the handler, so two
+changes sent together cannot share a window, and gives it back only if the handler fails before
+changing anything. The text below is the original description.
+
 
 For the most dangerous actions (adding or replacing a provider key, in A5), a window that lasts
 5 minutes is more than one change needs. **Consume-on-use** would add a `consume` column to the

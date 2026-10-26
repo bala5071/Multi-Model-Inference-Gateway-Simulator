@@ -97,6 +97,7 @@ from gateway.chatservice import ChatOutcome, ChatService
 from gateway.clock import Clock, ClockEpoch, EpochSource, PacedSimClock, SystemEpoch, WallClock
 from gateway.continuous import RequestTooLargeError, build_continuous_registry
 from gateway.database import ProcessLock, database_path, open_database
+from gateway.egress import organization_client, system_resolver
 from gateway.events import EventBus
 from gateway.ledger import BudgetExceededError, CostLedger, ModelUsage, run_retention
 from gateway.loadcontrol import PRESETS, LoadController, UnknownPresetError
@@ -149,7 +150,16 @@ from gateway.passwords import (
 )
 from gateway.permissions import PERMISSIONS, Actor, Resource
 from gateway.profiles import PROFILES, Tier, load_calibrated_profiles
+from gateway.providers import (
+    ProviderConfig,
+    ProviderService,
+    ProviderStore,
+    ProviderUnreachedError,
+    resolve_provider,
+)
 from gateway.ratelimit import RateLimitedError, RequestRateLimiter
+from gateway.redaction import Redactor
+from gateway.redaction import install as install_redaction
 from gateway.registry import ModelRegistry, UnknownModelError
 from gateway.roles import RoleStore
 from gateway.routing import ModelNotAllowedError, Quality, Router, load_plans, pick_by_quality
@@ -157,6 +167,7 @@ from gateway.schema import GenerateRequest, RequestResult
 from gateway.timeseries import TimeSeriesStore
 from gateway.usage import SqliteUsageStore, UsageStore
 from gateway.users import AccountStore, User
+from gateway.vault import Vault, load_master_keys
 from gateway.workload import PlannedRequest
 
 # How often /v1/monitor/stream pushes a snapshot, on the injected clock.
@@ -631,12 +642,28 @@ class ForbiddenError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class Authorized:
-    """What ``requires`` let through: who, with which session, for which action, on what."""
+    """What ``requires`` let through: who, with which session, for which action, on what;
+    the role and relation that allowed it (``platform_admin@platform``, ...); and, for a
+    consume-on-use action, the token its handler marks once it has changed something."""
 
     actor: Actor
     context: SessionContext
     action: str
     resource: Resource
+    via: str = ""
+    consumed: ConsumeToken | None = None
+
+
+class ConsumeToken:
+    """Given to the handler of a consume-on-use action (docs/32). The handler calls
+    ``changed()`` in the transaction that makes its change; if the handler then fails, the
+    step-up window it used stays used. If it fails before, the window is given back."""
+
+    def __init__(self) -> None:
+        self.was_changed = False
+
+    def changed(self) -> None:
+        self.was_changed = True
 
 
 def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
@@ -657,9 +684,11 @@ def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
         if action not in PERMISSIONS:
             raise ValueError(f"unknown action {action!r}")
 
+        consume = PERMISSIONS[action].consume
+
         async def check(
             request: Request, csrf: str | None = Header(default=None, alias=CSRF_HEADER)
-        ) -> Authorized:
+        ) -> AsyncIterator[Authorized]:
             context = service.authenticate(request.cookies.get(SESSION_COOKIE))
             if request.method.upper() in STATE_CHANGING:
                 service.check_csrf(context, csrf)
@@ -667,13 +696,29 @@ def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
                 raise PasswordChangeRequiredError()
             actor = service.actor_for(context.user)
             resource = resolver(request)
-            if resource is None or not authorize(actor, action, resource).allowed:
+            decision = authorize(actor, action, resource) if resource is not None else None
+            if resource is None or decision is None or not decision.allowed:
                 raise ForbiddenError()
-            service.check_step_up(context, action)
-            authorized = Authorized(actor, context, action, resource)
-            # For the refusal handler, which audits a conflict with who, what and where.
+            if not consume:
+                service.check_step_up(context, action)
+                authorized = Authorized(actor, context, action, resource, decision.reason)
+                # For the refusal handler, which audits a conflict with who, what and where.
+                request.state.authorized = authorized
+                yield authorized
+                return
+            # Consume-on-use: the window is claimed (used up) before the handler, in one
+            # transaction, so two requests cannot share it; it is given back only if the
+            # handler fails before it has changed anything (docs/32).
+            claimed = service.claim_step_up(context, action)
+            token = ConsumeToken()
+            authorized = Authorized(actor, context, action, resource, decision.reason, token)
             request.state.authorized = authorized
-            return authorized
+            try:
+                yield authorized
+            except BaseException:
+                if not token.was_changed:
+                    service.restore_step_up(context, claimed)
+                raise
 
         setattr(check, DECLARATION, RouteDeclaration("requires", action, "authorize"))
         return Depends(check)
@@ -775,7 +820,8 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
                 authorized.resource.organization_id,
                 exc.reason,
             )
-        status = 429 if exc.reason is Reason.USER_CREATION_LIMITED else 409
+        limited = (Reason.USER_CREATION_LIMITED, Reason.TEST_RATE_LIMITED)
+        status = 429 if exc.reason in limited else 409
         return _error(status, exc.reason.value, str(exc), headers=_NO_STORE)
 
     @app.exception_handler(StepUpFailedError)
@@ -1164,6 +1210,226 @@ def _admin_routes(
         return JSONResponse({"key_id": key_id, "state": "revoked"})
 
 
+class CreateProviderBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # openai_compatible or anthropic; Ollama is the operator's and is refused here (docs/32).
+    type: str = Field(min_length=1, max_length=32)
+    base_url: str = Field(min_length=1, max_length=2048)
+    model: str = Field(min_length=1, max_length=200)
+    serves_tier: Literal["economy", "standard", "premium"]
+    role: Literal["primary", "fallback"] = "fallback"
+    price_input_per_mtok: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    price_output_per_mtok: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    first_token_budget_ms: float | None = Field(default=None, gt=0, le=600_000, allow_inf_nan=False)
+
+
+class UpdateProviderBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: str | None = Field(default=None, min_length=1, max_length=32)
+    base_url: str | None = Field(default=None, min_length=1, max_length=2048)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    serves_tier: Literal["economy", "standard", "premium"] | None = None
+    role: Literal["primary", "fallback"] | None = None
+    price_input_per_mtok: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    price_output_per_mtok: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    first_token_budget_ms: float | None = Field(default=None, gt=0, le=600_000, allow_inf_nan=False)
+
+
+class SetProviderKeyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Checked by the service (length and characters), whose refusal never repeats it.
+    key: str
+
+
+def _provider_routes(app: FastAPI, accounts: AccountAccess, providers: ProviderService) -> None:
+    """The provider endpoints under /v1/admin/orgs/{org}/providers (docs/32), each through
+    ``requires``; key changes are consume-on-use."""
+    service = accounts.service
+    requires = app.state.requires
+    stores = Stores(service.organizations, service.store)
+    store = providers.store
+
+    def provider(request: Request) -> Resource | None:
+        p = request.path_params
+        return resolve_provider(stores, store, p["org"], p["provider_id"])
+
+    def organization(request: Request) -> Resource | None:
+        return resolve_organization(stores, request.path_params["org"])
+
+    listing = requires("providers.list", organization)
+    statuses = requires("providers.status", organization)
+    creating = requires("providers.create", organization)
+    updating = requires("providers.update", provider)
+    disabling = requires("providers.disable", provider)
+    enabling = requires("providers.enable", provider)
+    deleting = requires("providers.delete", provider)
+    testing = requires("providers.test", provider)
+    setting_keys = requires("provider_keys.set", provider)
+    deleting_keys = requires("provider_keys.delete", provider)
+
+    def found(provider_id: str) -> ProviderConfig:
+        config = store.get(provider_id)
+        if config is None:  # resolved a moment ago: gone since
+            raise ForbiddenError()
+        return config
+
+    def view(config: ProviderConfig) -> dict[str, object]:
+        """For the organization's admin. Never the key: whether there is one, whether it can be
+        read, its last four characters (keys of 20 or more) and when it was set."""
+        key = providers.key_state(config)
+        return {
+            "provider_id": config.id,
+            "type": config.type,
+            "base_url": config.base_url,
+            "model": config.model,
+            "serves_tier": config.serves_tier,
+            "role": config.role,
+            "enabled": config.is_enabled,
+            "organization_switch": config.enabled,
+            "platform_switch": config.platform_enabled,
+            "price_input_per_mtok": config.price_input_per_mtok,
+            "price_output_per_mtok": config.price_output_per_mtok,
+            "first_token_budget_ms": config.first_token_budget_ms,
+            "capabilities": dict(config.capabilities),
+            "key": {
+                "present": key.present,
+                "key_unreadable": key.present and not key.readable,
+                "last4": key.last4,
+                "updated_at_ms": key.updated_at_ms,
+            },
+            "created_at_ms": config.created_at_ms,
+        }
+
+    def invalid(exc: ValueError, field: str) -> JSONResponse:
+        return _invalid(field, str(exc))
+
+    @app.get(ORG_PREFIX + "/providers")
+    async def list_providers(org: str, auth: Authorized = listing) -> JSONResponse:
+        return JSONResponse({"providers": [view(c) for c in store.list_for(org)]})
+
+    @app.get(ORG_PREFIX + "/providers/status")
+    async def provider_status(org: str, auth: Authorized = statuses) -> JSONResponse:
+        # Only that each provider exists and whether it is enabled (docs/32).
+        return JSONResponse(
+            {
+                "providers": [
+                    {"provider_id": c.id, "enabled": c.is_enabled} for c in store.list_for(org)
+                ]
+            }
+        )
+
+    @app.post(ORG_PREFIX + "/providers")
+    async def create_provider(
+        org: str, body: CreateProviderBody, auth: Authorized = creating
+    ) -> JSONResponse:
+        try:
+            made = providers.create(
+                org,
+                type=body.type,
+                base_url=body.base_url,
+                model=body.model,
+                serves_tier=body.serves_tier,
+                role=body.role,
+                price_input_per_mtok=body.price_input_per_mtok,
+                price_output_per_mtok=body.price_output_per_mtok,
+                first_token_budget_ms=body.first_token_budget_ms,
+                actor=auth.actor,
+            )
+        except ManagementRefusal:
+            raise
+        except ValueError as exc:
+            return invalid(exc, "type" if "type" in str(exc) else "base_url")
+        return JSONResponse(view(made), status_code=201)
+
+    @app.patch(ORG_PREFIX + "/providers/{provider_id}")
+    async def update_provider(
+        provider_id: str, body: UpdateProviderBody, auth: Authorized = updating
+    ) -> JSONResponse:
+        changes = body.model_dump(exclude_unset=True)
+        try:
+            updated, key_deleted = providers.update(found(provider_id), changes, actor=auth.actor)
+        except ManagementRefusal:
+            raise
+        except ValueError as exc:
+            return invalid(exc, "type" if "type" in str(exc) else "base_url")
+        return JSONResponse({**view(updated), "key_deleted": key_deleted})
+
+    def switch(provider_id: str, auth: Authorized, on: bool) -> JSONResponse:
+        # Whose switch: the platform's for platform_admin, the organization's for its
+        # org_admin, as authorize allowed it.
+        platform = auth.via.startswith("platform_admin")
+        updated = providers.set_switch(found(provider_id), on, platform=platform, actor=auth.actor)
+        if platform:  # platform_admin sees no more than the status
+            return JSONResponse({"provider_id": updated.id, "enabled": updated.is_enabled})
+        return JSONResponse(view(updated))
+
+    @app.post(ORG_PREFIX + "/providers/{provider_id}/disable")
+    async def disable_provider(provider_id: str, auth: Authorized = disabling) -> JSONResponse:
+        return switch(provider_id, auth, False)
+
+    @app.post(ORG_PREFIX + "/providers/{provider_id}/enable")
+    async def enable_provider(provider_id: str, auth: Authorized = enabling) -> JSONResponse:
+        return switch(provider_id, auth, True)
+
+    @app.delete(ORG_PREFIX + "/providers/{provider_id}")
+    async def delete_provider(provider_id: str, auth: Authorized = deleting) -> JSONResponse:
+        assert auth.consumed is not None
+        providers.delete(found(provider_id), actor=auth.actor, marker=auth.consumed)
+        return JSONResponse({"provider_id": provider_id, "deleted": True})
+
+    @app.put(ORG_PREFIX + "/providers/{provider_id}/key")
+    async def set_provider_key(
+        provider_id: str, body: SetProviderKeyBody, auth: Authorized = setting_keys
+    ) -> JSONResponse:
+        assert auth.consumed is not None
+        with providers.redactor.watching(body.key):
+            try:
+                state = providers.set_key(
+                    found(provider_id), body.key, actor=auth.actor, marker=auth.consumed
+                )
+            except ValueError as exc:
+                if isinstance(exc, ManagementRefusal):
+                    raise
+                # Raised, not answered, so the step-up window is given back (docs/32).
+                raise ProviderKeyRejectedError(str(exc)) from None
+        # Never the key: its last four characters (for keys of 20 or more) and when.
+        return JSONResponse({"last4": state.last4, "updated_at_ms": state.updated_at_ms})
+
+    @app.delete(ORG_PREFIX + "/providers/{provider_id}/key")
+    async def delete_provider_key(
+        provider_id: str, auth: Authorized = deleting_keys
+    ) -> JSONResponse:
+        assert auth.consumed is not None
+        providers.delete_key(found(provider_id), actor=auth.actor, marker=auth.consumed)
+        return JSONResponse({"provider_id": provider_id, "key_deleted": True})
+
+    @app.post(ORG_PREFIX + "/providers/{provider_id}/test")
+    async def test_provider(provider_id: str, auth: Authorized = testing) -> JSONResponse:
+        """Spends tokens on the organization's account with this provider (docs/32)."""
+        try:
+            capabilities = await providers.test(found(provider_id), actor=auth.actor)
+        except ProviderUnreachedError:
+            # One answer for a refused address, no such name, no connection and no answer in
+            # time: not a way to map a network (docs/32). The audit entry says which.
+            return _error(502, "provider_unreachable", "The provider could not be reached.")
+        except ProviderError as exc:
+            # The host answered: the code and its fixed message, nothing derived from its body.
+            return _error(exc.status if exc.status != 422 else 502, exc.code.value, exc.message)
+        return JSONResponse({"ok": True, "capabilities": capabilities})
+
+    @app.exception_handler(ProviderKeyRejectedError)
+    async def key_rejected(_: Request, exc: ProviderKeyRejectedError) -> JSONResponse:
+        return _invalid("key", str(exc))
+
+
+class ProviderKeyRejectedError(ValueError):
+    """A provider key the service refused (its length or characters). The message never
+    contains the key."""
+
+
 def _invalid(field: str, message: str) -> JSONResponse:
     return _error(
         422,
@@ -1193,6 +1459,7 @@ def create_app(
     local_only: LocalOnlyPolicy | None = None,
     accounts: AccountAccess | None = None,
     chat_adapters: Mapping[str, Backend] | None = None,
+    providers: ProviderService | None = None,
 ) -> FastAPI:
     """Build the API around an already wired registry.
 
@@ -1290,7 +1557,14 @@ def create_app(
             if accounts is not None
             else None
         )
+        # Provider keys out of every log record while the server runs (docs/32), and a
+        # warning for each key no loaded master key can read.
+        remove_redaction = install_redaction(providers.redactor) if providers is not None else None
+        if providers is not None:
+            providers.warn_unreadable()
         yield
+        if remove_redaction is not None:
+            remove_redaction()
         if retention is not None:
             retention.cancel()
         if account_retention is not None:
@@ -1320,6 +1594,9 @@ def create_app(
             else None
         )
         _admin_routes(app, accounts, management)
+        if providers is not None:
+            app.state.providers = providers
+            _provider_routes(app, accounts, providers)
         # Outermost, so even the local-only guard's refusals of /v1/admin are not cached.
         app.add_middleware(NoStoreMiddleware)
     app.state.slo_monitor = monitor
@@ -2543,8 +2820,10 @@ def create_default_app() -> FastAPI:
             local_only=policy_from(os.environ),
         )
     clock = WallClock()
-    # Before anything else: without the pepper no key can be checked.
+    # Before anything else: without the pepper no key can be checked, and without the vault's
+    # master key no provider key can be sealed or opened (docs/32).
     pepper = load_pepper(os.environ)
+    master, previous_master = load_master_keys(os.environ)
     plans_path = os.environ.get("GATEWAY_PLANS")
     templates = load_plans(Path(plans_path) if plans_path else None)
     epoch = SystemEpoch()
@@ -2607,6 +2886,15 @@ def create_default_app() -> FastAPI:
         seed=seed,
         local_only=policy_from(os.environ),
         chat_adapters=chat_adapters,
+        providers=ProviderService(
+            ProviderStore(database),
+            Vault(master, previous_master),
+            accounts.service.audit,
+            clock,
+            epoch,
+            Redactor(),
+            lambda: organization_client(system_resolver),
+        ),
     )
     # Held for the life of the process; released when it exits, however it exits.
     app.state.database_lock = lock

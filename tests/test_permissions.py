@@ -181,16 +181,16 @@ def test_what_each_role_can_and_cannot_do() -> None:
 # --- the table, as documented and as generated ------------------------------------------------
 
 
-def _documented_table() -> dict[str, tuple[str, frozenset[str], bool, str]]:
+def _documented_table() -> dict[str, tuple[str, frozenset[str], bool, bool, str]]:
     text = (REPO / "docs" / "28-roles.md").read_text(encoding="utf-8")
     rows = {}
-    pattern = re.compile(r"^\| `([a-z_.]+)` \| (\w+) \| ([^|]+) \| (yes|) ?\| ([^|]+) \|$")
+    pattern = re.compile(r"^\| `([a-z_.]+)` \| (\w+) \| ([^|]+) \| (yes|consume|) ?\| ([^|]+) \|$")
     for line in text.splitlines():
         match = pattern.match(line.strip())
         if match:
             action, level, allowed, step_up, wired = match.groups()
             pairs = frozenset(p.strip().strip("`") for p in allowed.split(","))
-            rows[action] = (level, pairs, step_up == "yes", wired.strip())
+            rows[action] = (level, pairs, step_up != "", step_up == "consume", wired.strip())
     return rows
 
 
@@ -201,6 +201,7 @@ def test_the_documented_table_is_the_table() -> None:
             p.level.value,
             frozenset(f"{role.value}@{rel.value}" for role, rel in p.allowed),
             p.step_up,
+            p.consume,
             p.wired.value,
         )
         for p in PERMISSIONS.values()
@@ -443,9 +444,10 @@ def test_every_route_of_every_app_declares_itself() -> None:
     assert checked > 50
     # The explicit lists match real routes, so they cannot go stale.
     assert seen_lists >= DOCUMENTATION
-    # With accounts, the user endpoints; with applications too, all thirteen (docs/30).
+    # With accounts, the user endpoints; with applications too, all thirteen (docs/30); the
+    # default server also has the provider endpoints (docs/32), on 7 more paths.
     assert len({p for v, p in requires_routes if v == "accounts"}) == 5
-    assert len({p for v, p in requires_routes if v == "default server"}) == 10
+    assert len({p for v, p in requires_routes if v == "default server"}) == 17
 
 
 def test_a_route_without_a_declaration_is_found() -> None:

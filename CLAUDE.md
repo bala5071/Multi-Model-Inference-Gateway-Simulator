@@ -55,6 +55,17 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `adapters/` — `OllamaAdapter`, `OpenAICompatibleAdapter`, `AnthropicAdapter`: `Backend`s that
   speak the chat format; `http.py` holds the client (no redirects, no proxy), the credential
   header and the status mapping; the credential is passed to each call, never held (exists)
+- `vault.py` — `Vault`: provider keys sealed with AES-256-GCM under `GATEWAY_VAULT_KEY` (the
+  server refuses to start without it; `GATEWAY_VAULT_KEY_PREVIOUS` during a rotation), bound to
+  organization, provider, type and URL origin; no trial decryption; `lease()` decrypts for one
+  use (exists)
+- `redaction.py` — `Redactor` and `install`: a log-record factory that scrubs leased key values
+  and credential patterns from every record; installed by the server's lifespan (exists)
+- `egress.py` — the egress guard for organization providers: https only, every resolved address
+  public, the socket connects to the checked address, no redirects, no proxy (exists)
+- `providers.py` — `ProviderConfig`, `ProviderStore` over migrations 10 and 11, `ProviderService`
+  (create, update, the organization's and the platform's switches, keys, test-connection with
+  probing, `key_unreadable`) and `resolve_provider` (exists)
 - `chatservice.py` — `ChatService`: one chat request on one tier, through the simulator or the
   tier's adapter, first-token and total timeouts on the injected clock, cancellation (exists)
 - `passthrough.py` — `PassthroughWorker`: forwards to a backend that does its own
@@ -110,7 +121,7 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   issued, rotated and revoked with an audit entry by key id; the HTTP path's `KeyLimits`),
   shared with the CLI (exists)
 - `permissions.py` — `Role`, `ScopeType`, scope `Relation`s, `PERMISSIONS` (one table: action,
-  level, allowed role@relation pairs, step-up, wired), `Actor`, `Resource`, and `authorize`, deny
+  level, allowed role@relation pairs, step-up, consume-on-use, wired), `Actor`, `Resource`, and `authorize`, deny
   by default; `python -m gateway.permissions --matrix` writes `docs/permission-matrix.md` (exists)
 - `roles.py` — `RoleStore` over migration 8: role assignments and application-defined roles
   (exists)
@@ -140,7 +151,7 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   it and checks them; `plan_migrations` previews without writing; the server refuses a
   rebuild on a database with data, `scripts/manage.py migrate` backs up first); 5 `users`, 6
   `sessions`, 7 `audit_log`, 8 `role_assignments` and `app_roles` (a rebuild of `users` without
-  `platform_admin`), 9 `sessions.step_up_until_ms`. The default database is in the user's data folder,
+  `platform_admin`), 9 `sessions.step_up_until_ms`, 10 `provider_configs`, 11 `provider_keys`. The default database is in the user's data folder,
   owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
   `restore_database` use SQLite's backup API (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),
@@ -167,7 +178,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `create_simulated_live_app()` for simulated live mode (`GATEWAY_SIMULATED_LIVE=1`,
   everything in memory, Playground with throwaway keys); JSON or server-sent-event
   responses; serves the built dashboard at `/dashboard`; with accounts, the management
-  endpoints under `/v1/admin/orgs/{org}` (docs/30), each through `requires`, every answer
+  endpoints under `/v1/admin/orgs/{org}` (docs/30) and the provider endpoints (docs/32), each
+  through `requires` (which claims the step-up window for consume-on-use actions), every answer
   `Cache-Control: no-store` (exists)
 
 Outside the package, `benchmarks/` is a package run with `python -m`:
@@ -216,6 +228,8 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   request would add; the numbers in `docs/20-applications-api-keys.md` (exists)
 - `benchmarks/chat_overhead.py` — the chat endpoint in front of a mock provider on the running
   server, against the mock directly; the numbers in `docs/31` (exists)
+- `benchmarks/provider_requests.py` — a vault decrypt, the egress check, and provider admin
+  requests on the running server; the numbers in `docs/32` (exists)
 - `benchmarks/management_requests.py` — management reads and key writes on the running
   server, beside `/healthz` and `/v1/auth/me`; the numbers in `docs/30` (exists)
 
@@ -261,7 +275,7 @@ the monitoring API (`docs/15`); it has no logic of its own about the gateway.
 `capture_demo.py` (retakes the dashboard pictures in `docs/img/`),
 `run_local_models.sh`, `manage.py` (creates organizations and applications and issues, rotates
 and revokes API keys, audited like the management endpoints; prints a new key once, never logs
-it; also
+it; `rotate-vault-key` and `vault-drop-unreadable` for provider keys (docs/32); also
 `migrate` with `--dry-run` and a backup before a table rebuild, backup and restore), `readme_quickstart.py` (runs the README's quickstart blocks exactly as written and
 checks the result; a CI job, so the README cannot go stale), `check_characters.py` (a CI
 gate: tracked source, test, workflow and shell files are printable ASCII, with a short

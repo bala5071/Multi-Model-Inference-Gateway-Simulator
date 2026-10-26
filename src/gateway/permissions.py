@@ -90,6 +90,9 @@ class Permission:
     level: Level
     allowed: frozenset[tuple[Role, Relation]]
     step_up: bool
+    # Consume-on-use (docs/32): a step-up window is used up by one successful call, so each
+    # such change needs a fresh password. Always with step_up.
+    consume: bool
     wired: Wired
 
 
@@ -101,6 +104,9 @@ def _allow(*pairs: str) -> frozenset[tuple[Role, Relation]]:
         allowed.add((Role(role), Relation(relation)))
     return frozenset(allowed)
 
+
+# In the step-up column of _rows: step-up, used up by one successful call (consume-on-use).
+CONSUME = "consume"
 
 _PLATFORM = "platform_admin@platform"
 _ORG_ADMIN = "org_admin@own_organization"
@@ -135,6 +141,20 @@ def _rows() -> list[Permission]:
         ("applications.create", o, (_ORG_ADMIN,), False, w.STEP_7),
         ("applications.list", o, (_ORG_ADMIN, "viewer@own_organization"), False, w.STEP_7),
         ("usage.read_organization", o, (_ORG_ADMIN, "viewer@own_organization"), False, w.LATER),
+        # Model providers and their keys belong to the organization (docs/32): only its
+        # org_admin configures them or sets a key; platform_admin may see that they exist and
+        # switch one off or on. No action reads a key.
+        ("providers.list", o, (_ORG_ADMIN,), False, w.A5),
+        ("providers.status", o, (_PLATFORM, _ORG_ADMIN), False, w.A5),
+        ("providers.create", o, (_ORG_ADMIN,), True, w.A5),
+        ("providers.update", o, (_ORG_ADMIN,), True, w.A5),
+        ("providers.disable", o, (_PLATFORM, _ORG_ADMIN), True, w.A5),
+        ("providers.enable", o, (_PLATFORM, _ORG_ADMIN), True, w.A5),
+        ("providers.delete", o, (_ORG_ADMIN,), CONSUME, w.A5),
+        ("providers.test", o, (_ORG_ADMIN,), False, w.A5),
+        ("provider_keys.set", o, (_ORG_ADMIN,), CONSUME, w.A5),
+        ("provider_keys.delete", o, (_ORG_ADMIN,), CONSUME, w.A5),
+        ("mode.set_organization", o, (_ORG_ADMIN,), True, w.A5),
         # The audit log: organization-, user-, role- and login-level entries.
         ("audit.read_organization", o, (_PLATFORM, _ORG_ADMIN), False, w.LATER),
         # Inside an application: never platform_admin.
@@ -161,18 +181,15 @@ def _rows() -> list[Permission]:
         ("application_roles.list", a, in_app, False, w.LATER),
         # The audit log: entries about application keys and application roles.
         ("audit.read_application", a, in_app, False, w.LATER),
-        ("provider_keys.add", a, in_app, True, w.A5),
-        ("provider_keys.replace", a, in_app, True, w.A5),
-        ("provider_keys.delete", a, in_app, True, w.A5),
-        ("provider_keys.read", a, in_app, False, w.A5),
-        ("mode.change", a, in_app, True, w.A5),
+        # Modes (A5 step 3): an application may be stricter than its organization.
+        ("mode.set_application", a, in_app, True, w.A5),
         # Monitoring, control and the Playground: local only until A8.
         ("monitoring.read", p, (_PLATFORM,), False, w.A8),
         ("control.write", p, (_PLATFORM,), False, w.A8),
         ("playground.use", p, (_PLATFORM,), False, w.A8),
     ]
     return [
-        Permission(action, level, _allow(*pairs), step_up, wired)
+        Permission(action, level, _allow(*pairs), bool(step_up), step_up is CONSUME, wired)
         for action, level, pairs, step_up, wired in rows
     ]
 
@@ -329,7 +346,9 @@ def render_matrix() -> str:
     for action in PERMISSIONS:
         permission = PERMISSIONS[action]
         flags = f"level {permission.level}, wired {permission.wired}"
-        if permission.step_up:
+        if permission.consume:
+            flags += ", step-up, consume"
+        elif permission.step_up:
             flags += ", step-up"
         lines += [f"## `{action}` ({flags})", ""]
         lines.append("| role | " + " | ".join(r.value for r in Relation) + " |")
