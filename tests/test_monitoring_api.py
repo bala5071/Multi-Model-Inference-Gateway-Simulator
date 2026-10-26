@@ -43,6 +43,7 @@ NO_EVENTS = {
     "timeout": 0,
     "downgrade": 0,
     "budget_exhausted": 0,
+    "circuit_breaker": 0,
 }
 UNAVAILABLE = {
     "queue": {"available": False, "length": None},
@@ -1001,6 +1002,7 @@ gateway_events_total{type="queue_full"} 0
 gateway_events_total{type="timeout"} 0
 gateway_events_total{type="downgrade"} 0
 gateway_events_total{type="budget_exhausted"} 0
+gateway_events_total{type="circuit_breaker"} 0
 """
 
 SAMPLE_LINE = re.compile(r'^[a-z_]+(\{[a-z]+="[^"]*"(,[a-z]+="[^"]*")*\})? -?[0-9.e+-]+$')

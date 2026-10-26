@@ -6,11 +6,12 @@ See docs/31-chat-and-adapters.md.
 - **The simulator** takes only a prompt: the conversation is flattened into one, served by the
   same worker and scheduler as ``/v1/generate``, and answered ``[simulated output, N tokens]``.
   It has no tools (``supports_tools`` false, built in).
-- **An adapter** is given the request and no credential in this step (the operator's own
-  servers take none; organization keys arrive with the vault, docs/provider-plan.md). Waiting
-  for the first delta is bounded by ``first_token_timeout_ms``, the whole answer by
-  ``total_timeout_ms``; when either passes, or the caller is cancelled (the client went away),
-  the adapter's task is cancelled, which closes the upstream request.
+- **An adapter** is given the request, and a credential only for an organization's provider
+  (``attempt``, called by ``gateway.chatrouter`` inside the key's lease; the operator's own
+  servers take none). Waiting for the first delta is bounded by ``first_token_timeout_ms`` (or
+  the provider's own budget), the whole answer by ``total_timeout_ms``; when either passes, or
+  the caller is cancelled (the client went away), the adapter's task is cancelled, which closes
+  the upstream request.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from gateway.chat import (
 from gateway.clock import Clock
 from gateway.registry import ModelRegistry
 from gateway.schema import GenerateRequest, RequestResult
+from gateway.secret import Secret
 
 DEFAULT_FIRST_TOKEN_TIMEOUT_MS = 30_000.0
 DEFAULT_TOTAL_TIMEOUT_MS = 120_000.0
@@ -84,13 +86,17 @@ class ChatService:
         adapter = self._adapters.get(tier)
         return adapter.capabilities() if adapter is not None else SIMULATED_CAPABILITIES
 
+    def adapter_for(self, tier: str) -> Backend | None:
+        """The operator's adapter serving ``tier``, or None when the simulator serves it."""
+        return self._adapters.get(tier)
+
     async def run(
         self, request: ChatRequest, on_delta: ChatDeltaCallback | None = None
     ) -> ChatOutcome:
         adapter = self._adapters.get(request.model)
         if adapter is None:
             return await self._simulated(request, on_delta)
-        return await self._adapter(adapter, request, on_delta)
+        return await self.attempt(adapter, request, on_delta)
 
     async def _simulated(
         self, request: ChatRequest, on_delta: ChatDeltaCallback | None
@@ -114,9 +120,22 @@ class ChatService:
         result = ChatResult(text, (), finish, Usage(timing.tokens_in, timing.tokens_out))
         return ChatOutcome(result, timing, LOCAL_PROVIDER)
 
-    async def _adapter(
-        self, adapter: Backend, request: ChatRequest, on_delta: ChatDeltaCallback | None
+    async def attempt(
+        self,
+        adapter: Backend,
+        request: ChatRequest,
+        on_delta: ChatDeltaCallback | None,
+        *,
+        credential: Secret | None = None,
+        first_token_timeout_ms: float | None = None,
+        provider: str = LOCAL_PROVIDER,
     ) -> ChatOutcome:
+        """One request to one adapter, under the first-token and total timeouts."""
+        first_token_ms = (
+            first_token_timeout_ms
+            if first_token_timeout_ms is not None
+            else self.first_token_timeout_ms
+        )
         clock = self._clock
         started = clock.now_ms()
         first_ms: list[float] = []
@@ -129,9 +148,9 @@ class ChatService:
             if on_delta is not None:
                 on_delta(delta)
 
-        task = asyncio.ensure_future(adapter.chat(request, credential=None, on_delta=relay))
+        task = asyncio.ensure_future(adapter.chat(request, credential=credential, on_delta=relay))
         try:
-            if not await self._within(task, first, self.first_token_timeout_ms):
+            if not await self._within(task, first, first_token_ms):
                 raise ProviderError(ProviderErrorCode.UPSTREAM_TIMEOUT, detail="first_token")
             remaining = self.total_timeout_ms - (clock.now_ms() - started)
             if not await self._within(task, None, remaining):
@@ -154,7 +173,7 @@ class ChatService:
             cost_usd=0.0,
             text=result.content,
         )
-        return ChatOutcome(result, timing, LOCAL_PROVIDER)
+        return ChatOutcome(result, timing, provider)
 
     async def _within(
         self, task: asyncio.Future[ChatResult], event: asyncio.Event | None, timeout_ms: float

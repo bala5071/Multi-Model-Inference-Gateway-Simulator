@@ -1,11 +1,17 @@
 """The egress guard for organization providers: every blocked range, by literal address, by
 name and embedded in IPv6; DNS rebinding; redirects; https only; no proxy from the environment;
-the base-URL check at entry. See docs/32-provider-settings-and-vault.md. No network."""
+the base-URL check at entry. See docs/32-provider-settings-and-vault.md. And the locality rule
+(docs/33): a hosted destination only under a scope that allows it now, the operator's local
+destinations as configured. No network.
+
+The tests of the hosted rules run under a scope that allows hosted (``_get``), as a chat
+request in a hosted mode or a test-connection would."""
 
 from __future__ import annotations
 
 import ipaddress
 import re
+from functools import partial
 from pathlib import Path
 
 import httpx
@@ -13,7 +19,17 @@ import pytest
 
 from gateway.audit import FIXED_VALUES
 from gateway.chat import ProviderErrorCode
-from gateway.egress import EgressRefused, check_base_url, organization_client, refusal
+from gateway.egress import (
+    EgressRefused,
+    GuardedBackend,
+    LocalDestinations,
+    check_base_url,
+    egress_scope,
+    hosted_allowed,
+    operator_client,
+    organization_client,
+    refusal,
+)
 from mock_network import FakeResolver, ScriptedNetwork, http_response
 
 PUBLIC = "93.184.216.34"
@@ -56,7 +72,9 @@ def test_public_addresses_are_allowed(address: str) -> None:
 
 
 async def _get(client: httpx.AsyncClient, url: str) -> httpx.Response:
-    return await client.get(url)
+    """A request in a scope that may reach hosted destinations."""
+    with egress_scope(lambda: True):
+        return await client.get(url)
 
 
 @pytest.mark.parametrize(("address", "reason"), BLOCKED)
@@ -183,3 +201,110 @@ def test_every_reason_the_guard_gives_can_be_audited() -> None:
     allowed = FIXED_VALUES["outcome_detail"]
     assert given | addressed | {f"embedded_{a}" for a in addressed} <= allowed
     assert {"connect", "connection_lost", "probe"} <= allowed
+
+
+# --- locality (docs/33) -------------------------------------------------------------------
+
+
+async def test_with_no_scope_a_hosted_destination_is_refused_before_resolving() -> None:
+    network = ScriptedNetwork([http_response(b"{}")])
+    resolver = FakeResolver({"api.example.test": [PUBLIC]})
+    assert not hosted_allowed()
+    async with organization_client(resolver, inner=network) as client:
+        with pytest.raises(EgressRefused) as refused:
+            await client.get("https://api.example.test/")
+    assert refused.value.detail == "local_only"
+    assert resolver.calls == []  # not even the name left the machine
+    assert network.connections == []
+
+
+async def test_a_scope_that_says_no_refuses_and_is_asked_at_every_request() -> None:
+    """The scope's answer is asked again for each request, so a pooled connection opened while
+    hosted was allowed carries nothing once the answer changes (a mode made stricter)."""
+    network = ScriptedNetwork([http_response(b"{}"), http_response(b"{}")])
+    resolver = FakeResolver({"api.example.test": [PUBLIC]})
+    allowed = [True]
+    async with organization_client(resolver, inner=network) as client:
+        with egress_scope(lambda: allowed[0]):
+            first = await client.get("https://api.example.test/a")
+            allowed[0] = False
+            with pytest.raises(EgressRefused) as refused:
+                await client.get("https://api.example.test/b")
+    assert first.status_code == 200
+    assert refused.value.detail == "local_only"
+    assert len(network.connections) == 1
+    assert b"GET /b" not in bytes(network.connections[0].written)
+
+
+async def test_the_connect_check_refuses_without_the_transport() -> None:
+    """The backend refuses on its own, for any caller that reaches it another way."""
+    network = ScriptedNetwork([http_response(b"{}")])
+    backend = GuardedBackend(FakeResolver({"api.example.test": [PUBLIC]}), network)
+    with egress_scope(lambda: False), pytest.raises(EgressRefused) as refused:
+        await backend.connect_tcp("api.example.test", 443)
+    assert refused.value.detail == "local_only"
+    assert network.connections == []
+
+
+async def test_an_organization_client_never_treats_anything_as_local() -> None:
+    """Even a destination on the operator's list is hosted for an organization: under a scope
+    that allows hosted, loopback is still refused by the address check."""
+    network = ScriptedNetwork([http_response(b"{}")])
+    resolver = FakeResolver({"localhost": ["127.0.0.1"]})
+    async with organization_client(resolver, inner=network) as client:
+        with pytest.raises(EgressRefused) as refused:
+            await _get(client, "https://localhost:11434/")
+    assert refused.value.detail == "loopback"
+    assert network.connections == []
+
+
+async def test_the_operator_client_reaches_its_local_destinations_without_a_scope() -> None:
+    network = ScriptedNetwork([http_response(b"{}")])
+    local = LocalDestinations.parse("127.0.0.1:11434")
+    async with operator_client(FakeResolver({}), local, inner=network) as client:
+        response = await client.get("http://127.0.0.1:11434/api/chat")  # plain http: its own
+    assert response.status_code == 200
+    assert [(c.address, c.port) for c in network.connections] == [("127.0.0.1", 11434)]
+
+
+async def test_the_operator_client_holds_anything_else_to_the_hosted_rules() -> None:
+    local = LocalDestinations.parse("127.0.0.1:11434")
+    resolver = FakeResolver({"api.example.test": [PUBLIC], "gpu.lan": ["10.0.0.9"]})
+    network = ScriptedNetwork([http_response(b"{}")])
+    async with operator_client(resolver, local, inner=network) as client:
+        cases = [
+            ("http://127.0.0.1:8080/", None, "local_only"),  # another port: not on the list
+            ("https://api.example.test/", None, "local_only"),  # hosted, no scope
+            ("http://api.example.test/", True, "not_https"),
+            ("https://gpu.lan/", True, "private"),  # not on the list, so not reachable
+        ]
+        for url, scope, reason in cases:
+            with egress_scope(partial(bool, scope)), pytest.raises(EgressRefused) as refused:
+                await client.get(url)
+            assert refused.value.detail == reason, url
+        with egress_scope(lambda: True):
+            hosted = await client.get("https://api.example.test/")
+    assert hosted.status_code == 200
+    assert [c.address for c in network.connections] == [PUBLIC]
+
+
+def test_local_destinations_parse_and_loopback_defaults() -> None:
+    parsed = LocalDestinations.parse(" localhost:11434, [::1]:8080 ,gpu.lan:9000,")
+    assert parsed.destinations == {("localhost", 11434), ("::1", 8080), ("gpu.lan", 9000)}
+    assert parsed.contains("LOCALHOST.", 11434)
+    assert not parsed.contains("localhost", 11435)
+    for bad in ("localhost", "localhost:", ":80", "host:port"):
+        with pytest.raises(ValueError, match="host:port"):
+            LocalDestinations.parse(bad)
+    found = LocalDestinations.loopback_of(
+        [
+            "http://127.0.0.1:11434",
+            "http://localhost:8080/v1",
+            "https://[::1]",
+            "http://10.0.0.9:8000",
+            "https://api.example.com",
+        ]
+    )
+    assert found.destinations == {("127.0.0.1", 11434), ("localhost", 8080), ("::1", 443)}
+    assert found.contains_url("http://localhost:8080/v1/chat")
+    assert not found.contains_url("https://api.example.com/v1")

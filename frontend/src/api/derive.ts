@@ -115,6 +115,7 @@ const TITLES: Record<string, string> = {
   timeout: "Timeout",
   downgrade: "Downgrade",
   budget_exhausted: "Budget exhausted",
+  circuit_breaker: "Circuit breaker",
 };
 
 export function eventTitle(type: string): string {
@@ -147,6 +148,15 @@ export function describeEvent(event: GatewayEvent): string {
       return `A request for ${model} was served by ${typeof data.to_model === "string" ? data.to_model : "a cheaper model"}.`;
     case "budget_exhausted":
       return `Refused: ${number(data.used_tokens)} of ${number(data.budget_tokens)} budget tokens used.`;
+    case "circuit_breaker": {
+      const provider = typeof data.provider === "string" ? data.provider : "A provider";
+      if (data.state === "open") {
+        return `${provider} is skipped for ${number(Number(data.open_ms) / 1000)} s after repeated failures.`;
+      }
+      return data.state === "half_open"
+        ? `${provider} is being tried again with one request.`
+        : `${provider} is answering again.`;
+    }
     default:
       return JSON.stringify(data);
   }

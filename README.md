@@ -355,8 +355,19 @@ OpenAI-compatible endpoint, or Anthropic) and give the gateway their keys, under
 encrypted with the master key `GATEWAY_VAULT_KEY` (the server refuses to start without it; keep
 it apart from the database: if it is lost, every provider key must be entered again), never
 returned, and each change needs a fresh password. Provider URLs must be public `https` hosts.
-Testing a provider's connection spends tokens on the organization's account with it. Until the
-fallback modes of the next step, chat is still served only by the gateway's own tiers.
+Testing a provider's connection spends tokens on the organization's account with it.
+
+Chat is served by the gateway's own tiers unless the organization **and** the application both
+choose a fallback mode ([docs/33](docs/33-fallback-modes.md)): `local_only` (the default),
+`local_with_hosted_fallback` or `hosted_primary_with_local_fallback`, set with
+`PUT /v1/admin/orgs/{org}/mode` and `PUT .../applications/{app}/mode` (each change needs a
+fresh password). **A mode other than `local_only` sends prompts, and tool definitions and
+results, to a third party the organization chose, under that third party's terms**; the gateway
+stores none of it, but the provider may. Each answer says where it came from
+(`X-Provider`, `X-Provider-Class: local | hosted`, and `X-Fallback-From`/`X-Fallback-Reason`
+after a fallback), and so does the usage record. The operator's own model servers count as local
+when they are on this machine (loopback in the backends file) or listed in
+`GATEWAY_PROVIDER_LOCAL_ALLOW` (`host:port`, comma-separated).
 
 ### Real-model mode
 

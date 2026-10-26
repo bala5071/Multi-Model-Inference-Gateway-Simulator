@@ -88,7 +88,7 @@ planned in A2).
 | `providers.test` | organization | `org_admin@own_organization` | | A5 |
 | `provider_keys.set` | organization | `org_admin@own_organization` | consume | A5 |
 | `provider_keys.delete` | organization | `org_admin@own_organization` | consume | A5 |
-| `mode.set_organization` | organization | `org_admin@own_organization` | yes | A5 |
+| `mode.set_organization` | organization | `org_admin@own_organization` | consume | A5 |
 | `audit.read_organization` | organization | `org_admin@own_organization`, `platform_admin@platform` | | later |
 | `applications.read` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@application_in_own_organization`, `viewer@own_application` | | step 7 |
 | `usage.read_application` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@application_in_own_organization`, `viewer@own_application` | | later |
@@ -100,7 +100,7 @@ planned in A2).
 | `application_roles.delete` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | yes | later |
 | `application_roles.list` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | | later |
 | `audit.read_application` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | | later |
-| `mode.set_application` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | yes | A5 |
+| `mode.set_application` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | consume | A5 |
 | `monitoring.read` | platform | `platform_admin@platform` | | A8 |
 | `control.write` | platform | `platform_admin@platform` | | A8 |
 | `playground.use` | platform | `platform_admin@platform` | | A8 |

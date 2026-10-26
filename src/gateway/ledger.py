@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from gateway.clock import Clock, ClockEpoch, EpochSource
 from gateway.periods import BudgetPeriods, CalendarMonthsUTC
 from gateway.schema import RequestResult
-from gateway.usage import InMemoryUsageStore, ModelUsage, UsageEvent, UsageStore
+from gateway.usage import ChatSource, InMemoryUsageStore, ModelUsage, UsageEvent, UsageStore
 
 # How often the retention loop prunes, and how many events it deletes in one go: a batch is
 # one short transaction, and the loop yields to the event loop between batches.
@@ -200,7 +200,13 @@ class CostLedger:
             )
 
     def record(
-        self, application_id: str, result: RequestResult, *, model: str, price_multiplier: float
+        self,
+        application_id: str,
+        result: RequestResult,
+        *,
+        model: str,
+        price_multiplier: float,
+        source: ChatSource | None = None,
     ) -> float:
         """Charge a finished request to an application. Returns the amount billed in USD.
 
@@ -215,6 +221,7 @@ class CostLedger:
                 model=model,
                 billed_cost_usd=billed_cost_usd,
                 occurred_at_ms=self._epoch.epoch_ms(),
+                source=source,
             )
         )
         account.total = account.total.plus(result, billed_cost_usd)

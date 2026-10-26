@@ -75,6 +75,8 @@ class AuditAction(StrEnum):
     PROVIDER_KEY_SET = "provider_key_set"
     PROVIDER_KEY_DELETED = "provider_key_deleted"
     PROVIDER_TESTED = "provider_tested"
+    # A fallback mode set on an organization or an application (docs/33).
+    MODE_CHANGED = "mode_changed"
 
 
 class Outcome(StrEnum):
@@ -126,6 +128,7 @@ class Reason(StrEnum):
     NO_KEY = "no_key"
     KEY_UNREADABLE = "key_unreadable"
     TEST_RATE_LIMITED = "test_rate_limited"
+    MODE_LOOSER_THAN_ORGANIZATION = "mode_looser_than_organization"
 
 
 # The only keys ``details`` may have, and the type of each value.
@@ -157,6 +160,8 @@ DETAIL_FIELDS: Mapping[str, type] = {
     "switch": str,
     "step_up_consumed": bool,
     "key_deleted": bool,
+    "old_mode": str,
+    "new_mode": str,
 }
 # gateway.egress.refusal's reasons for an address.
 _ADDRESS_REFUSALS = (
@@ -168,10 +173,16 @@ _ADDRESS_REFUSALS = (
     "reserved",
     "not_global",
 )
+# gateway.modes.Mode's values (docs/33).
+_MODES = frozenset(
+    {"local_only", "local_with_hosted_fallback", "hosted_primary_with_local_fallback"}
+)
 # The string details that take only these values.
 FIXED_VALUES: Mapping[str, frozenset[str]] = {
     "provider_type": frozenset({"openai_compatible", "anthropic"}),
     "switch": frozenset({"organization", "platform"}),
+    "old_mode": _MODES,
+    "new_mode": _MODES,
     # "ok", or the code a provider failure or refusal maps to (gateway.chat, docs/32).
     "outcome_code": frozenset(
         {
@@ -200,6 +211,7 @@ FIXED_VALUES: Mapping[str, frozenset[str]] = {
             "bad_address",
             "unix_socket",
             "not_https",
+            "local_only",
             *_ADDRESS_REFUSALS,
             *(f"embedded_{reason}" for reason in _ADDRESS_REFUSALS),
         }

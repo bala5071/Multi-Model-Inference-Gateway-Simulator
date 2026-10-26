@@ -12,7 +12,15 @@ from gateway.clock import Clock
 DEFAULT_MAX_EVENTS = 1000
 
 # Every type the bus accepts. The per-type counters are keyed by these, so they are bounded.
-EVENT_TYPES = ("state_change", "queue_full", "timeout", "downgrade", "budget_exhausted")
+EVENT_TYPES = (
+    "state_change",
+    "queue_full",
+    "timeout",
+    "downgrade",
+    "budget_exhausted",
+    # An organization provider's circuit breaker moved (docs/33).
+    "circuit_breaker",
+)
 
 
 @dataclass(frozen=True, slots=True)

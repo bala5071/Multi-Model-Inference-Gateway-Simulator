@@ -91,6 +91,8 @@ def test_a_backup_restores_the_database_exactly_as_it_was(tmp_path: Path) -> Non
         9,
         10,
         11,
+        12,
+        13,
     )
     restored.close()
 

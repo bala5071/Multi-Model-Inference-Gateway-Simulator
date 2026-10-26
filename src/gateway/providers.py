@@ -54,7 +54,7 @@ from gateway.chat import (
     ToolSpec,
 )
 from gateway.clock import Clock, EpochSource
-from gateway.egress import check_base_url
+from gateway.egress import check_base_url, egress_scope
 from gateway.management import ManagementRefusal, Stores
 from gateway.overload import RequestTimeoutError, run_with_timeout
 from gateway.permissions import Actor, Resource
@@ -331,6 +331,11 @@ class ProviderService:
     def __repr__(self) -> str:
         return "ProviderService(<vault redacted>)"
 
+    @property
+    def client_factory(self) -> Callable[[], httpx.AsyncClient]:
+        """A new guarded client for each call to an organization's provider (docs/33)."""
+        return self._client_factory
+
     def _now(self) -> float:
         return self._epoch.epoch_ms()
 
@@ -584,6 +589,14 @@ class ProviderService:
                 "reason": reason,
             }
 
+        # An org_admin asked for this probe of a hosted provider: fixed prompts, audited,
+        # whatever the organization's mode (docs/33). The guard's other rules still apply.
+        with egress_scope(lambda: True):
+            return await self._probe_under_scope(config, stored, flag)
+
+    async def _probe_under_scope(
+        self, config: ProviderConfig, stored: StoredKey, flag: Callable[..., dict[str, Any]]
+    ) -> dict[str, Any]:
         async with self._client_factory() as client:
             adapter = self.adapter(config, client)
             with self.vault.lease(stored.sealed, config.binding, self.redactor) as key:

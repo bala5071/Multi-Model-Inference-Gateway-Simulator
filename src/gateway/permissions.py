@@ -154,7 +154,7 @@ def _rows() -> list[Permission]:
         ("providers.test", o, (_ORG_ADMIN,), False, w.A5),
         ("provider_keys.set", o, (_ORG_ADMIN,), CONSUME, w.A5),
         ("provider_keys.delete", o, (_ORG_ADMIN,), CONSUME, w.A5),
-        ("mode.set_organization", o, (_ORG_ADMIN,), True, w.A5),
+        ("mode.set_organization", o, (_ORG_ADMIN,), CONSUME, w.A5),
         # The audit log: organization-, user-, role- and login-level entries.
         ("audit.read_organization", o, (_PLATFORM, _ORG_ADMIN), False, w.LATER),
         # Inside an application: never platform_admin.
@@ -182,7 +182,7 @@ def _rows() -> list[Permission]:
         # The audit log: entries about application keys and application roles.
         ("audit.read_application", a, in_app, False, w.LATER),
         # Modes (A5 step 3): an application may be stricter than its organization.
-        ("mode.set_application", a, in_app, True, w.A5),
+        ("mode.set_application", a, in_app, CONSUME, w.A5),
         # Monitoring, control and the Playground: local only until A8.
         ("monitoring.read", p, (_PLATFORM,), False, w.A8),
         ("control.write", p, (_PLATFORM,), False, w.A8),

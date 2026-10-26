@@ -797,7 +797,8 @@
       "queue_full": 2,
       "timeout": 0,
       "downgrade": 1,
-      "budget_exhausted": 0
+      "budget_exhausted": 0,
+      "circuit_breaker": 0
     },
     "recent": [
       {

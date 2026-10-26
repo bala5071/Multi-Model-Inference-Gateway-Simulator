@@ -471,7 +471,14 @@ def test_the_table_has_a_consume_column_and_it_always_means_step_up() -> None:
         "wired",
     ]
     consumed = {a for a, p in PERMISSIONS.items() if p.consume}
-    assert consumed == {"providers.delete", "provider_keys.set", "provider_keys.delete"}
+    assert consumed == {
+        "providers.delete",
+        "provider_keys.set",
+        "provider_keys.delete",
+        # Mode changes too, with the A5 step 3 request (docs/33).
+        "mode.set_organization",
+        "mode.set_application",
+    }
     assert all(PERMISSIONS[a].step_up for a in consumed)
 
 

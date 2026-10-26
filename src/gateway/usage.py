@@ -62,6 +62,17 @@ class ModelUsage:
 
 
 @dataclass(frozen=True, slots=True)
+class ChatSource:
+    """Which provider answered a chat request, its class, and the fallback that led there."""
+
+    provider: str
+    provider_class: str  # "local" or "hosted"
+    fallback_from: str | None = None
+    fallback_reason: str | None = None
+    usage_estimated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class UsageEvent:
     """What one settled request used. ``occurred_at_ms`` is epoch time (``EpochSource``)."""
 
@@ -75,6 +86,8 @@ class UsageEvent:
     base_cost_usd: float
     billed_cost_usd: float
     occurred_at_ms: float
+    # Where a chat answer came from (docs/33): None for /v1/generate. Never a URL.
+    source: ChatSource | None = None
 
     @classmethod
     def of(
@@ -85,6 +98,7 @@ class UsageEvent:
         model: str,
         billed_cost_usd: float,
         occurred_at_ms: float,
+        source: ChatSource | None = None,
     ) -> UsageEvent:
         return cls(
             application_id=application_id,
@@ -96,6 +110,7 @@ class UsageEvent:
             base_cost_usd=result.cost_usd,
             billed_cost_usd=billed_cost_usd,
             occurred_at_ms=occurred_at_ms,
+            source=source,
         )
 
 
@@ -202,19 +217,29 @@ class InMemoryUsageStore:
         return len(doomed)
 
 
-# In the order of UsageEvent's fields.
+# In the order of UsageEvent's fields, then its source's (migration 13).
 _COLUMNS = (
     "application_id, request_id, model, prompt_tokens, cached_tokens, completion_tokens, "
-    "base_cost_usd, billed_cost_usd, occurred_at_ms"
+    "base_cost_usd, billed_cost_usd, occurred_at_ms, "
+    "provider, provider_class, fallback_from, fallback_reason, usage_estimated"
 )
 
 
 def _event(row: Sequence[Any]) -> UsageEvent:
-    return UsageEvent(*row)
+    provider, provider_class, fallback_from, fallback_reason, estimated = row[9:]
+    source = (
+        ChatSource(provider, provider_class, fallback_from, fallback_reason, bool(estimated))
+        if provider is not None
+        else None
+    )
+    (application_id, request_id, model, prompt, cached, completion, base, billed, at) = row[:9]
+    return UsageEvent(
+        application_id, request_id, model, prompt, cached, completion, base, billed, at, source
+    )
 
 
 class SqliteUsageStore:
-    """Events in the ``usage_events`` table (migration 1).
+    """Events in the ``usage_events`` table (migrations 1 and 13).
 
     The connection comes from ``gateway.database.open_database`` and must already be
     migrated. Each append is one short autocommit transaction; it blocks the event loop
@@ -231,7 +256,8 @@ class SqliteUsageStore:
 
     def append(self, event: UsageEvent) -> int:
         cursor = self._connection.execute(
-            f"INSERT INTO usage_events ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO usage_events ({_COLUMNS})"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event.application_id,
                 event.request_id,
@@ -242,6 +268,17 @@ class SqliteUsageStore:
                 event.base_cost_usd,
                 event.billed_cost_usd,
                 event.occurred_at_ms,
+                *(
+                    (
+                        source.provider,
+                        source.provider_class,
+                        source.fallback_from,
+                        source.fallback_reason,
+                        int(source.usage_estimated),
+                    )
+                    if (source := event.source) is not None
+                    else (None, None, None, None, None)
+                ),
             ),
         )
         seq = cursor.lastrowid

@@ -1,6 +1,7 @@
-"""The egress guard: where the gateway may open a connection for an organization's provider.
+"""The egress guard: where the gateway may open a connection to a model provider.
 
-See docs/32-provider-settings-and-vault.md and docs/provider-plan.md, section 4.
+See docs/32-provider-settings-and-vault.md, docs/33-fallback-modes.md and docs/provider-plan.md,
+sections 4 and 5.
 
 An organization supplies a provider's base URL, so it could point the gateway at this machine,
 the network behind it, or a cloud metadata service (SSRF). Every connection to an organization
@@ -20,6 +21,16 @@ provider goes through one ``httpcore`` network backend, ``GuardedBackend``, whos
 
 There is no allow-list on this path: the operator's ``GATEWAY_PROVIDER_LOCAL_ALLOW`` is for the
 operator's own servers (docs/provider-plan.md, section 4) and is never consulted here.
+
+**Locality** (docs/33). A destination is *local* when its host and port are on the operator's
+list (``LocalDestinations``); everything else is *hosted*, every organization provider
+included. The same transport and backend refuse a hosted destination unless the current
+request's scope allows it (``egress_scope``): the router opens a scope for each chat request
+whose answer is asked again, through ``gateway.modes.effective_mode``, at every request sent and
+every connection opened, so a mode made stricter mid-request stops the next attempt. With no
+scope the guard refuses every hosted destination (fail closed). The operator's own adapters go
+through ``operator_client``: local destinations as configured (any scheme, no address check:
+they are the operator's own), hosted ones under every rule above.
 """
 
 from __future__ import annotations
@@ -27,7 +38,11 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
-from collections.abc import Awaitable, Callable, Iterable
+import ssl
+from collections.abc import Awaitable, Callable, Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -50,6 +65,90 @@ class EgressRefused(ProviderError):
 
     def __init__(self, reason: str) -> None:
         super().__init__(ProviderErrorCode.EGRESS_REFUSED, detail=reason)
+
+
+@dataclass(frozen=True, slots=True)
+class EgressScope:
+    """Whether the request in progress may reach a hosted destination now. Asked again at every
+    request and every connection, never remembered."""
+
+    may_reach_hosted: Callable[[], bool]
+
+
+_SCOPE: ContextVar[EgressScope | None] = ContextVar("gateway_egress_scope", default=None)
+
+
+@contextmanager
+def egress_scope(may_reach_hosted: Callable[[], bool]) -> Iterator[None]:
+    """Run the block (and the tasks it starts) under this answer to "may it go hosted?"."""
+    token = _SCOPE.set(EgressScope(may_reach_hosted))
+    try:
+        yield
+    finally:
+        _SCOPE.reset(token)
+
+
+def hosted_allowed() -> bool:
+    """Whether the current scope lets a request reach a hosted destination. No scope: no."""
+    scope = _SCOPE.get()
+    return scope is not None and scope.may_reach_hosted()
+
+
+def _host(name: str) -> str:
+    return name.strip("[]").lower().rstrip(".")
+
+
+@dataclass(frozen=True, slots=True)
+class LocalDestinations:
+    """The operator's local destinations, as (host, port). Never an organization's."""
+
+    destinations: frozenset[tuple[str, int]] = frozenset()
+
+    def contains(self, host: str, port: int) -> bool:
+        return (_host(host), port) in self.destinations
+
+    def contains_url(self, url: str) -> bool:
+        parts = urlsplit(url)
+        if not parts.hostname:
+            return False
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        return self.contains(parts.hostname, port)
+
+    @classmethod
+    def parse(cls, text: str) -> LocalDestinations:
+        """``host:port`` entries, comma-separated (``GATEWAY_PROVIDER_LOCAL_ALLOW``)."""
+        found: set[tuple[str, int]] = set()
+        for entry in (e.strip() for e in text.split(",")):
+            if not entry:
+                continue
+            host, sep, port = entry.rpartition(":")
+            if not sep or not host or not port.isdigit():
+                raise ValueError(f"a local destination is host:port, not {entry!r}")
+            found.add((_host(host), int(port)))
+        return cls(frozenset(found))
+
+    @classmethod
+    def loopback_of(cls, urls: Iterable[str]) -> LocalDestinations:
+        """The destinations among ``urls`` that are this machine (loopback)."""
+        found: set[tuple[str, int]] = set()
+        for url in urls:
+            parts = urlsplit(url)
+            host = _host(parts.hostname or "")
+            try:
+                loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                loopback = False
+            if loopback:
+                found.add((host, parts.port or (443 if parts.scheme == "https" else 80)))
+        return cls(frozenset(found))
+
+    def __or__(self, other: LocalDestinations) -> LocalDestinations:
+        return LocalDestinations(self.destinations | other.destinations)
+
+
+NO_LOCAL_DESTINATIONS = LocalDestinations()
+# The operator's own local destinations, host:port, comma-separated (docs/33).
+LOCAL_ALLOW_ENV = "GATEWAY_PROVIDER_LOCAL_ALLOW"
 
 
 def embedded_ipv4(address: Address) -> ipaddress.IPv4Address | None:
@@ -121,11 +220,18 @@ async def system_resolver(host: str, port: int) -> list[str]:
 
 
 class GuardedBackend(httpcore.AsyncNetworkBackend):
-    """Opens a TCP connection only to a checked, public address, and to that address."""
+    """Opens a TCP connection to a local destination of the operator's, or, when the request's
+    scope allows hosted, only to a checked, public address, and to that address."""
 
-    def __init__(self, resolver: Resolver, inner: httpcore.AsyncNetworkBackend | None = None):
+    def __init__(
+        self,
+        resolver: Resolver,
+        inner: httpcore.AsyncNetworkBackend | None = None,
+        local: LocalDestinations = NO_LOCAL_DESTINATIONS,
+    ):
         self._resolver = resolver
         self._inner = inner if inner is not None else httpcore.AnyIOBackend()
+        self._local = local
 
     async def connect_tcp(
         self,
@@ -135,6 +241,18 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
         local_address: str | None = None,
         socket_options: Iterable[Any] | None = None,
     ) -> httpcore.AsyncNetworkStream:
+        if self._local.contains(host, port):
+            # The operator's own destination, as configured.
+            return await self._inner.connect_tcp(
+                host,
+                port,
+                timeout=timeout,
+                local_address=local_address,
+                socket_options=socket_options,
+            )
+        # Hosted: refused before the name is even resolved unless the scope allows it now.
+        if not hosted_allowed():
+            raise EgressRefused("local_only")
         try:
             literal: Address | None = ipaddress.ip_address(host.strip("[]"))
         except ValueError:
@@ -160,6 +278,9 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
             if reason is not None:
                 raise EgressRefused(reason)
             addresses.append(address)
+        # Asked again now: resolving takes time, and the mode may have changed meanwhile.
+        if not hosted_allowed():
+            raise EgressRefused("local_only")
         # The checked address, not the name: a second resolution could answer differently.
         return await self._inner.connect_tcp(
             str(addresses[0]),
@@ -181,22 +302,49 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
         await self._inner.sleep(seconds)
 
 
-class OrganizationTransport(httpx.AsyncHTTPTransport):
-    """httpx's transport, with every connection through ``GuardedBackend`` and only https."""
+class GuardedTransport(httpx.AsyncHTTPTransport):
+    """httpx's transport, with every connection through ``GuardedBackend``. Each request is
+    checked too, so a pooled connection never carries one past the locality rule: a hosted
+    destination needs a scope that allows it now, and https."""
 
     def __init__(
-        self, resolver: Resolver, inner: httpcore.AsyncNetworkBackend | None = None
+        self,
+        resolver: Resolver,
+        inner: httpcore.AsyncNetworkBackend | None = None,
+        local: LocalDestinations = NO_LOCAL_DESTINATIONS,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
-        super().__init__(trust_env=False)
+        # One TLS context, given to httpx's own setup too, which would otherwise build another:
+        # building one loads the certificate bundle, which costs more than a whole request.
+        tls = ssl_context if ssl_context is not None else httpx.create_ssl_context()
+        super().__init__(verify=tls, trust_env=False)
+        self._local = local
         self._pool = httpcore.AsyncConnectionPool(
-            ssl_context=httpx.create_ssl_context(),
-            network_backend=GuardedBackend(resolver, inner),
+            ssl_context=tls,
+            network_backend=GuardedBackend(resolver, inner, local),
         )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        if request.url.scheme != "https":
-            raise EgressRefused("not_https")
+        url = request.url
+        port = url.port or (443 if url.scheme == "https" else 80)
+        if not self._local.contains(url.host, port):
+            if not hosted_allowed():
+                raise EgressRefused("local_only")
+            if url.scheme != "https":
+                raise EgressRefused("not_https")
         return await super().handle_async_request(request)
+
+
+class OrganizationTransport(GuardedTransport):
+    """The transport for an organization's provider: no local destination, ever."""
+
+    def __init__(
+        self,
+        resolver: Resolver,
+        inner: httpcore.AsyncNetworkBackend | None = None,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> None:
+        super().__init__(resolver, inner, NO_LOCAL_DESTINATIONS, ssl_context)
 
 
 def organization_client(
@@ -204,11 +352,30 @@ def organization_client(
     *,
     inner: httpcore.AsyncNetworkBackend | None = None,
     connect_timeout_s: float = 5.0,
+    ssl_context: ssl.SSLContext | None = None,
 ) -> httpx.AsyncClient:
     """The client an adapter uses for an organization's provider: guarded, no redirects, no
-    proxy from the environment."""
+    proxy from the environment. A new one is made for every call (docs/33), so the server
+    passes one ``ssl_context`` for all of them (``httpx.create_ssl_context()``, made once)."""
     return httpx.AsyncClient(
-        transport=OrganizationTransport(resolver, inner),
+        transport=OrganizationTransport(resolver, inner, ssl_context),
+        timeout=httpx.Timeout(None, connect=connect_timeout_s),
+        trust_env=False,
+        follow_redirects=False,
+    )
+
+
+def operator_client(
+    resolver: Resolver,
+    local: LocalDestinations,
+    *,
+    inner: httpcore.AsyncNetworkBackend | None = None,
+    connect_timeout_s: float = 5.0,
+) -> httpx.AsyncClient:
+    """The client for the operator's own adapters: its local destinations as configured, and
+    anything else under the hosted rules (the request's scope, https, public addresses)."""
+    return httpx.AsyncClient(
+        transport=GuardedTransport(resolver, inner, local),
         timeout=httpx.Timeout(None, connect=connect_timeout_s),
         trust_env=False,
         follow_redirects=False,

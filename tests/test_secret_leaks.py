@@ -544,3 +544,88 @@ async def test_a_set_key_request_body_is_logged_and_kept_nowhere(
     # The control: logged by mistake, it is found (it is not a known shape, and not watched).
     logging.getLogger("gateway").warning("oops, the body: %s", planted)
     assert find_leaks(corpus(), {"provider key": planted}) == [("log records", "provider key")]
+
+
+async def test_a_provider_key_through_routed_chat_with_failures_and_fallbacks(
+    caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Chat requests routed to an organization's providers (docs/33): the first fails with a
+    5xx whose body echoes its key and the second answers; one answers 401 echoing it (not a
+    fallback); one refuses the connection and the next answers; both refuse and the local
+    tier answers; streaming and not. Each provider's key (no credential shape, so the redaction
+    patterns cannot be what hides it) is in no response, log, audit row, usage row, event,
+    table or repr: only in the Authorization header of the requests sent to its provider. The
+    planted control is found."""
+    from mock_network import http_response
+    from test_chat_routing import (
+        PRIMARY,
+        TEXT,
+        refused,
+        routing,
+    )
+
+    key_a = "plain-routed-key-for-provider-a-0123456789"
+    key_b = "plain-routed-key-for-provider-b-9876543210"
+    caplog.set_level(logging.DEBUG)
+    responses: dict[str, str] = {}
+    async with routing() as r:
+        r.mode(PRIMARY)
+        a = "prv_00000000000000a1"
+        b = "prv_00000000000000b2"
+        r.provider(a, "a.provider.test", role="primary", key=key_a)
+        r.provider(b, "b.provider.test", role="primary", key=key_b)
+
+        def echo(status: str) -> bytes:
+            body = json.dumps({"error": {"message": f"key {key_a} rejected"}}).encode()
+            return http_response(body, status, Content_Type="application/json")
+
+        scripts: list[tuple[str, list[object], list[object], bool]] = [
+            ("5xx echoing the key, then b", [echo("500 Internal Server Error"), TEXT], [], False),
+            ("401 echoing the key", [echo("401 Unauthorized")], [], False),
+            ("refused, then b, streaming", [refused(), TEXT], [], True),
+            ("both refused, then local", [refused(), refused()], [TEXT], False),
+        ]
+        for name, hosted, local, stream in scripts:
+            r.org_net.responses = list(hosted)
+            r.op_net.responses = list(local)
+            responses[name] = _response(await r.chat(stream=stream))
+        connection = r.world.accounts.connection
+        objects: list[object] = [r.service, r.service.vault, r.router, r.router.breakers]
+        events = repr(r.bus.recent(100))
+        sent = [bytes(c.written) for c in r.org_net.connections]
+
+    def corpus() -> dict[str, str]:
+        out, err = capsys.readouterr()
+        texts = {
+            "logs": "\n".join(
+                f"{rec.name} {rec.getMessage()} {rec.args!r} {rec.exc_text or ''}"
+                for rec in caplog.records
+            ),
+            "stdout": out,
+            "stderr": err,
+            "events": events,
+            "reprs": "\n".join(repr(o) for o in objects),
+        }
+        for table in ("audit_log", "usage_events", "provider_configs", "modes"):
+            texts[table] = _table(connection, table, set())
+        texts["provider_keys"] = _table(connection, "provider_keys", {"nonce", "ciphertext"})
+        texts.update({f"response: {name}": text for name, text in responses.items()})
+        return texts
+
+    secrets = {"a's key": key_a, "b's key": key_b}
+    # Where they must be: each request to a provider carries its own key, and no other.
+    to_a = [s for s in sent if b"Host: a.provider.test" in s]
+    to_b = [s for s in sent if b"Host: b.provider.test" in s]
+    # Each script tries a first; a refused connection sends nothing, so a got two requests
+    # (the 5xx and the 401) and b two (it answered twice, and refused the last).
+    assert len(to_a) == 2
+    assert len(to_b) == 2
+    assert all(f"Bearer {key_a}".encode() in s and key_b.encode() not in s for s in to_a)
+    assert all(f"Bearer {key_b}".encode() in s and key_a.encode() not in s for s in to_b)
+    assert find_leaks(corpus(), secrets) == []
+    assert '"provider_auth_failed"' in responses["401 echoing the key"]
+    assert "'x-fallback-reason', 'upstream_5xx'" in responses["5xx echoing the key, then b"]
+    assert "'x-provider', 'local'" in responses["both refused, then local"]
+    # The control: logged by mistake, it is found.
+    logging.getLogger("gateway").warning("oops: %s", key_b)
+    assert find_leaks(corpus(), secrets) == [("logs", "b's key")]

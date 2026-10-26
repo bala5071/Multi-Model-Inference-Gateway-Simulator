@@ -249,7 +249,7 @@ The table it comes from, and what each relation means, are in docs/28-roles.md.
 | app_admin | n/a | n/a | n/a | n/a | deny |
 | viewer | n/a | deny | n/a | n/a | deny |
 
-## `mode.set_organization` (level organization, wired A5, step-up)
+## `mode.set_organization` (level organization, wired A5, step-up, consume)
 
 | role | platform | own_organization | application_in_own_organization | own_application | other |
 |---|---|---|---|---|---|
@@ -357,7 +357,7 @@ The table it comes from, and what each relation means, are in docs/28-roles.md.
 | app_admin | n/a | n/a | n/a | allow | deny |
 | viewer | n/a | n/a | deny | deny | deny |
 
-## `mode.set_application` (level application, wired A5, step-up)
+## `mode.set_application` (level application, wired A5, step-up, consume)
 
 | role | platform | own_organization | application_in_own_organization | own_application | other |
 |---|---|---|---|---|---|
