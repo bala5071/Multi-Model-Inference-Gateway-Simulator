@@ -1,6 +1,6 @@
 # Provider plan, A5: provider adapters, the chat endpoint, the key vault and fallback modes
 
-Status: **approved 2026-10-22**; PR 1 built (`provider/step-1`), PR 2 being built (`provider/step-2`), with the answers and changes folded in below (it handles
+Status: **approved 2026-10-22**; PR 1 and PR 2 merged (PR 2 through #18, 2026-10-26); PR 3 being built (`provider/step-3`, from `main` at `9bebfa5`), with the answers and changes folded in below (it handles
 secrets and opens a new network surface: the gateway starts calling hosts an organization
 chooses). Branch `provider/step-1`, from `main` at `b5787ec` (identity step 7 merged). Identity
 steps 8 and 9 come after A5; each A5 pull request's note has its own threat-model section, and
@@ -485,10 +485,65 @@ success within budget. Monitoring still only watches: the breaker lives with the
 
 `PUT /v1/admin/orgs/{org}/mode` (`mode.set_organization`) and
 `PUT /v1/admin/orgs/{org}/applications/{app}/mode` (`mode.set_application`), through
-`requires()` with step-up (not consume), audited with the old and new mode. Note 33 and the
+`requires()` with **consume-on-use** step-up (changed with the PR 3 request: each mode change
+needs its own password, like a key change), audited with the old and new mode. Note 33 and the
 README say, plainly: **a mode other than `local_only` sends prompts, and tool definitions and
 results, to a third party the organization chose, under that third party's terms**; the gateway
 stores none of it (hard rule 7), but the provider may.
+
+### PR 3: additions with the request, and details settled before building
+
+Added with the request (2026-10-26):
+
+1. **Where an answer came from** is a response header, `X-Provider-Class: local | hosted` (a
+   class, never a URL), beside `X-Provider` (`local`, or the provider's id), and the same in the
+   usage record (`provider_class`).
+2. **The effective mode is computed in one place** (`gateway.modes.effective_mode`), and a test
+   fails if any path reaches a hosted provider when it is `local_only`: after a fallback, a
+   retry, a circuit-breaker reset, and a mode change while a request is in flight.
+3. **A mutation check for each trigger** (connection error, 5xx, first-token budget, open
+   breaker, invalid tool JSON) and each "never" rule (never after the first output reaches the
+   client, never another tier, never a model outside the plan).
+4. **The planted-key leak scan** runs a full chat request routed to an organization provider,
+   with a provider failure and a fallback.
+5. **The egress guard on every call path** to an organization provider, and the locality rule on
+   the operator's own adapters.
+6. **The added cost per chat request**, measured with a mock provider, hardware recorded, ranges
+   over three runs.
+7. **Mode changes** through `requires()` with consume-on-use step-up, audited (above).
+
+Settled before building, so they can be objected to:
+
+1. **An application's mode defaults to `local_only`**, as in the table above: hosted serving
+   needs both the organization and the application to opt in, so an organization switching
+   modes never moves its applications' prompts by itself.
+2. **What is local.** A destination is local when its host and port are on the operator's list:
+   `GATEWAY_PROVIDER_LOCAL_ALLOW` (`host:port`, comma-separated) plus, by default, the loopback
+   destinations in the operator's own backends file (they are on this machine). The simulator is
+   local. Everything else is hosted, an operator tier at a public URL included. The list is never
+   consulted for an organization's provider.
+3. **The guard checks the current effective mode**, not a copy taken when the request started:
+   the router sets a per-request scope (a context variable) that asks `effective_mode` again at
+   each request the transport sends and at each connection it opens. A mode made stricter while a
+   request is in flight therefore stops its next candidate; an answer already streaming from a
+   hosted provider is not cut (the prompt has already been sent), and nothing after it is tried.
+4. **Fail closed**: with no scope set, the guard refuses every hosted destination. Test-connection
+   sets an explicit probe scope (an org_admin's request to send fixed probe prompts, audited),
+   whatever the mode.
+5. **A fresh client for every attempt** at an organization provider, so a pooled connection can
+   never carry a request past the connect-time check; the operator's client keeps its pool, and
+   its locality check runs per request as well as per connection.
+6. **Candidates**: a provider is a candidate when it serves the routed tier, both its switches
+   are on, and it has a key. An unreadable key or an open breaker skips it and is recorded as the
+   reason (`key_unreadable`, `circuit_open`). Only the plan's five triggers move to the next
+   candidate; a full local queue (429) and the request's own overall timeout do not.
+7. **The breaker** is kept for organization providers, per (organization, provider); the local
+   tier keeps its own queue and timeouts.
+8. **The cost of a hosted answer** is computed from the organization's own prices for that
+   provider (0 when it has none), never from placeholder prices.
+9. **Measured** in process with a scripted network (no sockets): a chat request routed to an
+   organization provider, against the same request served by an operator tier on the same
+   scripted network, and with the first candidate failing at once.
 
 ## 6. What does not change
 
