@@ -369,6 +369,11 @@ These apply to every task without being repeated.
   as the first commit and continue.
 - The next step may start from the previous branch once its CI is green. Say clearly which PRs
   must be merged in which order.
+- When a PR is stacked on another branch, state its base at the top of the description and in
+  the report. Before the user merges, run `gh pr view <n> --json baseRefName` and say whether the
+  base is `main`; a PR is never described as ready to merge unless its base is `main`. When a
+  base PR merges, retarget the next PR at once (`gh pr edit <n> --base main`), check its CI
+  again, and report.
 
 **Definition of done** (real output shown, never summarized): ruff, the format check, mypy, the
 full pytest, `scripts/check_characters.py`, protected outputs with `--include-images`, the perf
