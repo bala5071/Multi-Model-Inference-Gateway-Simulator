@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from benchmarks import (
     baseline_limits,
+    chat_routing,
     chunked_prefill,
     compare_batching,
     fairness,
@@ -265,3 +266,11 @@ async def test_whole_report_builds_with_every_section(
     # Every figure the text points at was written.
     for name in ("1-batching", "2-prefix-cache"):
         assert f"![{name}.png](report/{name}.png)" in text
+
+
+@pytest.mark.parametrize("case", chat_routing.CASES)
+async def test_chat_routing_benchmark_serves_each_case_as_described(case: str) -> None:
+    """Each case answers 200 from the provider it says (the benchmark checks it), on the real
+    egress guard with scripted providers; the timing itself is not tested."""
+    times = await chat_routing._case(case, 1)
+    assert len(times) == 1

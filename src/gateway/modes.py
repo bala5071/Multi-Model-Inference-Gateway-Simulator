@@ -172,6 +172,7 @@ class ModeService:
         details: dict[str, object] = {
             "old_mode": change.previous.value,
             "new_mode": change.mode.value,
+            "step_up_consumed": True,
         }
         if ORGANIZATION_ID_PATTERN.fullmatch(organization_id):
             details["organization_id"] = organization_id

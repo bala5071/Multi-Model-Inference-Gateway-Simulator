@@ -1,12 +1,13 @@
 """A network for the egress guard to connect through, in tests: no sockets.
 
 ``ScriptedNetwork`` is an ``httpcore`` network backend. Each connection gets the next scripted
-item: a raw HTTP response, an exception raised on connecting (a refused connection, a connect
-timeout), ``HANG`` (a server that accepts and never answers: on a ``SimClock`` the loop goes
-idle and time moves to the next timeout), or a ``Gate`` that waits for the test before going on.
-It records the address the guard connected to, the TLS host name, and every byte written (the
-request, headers included). A fake resolver answers names from a table, and can change its
-answer between calls (DNS rebinding). Test values, not secrets.
+item: a raw HTTP response; an exception raised on connecting (a refused connection, a connect
+timeout); ``Breaks`` (part of an answer, then the connection breaks); ``HANG`` (a server that
+accepts and never answers: on a ``SimClock`` the loop goes idle and time moves to the next
+timeout); or a ``Gate`` that waits for the test before going on. It records the address the
+guard connected to, the TLS host name, and every byte written (the request, headers included).
+A fake resolver answers names from a table, and can change its answer between calls (DNS
+rebinding). Test values, not secrets.
 """
 
 from __future__ import annotations
@@ -68,7 +69,24 @@ class HangingStream(RecordingStream):
         return b""
 
 
+class BreakingStream(RecordingStream):
+    """Sends what it was given, then the connection breaks."""
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:  # noqa: ASYNC109
+        data = await super().read(max_bytes, timeout)
+        if not data:
+            raise httpcore.ReadError("connection reset")
+        return data
+
+
 HANG = object()
+
+
+@dataclass(frozen=True)
+class Breaks:
+    """A response whose connection breaks after ``data`` (output already sent)."""
+
+    data: bytes
 
 
 @dataclass
@@ -80,7 +98,7 @@ class Gate:
     opened: asyncio.Event = field(default_factory=asyncio.Event)
 
 
-Scripted = bytes | Exception | Gate | object
+Scripted = bytes | Exception | Gate | Breaks | object
 
 
 @dataclass
@@ -113,6 +131,8 @@ class ScriptedNetwork(httpcore.AsyncNetworkBackend):
             raise item
         if item is HANG:
             return HangingStream(connection)
+        if isinstance(item, Breaks):
+            return BreakingStream([item.data], connection)
         assert isinstance(item, bytes)
         return RecordingStream([item[i : i + 512] for i in range(0, len(item), 512)], connection)
 

@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
+import httpx
 from fastapi import Depends, FastAPI, Header, Query, Request, Response
 from fastapi import Path as Path_
 from fastapi.exceptions import RequestValidationError
@@ -3039,6 +3040,8 @@ def create_default_app() -> FastAPI:
     local = LocalDestinations.parse(os.environ.get(LOCAL_ALLOW_ENV, "")) | (
         LocalDestinations.loopback_of(s.url for s in backends.servers.values())
     )
+    # One TLS context for every organization client (one is made per call, docs/33).
+    tls = httpx.create_ssl_context()
     if backends.kind == "llamacpp":
         registry = build_llamacpp_registry(backends, clock)
         chat_adapters = build_chat_adapters(
@@ -3074,7 +3077,7 @@ def create_default_app() -> FastAPI:
             clock,
             epoch,
             Redactor(),
-            lambda: organization_client(system_resolver),
+            lambda: organization_client(system_resolver, ssl_context=tls),
         ),
         modes=SqliteModeStore(database),
         local_destinations=local,

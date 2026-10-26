@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+import ssl
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -277,6 +278,9 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
             if reason is not None:
                 raise EgressRefused(reason)
             addresses.append(address)
+        # Asked again now: resolving takes time, and the mode may have changed meanwhile.
+        if not hosted_allowed():
+            raise EgressRefused("local_only")
         # The checked address, not the name: a second resolution could answer differently.
         return await self._inner.connect_tcp(
             str(addresses[0]),
@@ -308,11 +312,15 @@ class GuardedTransport(httpx.AsyncHTTPTransport):
         resolver: Resolver,
         inner: httpcore.AsyncNetworkBackend | None = None,
         local: LocalDestinations = NO_LOCAL_DESTINATIONS,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
-        super().__init__(trust_env=False)
+        # One TLS context, given to httpx's own setup too, which would otherwise build another:
+        # building one loads the certificate bundle, which costs more than a whole request.
+        tls = ssl_context if ssl_context is not None else httpx.create_ssl_context()
+        super().__init__(verify=tls, trust_env=False)
         self._local = local
         self._pool = httpcore.AsyncConnectionPool(
-            ssl_context=httpx.create_ssl_context(),
+            ssl_context=tls,
             network_backend=GuardedBackend(resolver, inner, local),
         )
 
@@ -331,9 +339,12 @@ class OrganizationTransport(GuardedTransport):
     """The transport for an organization's provider: no local destination, ever."""
 
     def __init__(
-        self, resolver: Resolver, inner: httpcore.AsyncNetworkBackend | None = None
+        self,
+        resolver: Resolver,
+        inner: httpcore.AsyncNetworkBackend | None = None,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
-        super().__init__(resolver, inner, NO_LOCAL_DESTINATIONS)
+        super().__init__(resolver, inner, NO_LOCAL_DESTINATIONS, ssl_context)
 
 
 def organization_client(
@@ -341,11 +352,13 @@ def organization_client(
     *,
     inner: httpcore.AsyncNetworkBackend | None = None,
     connect_timeout_s: float = 5.0,
+    ssl_context: ssl.SSLContext | None = None,
 ) -> httpx.AsyncClient:
     """The client an adapter uses for an organization's provider: guarded, no redirects, no
-    proxy from the environment."""
+    proxy from the environment. A new one is made for every call (docs/33), so the server
+    passes one ``ssl_context`` for all of them (``httpx.create_ssl_context()``, made once)."""
     return httpx.AsyncClient(
-        transport=OrganizationTransport(resolver, inner),
+        transport=OrganizationTransport(resolver, inner, ssl_context),
         timeout=httpx.Timeout(None, connect=connect_timeout_s),
         trust_env=False,
         follow_redirects=False,

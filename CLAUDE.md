@@ -62,12 +62,23 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `redaction.py` — `Redactor` and `install`: a log-record factory that scrubs leased key values
   and credential patterns from every record; installed by the server's lifespan (exists)
 - `egress.py` — the egress guard for organization providers: https only, every resolved address
-  public, the socket connects to the checked address, no redirects, no proxy (exists)
+  public, the socket connects to the checked address, no redirects, no proxy; and the locality
+  rule (`LocalDestinations`, `GATEWAY_PROVIDER_LOCAL_ALLOW`): a hosted destination only under a
+  request scope (`egress_scope`) that allows it when asked, at every request and connection;
+  fail closed without one; `operator_client` for the operator's own adapters (exists)
 - `providers.py` — `ProviderConfig`, `ProviderStore` over migrations 10 and 11, `ProviderService`
   (create, update, the organization's and the platform's switches, keys, test-connection with
   probing, `key_unreadable`) and `resolve_provider` (exists)
 - `chatservice.py` — `ChatService`: one chat request on one tier, through the simulator or the
   tier's adapter, first-token and total timeouts on the injected clock, cancellation (exists)
+- `modes.py` — `Mode`, `effective_mode` (the only place the mode is decided: the stricter of the
+  organization's and the application's), the mode stores over migration 12, and `ModeService`
+  (consume-on-use, audited) (exists)
+- `chatrouter.py` — `ChatRouter`: a chat request's candidates (the tier, the organization's
+  providers for that tier) in the mode's order, the five fallback triggers, never after output,
+  never another tier; `X-Provider-Class` and the usage record's source (exists)
+- `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
+  warning, on the injected clock, `circuit_breaker` events (exists)
 - `passthrough.py` — `PassthroughWorker`: forwards to a backend that does its own
   batching and only times the result; the pair for `LlamaCppBackend` (exists)
 - `backend_config.py` + `backends.yaml` — which backend to use and where each tier's
@@ -151,7 +162,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   it and checks them; `plan_migrations` previews without writing; the server refuses a
   rebuild on a database with data, `scripts/manage.py migrate` backs up first); 5 `users`, 6
   `sessions`, 7 `audit_log`, 8 `role_assignments` and `app_roles` (a rebuild of `users` without
-  `platform_admin`), 9 `sessions.step_up_until_ms`, 10 `provider_configs`, 11 `provider_keys`. The default database is in the user's data folder,
+  `platform_admin`), 9 `sessions.step_up_until_ms`, 10 `provider_configs`, 11 `provider_keys`,
+  12 `modes`, 13 the chat source columns of `usage_events`. The default database is in the user's data folder,
   owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
   `restore_database` use SQLite's backup API (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),
@@ -230,6 +242,9 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   server, against the mock directly; the numbers in `docs/31` (exists)
 - `benchmarks/provider_requests.py` — a vault decrypt, the egress check, and provider admin
   requests on the running server; the numbers in `docs/32` (exists)
+- `benchmarks/chat_routing.py` — a chat request routed to an organization's provider, against
+  the operator's tier, and with a fallback, in process on scripted providers; the numbers in
+  `docs/33` (exists)
 - `benchmarks/management_requests.py` — management reads and key writes on the running
   server, beside `/healthz` and `/v1/auth/me`; the numbers in `docs/30` (exists)
 

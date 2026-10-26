@@ -1,0 +1,156 @@
+# 33. Fallback modes: routing chat to organization providers
+
+A5, pull request 3 (docs/provider-plan.md, section 5, with the request's additions and the
+details settled before building). Chat requests can now be served by an organization's own
+providers (note 32), when the organization and the application both allow it.
+
+**A mode other than `local_only` sends prompts, and tool definitions and results, to a third
+party the organization chose, under that third party's terms.** The gateway stores none of it
+(CLAUDE.md hard rule 7); the provider may.
+
+## Modes
+
+| Mode | May contact | Order of candidates |
+|---|---|---|
+| `local_only` (the default) | local destinations only | the tier |
+| `local_with_hosted_fallback` | local, then hosted | the tier, then the organization's `fallback` providers |
+| `hosted_primary_with_local_fallback` | hosted, then local | the organization's `primary` providers, then the tier |
+
+An organization and each application have a mode; both default to `local_only`, so hosted
+serving needs both to opt in. An application may be as strict as its organization or stricter;
+a looser one is refused (409 `mode_looser_than_organization`). **`effective_mode`** (in
+`gateway.modes`) is the only function that decides which mode applies, the stricter of the two;
+a test fails if any other module defines it or compares modes. When an organization becomes
+stricter, its applications follow without their stored values changing.
+
+Modes are in a table of their own (migration 12): no row means `local_only`. A table rather than
+a column on `organizations` and `applications`, so neither applying nor reversing it rebuilds a
+table that foreign keys refer to.
+
+## What is local
+
+A destination is **local** when its host and port are on the operator's list:
+`GATEWAY_PROVIDER_LOCAL_ALLOW` (`host:port`, comma-separated) plus, by default, the loopback
+destinations in the operator's own backends file. The simulator is local. Everything else is
+**hosted**: every organization provider, and an operator tier configured at a destination not
+on the list. The list is never consulted for an organization's provider (tested: under a scope
+that allows hosted, an organization client's `localhost` is still refused as loopback).
+
+## Candidates and fallback
+
+The candidates of a request are the tier it was routed to (`X-Provider: local`) and the
+organization's providers **serving that tier** that are enabled (both switches) and have a key,
+in the mode's order. A provider known not to take tools is left out of a request with tools; if
+none is left, 422 `tools_not_supported`. With no candidate the mode allows, 503
+`no_local_provider`.
+
+The router moves to the next candidate only on these:
+
+| Trigger | `X-Fallback-Reason` |
+|---|---|
+| A connection error (refused, reset, DNS failure, a connect timeout, the guard refusing) | `connect_error` |
+| A 5xx | `upstream_5xx` |
+| No first token within the budget (`first_token_budget_ms`, 10 s for a hosted provider by default; the tier's own first-token timeout for local) | `first_token_budget` |
+| The provider's circuit breaker is open (skipped, never contacted) | `circuit_open` |
+| Tool-call arguments that are not a JSON object: one retry on the same candidate, then the next | `invalid_tool_json` |
+| The provider's key cannot be read (skipped, never contacted) | `key_unreadable` |
+
+Not on 401/403 (answered `provider_auth_failed`), 429 (passed through), any other 4xx, a full
+local queue (429 `queue_full`) or the request's own overall timeout.
+
+**What never happens**, each with a test and a mutation:
+
+- **Never after output has started.** The first delta passed on closes fallback for that
+  request, streaming or not: a failure after it is the request's failure (in a stream, an error
+  event and no `[DONE]`). So a request is never answered, or charged, twice.
+- **Never another tier.** Only providers serving the routed tier are candidates; the request is
+  passed on unchanged.
+- **Never a model outside the plan.** The plan decides the tier before any candidate is
+  considered; a provider serving a tier outside the plan changes nothing.
+
+## Where the answer came from
+
+Every chat answer says `X-Provider` (`local` for the gateway's tier, or the provider's id) and
+`X-Provider-Class` (`local` or `hosted`): a class, never a URL. After a fallback,
+`X-Fallback-From` (the first candidate) and `X-Fallback-Reason` (why it was left). A streamed
+answer has them too: they are known when the first output is sent. The usage record keeps the
+same (migration 13: `provider`, `provider_class`, `fallback_from`, `fallback_reason`,
+`usage_estimated`; NULL for `/v1/generate`). A hosted answer is charged at the organization's
+own prices for that provider (0 when it has none), never at placeholder prices.
+
+## Local-only, enforced twice, asked live
+
+1. **The router** keeps hosted candidates out of a `local_only` request, and asks the mode again
+   before every candidate.
+2. **The egress guard** (note 32) refuses a hosted destination unless the request's scope allows
+   it: the router opens a scope whose answer is asked again, through `effective_mode`, at every
+   request the transport sends, every connection it opens, and again after the name is resolved.
+   With no scope, every hosted destination is refused (fail closed). Test-connection opens an
+   explicit probe scope: an org_admin's request to send fixed probe prompts, audited.
+
+So a mode made stricter while a request is in flight stops its next attempt (tested both at the
+router and at the guard, where the mode changes while the name is being resolved; the second
+test found the guard asked only before resolving, fixed). An answer already streaming from a
+hosted provider is not cut: the prompt has already been sent. Every attempt at an organization
+provider uses a new client, so no pooled connection carries a request past these checks; the
+server gives them all one TLS context, because building one loads the certificate bundle (about
+300 ms each on this machine before the fix, measured below).
+
+**The test that local_only reaches nothing hosted**: hosted providers configured for the tier, the
+local tier failing every way that would be a trigger in another mode (refused, 5xx, no first
+token, invalid tool JSON twice), a provider's breaker just reset to half-open, streaming and
+not: not one connection to a hosted address, not one hosted name resolved.
+
+## Circuit breaker and the slow-provider warning
+
+Per (organization, provider), in memory, on the injected clock: **open** after 5 consecutive
+trigger failures, for 30 s, doubling while probes fail, up to 5 minutes; **half-open** lets one
+request through (a request cancelled meanwhile frees the slot); **closed** again after 2
+consecutive successes. Each transition is a `circuit_breaker` event (docs/15); the router owns
+the breakers, monitoring only shows the events. A provider that misses its first-token budget 3
+times in a row is flagged in `GET .../providers` and `.../providers/status` (`slow_since_ms`,
+`consecutive_misses`), cleared by an answer within budget; `GET .../providers` also shows
+`circuit` (the breaker's state).
+
+## Mode endpoints
+
+| Method and path (under `/v1/admin/orgs/{org}`) | Action | Who |
+|---|---|---|
+| `PUT /mode` | `mode.set_organization` | org_admin |
+| `PUT /applications/{app}/mode` | `mode.set_application` | app_admin of it, org_admin |
+
+Body `{"mode": "..."}`. Through `requires` with **consume-on-use** step-up (note 32): each change
+needs its own password; a change refused before it is made (409) gives the window back. Each is
+audited (`mode_changed`, with `old_mode`, `new_mode` and `step_up_consumed`) in the same
+transaction as the change. A missing organization or application and a forbidden one get the same
+answer, byte for byte. The application answer includes its `effective_mode`.
+
+## Measured
+
+PENDING
+
+## Threat model (this step)
+
+For step 9's `docs/threat-model.md`:
+
+- **Hosted modes send prompts to a third party** the organization chose; the gateway cannot
+  control what that provider keeps. Both the organization and the application must opt in.
+- **A provider key is decrypted for each hosted call**, only inside the vault's lease around
+  that one call, after the mode, the plan, the breaker and the candidate checks. The leak scan
+  runs full routed requests (a 5xx echoing the key with a fallback, a 401 echoing it, refused
+  connections, a fallback to local, streaming): the keys appear only in the Authorization header
+  of the requests to their own provider.
+- **The operator's local list is trusted**: anything on it is treated as this machine's. An
+  operator who lists a remote host makes it "local" for every organization.
+- **Timing**: a fallback is visible to the client in its headers and in latency; the reason is a
+  fixed word, never a provider's text.
+- **Breakers are per process** and start closed after a restart.
+
+## Not built
+
+- A user interface for modes; reading a mode back other than in the answer to setting it.
+- Fallback between hosted providers of different organizations (never: candidates are the
+  organization's own).
+- Retrying a failed hosted request on the same provider beyond the one retry for invalid tool
+  JSON.
+- An operator allow-list for redirects (none are followed).
