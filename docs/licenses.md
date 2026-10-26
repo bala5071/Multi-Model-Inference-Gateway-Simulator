@@ -81,3 +81,24 @@ them.
 
 It replaced SecLists' `10k-most-common.txt` (commit `913b3273`), of whose 10,001 entries only
 10 had 12 or more characters.
+
+## Test data (not shipped)
+
+### OpenAI chat-completions wire examples
+
+| | |
+|---|---|
+| Files | `tests/fixtures/openai_wire/chat_completions.json`, `tests/fixtures/openai_wire/LICENSE-openai-openapi.txt` |
+| Source | OpenAI's published API description, `openapi.json` in `github.com/openai/openai-openapi` |
+| URL | https://github.com/openai/openai-openapi/blob/234829e2b634b8fb159df7fcddbffad204173ffd/openapi.json |
+| Commit | `234829e2b634b8fb159df7fcddbffad204173ffd` (2026-10-07, at least two weeks old when taken) |
+| sha256 of the source file | `dde9abb7f7ca1e260fa05b4828984851e77f35ab89f60d0f7bbc1f44859f4724` |
+| What is stored | Only the documented examples "Default", "Streaming" and "Functions" of `POST /chat/completions` (request bodies, responses, stream chunks), unchanged, and the `required` field lists of the response, chunk, message, tool-call, usage and error schemas |
+| License | MIT, Copyright (c) OpenAI; the license text is beside the fixture |
+| Used by | `tests/test_chat_api.py`, which checks the gateway's chat endpoint against them (docs/31) |
+
+## Considered and not added
+
+| Package | Why not | Evidence |
+|---|---|---|
+| `openai` 3.26.0 (dev only, for testing the chat endpoint with the official SDK) | Its required `httpx2` and `httpcore2` could not be shown to be canonical: no PyPI provenance attestation for either, no `httpcore2` repository, not mentioned by `encode/httpx`, and released days apart. The rule for this case is not to add it, so the OpenAI wire format is tested with plain `httpx` against the documented examples above | `docs/provider-plan.md`, section 8 (metadata, hashes, attestation and repository checks of 2026-10-22) |

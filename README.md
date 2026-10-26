@@ -363,6 +363,101 @@ Hardware needs, the Llama license, and what changes in this mode are in
 [docs/12-real-models.md](docs/12-real-models.md). The model weights are under Meta's Llama
 license, which is not an open-source license.
 
+### Try the chat endpoint with Ollama
+
+`POST /v1/chat/completions` ([docs/31](docs/31-chat-and-adapters.md)) serving the gateway's
+three tiers through a local Ollama, with tools. In Git Bash (or any bash), from the repository,
+with Ollama running (`ollama serve`) and the three tier models pulled (`ollama pull
+llama3.2:1b-instruct-q4_K_M && ollama pull llama3.2:3b && ollama pull llama3.1:8b`).
+
+What it needs: the backends file `examples/backends.ollama.yaml` (every tier at
+`http://127.0.0.1:11434`, `chat_api: ollama`), named by `GATEWAY_BACKENDS`; a database
+(`GATEWAY_DATABASE`, here a throwaway folder); the pepper (`GATEWAY_KEY_PEPPER`); and a first
+admin (`GATEWAY_ADMIN_USERNAME`, `GATEWAY_ADMIN_PASSWORD`), which the server needs to start. The
+secrets are generated into variables, never typed, so they are not in the shell's history, and
+never written to a file. The application key is read silently (`read -rs`) into a variable that
+is not exported.
+
+```sh
+# 1. A throwaway folder for the database, and secrets generated into variables.
+TRY=$(mktemp -d)
+export GATEWAY_DATABASE="$TRY/gateway.db"
+export GATEWAY_BACKENDS=examples/backends.ollama.yaml
+export GATEWAY_KEY_PEPPER=$(uv run python -c "import secrets; print(secrets.token_urlsafe(32))")
+export GATEWAY_ADMIN_USERNAME=admin
+export GATEWAY_ADMIN_PASSWORD=$(uv run python -c "import secrets; print(secrets.token_urlsafe(24))")
+
+# 2. The demo applications, and a key for Acme (enterprise: every tier), read silently.
+uv run python scripts/manage.py seed-demo
+IFS= read -rs KEY < <(uv run python scripts/manage.py create-key --application acme --label try-it)
+
+# 3. Start the gateway; every tier's chat goes to the local Ollama.
+uv run python -m gateway.serve --port 8000 &
+SERVER=$!
+until curl -sf http://127.0.0.1:8000/healthz > /dev/null; do sleep 1; done
+
+# 4. A plain chat request (economy: llama3.2:1b-instruct-q4_K_M), with the headers.
+curl -s -D - -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model": "economy", "messages": [{"role": "user", "content": "Say hello in five words."}], "max_tokens": 16}'
+
+# 5. Streamed: text arrives chunk by chunk, then the usage, then data: [DONE].
+curl -s -N -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model": "economy", "messages": [{"role": "user", "content": "Count to five."}], "max_tokens": 16, "stream": true, "stream_options": {"include_usage": true}}'
+
+# 6. A tool with tool_choice auto: the answer is a tool call, finish_reason "tool_calls".
+curl -s -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model": "economy", "messages": [{"role": "user", "content": "What is the weather in Paris? Use the tool."}], "tools": [{"type": "function", "function": {"name": "get_weather", "description": "Current weather for a city", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}], "tool_choice": "auto"}'
+
+# 7. An unsupported field: 422 unsupported_field, naming it.
+curl -s -w '\nHTTP %{http_code}\n' -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model": "economy", "messages": [{"role": "user", "content": "hi"}], "n": 2}'
+
+# 8. A wrong key: 401 invalid_api_key, the same answer for every bad key.
+curl -s -w '\nHTTP %{http_code}\n' -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer gwk_0000000000000000_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "economy", "messages": [{"role": "user", "content": "hi"}]}'
+
+# 9. tool_choice required: Ollama cannot be made to call a tool, so 422 tools_not_supported
+#    (tool_choice_not_supported), before anything is sent to Ollama.
+curl -s -w '\nHTTP %{http_code}\n' -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model": "economy", "messages": [{"role": "user", "content": "Weather in Paris?"}], "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}], "tool_choice": "required"}'
+
+# 10. Clean up: stop the gateway, forget the secrets, remove the folder. Nothing is left.
+kill $SERVER; wait $SERVER 2> /dev/null
+unset KEY SERVER GATEWAY_KEY_PEPPER GATEWAY_ADMIN_USERNAME GATEWAY_ADMIN_PASSWORD GATEWAY_DATABASE GATEWAY_BACKENDS
+rm -rf "$TRY"; unset TRY
+```
+
+What to look at, from a run on this machine (Ollama 0.12.6; the text is the model's and varies):
+
+- **4**: `HTTP/1.1 200 OK`, `x-model-used: economy`, `x-provider: local`, and
+  `"finish_reason":"stop"` with `"usage":{"prompt_tokens":31,"completion_tokens":10,...}` (the
+  counts are Ollama's; `x-usage-estimated: true` would say they were estimated). No
+  `x-cost-usd`: chat is priced only with prices an organization enters.
+- **5**: a first chunk `{"role": "assistant", "content": ""}`, then one chunk per piece of text,
+  a chunk with `"finish_reason": "stop"`, one with `"choices": []` and the usage, then
+  `data: [DONE]`.
+- **6**: `"content":null`, `"tool_calls":[{"id":"call_...","type":"function","function":
+  {"name":"get_weather","arguments":"{\"city\": \"Paris\"}"}}]`, `"finish_reason":"tool_calls"`.
+  The id is the gateway's: Ollama gives none.
+- **7**: `{"error":{"message":"The field 'n' is not supported by this gateway.",
+  "type":"invalid_request_error","param":"n","code":"unsupported_field"}}`, `HTTP 422`.
+- **8**: `{"error":{"message":"The API key is not valid.","type":"authentication_error",
+  "param":null,"code":"invalid_api_key"}}`, `HTTP 401`.
+- **9**: `{"error":{"message":"This model cannot be used with tools here.
+  (tool_choice_not_supported)",...,"code":"tools_not_supported"}}`, `HTTP 422`.
+
+If Ollama is not running, steps 4 to 6 answer `502` with `upstream_unavailable` (`connect`).
+Wire compatibility was checked against OpenAI's published API description and its recorded
+examples; no client library has been run against the endpoint
+([docs/31](docs/31-chat-and-adapters.md)).
+
 ## Curl demo
 
 With the server running and `GATEWAY_API_KEY` set as in the [Quickstart](#the-server)
@@ -395,6 +490,12 @@ curl -s -X POST http://127.0.0.1:8000/v1/generate -H "Content-Type: application/
 # Streaming, one event per token.
 curl -s -N -X POST http://127.0.0.1:8000/v1/generate -H "$KEY" -H "Content-Type: application/json" \
   -d '{"model": "economy", "prompt": "hello", "max_tokens": 4, "stream": true}'
+
+# The same tiers in the OpenAI chat format (docs/31): an OpenAI-compatible client can use
+# http://127.0.0.1:8000/v1 as its base URL with the key. Tools need a tier served by a real model.
+curl -s -X POST http://127.0.0.1:8000/v1/chat/completions -H "$KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "economy", "messages": [{"role": "user", "content": "hello"}], "max_tokens": 8}'
 
 # What this application has used this month, and the gateway's own view of latency and load.
 curl -s http://127.0.0.1:8000/v1/applications/me/usage -H "$KEY"

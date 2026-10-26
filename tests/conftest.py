@@ -12,6 +12,8 @@ from gateway.passwords import CHEAP, MEMORY_ENV, PARALLELISM_ENV, TIME_COST_ENV
 from helpers import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME, TEST_PEPPER
 
 REAL_MODELS_ENV = "GATEWAY_REAL_MODELS"
+# Live calls to hosted providers (docs/31): never in CI, never by default.
+LIVE_PROVIDERS_ENV = "GATEWAY_LIVE_PROVIDERS"
 
 
 def pytest_report_header(config: pytest.Config) -> str:
@@ -20,17 +22,22 @@ def pytest_report_header(config: pytest.Config) -> str:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Skip tests marked ``real_models`` unless they were asked for.
+    """Skip tests marked ``real_models`` or ``live_provider`` unless they were asked for.
 
     They need model servers running on this machine (see docs/12-real-models.md), which CI
     does not have. Run them with ``GATEWAY_REAL_MODELS=1 uv run pytest -m real_models``.
     """
-    if os.environ.get(REAL_MODELS_ENV) == "1":
-        return
-    skip = pytest.mark.skip(reason=f"needs real model servers; set {REAL_MODELS_ENV}=1 to run")
+    real = os.environ.get(REAL_MODELS_ENV) == "1"
+    live = os.environ.get(LIVE_PROVIDERS_ENV) == "1"
+    skip_real = pytest.mark.skip(reason=f"needs real model servers; set {REAL_MODELS_ENV}=1 to run")
+    skip_live = pytest.mark.skip(
+        reason=f"calls a hosted provider and can cost money; set {LIVE_PROVIDERS_ENV}=1 to run"
+    )
     for item in items:
-        if "real_models" in item.keywords:
-            item.add_marker(skip)
+        if "real_models" in item.keywords and not real:
+            item.add_marker(skip_real)
+        if "live_provider" in item.keywords and not live:
+            item.add_marker(skip_live)
 
 
 @pytest.fixture(autouse=True)

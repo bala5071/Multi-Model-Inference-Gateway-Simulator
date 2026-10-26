@@ -95,8 +95,13 @@ def test_every_launch_command_uses_the_launcher() -> None:
 def test_the_readme_makes_its_admin_password_at_run_time_and_keeps_it_out_of_git() -> None:
     readme = (REPO / "README.md").read_text(encoding="utf-8")
     assignments = re.findall(r"GATEWAY_ADMIN_PASSWORD=[^\n]*", readme)
-    # The only one prints a random value when the quickstart runs; no password is written down.
-    assert assignments == ["GATEWAY_ADMIN_PASSWORD=' + secrets.token_urlsafe(24))\" >> gateway.env"]
+    # Each makes a random value when it runs (the quickstart's into gateway.env, "Try the chat
+    # endpoint" into a variable); no password is written down.
+    assert assignments == [
+        "GATEWAY_ADMIN_PASSWORD=' + secrets.token_urlsafe(24))\" >> gateway.env",
+        'GATEWAY_ADMIN_PASSWORD=$(uv run python -c "import secrets; '
+        'print(secrets.token_urlsafe(24))")',
+    ]
     ignored = subprocess.run(
         ["git", "check-ignore", "--no-index", "-q", "gateway.env"], cwd=REPO, check=False
     )

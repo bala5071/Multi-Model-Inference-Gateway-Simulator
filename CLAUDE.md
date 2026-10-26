@@ -48,6 +48,15 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `backends/llamacpp.py` — `LlamaCppBackend`: a real model behind llama-server or Ollama,
   over the OpenAI-compatible streaming API; optional `sampling` fields such as
   temperature (exists)
+- `chat.py` — the one chat format (messages, tools, tool calls, deltas, usage, capabilities
+  with their source) and `ProviderError`, the fixed codes every provider failure maps to (exists)
+- `secret.py` — `Secret`: a credential whose `repr`, `str` and format are redacted; `reveal()`
+  only in `adapters/http.py`'s `credential_headers` (an AST test) (exists)
+- `adapters/` — `OllamaAdapter`, `OpenAICompatibleAdapter`, `AnthropicAdapter`: `Backend`s that
+  speak the chat format; `http.py` holds the client (no redirects, no proxy), the credential
+  header and the status mapping; the credential is passed to each call, never held (exists)
+- `chatservice.py` — `ChatService`: one chat request on one tier, through the simulator or the
+  tier's adapter, first-token and total timeouts on the injected clock, cancellation (exists)
 - `passthrough.py` — `PassthroughWorker`: forwards to a backend that does its own
   batching and only times the result; the pair for `LlamaCppBackend` (exists)
 - `backend_config.py` + `backends.yaml` — which backend to use and where each tier's
@@ -205,6 +214,8 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   write; the numbers in `docs/27` (exists)
 - `benchmarks/key_checks.py` — times a key check, and what writing `last_used_at` per
   request would add; the numbers in `docs/20-applications-api-keys.md` (exists)
+- `benchmarks/chat_overhead.py` — the chat endpoint in front of a mock provider on the running
+  server, against the mock directly; the numbers in `docs/31` (exists)
 - `benchmarks/management_requests.py` — management reads and key writes on the running
   server, beside `/healthz` and `/v1/auth/me`; the numbers in `docs/30` (exists)
 
