@@ -886,6 +886,24 @@ class AccountService:
         )
         raise StepUpRequiredError()
 
+    def claim_step_up(self, context: SessionContext, action: str) -> float:
+        """For ``requires`` and an action the table marks consume-on-use (docs/32): use up this
+        session's window, or audit and raise ``StepUpRequiredError`` if none is open. Returns the
+        window's end, to give back if the action fails before changing anything."""
+        claimed = self.store.claim_step_up(context.session.id_hash, self._now())
+        if claimed is None:
+            self._record(
+                self._session_event(
+                    AuditAction.STEP_UP_REQUIRED, Outcome.FAILURE, context, action=action
+                )
+            )
+            raise StepUpRequiredError()
+        return claimed
+
+    def restore_step_up(self, context: SessionContext, until_ms: float) -> None:
+        """Give back a window claimed for an action that failed before changing anything."""
+        self.store.restore_step_up(context.session.id_hash, until_ms)
+
     # --- login ---------------------------------------------------------------------------
 
     async def login(self, username: str, password: str) -> LoginResult:

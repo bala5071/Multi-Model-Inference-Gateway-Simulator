@@ -214,6 +214,7 @@ exists, and must change its password at its first login. `gateway.env` is git-ig
 ```sh
 uv sync
 uv run python -c "import secrets; print('GATEWAY_KEY_PEPPER=' + secrets.token_urlsafe(32))" > gateway.env
+uv run python -c "import secrets; print('GATEWAY_VAULT_KEY=' + secrets.token_urlsafe(32))" >> gateway.env
 uv run python -c "import secrets; print('GATEWAY_ADMIN_USERNAME=admin'); print('GATEWAY_ADMIN_PASSWORD=' + secrets.token_urlsafe(24))" >> gateway.env
 set -a; . ./gateway.env; set +a
 ```
@@ -277,8 +278,10 @@ Then open <http://127.0.0.1:8000/docs>. The dashboard is at `/dashboard/` once i
 been built (`cd frontend && npm ci && npm run build`, Node 20;
 [docs/16-dashboard.md](docs/16-dashboard.md)). More keys, rotation, revocation, backup and
 restore: `uv run python scripts/manage.py --help` and [docs/21](docs/21-persistence.md).
-A backup holds key HMACs and password hashes: never commit one (`*.db` is git-ignored), and
-keep it where only you can read it (it is created owner-only on Linux and macOS).
+A backup holds key HMACs, password hashes and the organizations' provider keys sealed under
+`GATEWAY_VAULT_KEY`: never commit one (`*.db` is git-ignored), keep it where only you can read
+it (it is created owner-only on Linux and macOS), and never store it with the master key or the
+pepper, or the env file that holds them.
 
 Applications belong to organizations ([docs/26](docs/26-organizations.md)). The ones above
 are in `default`, which every database has; others are created with the CLI. Application
@@ -346,6 +349,15 @@ These endpoints never take a password: creating a user or resetting one returns 
 password once, which must be changed at the first login; a new key is returned once too. Roles
 and organizations stay in the CLI.
 
+An organization's admin can configure the organization's own model providers (any
+OpenAI-compatible endpoint, or Anthropic) and give the gateway their keys, under
+`/v1/admin/orgs/{org}/providers` ([docs/32](docs/32-provider-settings-and-vault.md)). Keys are
+encrypted with the master key `GATEWAY_VAULT_KEY` (the server refuses to start without it; keep
+it apart from the database: if it is lost, every provider key must be entered again), never
+returned, and each change needs a fresh password. Provider URLs must be public `https` hosts.
+Testing a provider's connection spends tokens on the organization's account with it. Until the
+fallback modes of the next step, chat is still served only by the gateway's own tiers.
+
 ### Real-model mode
 
 1. Get three models running, either as three llama.cpp servers
@@ -372,18 +384,23 @@ llama3.2:1b-instruct-q4_K_M && ollama pull llama3.2:3b && ollama pull llama3.1:8
 
 What it needs: the backends file `examples/backends.ollama.yaml` (every tier at
 `http://127.0.0.1:11434`, `chat_api: ollama`), named by `GATEWAY_BACKENDS`; a database
-(`GATEWAY_DATABASE`, here a throwaway folder); the pepper (`GATEWAY_KEY_PEPPER`); and a first
+(`GATEWAY_DATABASE`, here a throwaway folder from `mktemp -d`, removed by a trap that names
+exactly that folder if the shell exits early); the pepper (`GATEWAY_KEY_PEPPER`); the vault's
+master key (`GATEWAY_VAULT_KEY`, [docs/32](docs/32-provider-settings-and-vault.md)); and a first
 admin (`GATEWAY_ADMIN_USERNAME`, `GATEWAY_ADMIN_PASSWORD`), which the server needs to start. The
 secrets are generated into variables, never typed, so they are not in the shell's history, and
 never written to a file. The application key is read silently (`read -rs`) into a variable that
 is not exported.
 
 ```sh
-# 1. A throwaway folder for the database, and secrets generated into variables.
-TRY=$(mktemp -d)
+# 1. A throwaway folder for the database, removed on exit by a trap naming exactly it (the
+#    path is expanded now, so the trap removes that folder whatever TRY holds later), and
+#    secrets generated into variables.
+TRY=$(mktemp -d) && trap "rm -rf -- '$TRY'" EXIT
 export GATEWAY_DATABASE="$TRY/gateway.db"
 export GATEWAY_BACKENDS=examples/backends.ollama.yaml
 export GATEWAY_KEY_PEPPER=$(uv run python -c "import secrets; print(secrets.token_urlsafe(32))")
+export GATEWAY_VAULT_KEY=$(uv run python -c "import secrets; print(secrets.token_urlsafe(32))")
 export GATEWAY_ADMIN_USERNAME=admin
 export GATEWAY_ADMIN_PASSWORD=$(uv run python -c "import secrets; print(secrets.token_urlsafe(24))")
 
@@ -429,9 +446,9 @@ curl -s -w '\nHTTP %{http_code}\n' -X POST http://127.0.0.1:8000/v1/chat/complet
   -d '{"model": "economy", "messages": [{"role": "user", "content": "Weather in Paris?"}], "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}], "tool_choice": "required"}'
 
 # 10. Clean up: stop the gateway, forget the secrets, remove the folder. Nothing is left.
-kill $SERVER; wait $SERVER 2> /dev/null
-unset KEY SERVER GATEWAY_KEY_PEPPER GATEWAY_ADMIN_USERNAME GATEWAY_ADMIN_PASSWORD GATEWAY_DATABASE GATEWAY_BACKENDS
-rm -rf "$TRY"; unset TRY
+kill $SERVER; wait $SERVER 2> /dev/null || true
+unset KEY SERVER GATEWAY_KEY_PEPPER GATEWAY_VAULT_KEY GATEWAY_ADMIN_USERNAME GATEWAY_ADMIN_PASSWORD GATEWAY_DATABASE GATEWAY_BACKENDS
+rm -rf -- "$TRY"; trap - EXIT; unset TRY
 ```
 
 What to look at, from a run on this machine (Ollama 0.12.6; the text is the model's and varies):

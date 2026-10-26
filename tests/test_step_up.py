@@ -150,7 +150,7 @@ def _window(accounts: Accounts, session: tuple[str, str]) -> float | None:
 
 
 async def test_every_flagged_action_needs_step_up_and_passes_with_it(accounts: Accounts) -> None:
-    assert len(FLAGGED) == 19
+    assert len(FLAGGED) == 24
     async with console(accounts) as c:
         for action in FLAGGED:
             session = await c.login(_who(action))
@@ -460,15 +460,19 @@ def test_local_only_route_refuses_a_flagged_action() -> None:
     local_only_route("monitoring.read")  # not flagged: fine
 
 
-def test_the_table_has_no_consume_column_yet() -> None:
-    # Consume-on-use (docs/29) is for A5; adding it must be a deliberate change to this test.
+def test_the_table_has_a_consume_column_and_it_always_means_step_up() -> None:
+    # Consume-on-use (docs/29, built in A5, docs/32): added deliberately; this pins the fields.
     assert [f.name for f in dataclasses.fields(Permission)] == [
         "action",
         "level",
         "allowed",
         "step_up",
+        "consume",
         "wired",
     ]
+    consumed = {a for a, p in PERMISSIONS.items() if p.consume}
+    assert consumed == {"providers.delete", "provider_keys.set", "provider_keys.delete"}
+    assert all(PERMISSIONS[a].step_up for a in consumed)
 
 
 def _app_source_violations(source: str) -> list[str]:
@@ -551,8 +555,8 @@ def test_migration_9_adds_the_column_and_its_reverse_keeps_every_session(tmp_pat
         " 'usr_0000000000000001', 'c', 1, 2, 3)"
     )
     before = connection.execute("SELECT * FROM sessions").fetchall()
-    assert runner.migrate() == (9,)
-    assert runner.migrate() == ()
+    assert runner.migrate(9) == (9,)
+    assert runner.migrate(9) == ()
     assert connection.execute("SELECT step_up_until_ms FROM sessions").fetchall() == [(None,)]
     assert runner.rollback(8) == (9,)
     assert connection.execute("SELECT * FROM sessions").fetchall() == before

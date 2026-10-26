@@ -176,6 +176,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             **environ,
             "GATEWAY_DATABASE": str(path),
             "GATEWAY_KEY_PEPPER": secrets.token_urlsafe(32),
+            "GATEWAY_VAULT_KEY": secrets.token_urlsafe(32),
         }
         process = subprocess.Popen(
             [sys.executable, "-m", "gateway.serve", "--port", str(port), "--log-level", "warning"],

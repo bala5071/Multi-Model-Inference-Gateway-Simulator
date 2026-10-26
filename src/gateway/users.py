@@ -278,6 +278,33 @@ class AccountStore:
             "UPDATE sessions SET step_up_until_ms = ? WHERE id_hash = ?", (until_ms, id_hash)
         )
 
+    def claim_step_up(self, id_hash: str, now_ms: float) -> float | None:
+        """Use up this session's open step-up window (consume-on-use, docs/32): read it and
+        close it in one write transaction, so two requests cannot both claim it. Returns the
+        window's end, or None if no window was open."""
+        with self.immediate():
+            row = self._connection.execute(
+                "SELECT step_up_until_ms FROM sessions WHERE id_hash = ? AND revoked = 0"
+                " AND step_up_until_ms > ?",
+                (id_hash, now_ms),
+            ).fetchone()
+            if row is None:
+                return None
+            self._connection.execute(
+                "UPDATE sessions SET step_up_until_ms = NULL WHERE id_hash = ?", (id_hash,)
+            )
+            return float(row[0])
+
+    def restore_step_up(self, id_hash: str, until_ms: float) -> bool:
+        """Give a claimed window back, only if nothing has opened or closed it since and the
+        session is still live. Returns whether it was given back."""
+        cursor = self._connection.execute(
+            "UPDATE sessions SET step_up_until_ms = ? WHERE id_hash = ? AND revoked = 0"
+            " AND step_up_until_ms IS NULL",
+            (until_ms, id_hash),
+        )
+        return cursor.rowcount == 1
+
     def clear_step_up(self, user_id: str) -> int:
         """Close the step-up window of every session of ``user_id``. Returns how many."""
         cursor = self._connection.execute(

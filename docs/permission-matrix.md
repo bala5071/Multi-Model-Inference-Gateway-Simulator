@@ -159,6 +159,105 @@ The table it comes from, and what each relation means, are in docs/28-roles.md.
 | app_admin | n/a | n/a | n/a | n/a | deny |
 | viewer | n/a | allow | n/a | n/a | deny |
 
+## `providers.list` (level organization, wired A5)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
+## `providers.status` (level organization, wired A5)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | allow | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
+## `providers.create` (level organization, wired A5, step-up)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
+## `providers.update` (level organization, wired A5, step-up)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
+## `providers.disable` (level organization, wired A5, step-up)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | allow | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
+## `providers.enable` (level organization, wired A5, step-up)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | allow | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
+## `providers.delete` (level organization, wired A5, step-up, consume)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
+## `providers.test` (level organization, wired A5)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
+## `provider_keys.set` (level organization, wired A5, step-up, consume)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
+## `provider_keys.delete` (level organization, wired A5, step-up, consume)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
+## `mode.set_organization` (level organization, wired A5, step-up)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
 ## `audit.read_organization` (level organization, wired later)
 
 | role | platform | own_organization | application_in_own_organization | own_application | other |
@@ -258,43 +357,7 @@ The table it comes from, and what each relation means, are in docs/28-roles.md.
 | app_admin | n/a | n/a | n/a | allow | deny |
 | viewer | n/a | n/a | deny | deny | deny |
 
-## `provider_keys.add` (level application, wired A5, step-up)
-
-| role | platform | own_organization | application_in_own_organization | own_application | other |
-|---|---|---|---|---|---|
-| platform_admin | deny | n/a | n/a | n/a | n/a |
-| org_admin | n/a | n/a | allow | n/a | deny |
-| app_admin | n/a | n/a | n/a | allow | deny |
-| viewer | n/a | n/a | deny | deny | deny |
-
-## `provider_keys.replace` (level application, wired A5, step-up)
-
-| role | platform | own_organization | application_in_own_organization | own_application | other |
-|---|---|---|---|---|---|
-| platform_admin | deny | n/a | n/a | n/a | n/a |
-| org_admin | n/a | n/a | allow | n/a | deny |
-| app_admin | n/a | n/a | n/a | allow | deny |
-| viewer | n/a | n/a | deny | deny | deny |
-
-## `provider_keys.delete` (level application, wired A5, step-up)
-
-| role | platform | own_organization | application_in_own_organization | own_application | other |
-|---|---|---|---|---|---|
-| platform_admin | deny | n/a | n/a | n/a | n/a |
-| org_admin | n/a | n/a | allow | n/a | deny |
-| app_admin | n/a | n/a | n/a | allow | deny |
-| viewer | n/a | n/a | deny | deny | deny |
-
-## `provider_keys.read` (level application, wired A5)
-
-| role | platform | own_organization | application_in_own_organization | own_application | other |
-|---|---|---|---|---|---|
-| platform_admin | deny | n/a | n/a | n/a | n/a |
-| org_admin | n/a | n/a | allow | n/a | deny |
-| app_admin | n/a | n/a | n/a | allow | deny |
-| viewer | n/a | n/a | deny | deny | deny |
-
-## `mode.change` (level application, wired A5, step-up)
+## `mode.set_application` (level application, wired A5, step-up)
 
 | role | platform | own_organization | application_in_own_organization | own_application | other |
 |---|---|---|---|---|---|

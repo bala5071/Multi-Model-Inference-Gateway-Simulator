@@ -33,6 +33,8 @@ docs/26-organizations.md and docs/30-management-endpoints.md.
     uv run python scripts/manage.py list-keys --application shop
     uv run python scripts/manage.py backup --to /backups/gateway-2025-06-01.db
     uv run python scripts/manage.py restore --from /backups/gateway-2025-06-01.db
+    uv run python scripts/manage.py rotate-vault-key
+    uv run python scripts/manage.py vault-drop-unreadable
 
 The database is GATEWAY_DATABASE (default: the user's local data folder, outside the working
 tree), the one the server reads; it is created owner-only and migrated if needed. Before a
@@ -94,10 +96,18 @@ from gateway.passwords import (
     parameters_from,
 )
 from gateway.permissions import PLATFORM_SCOPE_ID, ScopeType
+from gateway.providers import ProviderStore
 from gateway.roles import RoleStore
 from gateway.routing import PlansConfig, load_plans
 from gateway.usage import SqliteUsageStore
 from gateway.users import AccountStore
+from gateway.vault import (
+    VAULT_KEY_ENV,
+    VAULT_KEY_PREVIOUS_ENV,
+    Vault,
+    VaultKeyError,
+    load_master_keys,
+)
 
 DAY_MS = 24 * 60 * 60 * 1000.0
 HOUR_MS = 60 * 60 * 1000.0
@@ -273,6 +283,39 @@ def _management(
     return ManagementService(keys, templates, AuditLog(connection), epoch)
 
 
+def _rotate_vault_key(connection: sqlite3.Connection, database: Path, env: dict[str, str]) -> str:
+    """Re-seal every provider key sealed under the previous master key under the current one,
+    in one transaction, after a backup (docs/32). Keys under neither are left as they are and
+    reported: they are unreadable."""
+    vault = Vault(*load_master_keys(env))
+    if not env.get(VAULT_KEY_PREVIOUS_ENV):
+        raise ValueError(
+            f"set {VAULT_KEY_PREVIOUS_ENV} to the old master key and {VAULT_KEY_ENV} to the new"
+        )
+    epoch = SystemEpoch()
+    target = database.with_name(f"{database.name}.before-vault-rotation-{epoch.epoch_ms():.0f}.db")
+    backup_database(connection, target)
+    check_backup(target)
+    providers = ProviderStore(connection)
+    resealed, unreadable = 0, []
+    with providers.immediate():
+        for stored in providers.all_keys():
+            if stored.sealed.key_id == vault.current_key_id:
+                continue
+            config = providers.get(stored.provider_id)
+            if config is None or not vault.readable(stored.sealed):
+                unreadable.append(stored.provider_id)
+                continue
+            providers.put_key(
+                stored.provider_id, vault.reseal(stored.sealed, config.binding), epoch.epoch_ms()
+            )
+            resealed += 1
+    note = f"backed up to {target}; re-sealed {resealed} provider key(s) under the new master key"
+    if unreadable:
+        note += f"; unreadable, left as they were: {', '.join(unreadable)}"
+    return note + f". Remove {VAULT_KEY_PREVIOUS_ENV} and restart the server."
+
+
 ACCOUNT_COMMANDS = frozenset(
     {
         "create-user",
@@ -434,6 +477,15 @@ def main(
         "backup", help="a consistent copy of the database, safe while the server runs"
     )
     backup.add_argument("--to", type=Path, required=True, help="a new file; never overwritten")
+    commands.add_parser(
+        "rotate-vault-key",
+        help="re-seal every provider key under GATEWAY_VAULT_KEY; the old master key is "
+        "GATEWAY_VAULT_KEY_PREVIOUS (a backup first)",
+    )
+    commands.add_parser(
+        "vault-drop-unreadable",
+        help="delete provider keys no loaded master key can read (they are lost; re-enter them)",
+    )
     restore = commands.add_parser(
         "restore", help="replace the database with a backup; the server must be stopped"
     )
@@ -531,6 +583,18 @@ def main(
                 f"created application {args.id!r} on plan {args.plan!r} in organization "
                 f"{args.organization!r}"
             )
+        elif args.command == "rotate-vault-key":
+            _note(_rotate_vault_key(connection, database_path(env), env))
+        elif args.command == "vault-drop-unreadable":
+            vault = Vault(*load_master_keys(env))
+            providers = ProviderStore(connection)
+            dropped = 0
+            for stored in providers.all_keys():
+                if not vault.readable(stored.sealed):
+                    providers.delete_key(stored.provider_id)
+                    dropped += 1
+                    _note(f"dropped the unreadable key of provider {stored.provider_id}")
+            _note(f"{dropped} unreadable key(s) dropped")
         elif args.command == "list-keys":
             for key in store.list_keys(args.application):
                 print(_describe(key))
@@ -561,6 +625,7 @@ def main(
         FileExistsError,
         PasswordPolicyError,
         NotPermittedError,
+        VaultKeyError,
     ) as exc:
         _note(f"error: {exc}")
         return 1

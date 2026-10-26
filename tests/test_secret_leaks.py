@@ -4,6 +4,7 @@ docs/27-users-and-sessions.md."""
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import sys
@@ -307,3 +308,239 @@ async def test_no_temporary_password_or_issued_key_leaks_and_the_scan_would_see_
         ("logs", "temporary password, reset"),
         ("stdout", "issued key"),
     ]
+
+
+# --- provider keys through the vault (docs/32) ---------------------------------------------------
+
+
+async def test_a_provider_key_appears_only_in_the_requests_that_carry_it(
+    caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A key set through the admin endpoint, used by test-connection against a provider that
+    answers, one that answers 401 echoing the key (as real providers do), one whose stream
+    breaks, and four it never reaches (a blocked address, a refused connection, a timeout, a
+    name that does not resolve): it is in no response, log, audit row, table (other than
+    sealed), repr or output.
+    The planted control is found; with the redaction layer installed it is scrubbed."""
+    import httpcore
+
+    from gateway.redaction import install
+    from mock_network import http_response, sse_response
+    from mock_providers import openai_text, openai_tools
+    from test_providers_api import HOST, KEY, NEW, PUBLIC, rig
+
+    caplog.set_level(logging.DEBUG)
+    responses: dict[str, str] = {}
+    async with rig(tests_per_hour=10) as r:
+        alice = await r.login("alice")
+        await r.step_up(alice)
+        made = await r.call(alice, "POST", "/north/providers", NEW)
+        provider_id = made.json()["provider_id"]
+        await r.step_up(alice)
+        responses["set key"] = _response(
+            await r.call(alice, "PUT", f"/north/providers/{provider_id}/key", {"key": KEY})
+        )
+        echo = json.dumps({"error": {"message": f"Incorrect API key provided: {KEY}"}}).encode()
+        broken = sse_response(openai_text("He", "llo").chunks)[:-40]
+        r.network.responses = [
+            sse_response(openai_text("OK").chunks),
+            sse_response(openai_tools(("call_1", "ping", ["{}"])).chunks),
+            sse_response(openai_text("pong").chunks),
+            http_response(echo, "401 Unauthorized", Content_Type="application/json"),
+            broken,
+        ]
+        for name in ("test ok", "test 401", "test broken"):
+            responses[name] = _response(
+                await r.call(alice, "POST", f"/north/providers/{provider_id}/test")
+            )
+        unreached = [
+            ("test blocked", ["10.0.0.7"], None, False),
+            ("test refused", [PUBLIC], httpcore.ConnectError("refused"), False),
+            ("test timeout", [PUBLIC], httpcore.ConnectTimeout("timed out"), False),
+            ("test dns", [PUBLIC], None, True),
+        ]
+        for name, addresses, failure, missing in unreached:
+            r.resolver.table[HOST] = addresses
+            r.network.failure = failure
+            if missing:
+                r.resolver.missing.add(HOST)
+            responses[name] = _response(
+                await r.call(alice, "POST", f"/north/providers/{provider_id}/test")
+            )
+        responses["list"] = _response(await r.call(alice, "GET", "/north/providers"))
+        responses["status"] = _response(await r.call(alice, "GET", "/north/providers/status"))
+        connection = r.world.accounts.connection
+        objects = [
+            r.service,
+            r.service.vault,
+            r.store.get(provider_id),
+            r.store.get_key(provider_id),
+        ]
+        sent = b"".join(bytes(c.written) for c in r.network.connections)
+
+    def corpus() -> dict[str, str]:
+        out, err = capsys.readouterr()
+        texts = {
+            "logs": "\n".join(
+                f"{rec.name} {rec.getMessage()} {rec.args!r} {rec.exc_text or ''}"
+                for rec in caplog.records
+            ),
+            "stdout": out,
+            "stderr": err,
+            "audit_log": _table(connection, "audit_log", set()),
+            "provider_configs": _table(connection, "provider_configs", set()),
+            "provider_keys": _table(connection, "provider_keys", {"nonce", "ciphertext"}),
+            "reprs": "\n".join(repr(o) for o in objects),
+        }
+        texts.update({f"response: {name}": text for name, text in responses.items()})
+        return texts
+
+    # Where it must be: the Authorization header of each request test-connection sent.
+    assert sent.count(f"Bearer {KEY}".encode()) == 5  # 3 for the good test, 1 each after
+    assert find_leaks(corpus(), {"provider key": KEY}) == []
+    assert '"provider_auth_failed"' in responses["test 401"]
+    for name in ("test blocked", "test refused", "test timeout", "test dns"):
+        assert '"provider_unreachable"' in responses[name], name
+
+    # The control: logged by mistake, it is found.
+    logging.getLogger("gateway").warning("oops, logged: %s", KEY)
+    assert find_leaks(corpus(), {"provider key": KEY}) == [("logs", "provider key")]
+    # With the redaction layer installed (as the server does), the same mistake is scrubbed.
+    caplog.clear()
+    remove = install(r.service.redactor)
+    try:
+        logging.getLogger("gateway").warning("oops, logged: %s", KEY)
+    finally:
+        remove()
+    assert find_leaks(corpus(), {"provider key": KEY}) == []
+    assert "[redacted]" in caplog.records[0].getMessage()
+
+
+async def test_a_set_key_request_body_is_logged_and_kept_nowhere(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The set-key body, served by a real uvicorn server with its access and error logs (as
+    uvicorn formats them): accepted, refused in each way a body can be refused, refused before
+    the key is used (the body is still read and parsed), and failing with a traceback while
+    being stored. The planted key
+    is in no log record, access or error log line, response, audit row, table or traceback.
+    It has no credential shape, so the redaction patterns cannot be what hides it; the
+    planted control is found."""
+    import io
+    from dataclasses import replace as replaced
+
+    import uvicorn
+    from uvicorn.logging import AccessFormatter, DefaultFormatter
+
+    from test_providers_api import NEW, rig
+
+    planted = "plain-provider-key-for-body-scan-0123456789"
+    caplog.set_level(logging.DEBUG)
+    streams = {"uvicorn access log": io.StringIO(), "uvicorn error log": io.StringIO()}
+    handlers = {
+        "uvicorn.access": logging.StreamHandler(streams["uvicorn access log"]),
+        "uvicorn.error": logging.StreamHandler(streams["uvicorn error log"]),
+    }
+    handlers["uvicorn.access"].setFormatter(
+        AccessFormatter('%(client_addr)s - "%(request_line)s" %(status_code)s', use_colors=False)
+    )
+    handlers["uvicorn.error"].setFormatter(DefaultFormatter("%(levelprefix)s %(message)s"))
+    for name, handler in handlers.items():
+        logging.getLogger(name).addHandler(handler)
+    responses: dict[str, str] = {}
+    try:
+        async with rig() as r:
+            config = uvicorn.Config(r.app, host="127.0.0.1", port=0, log_config=None)
+            config.load()
+            server = uvicorn.Server(config)
+            server.lifespan = config.lifespan_class(config)
+            await server.startup()  # bound and the app's lifespan run (redaction installed)
+            port = server.servers[0].sockets[0].getsockname()[1]
+            try:
+                async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
+                    live = replaced(r, client=client)
+                    alice = await live.login("alice")
+                    await live.step_up(alice)
+                    made = await live.call(alice, "POST", "/north/providers", NEW)
+                    path = f"/v1/admin/orgs/north/providers/{made.json()['provider_id']}/key"
+                    missing = "/v1/admin/orgs/north/providers/prv_00000000000000ff/key"
+
+                    async def put(
+                        name: str, content: str, step_up: bool = True, to: str = path
+                    ) -> None:
+                        if step_up:
+                            await live.step_up(alice)
+                        response = await client.put(
+                            to,
+                            content=content,
+                            headers={
+                                "Cookie": f"gw_session={alice[0]}",
+                                "X-CSRF-Token": alice[1],
+                                "Content-Type": "application/json",
+                            },
+                        )
+                        responses[name] = _response(response)
+
+                    await put("accepted", json.dumps({"key": planted}))
+                    await put("extra field", json.dumps({"key": planted, "note": planted}))
+                    await put("wrong type", json.dumps({"key": [planted]}))
+                    await put("not JSON", '{"key": "' + planted)
+                    await put("too long", json.dumps({"key": planted * 20}))
+                    await put("bad character", json.dumps({"key": planted + "\n"}))
+                    # Each refusal above changed nothing, so its window came back (docs/32);
+                    # let the last one pass.
+                    await r.world.accounts.clock.sleep_ms(r.world.accounts.service.step_up_ms)
+                    await put("no step-up", json.dumps({"key": planted}), step_up=False)
+                    # Missing and forbidden answer alike (403).
+                    await put(
+                        "a provider that does not exist", json.dumps({"key": planted}), to=missing
+                    )
+
+                    def broken(*args: object) -> None:
+                        raise sqlite3.OperationalError("disk I/O error")
+
+                    monkeypatch.setattr(r.store, "put_key", broken)
+                    await put("server error", json.dumps({"key": planted}))
+            finally:
+                await server.shutdown()
+            connection = r.world.accounts.connection
+            tables = {
+                table: _table(connection, table, {"nonce", "ciphertext"})
+                for table in ("audit_log", "provider_configs", "provider_keys", "sessions")
+            }
+    finally:
+        for name, handler in handlers.items():
+            logging.getLogger(name).removeHandler(handler)
+
+    statuses = {name: int(text.split(" ", 1)[0]) for name, text in responses.items()}
+    assert statuses == {
+        "accepted": 200,
+        "extra field": 422,
+        "wrong type": 422,
+        "not JSON": 422,
+        "too long": 422,
+        "bad character": 422,
+        "no step-up": 403,
+        "a provider that does not exist": 403,
+        "server error": 500,
+    }
+    access = streams["uvicorn access log"].getvalue()
+    assert access.count(' - "PUT /v1/admin/orgs/north/providers/') == 9  # it was written
+    assert "Traceback" in streams["uvicorn error log"].getvalue()  # the 500 was logged in full
+
+    def corpus() -> dict[str, str]:
+        texts = {
+            "log records": "\n".join(
+                f"{rec.name} {rec.getMessage()} {rec.args!r} {rec.exc_text or ''}"
+                for rec in caplog.records
+            ),
+            **{name: stream.getvalue() for name, stream in streams.items()},
+            **tables,
+        }
+        texts.update({f"response: {name}": text for name, text in responses.items()})
+        return texts
+
+    assert find_leaks(corpus(), {"provider key": planted}) == []
+    # The control: logged by mistake, it is found (it is not a known shape, and not watched).
+    logging.getLogger("gateway").warning("oops, the body: %s", planted)
+    assert find_leaks(corpus(), {"provider key": planted}) == [("log records", "provider key")]

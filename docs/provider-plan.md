@@ -1,6 +1,6 @@
 # Provider plan, A5: provider adapters, the chat endpoint, the key vault and fallback modes
 
-Status: **approved 2026-10-22**, with the answers and changes folded in below (it handles
+Status: **approved 2026-10-22**; PR 1 built (`provider/step-1`), PR 2 being built (`provider/step-2`), with the answers and changes folded in below (it handles
 secrets and opens a new network surface: the gateway starts calling hosts an organization
 chooses). Branch `provider/step-1`, from `main` at `b5787ec` (identity step 7 merged). Identity
 steps 8 and 9 come after A5; each A5 pull request's note has its own threat-model section, and
@@ -262,7 +262,7 @@ through `requires()`:
 | Method and path | Action | Who | Step-up |
 |---|---|---|---|
 | `GET /providers` | `providers.list` | org_admin | |
-| `GET /providers/status` | `providers.status` | org_admin, platform_admin (id, type, enabled, whether a key exists; never URL, model, prices or last 4) | |
+| `GET /providers/status` | `providers.status` | org_admin, platform_admin (only that each provider exists and whether it is enabled; never type, URL, model, prices, key state or last 4) | |
 | `POST /providers` | `providers.create` | org_admin | yes |
 | `PATCH /providers/{id}` | `providers.update` | org_admin (URL, model, tier, role, prices, budget; a URL or type change deletes the key) | yes |
 | `POST /providers/{id}/disable`, `/enable` | `providers.disable` / `providers.enable` | org_admin, platform_admin | yes |
@@ -276,6 +276,30 @@ relation through the matrix). platform_admin never adds, replaces or reads a key
 URL, model, price or `last4`. Missing equals forbidden, as for step 7. A key is accepted only in
 the body of `PUT .../key` (`{"key": "..."}`, 8 to 512 printable ASCII characters), answered with
 `{"last4", "updated_at_ms"}` and `Cache-Control: no-store` like every admin answer.
+
+### PR 2 as built: details settled while building
+
+Five details the plan left open, settled here so they can be objected to:
+
+1. **What platform_admin sees** is only that a provider exists and whether it is enabled
+   (`GET /providers/status`), as restated with the approval; not its type or key state.
+2. **Two switches.** A provider has the organization's own `enabled` switch and a separate
+   platform switch. `providers.disable` and `providers.enable` act on the switch of whoever
+   holds the action (org_admin the organization's, platform_admin the platform's), so an
+   org_admin cannot re-enable a provider the platform disabled. A provider is enabled when both
+   are on. Which switch is decided from the role and relation `authorize` allowed it with, in
+   `requires`, not by the handler.
+3. **No redirects at all** for organization providers in this step: the operator allow-list for
+   redirects (`GATEWAY_PROVIDER_REDIRECT_HOSTS`) is not built, which is stricter; it can be
+   added if a provider is found that needs it.
+4. **Where the egress guard applies in this step.** In PR 2 the only path that contacts an
+   organization's provider is test-connection (routing chat to organization providers depends
+   on the modes of PR 3; the default, `local_only`, never contacts one). The guard is on that
+   path. The operator's own adapters keep their configuration as in PR 1 and gain the guard,
+   with the operator allow-list, when PR 3 adds the locality rule.
+5. **The redaction layer** is installed process-wide by the server factories as a log-record
+   factory, so it applies to every logger (uvicorn's included, whose loggers do not propagate)
+   before any handler formats a record.
 
 ### Permission table changes
 
