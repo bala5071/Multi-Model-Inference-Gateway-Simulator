@@ -16,7 +16,7 @@ raises for any other, so a store that waits on a network cannot be used there by
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass
 from typing import Any, TypeVar, cast
 
@@ -30,6 +30,29 @@ from gateway.usage import SqliteUsageStore, UsageStore
 from gateway.users import AccountStore, SqliteAccountStore
 
 T = TypeVar("T")
+
+
+STATE_ENV = "GATEWAY_STATE"
+
+
+class SharedStateRefusedError(RuntimeError):
+    """``GATEWAY_STATE=shared`` asked for before the shared budgets exist."""
+
+
+def check_state_setting(environ: Mapping[str, str]) -> None:
+    """``GATEWAY_STATE``: ``sqlite`` (the default) or ``shared``. ``shared`` refuses to start
+    until budgets are shared too (scale-out PR 3b): with each instance keeping its own budget
+    totals, two instances could each spend one budget (docs/36-postgres.md)."""
+    kind = environ.get(STATE_ENV, "sqlite")
+    if kind == "sqlite":
+        return
+    if kind == "shared":
+        raise SharedStateRefusedError(
+            f"{STATE_ENV}=shared is refused until budgets are shared between instances "
+            "(docs/36-postgres.md): each instance would enforce budgets on its own totals. "
+            f"Unset {STATE_ENV} to run one instance on SQLite."
+        )
+    raise ValueError(f"{STATE_ENV} must be sqlite or shared, not {kind!r}")
 
 
 class StateUnavailableError(Exception):

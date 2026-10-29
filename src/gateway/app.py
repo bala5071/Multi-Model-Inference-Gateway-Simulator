@@ -16,7 +16,7 @@ import logging
 import math
 import os
 import secrets
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -181,7 +181,13 @@ from gateway.redaction import install as install_redaction
 from gateway.registry import ModelRegistry, UnknownModelError
 from gateway.routing import ModelNotAllowedError, Quality, Router, load_plans, pick_by_quality
 from gateway.schema import GenerateRequest, RequestResult
-from gateway.state import StateBackend, StateUnavailableError, run_now, sqlite_state
+from gateway.state import (
+    StateBackend,
+    StateUnavailableError,
+    check_state_setting,
+    run_now,
+    sqlite_state,
+)
 from gateway.timeseries import TimeSeriesStore
 from gateway.usage import ChatSource, UsageStore
 from gateway.users import User
@@ -784,6 +790,8 @@ class PasswordChangeRequiredError(Exception):
 
 # Answers carrying a session or its token must not be cached anywhere.
 _NO_STORE = {"Cache-Control": "no-store"}
+# The durable store's readiness check: whether it answers now (docs/36).
+Readiness = Callable[[], Awaitable[bool]]
 
 
 def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
@@ -1574,6 +1582,8 @@ def create_app(
     modes: ModeStore | None = None,
     local_destinations: LocalDestinations | None = None,
     counters: SharedCounters | None = None,
+    startup_applications: Sequence[Application] | None = None,
+    readiness: Readiness | None = None,
 ) -> FastAPI:
     """Build the API around an already wired registry.
 
@@ -1629,15 +1639,29 @@ def create_app(
     the loopback destinations of ``chat_adapters``, as the server takes them from its backends
     file); with ``providers``, chat requests are routed among the tier and the organization's
     providers under the effective mode (docs/33).
+
+    ``startup_applications`` are the stored applications, read by the caller, for a store whose
+    calls wait on a network (Postgres, docs/36): they are checked against the registry as the
+    store's would be. Without it they are read here, from a store that never suspends.
+
+    ``/readyz`` answers ready while the shared counters are healthy and ``readiness`` (the
+    durable store's own check, if any) says yes; not ready otherwise, nothing more.
     """
     if metrics is None:
         metrics = MetricsStore(clock)
     request_numbers = itertools.count(1)
     started_ms = clock.now_ms()
     router = Router(applications.templates, registry) if applications is not None else None
+    known_applications: list[Application] = []
     if applications is not None:
-        # Before any event loop runs the app: a store call that cannot suspend (docs/34).
-        for application in run_now(applications.store.list_applications()):
+        # Before any event loop runs the app: a store call that cannot suspend (docs/34), or
+        # what the caller read from one that can.
+        known_applications = (
+            list(startup_applications)
+            if startup_applications is not None
+            else run_now(applications.store.list_applications())
+        )
+        for application in known_applications:
             Router.check_plan(application.plan, registry)
     rate_limiter: RateLimiter | None = None
     if applications is not None:
@@ -2589,6 +2613,7 @@ def create_app(
                 "GET /metrics/summary",
                 "GET /metrics/detail",
                 "GET /healthz",
+                "GET /readyz",
             ],
         }
 
@@ -2632,6 +2657,21 @@ def create_app(
     async def healthz() -> Health:
         return Health(
             status="ok", models=len(registry.names), uptime_ms=clock.now_ms() - started_ms
+        )
+
+    @app.get("/readyz")
+    @public_route("readiness: ready or not, nothing more (docs/36)")
+    async def readyz() -> JSONResponse:
+        ready = counters is None or counters.healthy
+        if ready and readiness is not None:
+            try:
+                ready = await readiness()
+            except StateUnavailableError:
+                ready = False
+        return JSONResponse(
+            {"status": "ready" if ready else "not_ready"},
+            status_code=200 if ready else 503,
+            headers=_NO_STORE,
         )
 
     @app.get("/metrics/summary")
@@ -2695,7 +2735,7 @@ def create_app(
     # Which applications may use each model, in the order they were created.
     applications_for: dict[str, list[Application]] = {}
     if applications is not None:
-        for application in run_now(applications.store.list_applications()):
+        for application in known_applications:
             for allowed in application.plan.models:
                 applications_for.setdefault(allowed, []).append(application)
 
@@ -3059,7 +3099,12 @@ def create_default_app() -> FastAPI:
     ``create_simulated_live_app``): ``GATEWAY_SIM_SPEED`` (1, 5 or 20; default 1) and
     ``GATEWAY_SIM_PRESET`` (default ``steady``) set its speed and load, ``GATEWAY_SEED``
     its seed. It cannot be combined with real models.
+
+    ``GATEWAY_STATE`` is ``sqlite`` (the default, all of the above); ``shared`` refuses to start
+    until budgets are shared between instances (docs/36-postgres.md).
     """
+    # Before anything else, simulated live mode included: shared state is refused for now.
+    check_state_setting(os.environ)
     seed = int(os.environ.get("GATEWAY_SEED", "0"))
     if os.environ.get("GATEWAY_SIMULATED_LIVE") == "1":
         if os.environ.get("GATEWAY_BACKEND", "simulated") != "simulated":
