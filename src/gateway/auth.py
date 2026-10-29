@@ -493,21 +493,28 @@ class AccountService:
         the operator at the CLI, must change its password at first login: whoever made it
         knows that password. Hashes synchronously (CLI and startup only)."""
         name = normalize_username(username)
-        organization = await self._check_new_user(name, organization_id, actor, platform_admin)
+        await self._check_new_user(name, organization_id, actor, platform_admin)
         self._policy.check(password, name)
-        outsider = actor is None or (
-            actor.holds(Role.PLATFORM_ADMIN) and actor.organization_id != organization.id
-        )
-        return await self._add_user(
-            name,
-            self._passwords.hasher.hash(password),
-            organization,
-            actor,
-            platform_admin=platform_admin,
-            must_change_password=must_change_password or outsider,
-            bootstrap=bootstrap,
-            reason=reason,
-        )
+        password_hash = self._passwords.hasher.hash(password)
+        # Checked again with the insert, in one transaction: on a store shared by several
+        # instances another may have taken the name or the seat since (section 3.6).
+        async with self.store.write_transaction():
+            organization = await self._check_new_user(
+                name, organization_id, actor, platform_admin
+            )
+            outsider = actor is None or (
+                actor.holds(Role.PLATFORM_ADMIN) and actor.organization_id != organization.id
+            )
+            return await self._add_user(
+                name,
+                password_hash,
+                organization,
+                actor,
+                platform_admin=platform_admin,
+                must_change_password=must_change_password or outsider,
+                bootstrap=bootstrap,
+                reason=reason,
+            )
 
     async def create_user_with_temporary_password(
         self, username: str, organization_id: str, *, actor: Actor
@@ -904,7 +911,7 @@ class AccountService:
             )
             raise StepUpFailedError()
         verification = await self._passwords.check(user.password_hash, password)
-        now = await self._now()
+        now = context.now_ms  # the request's one time, read with its session (section 3.8)
         key = self.limiter.key(user.username)
         reason: Reason | None = None
         if user.must_change_password:

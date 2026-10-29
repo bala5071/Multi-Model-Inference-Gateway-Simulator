@@ -32,7 +32,7 @@ from gateway.apikeys import ApiKeyService, ApplicationAccess, InvalidApiKeyError
 from gateway.app import create_app, create_default_app
 from gateway.applications import ApiKeyRecord, KeyLookup, application_from_template
 from gateway.audit import AuditAction, AuditEvent, AuditLog, Outcome, TargetType
-from gateway.auth import LOCK_MS, AccountAccess, LoginFailedError
+from gateway.auth import LOCK_MS, AccountAccess, AccountService, LoginFailedError
 from gateway.clock import ClockEpoch, SimClock, SystemEpoch, WallClock
 from gateway.continuous import build_continuous_registry
 from gateway.database import open_database
@@ -509,7 +509,7 @@ async def _scenario(s: StateBackend) -> list[Any]:
         await acc.revoke_session("sid1"),
         await acc.revoke_session("sid1"),
         await acc.revoke_sessions(users[0].id, keep_id_hash="sid0"),
-        await acc.prune_sessions(NOW + 2500.0, 1e15),
+        await acc.prune_sessions(NOW + 500.0, 1e15),
         await acc.list_sessions(users[0].id),
     ]
     # Roles.
@@ -540,10 +540,10 @@ async def _scenario(s: StateBackend) -> list[Any]:
             AuditEvent(
                 AuditAction.LOGIN,
                 Outcome.SUCCESS,
-                TargetType.SESSION,
-                f"handle{i}",
+                TargetType.USER,
+                users[i].id,
                 users[1].id,
-                details={"n": i},
+                details={"failures": i},
             ),
             90.0 + i,
         )
@@ -642,6 +642,15 @@ async def test_every_store_method_answers_as_sqlites_and_leaves_the_same_rows() 
     connection.close()
 
 
+async def _ready_user(service: AccountService, username: str) -> User:
+    """A user who may step up: made at the CLI, then with no password change pending."""
+    user = await service.create_user(username, PASSWORD, "default")
+    await service.store.set_password(
+        user.id, user.password_hash, must_change=False, bootstrap=Bootstrap.NONE
+    )
+    return user
+
+
 # --- the database's clock (postgres) --------------------------------------------------------------
 
 
@@ -652,7 +661,7 @@ async def test_the_lockout_and_the_step_up_window_are_on_the_databases_clock() -
         await world.set_time(NOW)
         [db] = world.instances
         service = pg_accounts(db)
-        await service.create_user("alice", PASSWORD, "default")
+        await _ready_user(service, "alice")
         for _ in range(5):
             with pytest.raises(LoginFailedError):
                 await service.login("alice", "not the password at all")
@@ -662,6 +671,9 @@ async def test_the_lockout_and_the_step_up_window_are_on_the_databases_clock() -
         with pytest.raises(LoginFailedError):  # still locked on the database's clock
             await service.login("alice", PASSWORD)
         await world.set_time(NOW + LOCK_MS + 1.0)
+        # The login limiter is a counter on the instance's own clock (note 35), not a window in
+        # Postgres: emptied here, so that only the lockout decides.
+        await service.limiter.clear(service.limiter.key("alice"))
         result = await service.login("alice", PASSWORD)
         context = await service.authenticate(result.session_id)
         assert context.now_ms == NOW + LOCK_MS + 1.0
@@ -758,7 +770,7 @@ async def test_a_step_up_window_is_claimed_once_across_instances() -> None:
     async with pg_world(instances=2) as world:
         await world.set_time(NOW)
         first, second = (pg_accounts(db, seed=i + 1) for i, db in enumerate(world.instances))
-        await first.create_user("alice", PASSWORD, "default")
+        await _ready_user(first, "alice")
         context = await first.authenticate((await first.login("alice", PASSWORD)).session_id)
         until = await first.step_up(context, PASSWORD)
         id_hash = context.session.id_hash
