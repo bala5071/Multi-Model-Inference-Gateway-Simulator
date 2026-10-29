@@ -543,12 +543,52 @@ order.
 |---|---|---|---|
 | 0 | `scale-out/plan` | This plan | None |
 | 1 | `scale-out/step-1` | Every store behind a protocol, async; `StateBackend` with `memory` and `sqlite`; `write_transaction()`; the window, budget, breaker and audit-cap protocols over today's in-memory classes; the lockout fix on SQLite (Q3) | One, named: concurrent wrong passwords each count (Q3). Otherwise the same tests, the perf gate and the protected outputs unchanged |
-| 2 | `scale-out/step-2` | Postgres: `asyncpg` (provenance check), `pg0001`, every durable store, the budget reservation, the step-up claim, the lockout update, the write lock, `migrate-to-postgres` and back; contract tests on Postgres; the CI service job | Only with `GATEWAY_STATE=shared`, which is not yet startable |
-| 3 | `scale-out/step-3` | Redis: `redis` (provenance check), the window script, the audit cap, the breakers, the startup checks; `GATEWAY_STATE=shared` startable; `/readyz`; the failure behaviour | Only with `shared` |
+| 2 | `scale-out/step-2` | Valkey counters (reordered on request, 2026-10-29): `redis` and the Valkey image (provenance check), the window scripts, the audit cap, the breakers, failing closed, restart detection, the skew check, the compose file and CI job, the two-instance test of a shared limit | Only with `GATEWAY_COUNTERS=valkey`; the default stays in memory |
+| 3 | `scale-out/step-3` | Postgres: `asyncpg` (provenance check), `pg0001`, every durable store, the budget reservation and its two-instance edge test (Q1), the step-up claim, the lockout update, the write lock, `migrate-to-postgres` and back; the skew check moves to `gateway_now_ms()`; `GATEWAY_STATE=shared`; `/readyz` | Only with `shared` |
 | 4 | `scale-out/step-4` | The two-instance tests in process and in two processes, the mutation table, the failure tests, `benchmarks/shared_state.py`, the note, the compose file for a two-instance demo on Postgres and Valkey | None |
 
 The questions PRs 2 and 3 depended on are answered (section 11). Each PR has the template,
 the definition of done, and its note (`docs/34-*` onward).
+
+### PR 2: Valkey counters, settled before building (2026-10-29)
+
+Requested as PR 2, ahead of Postgres. Answers given before building (2026-10-29):
+
+- **Valkey 9.0.7, pinned by digest** (`valkey/valkey:9.0.7@sha256:7e1deda01b64ece3167d370ab5be3452d29734feec22cbcbc69b3a64f6859d6d`),
+  an exception to the two-week rule: every current tag was a two-day-old security release
+  (GHSA-f4q9-j22m-xqq9), and the newest older one lacks the fix. Recorded in `docs/licenses.md`.
+- **`redis` (redis-py) 8.1.0**, pinned exactly. No PyPI attestation (the project publishes with
+  an API token); the wheel is byte-identical to the repository at tag `v8.1.0` (`e013126`),
+  file for file. The evidence is in `docs/licenses.md`.
+- **Budgets stay for the Postgres PR**, as section 3.1 and Q4 have it; so does the two-instance
+  test of the budget edge (Q1).
+- **The skew check measures against Valkey's `TIME`** until Postgres exists: read only to
+  measure skew, never to decide a window. The Postgres PR moves it to `gateway_now_ms()`
+  (section 3.8 otherwise unchanged).
+
+Settled from the code:
+
+- **`GATEWAY_COUNTERS`**: `memory` (the default: today's classes, no Valkey) or `valkey`, which
+  needs `GATEWAY_VALKEY_URL` (a secret: it may carry a password; never logged, and its
+  password is watched by the redactor). `GATEWAY_STATE_MAX_SKEW_MS` (default 1000).
+- **What is in Valkey:** the request rate limit, the login limiter, the step-up session cap,
+  the user-creation cap, the test-connection counts, the circuit breakers and the audit cap.
+  Every key name is an HMAC of what it counts under a key derived from the pepper for that
+  purpose alone, so no username, session digest or provider id appears in Valkey.
+- **Atomic operations** are Lua scripts (sections 3.4, 3.5, 3.7), each tested on two instances
+  and each with a mutation check.
+- **Failing closed**, per counter: the table in note 35. Every Valkey call has a timeout on the
+  injected clock (200 ms, decision 7).
+- **Restart detection** (section 3.9) checks `run_id` at startup and every 30 s, with the skew
+  check; the audit row is written once per `run_id`. The comparison is unit-tested with a
+  scripted `INFO` and its integration with the real `INFO`; restarting a container from a test
+  is not done.
+- **Two-instance test:** two `create_app` instances in one process, each with its own in-memory
+  stores (there is no shared durable store until Postgres), sharing one Valkey database.
+- **Running against Valkey:** `docker-compose.valkey.yml` (the pinned image, append-only, no
+  eviction, on 127.0.0.1 only). Tests that need it are marked `valkey` and skipped without
+  `GATEWAY_TEST_VALKEY_URL`; a new CI job runs them in a service container. Locally the operator
+  starts the compose file.
 
 ### PR 1: details settled before building (2026-10-28)
 
