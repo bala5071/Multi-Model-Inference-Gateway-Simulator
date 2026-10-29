@@ -1053,14 +1053,14 @@ def _admin_routes(
     resetting_passwords = requires("users.reset_password", member)
     unlocking_users = requires("users.unlock", member)
 
-    def user_view(user: User) -> dict[str, object]:
+    def user_view(user: User, now_ms: float) -> dict[str, object]:
         return {
             "user_id": user.id,
             "username": user.username,
             "organization_id": user.organization_id,
             "disabled": user.disabled,
             "must_change_password": user.must_change_password,
-            "locked": service.is_locked(user),
+            "locked": service.is_locked(user, now_ms),
             "created_at_ms": user.created_at_ms,
         }
 
@@ -1074,7 +1074,8 @@ def _admin_routes(
         )
         # The one place the temporary password is shown; never logged or stored.
         return JSONResponse(
-            {"user": user_view(user), "temporary_password": temporary}, status_code=201
+            {"user": user_view(user, auth.context.now_ms), "temporary_password": temporary},
+            status_code=201,
         )
 
     @app.get(ORG_PREFIX + "/users")
@@ -1085,7 +1086,9 @@ def _admin_routes(
         auth: Authorized = listing_users,
     ) -> JSONResponse:
         page = await service.page_users(org, after, limit, actor=auth.actor)
-        return _page_body("users", [user_view(u) for u in page.items], page.next)
+        return _page_body(
+            "users", [user_view(u, auth.context.now_ms) for u in page.items], page.next
+        )
 
     @app.post(ORG_PREFIX + "/users/{username}/disable")
     async def disable_user(username: str, auth: Authorized = disabling_users) -> JSONResponse:
@@ -1140,20 +1143,20 @@ def _admin_routes(
             "created_at_ms": a.created_at_ms,
         }
 
-    def key_view(record: ApiKeyRecord) -> dict[str, object]:
+    def key_view(record: ApiKeyRecord, now_ms: float) -> dict[str, object]:
         # Never the key, never its HMAC.
         return {
             "key_id": record.key_id,
             "label": record.label,
-            "state": keys.key_state(record),
+            "state": keys.key_state(record, now_ms),
             "created_at_ms": record.created_at_ms,
             "expires_at_ms": record.expires_at_ms,
             "last_used_at_ms": record.last_used_at_ms,
         }
 
-    def issued_view(issued: IssuedKey) -> JSONResponse:
+    def issued_view(issued: IssuedKey, now_ms: float) -> JSONResponse:
         # The one place a new key is shown; never logged or stored.
-        return JSONResponse({"key": issued.key, **key_view(issued.record)}, status_code=201)
+        return JSONResponse({"key": issued.key, **key_view(issued.record, now_ms)}, status_code=201)
 
     @app.post(ORG_PREFIX + "/applications")
     async def create_application(
@@ -1197,7 +1200,7 @@ def _admin_routes(
         issued = await keys.issue_key(
             app_id, body.label, actor=auth.actor, expires_in_days=body.expires_in_days
         )
-        return issued_view(issued)
+        return issued_view(issued, auth.context.now_ms)
 
     @app.get(ORG_PREFIX + "/applications/{app}/keys")
     async def list_keys(
@@ -1207,7 +1210,7 @@ def _admin_routes(
         auth: Authorized = listing_keys,
     ) -> JSONResponse:
         page = await keys.page_keys(app_id, after, limit, actor=auth.actor)
-        return _page_body("keys", [key_view(k) for k in page.items], page.next)
+        return _page_body("keys", [key_view(k, auth.context.now_ms) for k in page.items], page.next)
 
     @app.post(ORG_PREFIX + "/applications/{app}/keys/{key_id}/rotate")
     async def rotate_key(
@@ -1221,7 +1224,7 @@ def _admin_routes(
             actor=auth.actor,
             expires_in_days=body.expires_in_days,
         )
-        return issued_view(issued)
+        return issued_view(issued, auth.context.now_ms)
 
     @app.post(ORG_PREFIX + "/applications/{app}/keys/{key_id}/revoke")
     async def revoke_key(key_id: str, auth: Authorized = revoking_keys) -> JSONResponse:
@@ -3098,7 +3101,7 @@ def create_default_app() -> FastAPI:
             "`--dry-run` shows what it would do), then start the gateway again."
         )
     runner.migrate()
-    state = sqlite_state(database)
+    state = sqlite_state(database, epoch)
     access = ApplicationAccess(ApiKeyService(state.applications, pepper, epoch), templates)
     try:
         # Counters shared with other instances, or this process's own (docs/35).

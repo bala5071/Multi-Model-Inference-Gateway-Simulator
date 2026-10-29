@@ -8,6 +8,7 @@ import re
 import sqlite3
 from collections.abc import Iterator, Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -52,7 +53,7 @@ def store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Applicatio
     connection.close()
 
 
-async def _service(store: ApplicationStore, clock: SimClock, **kwargs: float) -> ApiKeyService:
+async def _service(store: ApplicationStore, clock: SimClock, **kwargs: Any) -> ApiKeyService:
     await seed_demo_applications(store, load_plans(), created_at_ms=0.0)
     rng = random.Random(1)
     return ApiKeyService(

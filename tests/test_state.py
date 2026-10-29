@@ -27,7 +27,7 @@ from helpers import TEST_PEPPER
 def state() -> Iterator[StateBackend]:
     connection = open_database(":memory:")
     MigrationRunner(connection, MIGRATIONS, ClockEpoch(SimClock())).migrate()
-    yield sqlite_state(connection)
+    yield sqlite_state(connection, ClockEpoch(SimClock()))
     connection.close()
 
 

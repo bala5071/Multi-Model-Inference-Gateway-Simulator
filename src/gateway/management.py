@@ -214,11 +214,12 @@ class ManagementService:
     def store(self) -> ApplicationStore:
         return self.keys.store
 
-    def _now(self) -> float:
-        return self._epoch.epoch_ms()
+    async def _now(self) -> float:
+        # Keys' expiry is decided on the store's clock (section 3.8), as the key check does.
+        return await self.keys.store_clock.now_ms()
 
     async def _record(self, event: AuditEvent) -> None:
-        await self.audit.write(event, self._now())
+        await self.audit.write(event, await self._now())
 
     async def _application(self, application_id: str) -> Application:
         application = await self.store.get_application(application_id)
@@ -271,7 +272,7 @@ class ManagementService:
             self.templates,
             plan,
             organization_id=organization_id,
-            created_at_ms=self._now(),
+            created_at_ms=await self._now(),
         )
         await self.store.add_application(application)
         who, acting = _who(actor)
@@ -369,7 +370,7 @@ class ManagementService:
         application = await self._application(application_id)
         resource = Resource.application(application.organization_id, application.id)
         _require(actor, "application_keys.issue", resource)
-        now = self._now()
+        now = await self._now()
         expires = self._expiry(expires_in_days, now)
         extra: dict[str, object] = {}
         if expires is not None:
@@ -396,7 +397,7 @@ class ManagementService:
         old, application = await self._key(key_id)
         resource = Resource.application(application.organization_id, application.id)
         _require(actor, "application_keys.rotate", resource)
-        now = self._now()
+        now = await self._now()
         if self.limits is not None and not 0 <= grace_hours <= MAX_GRACE_HOURS:
             raise ValueError(f"grace_hours must be from 0 to {MAX_GRACE_HOURS:g}")
         if not self._active(old, now):
@@ -432,10 +433,11 @@ class ManagementService:
         found = await self.store.page_keys(application.id, after, check_page_size(limit) + 1)
         return page_of(found, limit, lambda k: k.key_id)
 
-    def key_state(self, record: ApiKeyRecord) -> str:
+    def key_state(self, record: ApiKeyRecord, now_ms: float) -> str:
+        """``now_ms``: the request's store time (``SessionContext.now_ms``)."""
         if record.revoked:
             return "revoked"
-        return "active" if self._active(record, self._now()) else "expired"
+        return "active" if self._active(record, now_ms) else "expired"
 
 
 def page_of(found: list[T], limit: int, cursor: Callable[[T], str]) -> Page[T]:

@@ -22,6 +22,7 @@ from typing import Any, TypeVar, cast
 
 from gateway.applications import ApplicationStore, SqliteApplicationStore
 from gateway.audit import AuditStore, SqliteAuditStore
+from gateway.clock import EpochSource, EpochStoreClock, StoreClock
 from gateway.modes import ModeStore, SqliteModeStore
 from gateway.providers import ProviderStore, SqliteProviderStore
 from gateway.roles import RoleStore, SqliteRoleStore
@@ -56,7 +57,7 @@ def run_now(call: Coroutine[Any, Any, T]) -> T:
 
 @dataclass(frozen=True, slots=True)
 class StateBackend:
-    """The stores of one database."""
+    """The stores of one database, and the clock their windows are decided on."""
 
     usage: UsageStore
     applications: ApplicationStore
@@ -65,10 +66,11 @@ class StateBackend:
     audit: AuditStore
     providers: ProviderStore
     modes: ModeStore
+    clock: StoreClock
 
 
-def sqlite_state(connection: sqlite3.Connection) -> StateBackend:
-    """Every store over one migrated SQLite connection."""
+def sqlite_state(connection: sqlite3.Connection, epoch: EpochSource) -> StateBackend:
+    """Every store over one migrated SQLite connection; windows on ``epoch``."""
     return StateBackend(
         usage=SqliteUsageStore(connection),
         applications=SqliteApplicationStore(connection),
@@ -77,4 +79,5 @@ def sqlite_state(connection: sqlite3.Connection) -> StateBackend:
         audit=SqliteAuditStore(connection),
         providers=SqliteProviderStore(connection),
         modes=SqliteModeStore(connection),
+        clock=EpochStoreClock(epoch),
     )

@@ -48,7 +48,7 @@ from gateway.audit import (
     Reason,
     TargetType,
 )
-from gateway.clock import Clock, EpochSource
+from gateway.clock import Clock, EpochSource, EpochStoreClock, StoreClock
 from gateway.keyderivation import KeyPurpose, derive_key
 from gateway.management import (
     ManagementRefusal,
@@ -287,6 +287,9 @@ class SessionContext:
     user: User
     session: Session
     session_id: str
+    # The store clock's time when the session was checked: every window this request decides
+    # is decided on it (docs/scale-out-plan.md, section 3.8).
+    now_ms: float = 0.0
 
     def __repr__(self) -> str:
         return f"SessionContext(user={self.user!r}, session={self.session!r})"
@@ -326,6 +329,7 @@ class AccountService:
         step_up_session_failures: int = DEFAULT_STEP_UP_SESSION_FAILURES,
         user_create_attempts: int = DEFAULT_USER_CREATE_ATTEMPTS,
         windows: AccountWindows | None = None,
+        store_clock: StoreClock | None = None,
     ) -> None:
         if not 1 <= step_up_minutes <= 60:
             raise ValueError("step-up lasts from 1 to 60 minutes")
@@ -340,6 +344,9 @@ class AccountService:
         self._organizations = organizations
         self._clock = clock
         self._epoch = epoch
+        self._clock_of_store: StoreClock = (
+            store_clock if store_clock is not None else EpochStoreClock(epoch)
+        )
         self._policy = policy if policy is not None else PasswordPolicy(load_blocklist())
         self._random_bytes = random_bytes
         # One key per purpose, derived from ``secret`` (the pepper on the server); neither
@@ -387,11 +394,11 @@ class AccountService:
     def organizations(self) -> ApplicationStore:
         return self._organizations
 
-    def _now(self) -> float:
-        return self._epoch.epoch_ms()
+    async def _now(self) -> float:
+        return await self._clock_of_store.now_ms()
 
     async def _record(self, event: AuditEvent) -> None:
-        await self.audit.write(event, self._now())
+        await self.audit.write(event, await self._now())
 
     # --- actors --------------------------------------------------------------------------
 
@@ -556,7 +563,7 @@ class AccountService:
             username=name,
             password_hash=password_hash,
             organization_id=organization.id,
-            created_at_ms=self._now(),
+            created_at_ms=await self._now(),
             must_change_password=must_change_password,
             bootstrap=bootstrap,
         )
@@ -729,8 +736,9 @@ class AccountService:
         found = await self.store.page_users(organization_id, after, check_page_size(limit) + 1)
         return page_of(found, limit, lambda u: u.username)
 
-    def is_locked(self, user: User) -> bool:
-        return user.locked_until_ms is not None and self._now() < user.locked_until_ms
+    @staticmethod
+    def is_locked(user: User, now_ms: float) -> bool:
+        return user.locked_until_ms is not None and now_ms < user.locked_until_ms
 
     # --- management requests -------------------------------------------------------------
 
@@ -796,7 +804,7 @@ class AccountService:
 
     async def _grant(self, user: User, assignment: Assignment, actor: Actor | None) -> None:
         granted_by, _ = self._who(actor)
-        await self.roles.grant(user.id, assignment, granted_by, self._now())
+        await self.roles.grant(user.id, assignment, granted_by, await self._now())
         await self.store.clear_step_up(user.id)  # roles changed: a new step-up is needed
         await self._record(self._role_event(AuditAction.ROLE_GRANTED, user, assignment, actor))
 
@@ -895,7 +903,7 @@ class AccountService:
             )
             raise StepUpFailedError()
         verification = await self._passwords.check(user.password_hash, password)
-        now = self._now()
+        now = await self._now()
         key = self.limiter.key(user.username)
         reason: Reason | None = None
         if user.must_change_password:
@@ -930,7 +938,7 @@ class AccountService:
     def step_up_until(self, context: SessionContext) -> float | None:
         """The end of this session's open step-up window, or None."""
         until = context.session.step_up_until_ms
-        return until if until is not None and self._now() < until else None
+        return until if until is not None and context.now_ms < until else None
 
     async def check_step_up(self, context: SessionContext, action: str) -> None:
         """For ``requires``: an action the table flags needs this session's window open;
@@ -948,7 +956,7 @@ class AccountService:
         """For ``requires`` and an action the table marks consume-on-use (docs/32): use up this
         session's window, or audit and raise ``StepUpRequiredError`` if none is open. Returns the
         window's end, to give back if the action fails before changing anything."""
-        claimed = await self.store.claim_step_up(context.session.id_hash, self._now())
+        claimed = await self.store.claim_step_up(context.session.id_hash, await self._now())
         if claimed is None:
             await self._record(
                 self._session_event(
@@ -973,7 +981,7 @@ class AccountService:
         user = await self.store.find_user(name if name is not None else _NO_SUCH_USERNAME)
         stored = user.password_hash if user is not None else self._dummy_hash
         verification = await self._passwords.check(stored, password)
-        now = self._now()
+        now = await self._now()
         key = self.limiter.key(name if name is not None else username)
         reason: Reason | None = None
         if user is None:
@@ -1093,7 +1101,7 @@ class AccountService:
         if not session_id:
             raise SessionInvalidError()
         session = await self.store.get_session(_digest(session_id))
-        now = self._now()
+        now = await self._now()
         if session is None or not self._live(session, now):
             raise SessionInvalidError()
         user = await self.store.get_user(session.user_id)
@@ -1102,7 +1110,7 @@ class AccountService:
         if now - session.last_seen_at_ms >= LAST_SEEN_WRITE_MS:
             await self.store.touch_session(session.id_hash, now)
             session = replace(session, last_seen_at_ms=now)
-        return SessionContext(user, session, session_id)
+        return SessionContext(user, session, session_id, now)
 
     def csrf_token(self, context: SessionContext) -> str:
         """The session's CSRF token, made again from its id (it is never stored)."""
@@ -1127,7 +1135,7 @@ class AccountService:
         )
 
     async def live_sessions(self, context: SessionContext) -> list[Session]:
-        now = self._now()
+        now = await self._now()
         return [s for s in await self.store.list_sessions(context.user.id) if self._live(s, now)]
 
     async def change_password(self, context: SessionContext, current: str, new: str) -> int:
@@ -1136,7 +1144,7 @@ class AccountService:
         session of the user. Returns how many."""
         user = context.user
         if not await self._passwords.verify(user.password_hash, current):
-            now = self._now()
+            now = await self._now()
             failures = await self._count_failure(user, now)
             await self._record(
                 AuditEvent(
@@ -1170,7 +1178,7 @@ class AccountService:
     async def prune(self, limit: int | None = None) -> int:
         """Delete dead sessions and (with a retention) old audit entries, at most ``limit``
         of each; write any pending count of dropped audit rows. Returns how many rows went."""
-        now = self._now()
+        now = await self._now()
         await self.audit.flush_dropped(now)
         removed = await self.store.prune_sessions(now, SESSION_IDLE_MS, limit)
         if self.audit_retention_ms is not None:

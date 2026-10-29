@@ -200,7 +200,7 @@ def _open(environ: dict[str, str]) -> tuple[sqlite3.Connection, StateBackend]:
     except BaseException:
         connection.close()
         raise
-    return connection, sqlite_state(connection)
+    return connection, sqlite_state(connection, SystemEpoch())
 
 
 def _describe(key: ApiKeyRecord) -> str:

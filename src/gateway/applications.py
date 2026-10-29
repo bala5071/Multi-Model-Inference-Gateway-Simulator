@@ -96,6 +96,9 @@ class KeyLookup:
     record: ApiKeyRecord
     application: Application | None
     organization_enabled: bool
+    # The store's time, read in the same query, where the store has its own clock
+    # (docs/scale-out-plan.md, section 3.8); None where the injected epoch decides.
+    now_ms: float | None = None
 
 
 class ApplicationStore(Protocol):
