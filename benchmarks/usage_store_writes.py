@@ -25,6 +25,7 @@ from gateway.clock import ClockEpoch, SimClock, WallClock
 from gateway.database import open_database
 from gateway.metrics import percentile
 from gateway.migrations import MIGRATIONS, MigrationRunner
+from gateway.state import run_now
 from gateway.usage import InMemoryUsageStore, SqliteUsageStore, UsageEvent, UsageStore
 
 # A few writes first, so the file exists and its first pages are allocated.
@@ -48,11 +49,11 @@ def _event(i: int) -> UsageEvent:
 def time_writes(name: str, store: UsageStore, writes: int) -> WriteTimes:
     clock = WallClock()
     for i in range(WARMUP_WRITES):
-        store.append(_event(i))
+        run_now(store.append(_event(i)))
     times = []
     for i in range(writes):
         started = clock.now_ms()
-        store.append(_event(WARMUP_WRITES + i))
+        run_now(store.append(_event(WARMUP_WRITES + i)))
         times.append(clock.now_ms() - started)
     return WriteTimes(
         store=name,

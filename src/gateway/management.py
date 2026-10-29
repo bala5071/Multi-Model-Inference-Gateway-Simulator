@@ -16,7 +16,7 @@ See docs/30-management-endpoints.md and docs/identity-plan.md, section 7.
 - **``ManagementRefusal``** is a refusal for a conflict or a cap, carrying the reason that is
   both its answer's error code and its audit entry's reason.
 
-Store calls are synchronous, for the reason given in ``gateway.usage``.
+Store calls are coroutines that never suspend, for the reason given in ``gateway.usage``.
 """
 
 from __future__ import annotations
@@ -112,47 +112,47 @@ class Stores:
     users: AccountStore
 
 
-def resolve_organization(stores: Stores, organization_id: str) -> Resource | None:
-    found = stores.organizations.get_organization(organization_id)
+async def resolve_organization(stores: Stores, organization_id: str) -> Resource | None:
+    found = await stores.organizations.get_organization(organization_id)
     return Resource.organization(found.id) if found is not None else None
 
 
-def resolve_member(stores: Stores, organization_id: str, username: str) -> Resource | None:
+async def resolve_member(stores: Stores, organization_id: str, username: str) -> Resource | None:
     """The organization, as the resource a change to one of its users acts on, if the user
     exists **and belongs to it**."""
-    if resolve_organization(stores, organization_id) is None:
+    if await resolve_organization(stores, organization_id) is None:
         return None
     try:
         name = normalize_username(username)
     except ValueError:
         return None
-    user = stores.users.find_user(name)
+    user = await stores.users.find_user(name)
     if user is None or user.organization_id != organization_id:
         return None
     return Resource.organization(organization_id)
 
 
-def resolve_application(
+async def resolve_application(
     stores: Stores, organization_id: str, application_id: str
 ) -> Resource | None:
     """The application, if it exists **and belongs to the organization**."""
-    if resolve_organization(stores, organization_id) is None:
+    if await resolve_organization(stores, organization_id) is None:
         return None
-    application = stores.organizations.get_application(application_id)
+    application = await stores.organizations.get_application(application_id)
     if application is None or application.organization_id != organization_id:
         return None
     return Resource.application(organization_id, application.id)
 
 
-def resolve_key(
+async def resolve_key(
     stores: Stores, organization_id: str, application_id: str, key_id: str
 ) -> Resource | None:
     """The key's application, if the key exists **and belongs to that application**, which
     belongs to the organization."""
-    resource = resolve_application(stores, organization_id, application_id)
+    resource = await resolve_application(stores, organization_id, application_id)
     if resource is None:
         return None
-    record = stores.organizations.get_key(key_id)
+    record = await stores.organizations.get_key(key_id)
     if record is None or record.application_id != application_id:
         return None
     return resource
@@ -217,24 +217,24 @@ class ManagementService:
     def _now(self) -> float:
         return self._epoch.epoch_ms()
 
-    def _record(self, event: AuditEvent) -> None:
-        self.audit.write(event, self._now())
+    async def _record(self, event: AuditEvent) -> None:
+        await self.audit.write(event, self._now())
 
-    def _application(self, application_id: str) -> Application:
-        application = self.store.get_application(application_id)
+    async def _application(self, application_id: str) -> Application:
+        application = await self.store.get_application(application_id)
         if application is None:
             raise ValueError(f"no application {application_id!r}")
         return application
 
-    def _key(self, key_id: str) -> tuple[ApiKeyRecord, Application]:
-        record = self.store.get_key(key_id)
+    async def _key(self, key_id: str) -> tuple[ApiKeyRecord, Application]:
+        record = await self.store.get_key(key_id)
         if record is None:
             raise ValueError(f"no key {key_id!r}")
-        return record, self._application(record.application_id)
+        return record, await self._application(record.application_id)
 
     # --- applications --------------------------------------------------------------------
 
-    def create_application(
+    async def create_application(
         self,
         organization_id: str,
         name: str,
@@ -246,7 +246,7 @@ class ManagementService:
         """Create an application on a plan template, in an enabled organization, with a name
         not used there yet. Its id is generated unless one is given (the CLI)."""
         _require(actor, "applications.create", Resource.organization(organization_id))
-        organization = self.store.get_organization(organization_id)
+        organization = await self.store.get_organization(organization_id)
         if organization is None:
             raise ValueError(f"no organization {organization_id!r}")
         if plan not in self.templates.plans:
@@ -258,7 +258,7 @@ class ManagementService:
                 f"organization {organization_id!r} is disabled; no application can be created",
             )
         normalized = normalize_name(name)
-        if any(a.name == normalized for a in self.store.list_applications(organization_id)):
+        if any(a.name == normalized for a in await self.store.list_applications(organization_id)):
             raise ManagementRefusal(
                 Reason.APPLICATION_NAME_TAKEN,
                 f"organization {organization_id!r} already has an application named {normalized!r}",
@@ -273,14 +273,14 @@ class ManagementService:
             organization_id=organization_id,
             created_at_ms=self._now(),
         )
-        self.store.add_application(application)
+        await self.store.add_application(application)
         who, acting = _who(actor)
         details: dict[str, object] = {**acting, "organization_id": organization_id, "plan": plan}
         if _id_form(plan) is None:
             del details["plan"]
         if _id_form(organization_id) is None:
             del details["organization_id"]
-        self._record(
+        await self._record(
             AuditEvent(
                 AuditAction.APPLICATION_CREATED,
                 Outcome.SUCCESS,
@@ -292,15 +292,19 @@ class ManagementService:
         )
         return application
 
-    def page_applications(
+    async def page_applications(
         self, organization_id: str, after: str | None, limit: int, *, actor: Actor | None = None
     ) -> Page[Application]:
         _require(actor, "applications.list", Resource.organization(organization_id))
-        found = self.store.page_applications(organization_id, after, check_page_size(limit) + 1)
+        found = await self.store.page_applications(
+            organization_id, after, check_page_size(limit) + 1
+        )
         return page_of(found, limit, lambda a: a.id)
 
-    def read_application(self, application_id: str, *, actor: Actor | None = None) -> Application:
-        application = self._application(application_id)
+    async def read_application(
+        self, application_id: str, *, actor: Actor | None = None
+    ) -> Application:
+        application = await self._application(application_id)
         resource = Resource.application(application.organization_id, application.id)
         _require(actor, "applications.read", resource)
         return application
@@ -317,13 +321,15 @@ class ManagementService:
             raise ValueError(f"a key expires within 1 to {self.limits.max_days:g} days")
         return now + expires_in_days * DAY_MS
 
-    def _check_room(self, application: Application, now: float, *, replacing: str | None) -> None:
+    async def _check_room(
+        self, application: Application, now: float, *, replacing: str | None
+    ) -> None:
         """At most ``limits.max_active`` active keys, a key being replaced not counted."""
         if self.limits is None:
             return
         active = [
             k
-            for k in self.store.list_keys(application.id)
+            for k in await self.store.list_keys(application.id)
             if self._active(k, now) and k.key_id != replacing
         ]
         if len(active) >= self.limits.max_active:
@@ -351,7 +357,7 @@ class ManagementService:
                 details[field_name] = value
         return AuditEvent(action, Outcome.SUCCESS, TargetType.API_KEY, record.key_id, who, details)
 
-    def issue_key(
+    async def issue_key(
         self,
         application_id: str,
         label: str,
@@ -360,22 +366,25 @@ class ManagementService:
         expires_in_days: float | None = None,
     ) -> IssuedKey:
         """A new key, shown once by the caller and never again."""
-        application = self._application(application_id)
+        application = await self._application(application_id)
         resource = Resource.application(application.organization_id, application.id)
         _require(actor, "application_keys.issue", resource)
         now = self._now()
         expires = self._expiry(expires_in_days, now)
-        self._check_room(application, now, replacing=None)
-        issued = self.keys.issue(application.id, label, expires_at_ms=expires)
         extra: dict[str, object] = {}
         if expires is not None:
             extra["expires_at_ms"] = expires
-        self._record(
-            self._key_event(AuditAction.KEY_ISSUED, issued.record, application, actor, **extra)
-        )
+        # The count and the new key together: no other writer can take the last free place
+        # between them (docs/scale-out-plan.md, section 3.6).
+        async with self.store.write_transaction():
+            await self._check_room(application, now, replacing=None)
+            issued = await self.keys.issue(application.id, label, expires_at_ms=expires)
+            await self._record(
+                self._key_event(AuditAction.KEY_ISSUED, issued.record, application, actor, **extra)
+            )
         return issued
 
-    def rotate_key(
+    async def rotate_key(
         self,
         key_id: str,
         *,
@@ -384,7 +393,7 @@ class ManagementService:
         expires_in_days: float | None = None,
     ) -> IssuedKey:
         """A replacement key; the old one keeps working for ``grace_hours``."""
-        old, application = self._key(key_id)
+        old, application = await self._key(key_id)
         resource = Resource.application(application.organization_id, application.id)
         _require(actor, "application_keys.rotate", resource)
         now = self._now()
@@ -395,29 +404,32 @@ class ManagementService:
                 Reason.KEY_NOT_ACTIVE, f"key {key_id} is revoked or expired: issue a new one"
             )
         expires = self._expiry(expires_in_days, now)
-        self._check_room(application, now, replacing=old.key_id)
         grace_ms = grace_hours * HOUR_MS
-        issued = self.keys.rotate(key_id, grace_ms=grace_ms, expires_at_ms=expires)
-        extra: dict[str, object] = {"key_id": issued.record.key_id, "grace_ms": grace_ms}
-        if expires is not None:
-            extra["expires_at_ms"] = expires
-        self._record(self._key_event(AuditAction.KEY_ROTATED, old, application, actor, **extra))
+        async with self.store.write_transaction():  # the count and the new key together
+            await self._check_room(application, now, replacing=old.key_id)
+            issued = await self.keys.rotate(key_id, grace_ms=grace_ms, expires_at_ms=expires)
+            extra: dict[str, object] = {"key_id": issued.record.key_id, "grace_ms": grace_ms}
+            if expires is not None:
+                extra["expires_at_ms"] = expires
+            await self._record(
+                self._key_event(AuditAction.KEY_ROTATED, old, application, actor, **extra)
+            )
         return issued
 
-    def revoke_key(self, key_id: str, *, actor: Actor | None = None) -> None:
-        record, application = self._key(key_id)
+    async def revoke_key(self, key_id: str, *, actor: Actor | None = None) -> None:
+        record, application = await self._key(key_id)
         resource = Resource.application(application.organization_id, application.id)
         _require(actor, "application_keys.revoke", resource)
-        self.keys.revoke(key_id)
-        self._record(self._key_event(AuditAction.KEY_REVOKED, record, application, actor))
+        await self.keys.revoke(key_id)
+        await self._record(self._key_event(AuditAction.KEY_REVOKED, record, application, actor))
 
-    def page_keys(
+    async def page_keys(
         self, application_id: str, after: str | None, limit: int, *, actor: Actor | None = None
     ) -> Page[ApiKeyRecord]:
-        application = self._application(application_id)
+        application = await self._application(application_id)
         resource = Resource.application(application.organization_id, application.id)
         _require(actor, "application_keys.list", resource)
-        found = self.store.page_keys(application.id, after, check_page_size(limit) + 1)
+        found = await self.store.page_keys(application.id, after, check_page_size(limit) + 1)
         return page_of(found, limit, lambda k: k.key_id)
 
     def key_state(self, record: ApiKeyRecord) -> str:

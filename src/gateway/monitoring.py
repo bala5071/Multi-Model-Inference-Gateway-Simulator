@@ -13,7 +13,7 @@ from typing import Protocol, runtime_checkable
 from gateway.applications import ApplicationStore
 from gateway.clock import Clock
 from gateway.events import Event, EventBus
-from gateway.ledger import BudgetExceededError, CostLedger
+from gateway.ledger import BudgetExceededError, Budgets
 from gateway.metrics import Distribution, MetricsStore
 from gateway.overload import ModelHealth, QueueFullError, Transition
 from gateway.prefix_cache import PrefixCache
@@ -206,7 +206,7 @@ class Monitor:
         *,
         series: TimeSeriesStore,
         events: EventBus,
-        ledger: CostLedger | None = None,
+        ledger: Budgets | None = None,
         applications: ApplicationStore | None = None,
         slo_models: Collection[str] = (),
     ) -> None:
@@ -325,7 +325,7 @@ class Monitor:
 
     # --- reading back ----------------------------------------------------------------------
 
-    def snapshot(
+    async def snapshot(
         self,
         *,
         history_ms: float = 0.0,
@@ -342,7 +342,7 @@ class Monitor:
             resolution_ms=self._series.resolution_ms,
             window_ms=self._series.window_ms,
             models=models,
-            applications=self._applications(history_ms),
+            applications=await self._applications(history_ms),
             events=EventsGroup(
                 available=True,
                 capacity=self._events.capacity,
@@ -442,13 +442,13 @@ class Monitor:
             series=self._series.model_series(name, history_ms),
         )
 
-    def _applications(self, history_ms: float) -> ApplicationsGroup:
+    async def _applications(self, history_ms: float) -> ApplicationsGroup:
         if self._application_store is None or self._ledger is None:
             return ApplicationsGroup(False, None)
         applications: dict[str, ApplicationSnapshot] = {}
-        for application in self._application_store.list_applications():
+        for application in await self._application_store.list_applications():
             application_id, plan = application.id, application.plan
-            usage = self._ledger.usage(application_id)
+            usage = await self._ledger.usage(application_id)
             totals = self._series.application_totals(application_id)
             applications[application_id] = ApplicationSnapshot(
                 plan=plan.name,

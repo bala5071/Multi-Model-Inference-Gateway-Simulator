@@ -6,8 +6,10 @@ An event holds token counts and costs only. No prompt text, response text or tok
 ever reach a store (CLAUDE.md hard rule 7); ``UsageEvent`` has no field that could hold
 them.
 
-Every store method is synchronous, and callers must never move one onto a thread or
-await it: on a ``SimClock`` an event loop that looks idle lets simulated time jump.
+Every store method is a coroutine (docs/34-state-interfaces.md), so a store over a network
+can implement the same protocol. The stores here never suspend inside one: on a ``SimClock``
+an event loop that looks idle lets simulated time jump, so no simulated time may pass in a
+store call. Callers must never move one onto a thread.
 """
 
 from __future__ import annotations
@@ -124,29 +126,29 @@ class StoredUsageEvent:
 
 
 class UsageStore(Protocol):
-    def append(self, event: UsageEvent) -> int:
+    async def append(self, event: UsageEvent) -> int:
         """Store one event and return its ``seq``."""
         ...
 
-    def usage_by_model(
+    async def usage_by_model(
         self, application_id: str, start_ms: float, end_ms: float
     ) -> dict[str, ModelUsage]:
         """Totals per model of the application's events with ``start_ms <= occurred_at_ms <
         end_ms``, summed in ``seq`` order."""
         ...
 
-    def usage_by_model_for(
+    async def usage_by_model_for(
         self, application_ids: Collection[str], start_ms: float, end_ms: float
     ) -> dict[str, ModelUsage]:
         """The same totals over the events of several applications together (an
         organization's), summed in ``seq`` order. No application ids, no events."""
         ...
 
-    def events(self, application_id: str | None = None) -> list[StoredUsageEvent]:
+    async def events(self, application_id: str | None = None) -> list[StoredUsageEvent]:
         """Stored events in ``seq`` order, for one application or all of them."""
         ...
 
-    def prune(self, before_ms: float, limit: int | None = None) -> int:
+    async def prune(self, before_ms: float, limit: int | None = None) -> int:
         """Delete events with ``occurred_at_ms < before_ms``, oldest first, at most ``limit``
         of them (all if None). Returns how many."""
         ...
@@ -174,12 +176,12 @@ class InMemoryUsageStore:
         self._events: deque[StoredUsageEvent] = deque(maxlen=max_events)
         self._seq = itertools.count(1)
 
-    def append(self, event: UsageEvent) -> int:
+    async def append(self, event: UsageEvent) -> int:
         seq = next(self._seq)
         self._events.append(StoredUsageEvent(seq, event))
         return seq
 
-    def usage_by_model(
+    async def usage_by_model(
         self, application_id: str, start_ms: float, end_ms: float
     ) -> dict[str, ModelUsage]:
         return _totals(
@@ -189,7 +191,7 @@ class InMemoryUsageStore:
             and start_ms <= s.event.occurred_at_ms < end_ms
         )
 
-    def usage_by_model_for(
+    async def usage_by_model_for(
         self, application_ids: Collection[str], start_ms: float, end_ms: float
     ) -> dict[str, ModelUsage]:
         # Only what the ring still holds: the ledger's totals are the ones budgets use.
@@ -200,14 +202,14 @@ class InMemoryUsageStore:
             if s.event.application_id in wanted and start_ms <= s.event.occurred_at_ms < end_ms
         )
 
-    def events(self, application_id: str | None = None) -> list[StoredUsageEvent]:
+    async def events(self, application_id: str | None = None) -> list[StoredUsageEvent]:
         return [
             s
             for s in self._events
             if application_id is None or s.event.application_id == application_id
         ]
 
-    def prune(self, before_ms: float, limit: int | None = None) -> int:
+    async def prune(self, before_ms: float, limit: int | None = None) -> int:
         old = sorted(
             (e for e in self._events if e.event.occurred_at_ms < before_ms),
             key=lambda e: (e.event.occurred_at_ms, e.seq),
@@ -256,7 +258,7 @@ class SqliteUsageStore:
             raise RuntimeError("usage_events does not exist; run the migrations first")
         self._connection = connection
 
-    def append(self, event: UsageEvent) -> int:
+    async def append(self, event: UsageEvent) -> int:
         cursor = self._connection.execute(
             f"INSERT INTO usage_events ({_COLUMNS})"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -287,7 +289,7 @@ class SqliteUsageStore:
         assert seq is not None
         return seq
 
-    def usage_by_model(
+    async def usage_by_model(
         self, application_id: str, start_ms: float, end_ms: float
     ) -> dict[str, ModelUsage]:
         rows = self._connection.execute(
@@ -300,7 +302,7 @@ class SqliteUsageStore:
         # ledger built up request by request.
         return _totals(_event(row) for row in rows)
 
-    def usage_by_model_for(
+    async def usage_by_model_for(
         self, application_ids: Collection[str], start_ms: float, end_ms: float
     ) -> dict[str, ModelUsage]:
         ids = sorted(set(application_ids))
@@ -317,7 +319,7 @@ class SqliteUsageStore:
         )
         return _totals(_event(row) for row in rows)
 
-    def events(self, application_id: str | None = None) -> list[StoredUsageEvent]:
+    async def events(self, application_id: str | None = None) -> list[StoredUsageEvent]:
         query = f"SELECT seq, {_COLUMNS} FROM usage_events"
         params: tuple[str, ...] = ()
         if application_id is not None:
@@ -326,7 +328,7 @@ class SqliteUsageStore:
         rows = self._connection.execute(query + " ORDER BY seq", params).fetchall()
         return [StoredUsageEvent(int(row[0]), _event(row[1:])) for row in rows]
 
-    def prune(self, before_ms: float, limit: int | None = None) -> int:
+    async def prune(self, before_ms: float, limit: int | None = None) -> int:
         if limit is None:
             cursor = self._connection.execute(
                 "DELETE FROM usage_events WHERE occurred_at_ms < ?", (before_ms,)

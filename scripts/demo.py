@@ -33,6 +33,7 @@ from gateway.applications import InMemoryApplicationStore, seed_demo_application
 from gateway.clock import SystemEpoch, WallClock
 from gateway.continuous import build_continuous_registry
 from gateway.routing import load_plans
+from gateway.state import run_now
 
 SYSTEM = "You are a careful assistant for a logistics company. " * 12
 QUESTION = "Summarise the delivery policy in one sentence."
@@ -54,9 +55,12 @@ def build() -> tuple[FastAPI, dict[str, str]]:
     templates = load_plans()
     store = InMemoryApplicationStore()
     epoch = SystemEpoch()
-    seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms())
+    run_now(seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms()))
     keys = ApiKeyService(store, secrets.token_bytes(32), epoch)
-    issued = {a.id: keys.issue(a.id, "demo (in memory)").key for a in store.list_applications()}
+    issued = {
+        a.id: run_now(keys.issue(a.id, "demo (in memory)")).key
+        for a in run_now(store.list_applications())
+    }
     access = ApplicationAccess(keys, templates)
     return create_app(registry, clock, applications=access, overload=DEFAULT_OVERLOAD), issued
 

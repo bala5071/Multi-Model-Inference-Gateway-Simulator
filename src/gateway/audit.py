@@ -11,8 +11,9 @@ is kept.
 
 Rows for unknown-user failures are capped per minute (of epoch time); the ones over the cap
 are not written, and how many were dropped is written to the log itself once that minute is
-over. Entries older than the retention are pruned in batches, beside the server. Store calls
-are synchronous, for the reason given in ``gateway.usage``.
+over. Entries older than the retention are pruned in batches, beside the server. The rows are
+kept by an ``AuditStore`` and the cap is counted by an ``AuditCap`` (docs/34-state-interfaces.md);
+their calls are coroutines that never suspend, for the reason given in ``gateway.usage``.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol
 
 from gateway.permissions import PERMISSIONS
 
@@ -324,66 +325,84 @@ class AuditEntry:
     event: AuditEvent
 
 
-class AuditLog:
-    """The audit log in the table of migration 7."""
+@dataclass(frozen=True, slots=True)
+class DroppedRows:
+    """Unknown-user rows dropped over the cap in one finished minute."""
 
-    def __init__(
-        self,
-        connection: sqlite3.Connection,
-        *,
-        unknown_user_rows_per_minute: int = DEFAULT_UNKNOWN_USER_ROWS_PER_MINUTE,
-    ) -> None:
+    minute_start_ms: float
+    dropped: int
+
+
+class AuditCap(Protocol):
+    """The per-minute cap on unknown-user rows (minutes of epoch time)."""
+
+    async def take(self, at_ms: float) -> bool:
+        """Count one unknown-user row in ``at_ms``'s minute: False, counted as dropped, if
+        that minute is already at the cap."""
+        ...
+
+    async def collect(self, now_ms: float) -> DroppedRows | None:
+        """The rows a minute before ``now_ms``'s dropped, once: None if there are none, or
+        the minute is not over, or they have been collected."""
+        ...
+
+
+class InMemoryAuditCap:
+    """The cap in this process's memory: one gateway process per database (docs/21)."""
+
+    def __init__(self, rows_per_minute: int = DEFAULT_UNKNOWN_USER_ROWS_PER_MINUTE) -> None:
+        if rows_per_minute < 1:
+            raise ValueError("unknown_user_rows_per_minute must be at least 1")
+        self._cap = rows_per_minute
+        self._minute: int | None = None
+        self._written_this_minute = 0
+        self._dropped = 0
+
+    async def take(self, at_ms: float) -> bool:
+        minute = math.floor(at_ms / MINUTE_MS)
+        if minute != self._minute:
+            self._minute, self._written_this_minute = minute, 0
+        if self._written_this_minute >= self._cap:
+            self._dropped += 1
+            return False
+        self._written_this_minute += 1
+        return True
+
+    async def collect(self, now_ms: float) -> DroppedRows | None:
+        if self._dropped == 0 or self._minute is None:
+            return None
+        if math.floor(now_ms / MINUTE_MS) == self._minute:
+            return None
+        dropped, self._dropped = self._dropped, 0
+        return DroppedRows(self._minute * MINUTE_MS, dropped)
+
+
+class AuditStore(Protocol):
+    """Where the entries are kept."""
+
+    async def insert(self, event: AuditEvent, at_ms: float) -> None: ...
+
+    async def entries(self) -> list[AuditEntry]:
+        """Every entry, oldest first."""
+        ...
+
+    async def prune(self, before_ms: float, limit: int | None = None) -> int:
+        """Delete entries with ``at_ms < before_ms``, oldest first, at most ``limit``."""
+        ...
+
+
+class SqliteAuditStore:
+    """The entries in the table of migration 7."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
         found = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_log'"
         ).fetchone()
         if found is None:
             raise RuntimeError("audit_log does not exist; run the migrations first")
-        if unknown_user_rows_per_minute < 1:
-            raise ValueError("unknown_user_rows_per_minute must be at least 1")
         self._connection = connection
-        self._cap = unknown_user_rows_per_minute
-        self._minute: int | None = None
-        self._written_this_minute = 0
-        self._dropped = 0
 
-    def write(self, event: AuditEvent, at_ms: float) -> bool:
-        """Append ``event`` at epoch time ``at_ms``. Returns False if it was an unknown-user
-        row over this minute's cap (counted, and reported once the minute is over)."""
-        self.flush_dropped(at_ms)
-        if event.target_type is TargetType.UNKNOWN_USER:
-            minute = math.floor(at_ms / MINUTE_MS)
-            if minute != self._minute:
-                self._minute, self._written_this_minute = minute, 0
-            if self._written_this_minute >= self._cap:
-                self._dropped += 1
-                return False
-            self._written_this_minute += 1
-        self._insert(event, at_ms)
-        return True
-
-    def flush_dropped(self, now_ms: float) -> int:
-        """Once the minute that dropped rows is over, write how many. Returns that count."""
-        if self._dropped == 0 or self._minute is None:
-            return 0
-        if math.floor(now_ms / MINUTE_MS) == self._minute:
-            return 0
-        dropped, self._dropped = self._dropped, 0
-        self._insert(
-            AuditEvent(
-                AuditAction.ROWS_DROPPED,
-                Outcome.INFO,
-                TargetType.AUDIT_LOG,
-                details={
-                    "reason": Reason.UNKNOWN_USER_CAP,
-                    "dropped": dropped,
-                    "minute_start_ms": self._minute * MINUTE_MS,
-                },
-            ),
-            (self._minute + 1) * MINUTE_MS,
-        )
-        return dropped
-
-    def _insert(self, event: AuditEvent, at_ms: float) -> None:
+    async def insert(self, event: AuditEvent, at_ms: float) -> None:
         self._connection.execute(
             "INSERT INTO audit_log (at_ms, actor_user_id, action, target_type, target_id,"
             " outcome, details) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -398,15 +417,14 @@ class AuditLog:
             ),
         )
 
-    def entries(self) -> list[AuditEntry]:
+    async def entries(self) -> list[AuditEntry]:
         rows = self._connection.execute(
             "SELECT seq, at_ms, actor_user_id, action, target_type, target_id, outcome, details"
             " FROM audit_log ORDER BY seq"
         ).fetchall()
         return [_entry(row) for row in rows]
 
-    def prune(self, before_ms: float, limit: int | None = None) -> int:
-        """Delete entries with ``at_ms < before_ms``, oldest first, at most ``limit``."""
+    async def prune(self, before_ms: float, limit: int | None = None) -> int:
         if limit is None:
             cursor = self._connection.execute("DELETE FROM audit_log WHERE at_ms < ?", (before_ms,))
         else:
@@ -416,6 +434,57 @@ class AuditLog:
                 (before_ms, limit),
             )
         return cursor.rowcount
+
+
+class AuditLog:
+    """The audit log: the allowlisted events, kept by ``store``, with unknown-user rows capped
+    by ``cap`` (default: in memory, ``unknown_user_rows_per_minute`` a minute)."""
+
+    def __init__(
+        self,
+        store: AuditStore,
+        *,
+        cap: AuditCap | None = None,
+        unknown_user_rows_per_minute: int = DEFAULT_UNKNOWN_USER_ROWS_PER_MINUTE,
+    ) -> None:
+        self._store = store
+        self._cap = cap if cap is not None else InMemoryAuditCap(unknown_user_rows_per_minute)
+
+    async def write(self, event: AuditEvent, at_ms: float) -> bool:
+        """Append ``event`` at epoch time ``at_ms``. Returns False if it was an unknown-user
+        row over this minute's cap (counted, and reported once the minute is over)."""
+        await self.flush_dropped(at_ms)
+        if event.target_type is TargetType.UNKNOWN_USER and not await self._cap.take(at_ms):
+            return False
+        await self._store.insert(event, at_ms)
+        return True
+
+    async def flush_dropped(self, now_ms: float) -> int:
+        """Once the minute that dropped rows is over, write how many. Returns that count."""
+        found = await self._cap.collect(now_ms)
+        if found is None:
+            return 0
+        await self._store.insert(
+            AuditEvent(
+                AuditAction.ROWS_DROPPED,
+                Outcome.INFO,
+                TargetType.AUDIT_LOG,
+                details={
+                    "reason": Reason.UNKNOWN_USER_CAP,
+                    "dropped": found.dropped,
+                    "minute_start_ms": found.minute_start_ms,
+                },
+            ),
+            found.minute_start_ms + MINUTE_MS,
+        )
+        return found.dropped
+
+    async def entries(self) -> list[AuditEntry]:
+        return await self._store.entries()
+
+    async def prune(self, before_ms: float, limit: int | None = None) -> int:
+        """Delete entries with ``at_ms < before_ms``, oldest first, at most ``limit``."""
+        return await self._store.prune(before_ms, limit)
 
 
 def _entry(row: tuple[Any, ...]) -> AuditEntry:

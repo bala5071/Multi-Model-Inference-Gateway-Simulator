@@ -35,6 +35,7 @@ from gateway.database import open_database
 from gateway.metrics import percentile
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.routing import load_plans
+from gateway.state import run_now
 
 WARMUP_CHECKS = 20
 FLUSH_SIZES = (1, 100, 1000)
@@ -66,23 +67,27 @@ def run(checks: int, directory: Path | None) -> list[WriteTimes]:
         connection = open_database(Path(folder) / "keys.db")
         MigrationRunner(connection, MIGRATIONS, epoch).migrate()
         store = SqliteApplicationStore(connection)
-        seed_demo_applications(store, load_plans(), created_at_ms=epoch.epoch_ms())
+        run_now(seed_demo_applications(store, load_plans(), created_at_ms=epoch.epoch_ms()))
         # A throwaway pepper and keys: they live in this function and are never printed.
         keys = ApiKeyService(store, secrets.token_bytes(32), epoch, last_used_flush_ms=float("inf"))
-        issued = keys.issue("acme", "benchmark")
-        many = [keys.issue("globex", f"k{i}").record.key_id for i in range(max(FLUSH_SIZES))]
+        issued = run_now(keys.issue("acme", "benchmark"))
+        many = [
+            run_now(keys.issue("globex", f"k{i}")).record.key_id for i in range(max(FLUSH_SIZES))
+        ]
 
-        results.append(_times("check, batched", checks, lambda: keys.authenticate(issued.key)))
+        results.append(
+            _times("check, batched", checks, lambda: run_now(keys.authenticate(issued.key)))
+        )
         # Strictly increasing times, so every write really changes the row: the system clock
         # can return the same reading twice, and an unchanged time is not written.
         stamps = itertools.count(epoch.epoch_ms())
 
         def check_and_write() -> None:
-            keys.authenticate(issued.key)
-            store.record_last_used({issued.record.key_id: next(stamps)})
+            run_now(keys.authenticate(issued.key))
+            run_now(store.record_last_used({issued.record.key_id: next(stamps)}))
 
         def flush(batch: list[str]) -> Callable[[], None]:
-            return lambda: store.record_last_used(dict.fromkeys(batch, next(stamps)))
+            return lambda: run_now(store.record_last_used(dict.fromkeys(batch, next(stamps))))
 
         results.append(_times("check + write per request", checks, check_and_write))
         for size in FLUSH_SIZES:

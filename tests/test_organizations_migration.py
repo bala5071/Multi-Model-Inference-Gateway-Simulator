@@ -135,7 +135,7 @@ def v3(tmp_path: Path) -> Iterator[sqlite3.Connection]:
 # --- a realistic database -------------------------------------------------------------------
 
 
-def test_a_realistic_database_keeps_every_key_and_every_event_exactly(
+async def test_a_realistic_database_keeps_every_key_and_every_event_exactly(
     v3: sqlite3.Connection,
 ) -> None:
     """Several applications, keys in every state and thousands of usage events. After the
@@ -197,9 +197,9 @@ def test_a_realistic_database_keeps_every_key_and_every_event_exactly(
     for key, application in expected.items():
         if application is None:
             with pytest.raises(InvalidApiKeyError):
-                service.authenticate(key)
+                await service.authenticate(key)
         else:
-            assert service.authenticate(key).id == application
+            assert (await service.authenticate(key)).id == application
     assert sum(a is not None for a in expected.values()) == 18
 
 
@@ -316,7 +316,7 @@ def test_apply_reverse_and_apply_again(v3: sqlite3.Connection) -> None:
 
 
 @pytest.mark.parametrize("change", ["second organization", "renamed", "disabled"])
-def test_the_reverse_refuses_once_organizations_hold_information(
+async def test_the_reverse_refuses_once_organizations_hold_information(
     v3: sqlite3.Connection, change: str
 ) -> None:
     _add_application(v3, "acme", "Acme", 100)
@@ -324,11 +324,13 @@ def test_the_reverse_refuses_once_organizations_hold_information(
     runner.migrate()
     store = SqliteApplicationStore(v3)
     if change == "second organization":
-        store.add_organization(new_organization("north", "North", "business", created_at_ms=0))
+        await store.add_organization(
+            new_organization("north", "North", "business", created_at_ms=0)
+        )
     elif change == "renamed":
         v3.execute("UPDATE organizations SET name = 'Main' WHERE id = 'default'")
     else:
-        store.set_organization_disabled("default", True)
+        await store.set_organization_disabled("default", True)
     with pytest.raises(MigrationError, match="cannot be reversed"):
         runner.rollback(3)
     assert runner.current_version() == 4

@@ -8,18 +8,20 @@ was created from, and belongs to one organization. Application ids are unique ev
 names are unique within an organization. Nothing here assumes there is one organization:
 both stores start with the ``default`` organization (migration 4 creates it), which is data.
 
-A key record holds the key's HMAC, never the key. Store methods are synchronous, for the
-reason given in ``gateway.usage``.
+A key record holds the key's HMAC, never the key. Store methods are coroutines that never
+suspend, for the reason given in ``gateway.usage``.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
+from gateway.database import write_transaction
 from gateway.organizations import (
     DEFAULT_ORGANIZATION_ID,
     DEFAULT_ORGANIZATION_NAME,
@@ -97,64 +99,71 @@ class KeyLookup:
 
 
 class ApplicationStore(Protocol):
-    def add_organization(self, organization: Organization) -> None:
+    def write_transaction(self) -> AbstractAsyncContextManager[None]:
+        """One write transaction: whatever the block writes, together or not at all, and no
+        other writer between its reads and its writes."""
+        ...
+
+    async def add_organization(self, organization: Organization) -> None:
         """Raise ``ValueError`` if the id or the name is taken."""
         ...
 
-    def get_organization(self, organization_id: str) -> Organization | None: ...
+    async def get_organization(self, organization_id: str) -> Organization | None: ...
 
-    def find_organization(self, name: str) -> Organization | None:
+    async def find_organization(self, name: str) -> Organization | None:
         """The organization with exactly this name (after NFC normalization), if any."""
         ...
 
-    def list_organizations(self) -> list[Organization]:
+    async def list_organizations(self) -> list[Organization]:
         """Every organization, in the order they were added."""
         ...
 
-    def set_organization_disabled(self, organization_id: str, disabled: bool) -> None:
+    async def set_organization_disabled(self, organization_id: str, disabled: bool) -> None:
         """Raise ``KeyError`` if there is no such organization."""
         ...
 
-    def add_application(self, application: Application) -> None:
+    async def add_application(self, application: Application) -> None:
         """Raise ``ValueError`` if an application with that id exists, the name is used in
         its organization, or the organization does not exist or is disabled."""
         ...
 
-    def get_application(self, application_id: str) -> Application | None: ...
+    async def get_application(self, application_id: str) -> Application | None: ...
 
-    def list_applications(self, organization_id: str | None = None) -> list[Application]:
+    async def list_applications(self, organization_id: str | None = None) -> list[Application]:
         """Every application (or every one of an organization), in the order they were
         added."""
         ...
 
-    def page_applications(
+    async def page_applications(
         self, organization_id: str, after: str | None, limit: int
     ) -> list[Application]:
         """Up to ``limit`` applications of an organization by id, after ``after`` (compared,
         never looked up)."""
         ...
 
-    def add_key(self, record: ApiKeyRecord) -> None:
+    async def add_key(self, record: ApiKeyRecord) -> None:
         """Raise ``ValueError`` if the key id exists or the application does not."""
         ...
 
-    def get_key(self, key_id: str) -> ApiKeyRecord | None: ...
+    async def get_key(self, key_id: str) -> ApiKeyRecord | None: ...
 
-    def lookup_key(self, key_id: str) -> KeyLookup | None:
+    async def lookup_key(self, key_id: str) -> KeyLookup | None:
         """The key's record with its application and organization state, in one lookup."""
         ...
 
-    def list_keys(self, application_id: str) -> list[ApiKeyRecord]: ...
+    async def list_keys(self, application_id: str) -> list[ApiKeyRecord]: ...
 
-    def page_keys(self, application_id: str, after: str | None, limit: int) -> list[ApiKeyRecord]:
+    async def page_keys(
+        self, application_id: str, after: str | None, limit: int
+    ) -> list[ApiKeyRecord]:
         """Up to ``limit`` key records of an application by key id, after ``after``."""
         ...
 
-    def set_key_expiry(self, key_id: str, expires_at_ms: float) -> None: ...
+    async def set_key_expiry(self, key_id: str, expires_at_ms: float) -> None: ...
 
-    def revoke_key(self, key_id: str) -> None: ...
+    async def revoke_key(self, key_id: str) -> None: ...
 
-    def record_last_used(self, times_ms: Mapping[str, float]) -> None:
+    async def record_last_used(self, times_ms: Mapping[str, float]) -> None:
         """Set ``last_used_at_ms`` for several keys at once (never moving it backwards)."""
         ...
 
@@ -182,31 +191,36 @@ class InMemoryApplicationStore:
         self._applications: dict[str, Application] = {}
         self._keys: dict[str, ApiKeyRecord] = {}
 
-    def add_organization(self, organization: Organization) -> None:
+    @asynccontextmanager
+    async def write_transaction(self) -> AsyncIterator[None]:
+        # One process and no await that suspends inside a block: nothing can come between.
+        yield
+
+    async def add_organization(self, organization: Organization) -> None:
         _checked_name(organization.name)
         if organization.id in self._organizations:
             raise ValueError(f"organization {organization.id!r} exists")
-        if self.find_organization(organization.name) is not None:
+        if await self.find_organization(organization.name) is not None:
             raise ValueError(f"an organization is already named {organization.name!r}")
         self._organizations[organization.id] = organization
 
-    def get_organization(self, organization_id: str) -> Organization | None:
+    async def get_organization(self, organization_id: str) -> Organization | None:
         return self._organizations.get(organization_id)
 
-    def find_organization(self, name: str) -> Organization | None:
+    async def find_organization(self, name: str) -> Organization | None:
         normalized = normalize_name(name)
         return next((o for o in self._organizations.values() if o.name == normalized), None)
 
-    def list_organizations(self) -> list[Organization]:
+    async def list_organizations(self) -> list[Organization]:
         return list(self._organizations.values())
 
-    def set_organization_disabled(self, organization_id: str, disabled: bool) -> None:
+    async def set_organization_disabled(self, organization_id: str, disabled: bool) -> None:
         organization = self._organizations.get(organization_id)
         if organization is None:
             raise KeyError(organization_id)
         self._organizations[organization_id] = replace(organization, disabled=disabled)
 
-    def add_application(self, application: Application) -> None:
+    async def add_application(self, application: Application) -> None:
         _checked_name(application.name)
         if application.id in self._applications:
             raise ValueError(f"application {application.id!r} exists")
@@ -218,36 +232,36 @@ class InMemoryApplicationStore:
             raise _name_taken(application)
         self._applications[application.id] = application
 
-    def get_application(self, application_id: str) -> Application | None:
+    async def get_application(self, application_id: str) -> Application | None:
         return self._applications.get(application_id)
 
-    def list_applications(self, organization_id: str | None = None) -> list[Application]:
+    async def list_applications(self, organization_id: str | None = None) -> list[Application]:
         return [
             a
             for a in self._applications.values()
             if organization_id is None or a.organization_id == organization_id
         ]
 
-    def page_applications(
+    async def page_applications(
         self, organization_id: str, after: str | None, limit: int
     ) -> list[Application]:
         found = sorted(
-            (a for a in self.list_applications(organization_id) if a.id > (after or "")),
+            (a for a in await self.list_applications(organization_id) if a.id > (after or "")),
             key=lambda a: a.id,
         )
         return found[:limit]
 
-    def add_key(self, record: ApiKeyRecord) -> None:
+    async def add_key(self, record: ApiKeyRecord) -> None:
         if record.key_id in self._keys:
             raise ValueError("key id exists")
         if record.application_id not in self._applications:
             raise ValueError(f"no application {record.application_id!r}")
         self._keys[record.key_id] = record
 
-    def get_key(self, key_id: str) -> ApiKeyRecord | None:
+    async def get_key(self, key_id: str) -> ApiKeyRecord | None:
         return self._keys.get(key_id)
 
-    def lookup_key(self, key_id: str) -> KeyLookup | None:
+    async def lookup_key(self, key_id: str) -> KeyLookup | None:
         record = self._keys.get(key_id)
         if record is None:
             return None
@@ -256,12 +270,14 @@ class InMemoryApplicationStore:
         enabled = organization is not None and not organization.disabled
         return KeyLookup(record, application, enabled)
 
-    def list_keys(self, application_id: str) -> list[ApiKeyRecord]:
+    async def list_keys(self, application_id: str) -> list[ApiKeyRecord]:
         return [k for k in self._keys.values() if k.application_id == application_id]
 
-    def page_keys(self, application_id: str, after: str | None, limit: int) -> list[ApiKeyRecord]:
+    async def page_keys(
+        self, application_id: str, after: str | None, limit: int
+    ) -> list[ApiKeyRecord]:
         found = sorted(
-            (k for k in self.list_keys(application_id) if k.key_id > (after or "")),
+            (k for k in await self.list_keys(application_id) if k.key_id > (after or "")),
             key=lambda k: k.key_id,
         )
         return found[:limit]
@@ -272,13 +288,13 @@ class InMemoryApplicationStore:
             raise KeyError(key_id)
         self._keys[key_id] = replace(record, **changes)
 
-    def set_key_expiry(self, key_id: str, expires_at_ms: float) -> None:
+    async def set_key_expiry(self, key_id: str, expires_at_ms: float) -> None:
         self._update(key_id, expires_at_ms=expires_at_ms)
 
-    def revoke_key(self, key_id: str) -> None:
+    async def revoke_key(self, key_id: str) -> None:
         self._update(key_id, revoked=True)
 
-    def record_last_used(self, times_ms: Mapping[str, float]) -> None:
+    async def record_last_used(self, times_ms: Mapping[str, float]) -> None:
         for key_id, at_ms in times_ms.items():
             record = self._keys.get(key_id)
             if record is not None and (record.last_used_at_ms or 0.0) < at_ms:
@@ -349,49 +365,52 @@ class SqliteApplicationStore:
             )
         self._connection = connection
 
-    def add_organization(self, organization: Organization) -> None:
+    def write_transaction(self) -> AbstractAsyncContextManager[None]:
+        return write_transaction(self._connection)
+
+    async def add_organization(self, organization: Organization) -> None:
         o = organization
         _checked_name(o.name)
-        if self.get_organization(o.id) is not None:
+        if await self.get_organization(o.id) is not None:
             raise ValueError(f"organization {o.id!r} exists")
-        if self.find_organization(o.name) is not None:
+        if await self.find_organization(o.name) is not None:
             raise ValueError(f"an organization is already named {o.name!r}")
         self._connection.execute(
             f"INSERT INTO organizations ({_ORG_COLUMNS}) VALUES (?, ?, ?, ?, ?)",
             (o.id, o.name, o.kind.value, o.created_at_ms, int(o.disabled)),
         )
 
-    def get_organization(self, organization_id: str) -> Organization | None:
+    async def get_organization(self, organization_id: str) -> Organization | None:
         row = self._connection.execute(
             f"SELECT {_ORG_COLUMNS} FROM organizations WHERE id = ?", (organization_id,)
         ).fetchone()
         return _organization(row) if row is not None else None
 
-    def find_organization(self, name: str) -> Organization | None:
+    async def find_organization(self, name: str) -> Organization | None:
         row = self._connection.execute(
             f"SELECT {_ORG_COLUMNS} FROM organizations WHERE name = ?", (normalize_name(name),)
         ).fetchone()
         return _organization(row) if row is not None else None
 
-    def list_organizations(self) -> list[Organization]:
+    async def list_organizations(self) -> list[Organization]:
         rows = self._connection.execute(
             f"SELECT {_ORG_COLUMNS} FROM organizations ORDER BY rowid"
         ).fetchall()
         return [_organization(row) for row in rows]
 
-    def set_organization_disabled(self, organization_id: str, disabled: bool) -> None:
+    async def set_organization_disabled(self, organization_id: str, disabled: bool) -> None:
         cursor = self._connection.execute(
             "UPDATE organizations SET disabled = ? WHERE id = ?", (int(disabled), organization_id)
         )
         if cursor.rowcount != 1:
             raise KeyError(organization_id)
 
-    def add_application(self, application: Application) -> None:
+    async def add_application(self, application: Application) -> None:
         a = application
         _checked_name(a.name)
-        if self.get_application(a.id) is not None:
+        if await self.get_application(a.id) is not None:
             raise ValueError(f"application {a.id!r} exists")
-        _check_organization(self.get_organization(a.organization_id), a)
+        _check_organization(await self.get_organization(a.organization_id), a)
         taken = self._connection.execute(
             "SELECT 1 FROM applications WHERE organization_id = ? AND name = ?",
             (a.organization_id, a.name),
@@ -414,13 +433,13 @@ class SqliteApplicationStore:
             ),
         )
 
-    def get_application(self, application_id: str) -> Application | None:
+    async def get_application(self, application_id: str) -> Application | None:
         row = self._connection.execute(
             f"SELECT {_APP_COLUMNS} FROM applications WHERE id = ?", (application_id,)
         ).fetchone()
         return _application(row) if row is not None else None
 
-    def list_applications(self, organization_id: str | None = None) -> list[Application]:
+    async def list_applications(self, organization_id: str | None = None) -> list[Application]:
         if organization_id is None:
             rows = self._connection.execute(
                 f"SELECT {_APP_COLUMNS} FROM applications ORDER BY rowid"
@@ -432,7 +451,7 @@ class SqliteApplicationStore:
             ).fetchall()
         return [_application(row) for row in rows]
 
-    def page_applications(
+    async def page_applications(
         self, organization_id: str, after: str | None, limit: int
     ) -> list[Application]:
         rows = self._connection.execute(
@@ -442,7 +461,7 @@ class SqliteApplicationStore:
         ).fetchall()
         return [_application(row) for row in rows]
 
-    def add_key(self, record: ApiKeyRecord) -> None:
+    async def add_key(self, record: ApiKeyRecord) -> None:
         r = record
         try:
             self._connection.execute(
@@ -461,13 +480,13 @@ class SqliteApplicationStore:
         except sqlite3.IntegrityError as exc:
             raise ValueError("key id exists, or no such application") from exc
 
-    def get_key(self, key_id: str) -> ApiKeyRecord | None:
+    async def get_key(self, key_id: str) -> ApiKeyRecord | None:
         row = self._connection.execute(
             f"SELECT {_KEY_COLUMNS} FROM api_keys WHERE key_id = ?", (key_id,)
         ).fetchone()
         return _key(row) if row is not None else None
 
-    def lookup_key(self, key_id: str) -> KeyLookup | None:
+    async def lookup_key(self, key_id: str) -> KeyLookup | None:
         key_columns = ", ".join(f"k.{c.strip()}" for c in _KEY_COLUMNS.split(","))
         app_columns = ", ".join(f"a.{c.strip()}" for c in _APP_COLUMNS.split(","))
         row = self._connection.execute(
@@ -484,14 +503,16 @@ class SqliteApplicationStore:
         application = _application(application_row) if application_row[0] is not None else None
         return KeyLookup(_key(row[:key_width]), application, row[-1] == 0)
 
-    def list_keys(self, application_id: str) -> list[ApiKeyRecord]:
+    async def list_keys(self, application_id: str) -> list[ApiKeyRecord]:
         rows = self._connection.execute(
             f"SELECT {_KEY_COLUMNS} FROM api_keys WHERE application_id = ? ORDER BY rowid",
             (application_id,),
         ).fetchall()
         return [_key(row) for row in rows]
 
-    def page_keys(self, application_id: str, after: str | None, limit: int) -> list[ApiKeyRecord]:
+    async def page_keys(
+        self, application_id: str, after: str | None, limit: int
+    ) -> list[ApiKeyRecord]:
         rows = self._connection.execute(
             f"SELECT {_KEY_COLUMNS} FROM api_keys WHERE application_id = ? AND key_id > ?"
             " ORDER BY key_id LIMIT ?",
@@ -503,15 +524,15 @@ class SqliteApplicationStore:
         if self._connection.execute(sql, params).rowcount != 1:
             raise KeyError(params[-1])
 
-    def set_key_expiry(self, key_id: str, expires_at_ms: float) -> None:
+    async def set_key_expiry(self, key_id: str, expires_at_ms: float) -> None:
         self._update(
             "UPDATE api_keys SET expires_at_ms = ? WHERE key_id = ?", (expires_at_ms, key_id)
         )
 
-    def revoke_key(self, key_id: str) -> None:
+    async def revoke_key(self, key_id: str) -> None:
         self._update("UPDATE api_keys SET revoked = 1 WHERE key_id = ?", (key_id,))
 
-    def record_last_used(self, times_ms: Mapping[str, float]) -> None:
+    async def record_last_used(self, times_ms: Mapping[str, float]) -> None:
         if not times_ms:
             return
         connection = self._connection
@@ -528,7 +549,7 @@ class SqliteApplicationStore:
         connection.execute("COMMIT")
 
 
-def seed_demo_applications(
+async def seed_demo_applications(
     store: ApplicationStore,
     templates: PlansConfig,
     *,
@@ -540,7 +561,7 @@ def seed_demo_applications(
     those made."""
     made = []
     for app_id, demo in templates.applications.items():
-        if store.get_application(app_id) is None:
+        if await store.get_application(app_id) is None:
             application = application_from_template(
                 app_id,
                 demo.name,
@@ -549,6 +570,6 @@ def seed_demo_applications(
                 organization_id=organization_id,
                 created_at_ms=created_at_ms,
             )
-            store.add_application(application)
+            await store.add_application(application)
             made.append(application)
     return made

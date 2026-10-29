@@ -8,7 +8,7 @@ import ast
 import asyncio
 import dataclasses
 import hashlib
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 import pytest
+from fastapi import Request
 
 from accounts_helpers import (
     OTHER_PASSWORD,
@@ -92,15 +93,24 @@ class Console:
 
 
 @pytest.fixture
-def accounts() -> Accounts:
+async def accounts() -> Accounts:
     """north: alice and dora (org_admins), bob (no role); default: root (platform_admin)."""
     accounts = make_accounts()
     for name, org in (("alice", "north"), ("dora", "north"), ("bob", "north"), ("root", "default")):
         ready_user(accounts, name, PASSWORD, org)
-    accounts.service.grant_role("alice", "org_admin", "organization", "north")
-    accounts.service.grant_role("dora", "org_admin", "organization", "north")
-    accounts.service.grant_role("root", "platform_admin", "platform", "*")
+    await accounts.service.grant_role("alice", "org_admin", "organization", "north")
+    await accounts.service.grant_role("dora", "org_admin", "organization", "north")
+    await accounts.service.grant_role("root", "platform_admin", "platform", "*")
     return accounts
+
+
+def _resolving_to(resource: Resource) -> Callable[[Request], Awaitable[Resource | None]]:
+    """A resolver that always finds ``resource``."""
+
+    async def resolve(_: Request) -> Resource | None:
+        return resource
+
+    return resolve
 
 
 @asynccontextmanager
@@ -122,7 +132,7 @@ async def console(accounts: Accounts) -> AsyncIterator[Console]:
             f"/v1/admin/probe/{action}",
             _probe(action),
             methods=["POST"],
-            dependencies=[requires(action, lambda request, r=resource: r)],
+            dependencies=[requires(action, _resolving_to(resource))],
         )
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
@@ -141,8 +151,8 @@ def _raw(response: httpx.Response) -> tuple[int, list[tuple[str, str]], bytes]:
     return response.status_code, sorted(response.headers.multi_items()), response.content
 
 
-def _window(accounts: Accounts, session: tuple[str, str]) -> float | None:
-    context = accounts.service.authenticate(session[0])
+async def _window(accounts: Accounts, session: tuple[str, str]) -> float | None:
+    context = await accounts.service.authenticate(session[0])
     return context.session.step_up_until_ms
 
 
@@ -246,11 +256,11 @@ async def test_locking_disabling_or_a_role_change_clears_every_window(accounts: 
         one, two = await c.login("alice"), await c.login("alice")
         await c.step_up(one)
         await c.step_up(two)
-        accounts.service.grant_role("alice", "viewer", "organization", "north")
+        await accounts.service.grant_role("alice", "viewer", "organization", "north")
         assert (await c.act(one, "users.create")).json() == STEP_UP_REQUIRED
         assert (await c.act(two, "users.create")).json() == STEP_UP_REQUIRED
         await c.step_up(one)
-        accounts.service.revoke_role("alice", "viewer", "organization", "north")
+        await accounts.service.revoke_role("alice", "viewer", "organization", "north")
         assert (await c.act(one, "users.create")).json() == STEP_UP_REQUIRED
         # Locked by failed logins elsewhere: the windows close, the session survives.
         await c.step_up(one)
@@ -261,7 +271,7 @@ async def test_locking_disabling_or_a_role_change_clears_every_window(accounts: 
         # Disabling revokes every session; their windows go with them.
         dora = await c.login("dora")
         await c.step_up(dora)
-        accounts.service.disable_user("dora")
+        await accounts.service.disable_user("dora")
         assert _stored_window(accounts, dora[0]) is None
 
 
@@ -276,17 +286,19 @@ async def test_every_refused_step_up_gets_the_same_bytes(accounts: Accounts) -> 
         cases["wrong password"] = await c.step_up(session, "not the password at all")
         bob = await c.login("bob")
         for _ in range(5):  # the login limiter alone, the database lockout untouched
-            service.limiter.record_failure(service.limiter.key("bob"))
+            await service.limiter.record_failure(service.limiter.key("bob"))
         cases["limiter"] = await c.step_up(bob)
         dora = await c.login("dora")
-        dora_user = accounts.store.find_user("dora")
+        dora_user = await accounts.store.find_user("dora")
         assert dora_user is not None
-        accounts.store.set_login_state(dora_user.id, 0, None, accounts.epoch.epoch_ms() + MINUTE_MS)
+        await accounts.store.set_login_state(
+            dora_user.id, 0, None, accounts.epoch.epoch_ms() + MINUTE_MS
+        )
         cases["locked"] = await c.step_up(dora)
         root = await c.login("root")
-        root_user = accounts.store.find_user("root")
+        root_user = await accounts.store.find_user("root")
         assert root_user is not None
-        accounts.store.set_password(
+        await accounts.store.set_password(
             root_user.id, root_user.password_hash, must_change=True, bootstrap=root_user.bootstrap
         )
         cases["must change password"] = await c.step_up(root)
@@ -307,7 +319,7 @@ async def test_a_wrong_password_counts_toward_the_lockout(accounts: Accounts) ->
         for session, attempts in zip(sessions, (3, 2), strict=True):
             for _ in range(attempts):
                 await c.step_up(session, "not the password at all")
-        user = accounts.store.find_user("alice")
+        user = await accounts.store.find_user("alice")
         assert user is not None
         assert user.locked_until_ms is not None  # five failures across two sessions
         refused = await c.client.post(
@@ -315,7 +327,7 @@ async def test_a_wrong_password_counts_toward_the_lockout(accounts: Accounts) ->
         )
         assert refused.status_code == 401
     service = accounts.service
-    assert service.limiter.blocked(service.limiter.key("alice"))
+    assert await service.limiter.blocked(service.limiter.key("alice"))
 
 
 async def test_the_session_cap_refuses_without_verifying(
@@ -390,12 +402,12 @@ async def test_every_step_up_takes_the_same_steps(
     contexts = {}
     for name in ("alice", "dora", "bob", "root"):
         login = await service.login(name, PASSWORD)
-        contexts[name] = service.authenticate(login.session_id)
+        contexts[name] = await service.authenticate(login.session_id)
     dora = contexts["dora"].user
     locked = dataclasses.replace(dora, locked_until_ms=accounts.epoch.epoch_ms() + MINUTE_MS)
     must = dataclasses.replace(contexts["root"].user, must_change_password=True)
     for _ in range(5):
-        service.limiter.record_failure(service.limiter.key("bob"))
+        await service.limiter.record_failure(service.limiter.key("bob"))
     cases = {
         "success": (contexts["alice"], PASSWORD),
         "wrong password": (contexts["alice"], "not the password at all"),
@@ -414,7 +426,7 @@ async def test_every_step_up_takes_the_same_steps(
 
 async def test_a_step_up_does_not_let_simulated_time_move(accounts: Accounts) -> None:
     service = accounts.service
-    context = service.authenticate((await service.login("alice", PASSWORD)).session_id)
+    context = await service.authenticate((await service.login("alice", PASSWORD)).session_id)
     woke: list[float] = []
 
     async def sleeper() -> None:
@@ -437,7 +449,7 @@ async def test_step_up_is_audited_without_secrets(accounts: Accounts) -> None:
         await c.act(session, "users.create")
         await c.step_up(session, "not the password at all")
         await c.step_up(session)
-    events = [e.event for e in accounts.audit.entries()]
+    events = [e.event for e in await accounts.audit.entries()]
     required = [e for e in events if e.action is AuditAction.STEP_UP_REQUIRED]
     failed = [e for e in events if e.action is AuditAction.STEP_UP_FAILED]
     granted = [e for e in events if e.action is AuditAction.STEP_UP_GRANTED]

@@ -7,7 +7,8 @@ import asyncio
 import json
 import logging
 import math
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import httpx
 import pytest
@@ -58,10 +59,10 @@ def accounts() -> Accounts:
     return make_accounts()
 
 
-def _actions(accounts: Accounts) -> list[tuple[str, str, str]]:
+async def _actions(accounts: Accounts) -> list[tuple[str, str, str]]:
     return [
         (e.event.action.value, e.event.outcome.value, e.event.target_type.value)
-        for e in accounts.audit.entries()
+        for e in await accounts.audit.entries()
     ]
 
 
@@ -86,39 +87,39 @@ def test_bad_usernames_are_refused(raw: str) -> None:
         normalize_username(raw)
 
 
-def test_an_individual_organization_refuses_a_second_member(accounts: Accounts) -> None:
-    accounts.service.create_user("first", PASSWORD, "solo")
+async def test_an_individual_organization_refuses_a_second_member(accounts: Accounts) -> None:
+    await accounts.service.create_user("first", PASSWORD, "solo")
     with pytest.raises(ValueError, match="individual organization"):
-        accounts.service.create_user("second", PASSWORD, "solo")
+        await accounts.service.create_user("second", PASSWORD, "solo")
     # A business organization takes any number.
     for name in ("bee1", "bee2", "bee3"):
-        accounts.service.create_user(name, PASSWORD, "north")
-    assert accounts.store.count_members("north") == 3
+        await accounts.service.create_user(name, PASSWORD, "north")
+    assert await accounts.store.count_members("north") == 3
 
 
-def test_creating_a_user_checks_everything_and_never_shows_the_password(
+async def test_creating_a_user_checks_everything_and_never_shows_the_password(
     accounts: Accounts,
 ) -> None:
     service = accounts.service
     with pytest.raises(ValueError, match="no organization"):
-        service.create_user("carol", PASSWORD, "nowhere")
-    accounts.organizations.set_organization_disabled("north", True)
+        await service.create_user("carol", PASSWORD, "nowhere")
+    await accounts.organizations.set_organization_disabled("north", True)
     with pytest.raises(ValueError, match="disabled"):
-        service.create_user("carol", PASSWORD, "north")
-    accounts.organizations.set_organization_disabled("north", False)
+        await service.create_user("carol", PASSWORD, "north")
+    await accounts.organizations.set_organization_disabled("north", False)
     for password, problem in (
         ("short", "too_short"),
         ("carol likes long walks", "contains_username"),
         ("q1w2e3r4t5y6", "too_common"),
     ):
         with pytest.raises(PasswordPolicyError) as excinfo:
-            service.create_user("carol", password, "north")
+            await service.create_user("carol", password, "north")
         assert excinfo.value.problem.value == problem
         assert password not in str(excinfo.value)
-    service.create_user("carol", PASSWORD, "north")
+    await service.create_user("carol", PASSWORD, "north")
     with pytest.raises(ValueError, match="taken"):
-        service.create_user("CAROL", OTHER_PASSWORD, "north")
-    user = accounts.store.find_user("carol")
+        await service.create_user("CAROL", OTHER_PASSWORD, "north")
+    user = await accounts.store.find_user("carol")
     assert user is not None
     assert PASSWORD not in user.password_hash
     assert user.password_hash.startswith("$argon2id$")
@@ -129,19 +130,19 @@ def test_creating_a_user_checks_everything_and_never_shows_the_password(
 # --- the bootstrap admin --------------------------------------------------------------------
 
 
-def test_the_bootstrap_admin_is_made_once_and_never_overwritten(accounts: Accounts) -> None:
-    assert accounts.service.bootstrap_admin(ADMIN_ENV) is BootstrapOutcome.CREATED
-    admin = accounts.store.find_user("root")
+async def test_the_bootstrap_admin_is_made_once_and_never_overwritten(accounts: Accounts) -> None:
+    assert await accounts.service.bootstrap_admin(ADMIN_ENV) is BootstrapOutcome.CREATED
+    admin = await accounts.store.find_user("root")
     assert admin is not None
     assert (admin.must_change_password, admin.bootstrap) == (True, Bootstrap.UNUSED)
-    assert accounts.service.roles.assignments_for(admin.id) == (
+    assert await accounts.service.roles.assignments_for(admin.id) == (
         Assignment("platform_admin", ScopeType.PLATFORM, "*"),
     )
     assert admin.organization_id == "default"
     other = {ADMIN_USERNAME_ENV: "root", ADMIN_PASSWORD_ENV: "another long passphrase here"}
-    assert accounts.service.bootstrap_admin(other) is BootstrapOutcome.EXISTS_WITH_VARIABLES
-    assert accounts.service.bootstrap_admin({}) is BootstrapOutcome.EXISTS
-    assert accounts.store.find_user("root") == admin  # untouched
+    assert await accounts.service.bootstrap_admin(other) is BootstrapOutcome.EXISTS_WITH_VARIABLES
+    assert await accounts.service.bootstrap_admin({}) is BootstrapOutcome.EXISTS
+    assert await accounts.store.find_user("root") == admin  # untouched
 
 
 @pytest.mark.parametrize(
@@ -152,24 +153,26 @@ def test_the_bootstrap_admin_is_made_once_and_never_overwritten(accounts: Accoun
         {ADMIN_PASSWORD_ENV: "maple quarry eleven hounds"},
     ],
 )
-def test_without_an_admin_or_both_variables_it_refuses(
+async def test_without_an_admin_or_both_variables_it_refuses(
     accounts: Accounts, environ: dict[str, str]
 ) -> None:
     with pytest.raises(BootstrapError, match=f"{ADMIN_USERNAME_ENV} and {ADMIN_PASSWORD_ENV}"):
-        accounts.service.bootstrap_admin(environ)
+        await accounts.service.bootstrap_admin(environ)
 
 
 @pytest.mark.parametrize(
     ("password", "rule"),
     [("short", "at least 12"), ("root password is long", "username"), ("q1w2e3r4t5y6", "common")],
 )
-def test_the_bootstrap_password_must_pass_the_policy(
+async def test_the_bootstrap_password_must_pass_the_policy(
     accounts: Accounts, password: str, rule: str
 ) -> None:
     with pytest.raises(BootstrapError, match=rule) as excinfo:
-        accounts.service.bootstrap_admin({ADMIN_USERNAME_ENV: "root", ADMIN_PASSWORD_ENV: password})
+        await accounts.service.bootstrap_admin(
+            {ADMIN_USERNAME_ENV: "root", ADMIN_PASSWORD_ENV: password}
+        )
     assert password not in str(excinfo.value)
-    assert not accounts.service.roles.platform_admin_exists()
+    assert not await accounts.service.roles.platform_admin_exists()
 
 
 def test_the_server_refuses_to_start_without_an_admin(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -209,7 +212,7 @@ def test_a_warning_names_the_variables_still_set_never_their_values(
 
 
 async def test_the_bootstrap_password_works_for_one_login_only(accounts: Accounts) -> None:
-    accounts.service.bootstrap_admin(ADMIN_ENV)
+    await accounts.service.bootstrap_admin(ADMIN_ENV)
     password = ADMIN_ENV[ADMIN_PASSWORD_ENV]
     async with console(accounts) as c:
         first, sid, csrf = await http_login(c, "root", password)
@@ -242,7 +245,7 @@ async def test_the_bootstrap_password_works_for_one_login_only(accounts: Account
         assert (await c.client.get("/v1/auth/sessions", headers=cookie(sid))).status_code == 200
         assert (await http_login(c, "root", OTHER_PASSWORD))[0].status_code == 200
         assert (await http_login(c, "root", password))[0].status_code == 401
-    admin = accounts.store.find_user("root")
+    admin = await accounts.store.find_user("root")
     assert admin is not None
     assert admin.bootstrap is Bootstrap.NONE
     assert not admin.must_change_password
@@ -258,17 +261,17 @@ def _raw(response: httpx.Response) -> tuple[int, list[tuple[str, str]], bytes]:
 async def _every_refusal(accounts: Accounts) -> dict[str, tuple[str, str]]:
     """Accounts set up for each way a login can be refused; returns (username, password)."""
     service = accounts.service
-    service.create_user("wrongpw", PASSWORD, "north")
-    service.create_user("disabled", PASSWORD, "north")
-    service.disable_user("disabled")
-    service.create_user("locked", PASSWORD, "north")
+    await service.create_user("wrongpw", PASSWORD, "north")
+    await service.create_user("disabled", PASSWORD, "north")
+    await service.disable_user("disabled")
+    await service.create_user("locked", PASSWORD, "north")
     for _ in range(5):
         with pytest.raises(LoginFailedError):
             await service.login("locked", "not the password at all")
-    service.create_user("limited", PASSWORD, "north")
+    await service.create_user("limited", PASSWORD, "north")
     for _ in range(5):  # the in-memory limiter alone, with the database lockout untouched
-        service.limiter.record_failure(service.limiter.key("limited"))
-    service.bootstrap_admin(ADMIN_ENV)
+        await service.limiter.record_failure(service.limiter.key("limited"))
+    await service.bootstrap_admin(ADMIN_ENV)
     await service.login("root", ADMIN_ENV[ADMIN_PASSWORD_ENV])
     return {
         "unknown username": ("nobody", PASSWORD),
@@ -302,7 +305,7 @@ async def test_every_login_takes_the_same_steps_whatever_is_wrong(
     hash with the current parameters (the stored one, or the dummy), for every refusal and
     for a success. What the writes after that cost is measured in note 27."""
     cases = await _every_refusal(accounts)
-    accounts.service.create_user("good", PASSWORD, "north")
+    await accounts.service.create_user("good", PASSWORD, "north")
     cases["success"] = ("good", PASSWORD)
     service = accounts.service
     steps: list[tuple[str, object]] = []
@@ -328,6 +331,8 @@ async def test_every_login_takes_the_same_steps_whatever_is_wrong(
         assert steps == expected, name
 
 
+T = TypeVar("T")
+
 # --- lockout --------------------------------------------------------------------------------
 
 
@@ -337,12 +342,65 @@ async def _fail(accounts: Accounts, username: str, times: int) -> None:
             await accounts.service.login(username, "not the password at all")
 
 
+class _AllStarted:
+    """A hash runner that holds every verify until ``parties`` of them have started. Each
+    login has read the user by then, as logins that overlap on the server's thread runner do."""
+
+    def __init__(self, parties: int) -> None:
+        self._parties = parties
+        self._started = 0
+        self._all = asyncio.Event()
+
+    async def run(self, work: Callable[[], T]) -> T:
+        self._started += 1
+        if self._started == self._parties:
+            self._all.set()
+        await self._all.wait()
+        return work()
+
+
+async def _fail_together(accounts: Accounts, username: str, times: int) -> None:
+    accounts.service._passwords._runner = _AllStarted(times)
+    results = await asyncio.gather(
+        *(accounts.service.login(username, f"wrong password {i}") for i in range(times)),
+        return_exceptions=True,
+    )
+    assert all(isinstance(r, LoginFailedError) for r in results), results
+
+
+async def test_wrong_passwords_at_the_same_time_each_count(accounts: Accounts) -> None:
+    """Scale-out plan, Q3 (a deliberate change in PR 1): each wrong password is counted from
+    the account's row as it is when counted, not as it was read before the verify. Before,
+    two at once each wrote one failure, and the account recorded one."""
+    await accounts.service.create_user("alice", PASSWORD, "north")
+    await _fail_together(accounts, "alice", 2)
+    user = await accounts.store.find_user("alice")
+    assert user is not None
+    assert (user.failed_logins, user.locked_until_ms) == (2, None)
+
+
+async def test_five_wrong_passwords_at_the_same_time_lock_the_account_once(
+    accounts: Accounts,
+) -> None:
+    await accounts.service.create_user("alice", PASSWORD, "north")
+    await _fail_together(accounts, "alice", 5)
+    user = await accounts.store.find_user("alice")
+    assert user is not None
+    assert user.locked_until_ms == accounts.epoch.epoch_ms() + LOCK_MS
+    assert user.failed_logins == 0
+    locks = [
+        e for e in await accounts.audit.entries() if e.event.action is AuditAction.LOGIN_LOCKED
+    ]
+    assert len(locks) == 1
+    assert locks[0].event.details["failures"] == 5
+
+
 async def test_five_failures_lock_for_fifteen_minutes(accounts: Accounts) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     await _fail(accounts, "alice", 4)
     await accounts.clock.sleep_ms(LOCK_WINDOW_MS - 1)  # four failures, then nearly the window
     await _fail(accounts, "alice", 1)  # the fifth within the window: locked
-    user = accounts.store.find_user("alice")
+    user = await accounts.store.find_user("alice")
     assert user is not None
     assert user.locked_until_ms == accounts.epoch.epoch_ms() + LOCK_MS
     with pytest.raises(LoginFailedError):
@@ -353,14 +411,14 @@ async def test_five_failures_lock_for_fifteen_minutes(accounts: Accounts) -> Non
         await restarted.login("alice", PASSWORD)
     await accounts.clock.sleep_ms(LOCK_MS)
     await restarted.login("alice", PASSWORD)
-    user = accounts.store.find_user("alice")
+    user = await accounts.store.find_user("alice")
     assert user is not None
     assert (user.failed_logins, user.locked_until_ms) == (0, None)
-    assert ("login_locked", "info", "user") in _actions(accounts)
+    assert ("login_locked", "info", "user") in await _actions(accounts)
 
 
 async def test_failures_spread_over_more_than_the_window_do_not_lock(accounts: Accounts) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     await _fail(accounts, "alice", 4)
     await accounts.clock.sleep_ms(LOCK_WINDOW_MS)
     await _fail(accounts, "alice", 4)  # a new window
@@ -368,38 +426,40 @@ async def test_failures_spread_over_more_than_the_window_do_not_lock(accounts: A
 
 
 async def test_unlock_user_ends_a_lock_early(accounts: Accounts) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     await _fail(accounts, "alice", 5)
-    accounts.service.unlock_user("alice")
+    await accounts.service.unlock_user("alice")
     # The in-memory limiter still counts those five (it is not in the database).
-    accounts.service.limiter.clear(accounts.service.limiter.key("alice"))
+    await accounts.service.limiter.clear(accounts.service.limiter.key("alice"))
     await accounts.service.login("alice", PASSWORD)
-    assert ("user_unlocked", "success", "user") in _actions(accounts)
+    assert ("user_unlocked", "success", "user") in await _actions(accounts)
 
 
 async def test_unknown_usernames_are_limited_like_real_ones(accounts: Accounts) -> None:
     service = accounts.service
     await _fail(accounts, "ghost", 5)
-    assert service.limiter.blocked(service.limiter.key("ghost"))
+    assert await service.limiter.blocked(service.limiter.key("ghost"))
     await accounts.clock.sleep_ms(LOCK_WINDOW_MS)
-    assert not service.limiter.blocked(service.limiter.key("ghost"))
+    assert not await service.limiter.blocked(service.limiter.key("ghost"))
 
 
 # --- re-hashing -----------------------------------------------------------------------------
 
 
 async def test_a_login_upgrades_a_hash_made_with_other_parameters(accounts: Accounts) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
-    user = accounts.store.find_user("alice")
+    await accounts.service.create_user("alice", PASSWORD, "north")
+    user = await accounts.store.find_user("alice")
     assert user is not None
     older = PasswordHasher(Argon2Parameters(time_cost=2, memory_cost_kib=16)).hash(PASSWORD)
-    accounts.store.set_password_hash(user.id, older)
+    await accounts.store.set_password_hash(user.id, older)
     await accounts.service.login("alice", PASSWORD)
-    upgraded = accounts.store.find_user("alice")
+    upgraded = await accounts.store.find_user("alice")
     assert upgraded is not None
     assert upgraded.password_hash.startswith("$argon2id$v=19$m=8,t=1,p=1$")
     await accounts.service.login("alice", PASSWORD)  # it verifies, and needs no second upgrade
-    logins = [e.event for e in accounts.audit.entries() if e.event.action is AuditAction.LOGIN]
+    logins = [
+        e.event for e in await accounts.audit.entries() if e.event.action is AuditAction.LOGIN
+    ]
     assert [e.details["password_rehashed"] for e in logins] == [True, False]
 
 
@@ -409,44 +469,44 @@ async def test_a_login_upgrades_a_hash_made_with_other_parameters(accounts: Acco
 async def test_sessions_expire_after_thirty_idle_minutes_and_twelve_hours(
     accounts: Accounts,
 ) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     idle = await accounts.service.login("alice", PASSWORD)
     busy = await accounts.service.login("alice", PASSWORD)
     await accounts.clock.sleep_ms(SESSION_IDLE_MS - MINUTE_MS)
-    accounts.service.authenticate(busy.session_id)
+    await accounts.service.authenticate(busy.session_id)
     await accounts.clock.sleep_ms(MINUTE_MS)
     with pytest.raises(SessionInvalidError):  # idle for 30 minutes
-        accounts.service.authenticate(idle.session_id)
+        await accounts.service.authenticate(idle.session_id)
     # A session used every 20 minutes lives until its absolute expiry, and no longer.
     while accounts.epoch.epoch_ms() + 20 * MINUTE_MS < ORIGIN_MS + SESSION_ABSOLUTE_MS:
         await accounts.clock.sleep_ms(20 * MINUTE_MS)
-        accounts.service.authenticate(busy.session_id)
+        await accounts.service.authenticate(busy.session_id)
     await accounts.clock.sleep_ms(ORIGIN_MS + SESSION_ABSOLUTE_MS - accounts.epoch.epoch_ms())
     with pytest.raises(SessionInvalidError):
-        accounts.service.authenticate(busy.session_id)
+        await accounts.service.authenticate(busy.session_id)
 
 
 async def test_last_seen_is_written_at_most_once_a_minute(
     accounts: Accounts, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     login = await accounts.service.login("alice", PASSWORD)
     writes: list[float] = []
     real_touch = accounts.store.touch_session
 
-    def touch(id_hash: str, at_ms: float) -> None:
+    async def touch(id_hash: str, at_ms: float) -> None:
         writes.append(at_ms - ORIGIN_MS)
-        real_touch(id_hash, at_ms)
+        await real_touch(id_hash, at_ms)
 
     monkeypatch.setattr(accounts.store, "touch_session", touch)
     for _ in range(12):  # a request every 10 seconds for two minutes
         await accounts.clock.sleep_ms(10_000.0)
-        accounts.service.authenticate(login.session_id)
+        await accounts.service.authenticate(login.session_id)
     assert writes == [LAST_SEEN_WRITE_MS, 2 * LAST_SEEN_WRITE_MS]
 
 
 async def test_a_login_never_reuses_a_session_it_was_sent(accounts: Accounts) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     planted = "A" * 43  # what an attacker might set in the victim's browser
     async with console(accounts) as c:
         response, sid, _ = await http_login(c, "alice", PASSWORD, Cookie=f"gw_session={planted}")
@@ -473,7 +533,7 @@ def test_the_set_cookie_header_is_exactly_this() -> None:
 
 @pytest.mark.parametrize("secure", [False, True])
 async def test_login_sets_exactly_that_cookie(accounts: Accounts, secure: bool) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     async with console(accounts, cookie_secure=secure) as c:
         response, sid, _ = await http_login(c, "alice", PASSWORD)
     assert sid is not None
@@ -495,7 +555,7 @@ def test_the_default_server_marks_the_cookie_secure_only_when_asked(
 
 
 async def test_state_changing_requests_need_the_csrf_token(accounts: Accounts) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     async with console(accounts) as c:
         _, sid, csrf = await http_login(c, "alice", PASSWORD)
         assert sid is not None
@@ -525,7 +585,7 @@ async def test_state_changing_requests_need_the_csrf_token(accounts: Accounts) -
 
 
 async def test_a_login_from_another_site_is_refused(accounts: Accounts) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     async with console(accounts) as c:
         evil, *_ = await http_login(c, "alice", PASSWORD, Origin="https://evil.example")
         null, *_ = await http_login(c, "alice", PASSWORD, Origin="null")
@@ -551,7 +611,7 @@ async def test_a_login_from_another_site_is_refused(accounts: Accounts) -> None:
 
 
 async def test_a_password_change_revokes_the_other_sessions(accounts: Accounts) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     async with console(accounts) as c:
         _, first, csrf = await http_login(c, "alice", PASSWORD)
         _, second, _ = await http_login(c, "alice", PASSWORD)
@@ -585,23 +645,23 @@ async def test_a_password_change_revokes_the_other_sessions(accounts: Accounts) 
         assert changed.json() == {"changed": True, "sessions_revoked": 1}
         assert (await c.client.get("/v1/auth/me", headers=cookie(first))).status_code == 200
         assert (await c.client.get("/v1/auth/me", headers=cookie(second))).status_code == 401
-    actions = _actions(accounts)
+    actions = await _actions(accounts)
     assert ("password_changed", "success", "user") in actions
     assert ("password_change_failed", "failure", "user") in actions
     assert ("sessions_revoked", "success", "user") in actions
 
 
 async def test_disabling_a_user_revokes_every_session(accounts: Accounts) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     logins = [await accounts.service.login("alice", PASSWORD) for _ in range(3)]
-    assert accounts.service.disable_user("alice") == 3
+    assert await accounts.service.disable_user("alice") == 3
     for login in logins:
         with pytest.raises(SessionInvalidError):
-            accounts.service.authenticate(login.session_id)
-    accounts.service.enable_user("alice")
+            await accounts.service.authenticate(login.session_id)
+    await accounts.service.enable_user("alice")
     for login in logins:  # enabling does not bring revoked sessions back
         with pytest.raises(SessionInvalidError):
-            accounts.service.authenticate(login.session_id)
+            await accounts.service.authenticate(login.session_id)
 
 
 async def test_the_session_list_shows_only_ones_own_live_sessions(accounts: Accounts) -> None:
@@ -633,7 +693,7 @@ async def test_the_session_list_shows_only_ones_own_live_sessions(accounts: Acco
 
 async def test_nothing_else_takes_a_session_and_no_accounts_means_no_routes() -> None:
     accounts = make_accounts()
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     async with console(accounts) as c:
         _, sid, _ = await http_login(c, "alice", PASSWORD)
         assert sid is not None
@@ -653,7 +713,7 @@ async def test_nothing_else_takes_a_session_and_no_accounts_means_no_routes() ->
 
 
 async def test_a_login_does_not_let_simulated_time_move(accounts: Accounts) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     woke: list[float] = []
 
     async def sleeper() -> None:
@@ -667,7 +727,7 @@ async def test_a_login_does_not_let_simulated_time_move(accounts: Accounts) -> N
         await accounts.service.login("alice", "not the password at all")
     with pytest.raises(LoginFailedError):
         await accounts.service.login("nobody-here", PASSWORD)
-    context = accounts.service.authenticate(login.session_id)
+    context = await accounts.service.authenticate(login.session_id)
     await accounts.service.change_password(context, PASSWORD, OTHER_PASSWORD)
     assert accounts.clock.now_ms() == 0.0
     assert woke == []
@@ -706,17 +766,17 @@ def test_an_audit_entry_names_only_ids() -> None:
 
 
 async def test_logins_and_their_failures_are_audited(accounts: Accounts) -> None:
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     await accounts.service.login("alice", PASSWORD)
     await _fail(accounts, "alice", 5)
     await _fail(accounts, "typed-into-the-wrong-box", 1)
-    actions = _actions(accounts)
+    actions = await _actions(accounts)
     assert actions[0] == ("user_created", "success", "user")
     assert ("login", "success", "session") in actions
     assert actions.count(("login_failed", "failure", "user")) == 5
     assert ("login_locked", "info", "user") in actions
     unknown = [
-        e for e in accounts.audit.entries() if e.event.target_type is TargetType.UNKNOWN_USER
+        e for e in await accounts.audit.entries() if e.event.target_type is TargetType.UNKNOWN_USER
     ]
     assert [(e.event.target_id, e.event.details) for e in unknown] == [
         (None, {"reason": "unknown_user"})
@@ -728,12 +788,16 @@ async def test_logins_and_their_failures_are_audited(accounts: Accounts) -> None
 async def test_unknown_user_rows_are_capped_per_minute_and_the_drops_recorded() -> None:
     accounts = make_accounts(unknown_user_rows_per_minute=3)
     await _fail(accounts, "ghost", 7)
-    rows = [e for e in accounts.audit.entries() if e.event.target_type is TargetType.UNKNOWN_USER]
+    rows = [
+        e for e in await accounts.audit.entries() if e.event.target_type is TargetType.UNKNOWN_USER
+    ]
     assert len(rows) == 3
     minute_start = math.floor(ORIGIN_MS / MINUTE_MS) * MINUTE_MS
     await accounts.clock.sleep_ms(MINUTE_MS)
-    accounts.service.prune()  # the retention pass writes the count once the minute is over
-    [dropped] = [e for e in accounts.audit.entries() if e.event.action is AuditAction.ROWS_DROPPED]
+    await accounts.service.prune()  # the retention pass writes the count once the minute is over
+    [dropped] = [
+        e for e in await accounts.audit.entries() if e.event.action is AuditAction.ROWS_DROPPED
+    ]
     assert dropped.event.details == {
         "reason": "unknown_user_cap",
         "dropped": 4,
@@ -745,18 +809,18 @@ async def test_unknown_user_rows_are_capped_per_minute_and_the_drops_recorded() 
 async def test_old_audit_entries_and_dead_sessions_are_pruned() -> None:
     accounts = make_accounts(audit_retention_ms=10 * MINUTE_MS)
     service = accounts.service
-    service.create_user("alice", PASSWORD, "north")
+    await service.create_user("alice", PASSWORD, "north")
     revoked = await service.login("alice", PASSWORD)
-    service.logout(service.authenticate(revoked.session_id))
+    await service.logout(await service.authenticate(revoked.session_id))
     idle = await service.login("alice", PASSWORD)
     await accounts.clock.sleep_ms(SESSION_IDLE_MS)
     live = await service.login("alice", PASSWORD)
-    before = len(accounts.audit.entries())
-    assert service.prune() == 2 + (before - 1)  # two dead sessions; all but the newest entry
+    before = len(await accounts.audit.entries())
+    assert await service.prune() == 2 + (before - 1)  # two dead sessions; all but the newest entry
     remaining = {row[0] for row in accounts.connection.execute("SELECT handle FROM sessions")}
     assert remaining == {live.session.handle}
     assert idle.session.handle not in remaining
-    assert [e.event.action for e in accounts.audit.entries()] == [AuditAction.LOGIN]
+    assert [e.event.action for e in await accounts.audit.entries()] == [AuditAction.LOGIN]
 
 
 def test_audit_retention_comes_from_the_environment() -> None:
@@ -774,5 +838,5 @@ def test_session_ids_are_256_bits(accounts: Accounts) -> None:
 
 
 async def _login(accounts: Accounts) -> str:
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     return (await accounts.service.login("alice", PASSWORD)).session_id

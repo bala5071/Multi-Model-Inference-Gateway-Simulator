@@ -49,6 +49,7 @@ again. Everything else goes to standard error.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import dataclasses
 import getpass
 import io
@@ -62,7 +63,6 @@ from pathlib import Path
 from gateway.apikeys import ApiKeyService, load_pepper
 from gateway.applications import (
     ApiKeyRecord,
-    SqliteApplicationStore,
     seed_demo_applications,
 )
 from gateway.audit import AuditLog
@@ -96,11 +96,8 @@ from gateway.passwords import (
     parameters_from,
 )
 from gateway.permissions import PLATFORM_SCOPE_ID, ScopeType
-from gateway.providers import ProviderStore
-from gateway.roles import RoleStore
 from gateway.routing import PlansConfig, load_plans
-from gateway.usage import SqliteUsageStore
-from gateway.users import AccountStore
+from gateway.state import StateBackend, sqlite_state
 from gateway.vault import (
     VAULT_KEY_ENV,
     VAULT_KEY_PREVIOUS_ENV,
@@ -195,7 +192,7 @@ def dry_run(database: Path) -> int:
     return 1 if plan.conflicts else 0
 
 
-def _open(environ: dict[str, str]) -> tuple[sqlite3.Connection, SqliteApplicationStore]:
+def _open(environ: dict[str, str]) -> tuple[sqlite3.Connection, StateBackend]:
     path = database_path(environ)
     connection = open_database(path)
     try:
@@ -203,7 +200,7 @@ def _open(environ: dict[str, str]) -> tuple[sqlite3.Connection, SqliteApplicatio
     except BaseException:
         connection.close()
         raise
-    return connection, SqliteApplicationStore(connection)
+    return connection, sqlite_state(connection)
 
 
 def _describe(key: ApiKeyRecord) -> str:
@@ -213,18 +210,17 @@ def _describe(key: ApiKeyRecord) -> str:
     return f"{key.key_id}  {state}  {key.label!r}  {expires}  {used}"
 
 
-def _organization_usage(
-    connection: sqlite3.Connection, store: SqliteApplicationStore, organization_id: str
-) -> None:
-    if store.get_organization(organization_id) is None:
+async def _organization_usage(state: StateBackend, organization_id: str) -> None:
+    store = state.applications
+    if await store.get_organization(organization_id) is None:
         raise ValueError(f"no organization {organization_id!r}")
     budgets = {
         a.id: a.plan.monthly_token_budget
-        for a in store.list_applications(organization_id=organization_id)
+        for a in await store.list_applications(organization_id=organization_id)
     }
     epoch = SystemEpoch()
-    ledger = CostLedger(WallClock(), store=SqliteUsageStore(connection), epoch=epoch)
-    usage = ledger.organization_usage(organization_id, budgets)
+    ledger = CostLedger(WallClock(), store=state.usage, epoch=epoch)
+    usage = await ledger.organization_usage(organization_id, budgets)
     print(
         f"organization {organization_id}  period_start_ms={usage.period_start_ms:.0f}  "
         f"period_end_ms={usage.period_end_ms:.0f}"
@@ -249,18 +245,16 @@ def _new_password(read_password: ReadPassword) -> str:
     return first
 
 
-def _accounts(
-    connection: sqlite3.Connection, store: SqliteApplicationStore, env: dict[str, str]
-) -> AccountService:
+def _accounts(state: StateBackend, env: dict[str, str]) -> AccountService:
     # The CLI never logs anyone in, so its login limiter needs no lasting secret; hashing
-    # is synchronous here (no event loop, nothing else waiting).
+    # is synchronous here (nothing else is waiting on the CLI's event loop).
     hasher = PasswordHasher(parameters_from(env, PRODUCTION))
     return AccountService(
-        AccountStore(connection),
-        AuditLog(connection),
+        state.accounts,
+        AuditLog(state.audit),
         Passwords(hasher, InlineHashRunner()),
-        roles=RoleStore(connection),
-        organizations=store,
+        roles=state.roles,
+        organizations=state.applications,
         clock=WallClock(),
         epoch=SystemEpoch(),
         secret=secrets.token_bytes(32),
@@ -268,8 +262,7 @@ def _accounts(
 
 
 def _management(
-    connection: sqlite3.Connection,
-    store: SqliteApplicationStore,
+    state: StateBackend,
     templates: PlansConfig,
     env: dict[str, str],
     *,
@@ -279,11 +272,15 @@ def _management(
     key expires only if asked). Without ``pepper`` (creating an application, revoking) no key
     can be issued, and none is needed; a throwaway one fills the slot."""
     epoch = SystemEpoch()
-    keys = ApiKeyService(store, pepper if pepper is not None else secrets.token_bytes(32), epoch)
-    return ManagementService(keys, templates, AuditLog(connection), epoch)
+    keys = ApiKeyService(
+        state.applications, pepper if pepper is not None else secrets.token_bytes(32), epoch
+    )
+    return ManagementService(keys, templates, AuditLog(state.audit), epoch)
 
 
-def _rotate_vault_key(connection: sqlite3.Connection, database: Path, env: dict[str, str]) -> str:
+async def _rotate_vault_key(
+    connection: sqlite3.Connection, state: StateBackend, database: Path, env: dict[str, str]
+) -> str:
     """Re-seal every provider key sealed under the previous master key under the current one,
     in one transaction, after a backup (docs/32). Keys under neither are left as they are and
     reported: they are unreadable."""
@@ -296,17 +293,17 @@ def _rotate_vault_key(connection: sqlite3.Connection, database: Path, env: dict[
     target = database.with_name(f"{database.name}.before-vault-rotation-{epoch.epoch_ms():.0f}.db")
     backup_database(connection, target)
     check_backup(target)
-    providers = ProviderStore(connection)
+    providers = state.providers
     resealed, unreadable = 0, []
-    with providers.immediate():
-        for stored in providers.all_keys():
+    async with providers.write_transaction():
+        for stored in await providers.all_keys():
             if stored.sealed.key_id == vault.current_key_id:
                 continue
-            config = providers.get(stored.provider_id)
+            config = await providers.get(stored.provider_id)
             if config is None or not vault.readable(stored.sealed):
                 unreadable.append(stored.provider_id)
                 continue
-            providers.put_key(
+            await providers.put_key(
                 stored.provider_id, vault.reseal(stored.sealed, config.binding), epoch.epoch_ms()
             )
             resealed += 1
@@ -338,7 +335,7 @@ def _scope(args: argparse.Namespace) -> tuple[str, str]:
     return ScopeType.APPLICATION.value, args.application
 
 
-def _account_command(
+async def _account_command(
     args: argparse.Namespace, accounts: AccountService, read_password: ReadPassword
 ) -> None:
     """The user and role commands. ``--as`` acts as that user, checked with ``authorize``;
@@ -346,13 +343,13 @@ def _account_command(
     # --as: the operator acts, within that user's roles; the audit log records the operator
     # as the actor and the user as acting_as (docs/28).
     actor = (
-        dataclasses.replace(accounts.actor_named(args.as_user), via_operator=True)
+        dataclasses.replace(await accounts.actor_named(args.as_user), via_operator=True)
         if args.as_user
         else None
     )
     name = args.username
     if args.command == "create-user":
-        made = accounts.create_user(
+        made = await accounts.create_user(
             name,
             _new_password(read_password),
             args.organization,
@@ -364,31 +361,125 @@ def _account_command(
         where = made.organization_id
         _note(f"created user {made.username!r}{role} in organization {where!r}{change}")
     elif args.command == "disable-user":
-        revoked = accounts.disable_user(name, actor=actor)
+        revoked = await accounts.disable_user(name, actor=actor)
         _note(f"disabled user {name!r}; revoked {revoked} session(s)")
     elif args.command == "enable-user":
-        accounts.enable_user(name, actor=actor)
+        await accounts.enable_user(name, actor=actor)
         _note(f"enabled user {name!r}")
     elif args.command == "reset-password":
-        revoked = accounts.reset_password(name, _new_password(read_password), actor=actor)
+        revoked = await accounts.reset_password(name, _new_password(read_password), actor=actor)
         _note(
             f"reset the password of {name!r}: it must be changed at the next login; "
             f"revoked {revoked} session(s)"
         )
     elif args.command == "unlock-user":
-        accounts.unlock_user(name, actor=actor)
+        await accounts.unlock_user(name, actor=actor)
         _note(f"unlocked user {name!r}")
     elif args.command == "list-roles":
-        for held in accounts.list_roles(name, actor=actor):
+        for held in await accounts.list_roles(name, actor=actor):
             print(f"{held.role}  {held.scope_type.value}  {held.scope_id}")
     else:
         scope_type, scope_id = _scope(args)
         if args.command == "grant-role":
-            accounts.grant_role(name, args.role, scope_type, scope_id, actor=actor)
+            await accounts.grant_role(name, args.role, scope_type, scope_id, actor=actor)
             _note(f"granted {args.role} ({scope_type} {scope_id}) to {name!r}")
         else:
-            accounts.revoke_role(name, args.role, scope_type, scope_id, actor=actor)
+            await accounts.revoke_role(name, args.role, scope_type, scope_id, actor=actor)
             _note(f"revoked {args.role} ({scope_type} {scope_id}) from {name!r}")
+
+
+async def _store_command(
+    args: argparse.Namespace,
+    env: dict[str, str],
+    connection: sqlite3.Connection,
+    state: StateBackend,
+    templates: PlansConfig,
+    read_password: ReadPassword,
+) -> None:
+    """Every command that reads or changes the stores, on one event loop (the stores' calls are
+    coroutines, docs/34-state-interfaces.md)."""
+    store = state.applications
+    epoch = SystemEpoch()
+    if args.command == "migrate":
+        _note(f"database is at version {len(MIGRATIONS)}")
+    elif args.command == "seed-demo":
+        made = await seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms())
+        _note(f"created {len(made)} demo application(s): {', '.join(a.id for a in made)}")
+    elif args.command == "create-organization":
+        organization = new_organization(
+            args.id, args.name, args.kind, created_at_ms=epoch.epoch_ms()
+        )
+        await store.add_organization(organization)
+        _note(f"created organization {args.id!r} ({args.kind})")
+    elif args.command == "list-organizations":
+        for organization in await store.list_organizations():
+            count = len(await store.list_applications(organization_id=organization.id))
+            status = "disabled" if organization.disabled else "enabled"
+            print(
+                f"{organization.id}  {organization.name!r}  kind={organization.kind.value}  "
+                f"{status}  applications={count}"
+            )
+    elif args.command in ("disable-organization", "enable-organization"):
+        disabled = args.command == "disable-organization"
+        if await store.get_organization(args.organization) is None:
+            raise ValueError(f"no organization {args.organization!r}")
+        await store.set_organization_disabled(args.organization, disabled)
+        _note(f"organization {args.organization!r} {'disabled' if disabled else 'enabled'}")
+    elif args.command in ACCOUNT_COMMANDS:
+        await _account_command(args, _accounts(state, env), read_password)
+    elif args.command == "organization-usage":
+        await _organization_usage(state, args.organization)
+    elif args.command == "list-applications":
+        for application in await store.list_applications(organization_id=args.organization):
+            print(
+                f"{application.id}  {application.name!r}  plan={application.plan.name}  "
+                f"organization={application.organization_id}"
+            )
+    elif args.command == "create-application":
+        # Audited, as over HTTP; the operator names the id (docs/30).
+        await _management(state, templates, env).create_application(
+            args.organization, args.name, args.plan, application_id=args.id
+        )
+        _note(
+            f"created application {args.id!r} on plan {args.plan!r} in organization "
+            f"{args.organization!r}"
+        )
+    elif args.command == "rotate-vault-key":
+        _note(await _rotate_vault_key(connection, state, database_path(env), env))
+    elif args.command == "vault-drop-unreadable":
+        vault = Vault(*load_master_keys(env))
+        providers = state.providers
+        dropped = 0
+        for stored in await providers.all_keys():
+            if not vault.readable(stored.sealed):
+                await providers.delete_key(stored.provider_id)
+                dropped += 1
+                _note(f"dropped the unreadable key of provider {stored.provider_id}")
+        _note(f"{dropped} unreadable key(s) dropped")
+    elif args.command == "list-keys":
+        for key in await store.list_keys(args.application):
+            print(_describe(key))
+    elif args.command == "revoke-key":
+        await _management(state, templates, env).revoke_key(args.key_id)
+        _note(f"revoked key {args.key_id}")
+    else:
+        service = _management(state, templates, env, pepper=load_pepper(env))
+        if args.command == "create-key":
+            issued = await service.issue_key(
+                args.application, args.label, expires_in_days=args.expires_in_days
+            )
+        else:
+            issued = await service.rotate_key(args.key_id, grace_hours=args.grace_hours)
+            _note(f"key {args.key_id} stops working in {args.grace_hours:g} hours")
+        _note(
+            f"key id {issued.record.key_id} for application {issued.record.application_id!r}. "
+            "The key is printed below, once; store it now, it cannot be shown again."
+        )
+        # A bare "\n" even on Windows, so `KEY=$(... create-key ...)` in bash gets the key
+        # without a trailing carriage return.
+        if isinstance(sys.stdout, io.TextIOWrapper):
+            sys.stdout.reconfigure(newline="\n")
+        print(issued.key)
 
 
 def main(
@@ -532,93 +623,13 @@ def main(
 
     plans_path = env.get("GATEWAY_PLANS")
     templates = load_plans(Path(plans_path) if plans_path else None)
-    epoch = SystemEpoch()
     try:
-        connection, store = _open(env)
+        connection, state = _open(env)
     except (MigrationError, DatabaseInUseError) as exc:
         _note(f"error: {exc}")
         return 1
     try:
-        if args.command == "migrate":
-            _note(f"database is at version {len(MIGRATIONS)}")
-        elif args.command == "seed-demo":
-            made = seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms())
-            _note(f"created {len(made)} demo application(s): {', '.join(a.id for a in made)}")
-        elif args.command == "create-organization":
-            organization = new_organization(
-                args.id, args.name, args.kind, created_at_ms=epoch.epoch_ms()
-            )
-            store.add_organization(organization)
-            _note(f"created organization {args.id!r} ({args.kind})")
-        elif args.command == "list-organizations":
-            for organization in store.list_organizations():
-                count = len(store.list_applications(organization_id=organization.id))
-                state = "disabled" if organization.disabled else "enabled"
-                print(
-                    f"{organization.id}  {organization.name!r}  kind={organization.kind.value}  "
-                    f"{state}  applications={count}"
-                )
-        elif args.command in ("disable-organization", "enable-organization"):
-            disabled = args.command == "disable-organization"
-            if store.get_organization(args.organization) is None:
-                raise ValueError(f"no organization {args.organization!r}")
-            store.set_organization_disabled(args.organization, disabled)
-            _note(f"organization {args.organization!r} {'disabled' if disabled else 'enabled'}")
-        elif args.command in ACCOUNT_COMMANDS:
-            _account_command(args, _accounts(connection, store, env), read_password)
-        elif args.command == "organization-usage":
-            _organization_usage(connection, store, args.organization)
-        elif args.command == "list-applications":
-            for application in store.list_applications(organization_id=args.organization):
-                print(
-                    f"{application.id}  {application.name!r}  plan={application.plan.name}  "
-                    f"organization={application.organization_id}"
-                )
-        elif args.command == "create-application":
-            # Audited, as over HTTP; the operator names the id (docs/30).
-            _management(connection, store, templates, env).create_application(
-                args.organization, args.name, args.plan, application_id=args.id
-            )
-            _note(
-                f"created application {args.id!r} on plan {args.plan!r} in organization "
-                f"{args.organization!r}"
-            )
-        elif args.command == "rotate-vault-key":
-            _note(_rotate_vault_key(connection, database_path(env), env))
-        elif args.command == "vault-drop-unreadable":
-            vault = Vault(*load_master_keys(env))
-            providers = ProviderStore(connection)
-            dropped = 0
-            for stored in providers.all_keys():
-                if not vault.readable(stored.sealed):
-                    providers.delete_key(stored.provider_id)
-                    dropped += 1
-                    _note(f"dropped the unreadable key of provider {stored.provider_id}")
-            _note(f"{dropped} unreadable key(s) dropped")
-        elif args.command == "list-keys":
-            for key in store.list_keys(args.application):
-                print(_describe(key))
-        elif args.command == "revoke-key":
-            _management(connection, store, templates, env).revoke_key(args.key_id)
-            _note(f"revoked key {args.key_id}")
-        else:
-            service = _management(connection, store, templates, env, pepper=load_pepper(env))
-            if args.command == "create-key":
-                issued = service.issue_key(
-                    args.application, args.label, expires_in_days=args.expires_in_days
-                )
-            else:
-                issued = service.rotate_key(args.key_id, grace_hours=args.grace_hours)
-                _note(f"key {args.key_id} stops working in {args.grace_hours:g} hours")
-            _note(
-                f"key id {issued.record.key_id} for application {issued.record.application_id!r}. "
-                "The key is printed below, once; store it now, it cannot be shown again."
-            )
-            # A bare "\n" even on Windows, so `KEY=$(... create-key ...)` in bash gets the key
-            # without a trailing carriage return.
-            if isinstance(sys.stdout, io.TextIOWrapper):
-                sys.stdout.reconfigure(newline="\n")
-            print(issued.key)
+        asyncio.run(_store_command(args, env, connection, state, templates, read_password))
     except (
         ValueError,
         KeyError,

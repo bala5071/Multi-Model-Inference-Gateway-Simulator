@@ -8,6 +8,7 @@ bounded by the limit: at most that many timestamps are kept per application.
 from __future__ import annotations
 
 from collections import deque
+from typing import Protocol
 
 from gateway.clock import Clock
 
@@ -24,12 +25,20 @@ class RateLimitedError(Exception):
         )
 
 
+class RateLimiter(Protocol):
+    """Requests per minute per application (docs/34-state-interfaces.md)."""
+
+    async def admit(self, application_id: str, requests_per_minute: int | None) -> None:
+        """Count one request, or raise ``RateLimitedError`` (which counts nothing)."""
+        ...
+
+
 class RequestRateLimiter:
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
         self._starts: dict[str, deque[float]] = {}
 
-    def admit(self, application_id: str, requests_per_minute: int | None) -> None:
+    async def admit(self, application_id: str, requests_per_minute: int | None) -> None:
         """Count one request, or raise ``RateLimitedError`` (which counts nothing)."""
         if requests_per_minute is None:
             return

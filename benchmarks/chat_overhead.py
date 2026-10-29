@@ -46,6 +46,7 @@ from gateway.database import open_database
 from gateway.metrics import percentile
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.routing import load_plans
+from gateway.state import run_now
 
 WARMUP_ROUNDS = 20
 KINDS = (
@@ -103,8 +104,8 @@ def _prepare(path: Path, pepper: str) -> str:
     epoch = SystemEpoch()
     MigrationRunner(connection, MIGRATIONS, epoch).migrate()
     store = SqliteApplicationStore(connection)
-    seed_demo_applications(store, load_plans(), created_at_ms=epoch.epoch_ms())
-    key = ApiKeyService(store, pepper.encode(), epoch).issue("acme", "bench").key
+    run_now(seed_demo_applications(store, load_plans(), created_at_ms=epoch.epoch_ms()))
+    key = run_now(ApiKeyService(store, pepper.encode(), epoch).issue("acme", "bench")).key
     connection.close()
     return key
 

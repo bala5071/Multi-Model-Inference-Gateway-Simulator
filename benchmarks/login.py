@@ -36,7 +36,7 @@ import httpx
 
 from benchmarks.calibrate import describe_machine
 from gateway.applications import SqliteApplicationStore
-from gateway.audit import AuditLog
+from gateway.audit import AuditLog, SqliteAuditStore
 from gateway.auth import AccountService
 from gateway.clock import SystemEpoch, WallClock
 from gateway.database import open_database
@@ -49,8 +49,9 @@ from gateway.passwords import (
     Passwords,
     parameters_from,
 )
-from gateway.roles import RoleStore
-from gateway.users import AccountStore
+from gateway.roles import SqliteRoleStore
+from gateway.state import run_now
+from gateway.users import SqliteAccountStore
 
 FAILURES_PER_KNOWN_USER = 4  # below the lockout's 5
 
@@ -67,10 +68,10 @@ def _make_users(path: Path, count: int, environ: dict[str, str]) -> dict[str, st
     MigrationRunner(connection, MIGRATIONS, SystemEpoch()).migrate()
     hasher = PasswordHasher(parameters_from(environ, PRODUCTION))
     service = AccountService(
-        AccountStore(connection),
-        AuditLog(connection),
+        SqliteAccountStore(connection),
+        AuditLog(SqliteAuditStore(connection)),
         Passwords(hasher, InlineHashRunner()),
-        roles=RoleStore(connection),
+        roles=SqliteRoleStore(connection),
         organizations=SqliteApplicationStore(connection),
         clock=WallClock(),
         epoch=SystemEpoch(),
@@ -80,7 +81,7 @@ def _make_users(path: Path, count: int, environ: dict[str, str]) -> dict[str, st
     for i in range(count):
         name = f"bench{i:03d}"
         users[name] = secrets.token_urlsafe(18)
-        service.create_user(name, users[name], "default", platform_admin=i == 0)
+        run_now(service.create_user(name, users[name], "default", platform_admin=i == 0))
     connection.close()
     return users
 

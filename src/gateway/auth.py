@@ -36,6 +36,7 @@ from collections import OrderedDict, deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from typing import Protocol
 
 from gateway.applications import ApplicationStore
 from gateway.audit import (
@@ -178,6 +179,23 @@ def csrf_token_for(csrf_key: bytes, session_id: str) -> str:
     return _token(hmac.new(csrf_key, session_id.encode(), hashlib.sha256).digest())
 
 
+class FailureWindow(Protocol):
+    """Failures per key in a sliding window: the login limiter, the step-up session cap and
+    the user-creation cap (docs/34-state-interfaces.md). ``LoginLimiter`` in one process."""
+
+    def key(self, username: str) -> str:
+        """What a username is counted under: an HMAC of it, never the text."""
+        ...
+
+    async def blocked(self, key: str) -> bool:
+        """Whether ``key`` has reached the limit in the window."""
+        ...
+
+    async def record_failure(self, key: str) -> None: ...
+
+    async def clear(self, key: str) -> None: ...
+
+
 class LoginLimiter:
     """Login failures per username in memory, for known and unknown usernames alike.
 
@@ -212,10 +230,10 @@ class LoginLimiter:
             times.popleft()
         return times
 
-    def blocked(self, key: str) -> bool:
+    async def blocked(self, key: str) -> bool:
         return len(self._recent(key)) >= self._max_failures
 
-    def record_failure(self, key: str) -> None:
+    async def record_failure(self, key: str) -> None:
         times = self._recent(key)
         times.append(self._clock.now_ms())
         self._failures[key] = times
@@ -223,7 +241,7 @@ class LoginLimiter:
         while len(self._failures) > self._max_entries:
             self._failures.popitem(last=False)
 
-    def clear(self, key: str) -> None:
+    async def clear(self, key: str) -> None:
         self._failures.pop(key, None)
 
     def __len__(self) -> int:
@@ -304,12 +322,14 @@ class AccountService:
         # One key per purpose, derived from ``secret`` (the pepper on the server); neither
         # is the pepper itself, and neither equals the other.
         self._csrf_key = derive_key(secret, KeyPurpose.CSRF_TOKEN)
-        self.limiter = LoginLimiter(clock, derive_key(secret, KeyPurpose.LOGIN_LIMITER))
+        self.limiter: FailureWindow = LoginLimiter(
+            clock, derive_key(secret, KeyPurpose.LOGIN_LIMITER)
+        )
         self.audit_retention_ms = audit_retention_ms
         self.step_up_ms = step_up_minutes * MINUTE_MS
         # Failed step-ups per session (by its digest), in memory, on the injected clock:
         # past the cap, the endpoint refuses without verifying.
-        self._step_up_failures = LoginLimiter(
+        self._step_up_failures: FailureWindow = LoginLimiter(
             clock,
             derive_key(secret, KeyPurpose.LOGIN_LIMITER),
             max_failures=step_up_session_failures,
@@ -317,7 +337,7 @@ class AccountService:
         )
         # User-creation attempts per session (by its digest), in memory: every attempt counts,
         # whatever its outcome, so the cap bounds how many usernames a session can probe.
-        self._creation_attempts = LoginLimiter(
+        self._creation_attempts: FailureWindow = LoginLimiter(
             clock,
             derive_key(secret, KeyPurpose.LOGIN_LIMITER),
             max_failures=user_create_attempts,
@@ -337,24 +357,24 @@ class AccountService:
     def _now(self) -> float:
         return self._epoch.epoch_ms()
 
-    def _record(self, event: AuditEvent) -> None:
-        self.audit.write(event, self._now())
+    async def _record(self, event: AuditEvent) -> None:
+        await self.audit.write(event, self._now())
 
     # --- actors --------------------------------------------------------------------------
 
-    def actor_for(self, user: User) -> Actor:
+    async def actor_for(self, user: User) -> Actor:
         """The user as ``authorize`` sees them, read now: a removed role is already gone."""
-        organization = self._organizations.get_organization(user.organization_id)
+        organization = await self._organizations.get_organization(user.organization_id)
         return Actor(
             user.id,
             user.organization_id,
-            self.roles.assignments_for(user.id),
+            await self.roles.assignments_for(user.id),
             disabled=user.disabled,
             organization_disabled=organization is None or organization.disabled,
         )
 
-    def actor_named(self, username: str) -> Actor:
-        return self.actor_for(self._user_by_name(username))
+    async def actor_named(self, username: str) -> Actor:
+        return await self.actor_for(await self._user_by_name(username))
 
     @staticmethod
     def _who(actor: Actor | None) -> tuple[str | None, dict[str, object]]:
@@ -384,13 +404,13 @@ class AccountService:
 
     # --- users ---------------------------------------------------------------------------
 
-    def _check_new_user(
+    async def _check_new_user(
         self, name: str, organization_id: str, actor: Actor | None, platform_admin: bool
     ) -> Organization:
         """Whether ``name`` may be created in the organization by ``actor``: the actor may
         create users there, the organization exists and is enabled, its kind takes another
         member, and the username is free (in every organization)."""
-        organization = self._organizations.get_organization(organization_id)
+        organization = await self._organizations.get_organization(organization_id)
         if organization is None:
             raise ValueError(f"no organization {organization_id!r}")
         self._require(actor, "users.create", Resource.organization(organization.id))
@@ -400,18 +420,20 @@ class AccountService:
             raise ManagementRefusal(
                 Reason.ORGANIZATION_DISABLED, f"organization {organization_id!r} is disabled"
             )
-        decision = membership_decision(organization.kind, self.store.count_members(organization.id))
+        decision = membership_decision(
+            organization.kind, await self.store.count_members(organization.id)
+        )
         if not decision.allowed:
             raise ManagementRefusal(
                 Reason.ORGANIZATION_FULL,
                 f"organization {organization_id!r} is an individual organization and already "
                 "has its one member",
             )
-        if self.store.find_user(name) is not None:
+        if await self.store.find_user(name) is not None:
             raise ManagementRefusal(Reason.USERNAME_TAKEN, f"username {name!r} is taken")
         return organization
 
-    def create_user(
+    async def create_user(
         self,
         username: str,
         password: str,
@@ -430,12 +452,12 @@ class AccountService:
         the operator at the CLI, must change its password at first login: whoever made it
         knows that password. Hashes synchronously (CLI and startup only)."""
         name = normalize_username(username)
-        organization = self._check_new_user(name, organization_id, actor, platform_admin)
+        organization = await self._check_new_user(name, organization_id, actor, platform_admin)
         self._policy.check(password, name)
         outsider = actor is None or (
             actor.holds(Role.PLATFORM_ADMIN) and actor.organization_id != organization.id
         )
-        return self._add_user(
+        return await self._add_user(
             name,
             self._passwords.hasher.hash(password),
             organization,
@@ -454,14 +476,14 @@ class AccountService:
         the account must change the password at first login. Returns the user and the
         password, which the caller shows once and nowhere else."""
         name = normalize_username(username)
-        self._check_new_user(name, organization_id, actor, False)
+        await self._check_new_user(name, organization_id, actor, False)
         temporary = self._temporary_password(name)
         password_hash = await self._passwords.hash(temporary)
         # Checked again with the insert, in one transaction: the hash may have let another
         # request in (the thread runner yields), and it may have taken the name or the seat.
-        with self.store.immediate():
-            organization = self._check_new_user(name, organization_id, actor, False)
-            user = self._add_user(
+        async with self.store.write_transaction():
+            organization = await self._check_new_user(name, organization_id, actor, False)
+            user = await self._add_user(
                 name,
                 password_hash,
                 organization,
@@ -484,7 +506,7 @@ class AccountService:
             return candidate
         raise RuntimeError("no temporary password the policy accepts was drawn")
 
-    def _add_user(
+    async def _add_user(
         self,
         name: str,
         password_hash: str,
@@ -513,23 +535,23 @@ class AccountService:
         if ORGANIZATION_ID_PATTERN.fullmatch(organization.id):
             details["organization_id"] = organization.id
         event = self._user_event(AuditAction.USER_CREATED, user, actor, **details)
-        self.store.add_user(user)
-        self._record(event)
+        await self.store.add_user(user)
+        await self._record(event)
         if platform_admin:
             platform = Assignment(Role.PLATFORM_ADMIN.value, ScopeType.PLATFORM, "*")
-            self._grant(user, platform, None)
+            await self._grant(user, platform, None)
         if organization.kind is OrganizationKind.INDIVIDUAL:
             # The one member of an individual organization is its org_admin.
             org_admin = Assignment(Role.ORG_ADMIN.value, ScopeType.ORGANIZATION, organization.id)
-            self._grant(user, org_admin, actor)
+            await self._grant(user, org_admin, actor)
         return user
 
-    def bootstrap_admin(self, environ: Mapping[str, str]) -> BootstrapOutcome:
+    async def bootstrap_admin(self, environ: Mapping[str, str]) -> BootstrapOutcome:
         """Create the first platform_admin from the environment if there is none. Never
         touches an existing one."""
         username = environ.get(ADMIN_USERNAME_ENV)
         password = environ.get(ADMIN_PASSWORD_ENV)
-        if self.roles.platform_admin_exists():
+        if await self.roles.platform_admin_exists():
             if username is not None or password is not None:
                 return BootstrapOutcome.EXISTS_WITH_VARIABLES
             return BootstrapOutcome.EXISTS
@@ -541,7 +563,7 @@ class AccountService:
                 "create-user --platform-admin`."
             )
         try:
-            self.create_user(
+            await self.create_user(
                 username,
                 password,
                 DEFAULT_ORGANIZATION_ID,
@@ -556,16 +578,16 @@ class AccountService:
             ) from None
         return BootstrapOutcome.CREATED
 
-    def _user_by_name(self, username: str) -> User:
-        user = self.store.find_user(normalize_username(username))
+    async def _user_by_name(self, username: str) -> User:
+        user = await self.store.find_user(normalize_username(username))
         if user is None:
             raise ValueError(f"no user {normalize_username(username)!r}")
         return user
 
-    def _revoke_all(self, user: User, reason: Reason, keep: str | None = None) -> int:
-        revoked = self.store.revoke_sessions(user.id, keep_id_hash=keep)
+    async def _revoke_all(self, user: User, reason: Reason, keep: str | None = None) -> int:
+        revoked = await self.store.revoke_sessions(user.id, keep_id_hash=keep)
         if revoked:
-            self._record(
+            await self._record(
                 AuditEvent(
                     AuditAction.SESSIONS_REVOKED,
                     Outcome.SUCCESS,
@@ -576,13 +598,13 @@ class AccountService:
             )
         return revoked
 
-    def _guard_last_admin(self, user: User, losing: tuple[Assignment, ...]) -> None:
+    async def _guard_last_admin(self, user: User, losing: tuple[Assignment, ...]) -> None:
         """Refuse if ``user`` losing ``losing`` leaves an organization with no enabled
         org_admin, or the platform with no enabled platform_admin."""
         for assignment in losing:
             if assignment.role not in (Role.ORG_ADMIN.value, Role.PLATFORM_ADMIN.value):
                 continue
-            holders = self.roles.enabled_holders(assignment)
+            holders = await self.roles.enabled_holders(assignment)
             if user.id in holders and len(holders) == 1:
                 where = (
                     "the platform"
@@ -605,71 +627,73 @@ class AccountService:
                 "password at POST /v1/auth/change-password",
             )
 
-    def disable_user(self, username: str, *, actor: Actor | None = None) -> int:
+    async def disable_user(self, username: str, *, actor: Actor | None = None) -> int:
         """Disable an account and revoke all its sessions. Returns how many were revoked.
         Refused for the last org_admin of an organization or the last platform_admin, and for
         an actor's own account."""
-        user = self._user_by_name(username)
+        user = await self._user_by_name(username)
         self._require(actor, "users.disable", Resource.organization(user.organization_id))
         self._not_own_account(actor, user)
         # The count of the other admins and the change are one transaction: no other
         # connection can remove the last other admin in between.
-        with self.store.immediate():
-            self._guard_last_admin(user, self.roles.assignments_for(user.id))
-            self.store.set_disabled(user.id, True)
-            self.store.clear_step_up(user.id)
-            self._record(self._user_event(AuditAction.USER_DISABLED, user, actor))
-            return self._revoke_all(user, Reason.USER_DISABLED)
+        async with self.store.write_transaction():
+            await self._guard_last_admin(user, await self.roles.assignments_for(user.id))
+            await self.store.set_disabled(user.id, True)
+            await self.store.clear_step_up(user.id)
+            await self._record(self._user_event(AuditAction.USER_DISABLED, user, actor))
+            return await self._revoke_all(user, Reason.USER_DISABLED)
 
-    def enable_user(self, username: str, *, actor: Actor | None = None) -> None:
-        user = self._user_by_name(username)
+    async def enable_user(self, username: str, *, actor: Actor | None = None) -> None:
+        user = await self._user_by_name(username)
         self._require(actor, "users.enable", Resource.organization(user.organization_id))
-        self.store.set_disabled(user.id, False)
-        self._record(self._user_event(AuditAction.USER_ENABLED, user, actor))
+        await self.store.set_disabled(user.id, False)
+        await self._record(self._user_event(AuditAction.USER_ENABLED, user, actor))
 
-    def reset_password(
+    async def reset_password(
         self, username: str, new_password: str, *, actor: Actor | None = None
     ) -> int:
         """Set a temporary password the user must change, clear any lock and revoke every
         session. Hashes synchronously (CLI only). Returns how many sessions were revoked."""
-        user = self._user_by_name(username)
+        user = await self._user_by_name(username)
         self._require(actor, "users.reset_password", Resource.organization(user.organization_id))
         self._not_own_account(actor, user)
         self._policy.check(new_password, user.username)
-        return self._apply_reset(user, self._passwords.hasher.hash(new_password), actor)
+        return await self._apply_reset(user, self._passwords.hasher.hash(new_password), actor)
 
     async def reset_to_temporary_password(self, username: str, *, actor: Actor) -> tuple[int, str]:
         """``reset_password`` with a password the server makes (the management endpoint,
         docs/30), hashed through the runner. Returns how many sessions were revoked and the
         password, which the caller shows once and nowhere else."""
-        user = self._user_by_name(username)
+        user = await self._user_by_name(username)
         self._require(actor, "users.reset_password", Resource.organization(user.organization_id))
         self._not_own_account(actor, user)
         temporary = self._temporary_password(user.username)
         password_hash = await self._passwords.hash(temporary)
-        return self._apply_reset(user, password_hash, actor), temporary
+        return await self._apply_reset(user, password_hash, actor), temporary
 
-    def _apply_reset(self, user: User, password_hash: str, actor: Actor | None) -> int:
+    async def _apply_reset(self, user: User, password_hash: str, actor: Actor | None) -> int:
         """The new hash, to be changed at the next login; no lock; every session revoked, which
         closes every step-up window with it (``revoke_sessions`` clears them in the same
         update)."""
-        self.store.set_password(user.id, password_hash, must_change=True, bootstrap=Bootstrap.NONE)
-        self.store.set_login_state(user.id, 0, None, None)
-        self._record(self._user_event(AuditAction.PASSWORD_RESET, user, actor))
-        return self._revoke_all(user, Reason.PASSWORD_RESET)
+        await self.store.set_password(
+            user.id, password_hash, must_change=True, bootstrap=Bootstrap.NONE
+        )
+        await self.store.set_login_state(user.id, 0, None, None)
+        await self._record(self._user_event(AuditAction.PASSWORD_RESET, user, actor))
+        return await self._revoke_all(user, Reason.PASSWORD_RESET)
 
-    def unlock_user(self, username: str, *, actor: Actor | None = None) -> None:
-        user = self._user_by_name(username)
+    async def unlock_user(self, username: str, *, actor: Actor | None = None) -> None:
+        user = await self._user_by_name(username)
         self._require(actor, "users.unlock", Resource.organization(user.organization_id))
-        self.store.set_login_state(user.id, 0, None, None)
-        self._record(self._user_event(AuditAction.USER_UNLOCKED, user, actor))
+        await self.store.set_login_state(user.id, 0, None, None)
+        await self._record(self._user_event(AuditAction.USER_UNLOCKED, user, actor))
 
-    def page_users(
+    async def page_users(
         self, organization_id: str, after: str | None, limit: int, *, actor: Actor | None = None
     ) -> Page[User]:
         """One page of an organization's users, by username."""
         self._require(actor, "users.list", Resource.organization(organization_id))
-        found = self.store.page_users(organization_id, after, check_page_size(limit) + 1)
+        found = await self.store.page_users(organization_id, after, check_page_size(limit) + 1)
         return page_of(found, limit, lambda u: u.username)
 
     def is_locked(self, user: User) -> bool:
@@ -677,19 +701,19 @@ class AccountService:
 
     # --- management requests -------------------------------------------------------------
 
-    def count_user_creation(self, context: SessionContext) -> None:
+    async def count_user_creation(self, context: SessionContext) -> None:
         """Count one user-creation attempt by this session, or refuse it past the cap
         (``GATEWAY_USER_CREATE_ATTEMPTS`` an hour): every attempt counts, whatever its outcome,
         so a session cannot probe many usernames."""
         key = context.session.id_hash
-        if self._creation_attempts.blocked(key):
+        if await self._creation_attempts.blocked(key):
             raise ManagementRefusal(
                 Reason.USER_CREATION_LIMITED,
                 "this session has tried to create too many users this hour; try again later",
             )
-        self._creation_attempts.record_failure(key)
+        await self._creation_attempts.record_failure(key)
 
-    def record_refusal(
+    async def record_refusal(
         self, actor: Actor, action: str, organization_id: str | None, reason: Reason
     ) -> None:
         """Audit a management request refused for a conflict or a cap: who, which action,
@@ -698,7 +722,7 @@ class AccountService:
         target = organization_id
         if target is not None and not ORGANIZATION_ID_PATTERN.fullmatch(target):
             target = None
-        self._record(
+        await self._record(
             AuditEvent(
                 AuditAction.MANAGEMENT_REFUSED,
                 Outcome.FAILURE,
@@ -711,7 +735,7 @@ class AccountService:
 
     # --- roles ---------------------------------------------------------------------------
 
-    def _assignment(
+    async def _assignment(
         self, user: User, role: str, scope_type: str, scope_id: str, *, defined: bool
     ) -> Assignment:
         """The assignment, checked: the role may be held in that scope, and the scope lies in
@@ -725,7 +749,7 @@ class AccountService:
             if scope_id != user.organization_id:
                 raise ValueError("a role is held only within the user's own organization")
         else:
-            application = self._organizations.get_application(scope_id)
+            application = await self._organizations.get_application(scope_id)
             if application is None or application.organization_id != user.organization_id:
                 raise ValueError("a role is held only within the user's own organization")
         if role in {r.value for r in Role}:
@@ -734,15 +758,15 @@ class AccountService:
         else:
             if kind is not ScopeType.APPLICATION:
                 raise ValueError("an application-defined role is held at application scope")
-            if defined and role not in self.roles.app_roles(scope_id):
+            if defined and role not in await self.roles.app_roles(scope_id):
                 raise ValueError(f"application {scope_id!r} defines no role {role!r}")
         return Assignment(role, kind, scope_id)
 
-    def _grant(self, user: User, assignment: Assignment, actor: Actor | None) -> None:
+    async def _grant(self, user: User, assignment: Assignment, actor: Actor | None) -> None:
         granted_by, _ = self._who(actor)
-        self.roles.grant(user.id, assignment, granted_by, self._now())
-        self.store.clear_step_up(user.id)  # roles changed: a new step-up is needed
-        self._record(self._role_event(AuditAction.ROLE_GRANTED, user, assignment, actor))
+        await self.roles.grant(user.id, assignment, granted_by, self._now())
+        await self.store.clear_step_up(user.id)  # roles changed: a new step-up is needed
+        await self._record(self._role_event(AuditAction.ROLE_GRANTED, user, assignment, actor))
 
     def _role_event(
         self, action: AuditAction, user: User, assignment: Assignment, actor: Actor | None
@@ -767,7 +791,7 @@ class AccountService:
             # A platform_admin outside an organization only appoints its org_admin.
             raise NotPermittedError("a platform_admin may grant only org_admin")
 
-    def grant_role(
+    async def grant_role(
         self,
         username: str,
         role: str,
@@ -776,13 +800,13 @@ class AccountService:
         *,
         actor: Actor | None = None,
     ) -> None:
-        user = self._user_by_name(username)
+        user = await self._user_by_name(username)
         self._require(actor, "roles.assign", Resource.organization(user.organization_id))
         self._check_granting(actor, role)
-        assignment = self._assignment(user, role, scope_type, scope_id, defined=True)
-        self._grant(user, assignment, actor)
+        assignment = await self._assignment(user, role, scope_type, scope_id, defined=True)
+        await self._grant(user, assignment, actor)
 
-    def revoke_role(
+    async def revoke_role(
         self,
         username: str,
         role: str,
@@ -791,21 +815,23 @@ class AccountService:
         *,
         actor: Actor | None = None,
     ) -> None:
-        user = self._user_by_name(username)
+        user = await self._user_by_name(username)
         self._require(actor, "roles.revoke", Resource.organization(user.organization_id))
         self._check_granting(actor, role)
-        assignment = self._assignment(user, role, scope_type, scope_id, defined=False)
-        with self.store.immediate():  # the count and the revocation together
-            self._guard_last_admin(user, (assignment,))
-            if not self.roles.revoke(user.id, assignment):
+        assignment = await self._assignment(user, role, scope_type, scope_id, defined=False)
+        async with self.store.write_transaction():  # the count and the revocation together
+            await self._guard_last_admin(user, (assignment,))
+            if not await self.roles.revoke(user.id, assignment):
                 raise ValueError(f"{user.username!r} does not hold that role in that scope")
-            self.store.clear_step_up(user.id)  # roles changed: a new step-up is needed
-            self._record(self._role_event(AuditAction.ROLE_REVOKED, user, assignment, actor))
+            await self.store.clear_step_up(user.id)  # roles changed: a new step-up is needed
+            await self._record(self._role_event(AuditAction.ROLE_REVOKED, user, assignment, actor))
 
-    def list_roles(self, username: str, *, actor: Actor | None = None) -> tuple[Assignment, ...]:
-        user = self._user_by_name(username)
+    async def list_roles(
+        self, username: str, *, actor: Actor | None = None
+    ) -> tuple[Assignment, ...]:
+        user = await self._user_by_name(username)
         self._require(actor, "roles.list", Resource.organization(user.organization_id))
-        return self.roles.assignments_for(user.id)
+        return await self.roles.assignments_for(user.id)
 
     # --- step-up -------------------------------------------------------------------------
 
@@ -826,8 +852,8 @@ class AccountService:
         toward the account lockout and the login limiter, exactly like a failed login, and
         toward this session's cap. Returns the window's end (epoch ms)."""
         user, session = context.user, context.session
-        if self._step_up_failures.blocked(session.id_hash):
-            self._record(
+        if await self._step_up_failures.blocked(session.id_hash):
+            await self._record(
                 self._session_event(
                     AuditAction.STEP_UP_FAILED,
                     Outcome.FAILURE,
@@ -846,23 +872,23 @@ class AccountService:
             reason = Reason.LOCKED
         elif not verification.valid:
             reason = Reason.WRONG_PASSWORD
-        elif self.limiter.blocked(key):
+        elif await self.limiter.blocked(key):
             reason = Reason.RATE_LIMITED
         if reason is not None:
             details: dict[str, object] = {"reason": reason}
-            self._step_up_failures.record_failure(session.id_hash)
+            await self._step_up_failures.record_failure(session.id_hash)
             if reason is Reason.WRONG_PASSWORD:
-                details["failures"] = self._count_failure(user, now)
-                self.limiter.record_failure(key)
-            self._record(
+                details["failures"] = await self._count_failure(user, now)
+                await self.limiter.record_failure(key)
+            await self._record(
                 self._session_event(AuditAction.STEP_UP_FAILED, Outcome.FAILURE, context, **details)
             )
             raise StepUpFailedError()
         if verification.upgraded_hash is not None:
-            self.store.set_password_hash(user.id, verification.upgraded_hash)
+            await self.store.set_password_hash(user.id, verification.upgraded_hash)
         until = now + self.step_up_ms
-        self.store.set_step_up(session.id_hash, until)
-        self._record(
+        await self.store.set_step_up(session.id_hash, until)
+        await self._record(
             self._session_event(
                 AuditAction.STEP_UP_GRANTED, Outcome.SUCCESS, context, step_up_until_ms=until
             )
@@ -874,25 +900,25 @@ class AccountService:
         until = context.session.step_up_until_ms
         return until if until is not None and self._now() < until else None
 
-    def check_step_up(self, context: SessionContext, action: str) -> None:
+    async def check_step_up(self, context: SessionContext, action: str) -> None:
         """For ``requires``: an action the table flags needs this session's window open;
         otherwise audit it and raise ``StepUpRequiredError``."""
         if not PERMISSIONS[action].step_up or self.step_up_until(context) is not None:
             return
-        self._record(
+        await self._record(
             self._session_event(
                 AuditAction.STEP_UP_REQUIRED, Outcome.FAILURE, context, action=action
             )
         )
         raise StepUpRequiredError()
 
-    def claim_step_up(self, context: SessionContext, action: str) -> float:
+    async def claim_step_up(self, context: SessionContext, action: str) -> float:
         """For ``requires`` and an action the table marks consume-on-use (docs/32): use up this
         session's window, or audit and raise ``StepUpRequiredError`` if none is open. Returns the
         window's end, to give back if the action fails before changing anything."""
-        claimed = self.store.claim_step_up(context.session.id_hash, self._now())
+        claimed = await self.store.claim_step_up(context.session.id_hash, self._now())
         if claimed is None:
-            self._record(
+            await self._record(
                 self._session_event(
                     AuditAction.STEP_UP_REQUIRED, Outcome.FAILURE, context, action=action
                 )
@@ -900,9 +926,9 @@ class AccountService:
             raise StepUpRequiredError()
         return claimed
 
-    def restore_step_up(self, context: SessionContext, until_ms: float) -> None:
+    async def restore_step_up(self, context: SessionContext, until_ms: float) -> None:
         """Give back a window claimed for an action that failed before changing anything."""
-        self.store.restore_step_up(context.session.id_hash, until_ms)
+        await self.store.restore_step_up(context.session.id_hash, until_ms)
 
     # --- login ---------------------------------------------------------------------------
 
@@ -912,7 +938,7 @@ class AccountService:
             name: str | None = normalize_username(username)
         except ValueError:
             name = None
-        user = self.store.find_user(name if name is not None else _NO_SUCH_USERNAME)
+        user = await self.store.find_user(name if name is not None else _NO_SUCH_USERNAME)
         stored = user.password_hash if user is not None else self._dummy_hash
         verification = await self._passwords.check(stored, password)
         now = self._now()
@@ -926,23 +952,23 @@ class AccountService:
             reason = Reason.LOCKED
         elif not verification.valid:
             reason = Reason.WRONG_PASSWORD
-        elif self.limiter.blocked(key):
+        elif await self.limiter.blocked(key):
             reason = Reason.RATE_LIMITED
         elif user.bootstrap is Bootstrap.USED and user.must_change_password:
             reason = Reason.BOOTSTRAP_USED
         if reason is not None:
-            self._failed(user, reason, key, now)
+            await self._failed(user, reason, key, now)
             raise LoginFailedError()
         assert user is not None
-        self.limiter.clear(key)
+        await self.limiter.clear(key)
         if user.failed_logins or user.locked_until_ms is not None:
-            self.store.set_login_state(user.id, 0, None, None)
+            await self.store.set_login_state(user.id, 0, None, None)
         if verification.upgraded_hash is not None:
-            self.store.set_password_hash(user.id, verification.upgraded_hash)
+            await self.store.set_password_hash(user.id, verification.upgraded_hash)
         if user.bootstrap is Bootstrap.UNUSED:
-            self.store.set_bootstrap(user.id, Bootstrap.USED)
-        session_id, session = self._new_session(user, now)
-        self._record(
+            await self.store.set_bootstrap(user.id, Bootstrap.USED)
+        session_id, session = await self._new_session(user, now)
+        await self._record(
             AuditEvent(
                 AuditAction.LOGIN,
                 Outcome.SUCCESS,
@@ -952,14 +978,14 @@ class AccountService:
                 details={"password_rehashed": verification.upgraded_hash is not None},
             )
         )
-        current = self.store.get_user(user.id)
+        current = await self.store.get_user(user.id)
         assert current is not None
         return LoginResult(current, session, session_id, csrf_token_for(self._csrf_key, session_id))
 
-    def _failed(self, user: User | None, reason: Reason, key: str, now: float) -> None:
-        self.limiter.record_failure(key)
+    async def _failed(self, user: User | None, reason: Reason, key: str, now: float) -> None:
+        await self.limiter.record_failure(key)
         if user is None:
-            self._record(
+            await self._record(
                 AuditEvent(
                     AuditAction.LOGIN_FAILED,
                     Outcome.FAILURE,
@@ -970,39 +996,42 @@ class AccountService:
             return
         details: dict[str, object] = {"reason": reason}
         if reason is Reason.WRONG_PASSWORD:
-            details["failures"] = self._count_failure(user, now)
-        self._record(
+            details["failures"] = await self._count_failure(user, now)
+        await self._record(
             AuditEvent(
                 AuditAction.LOGIN_FAILED, Outcome.FAILURE, TargetType.USER, user.id, details=details
             )
         )
 
-    def _count_failure(self, user: User, now: float) -> int:
+    async def _count_failure(self, user: User, now: float) -> int:
         """Count a wrong password against the account; lock it at the fifth within the
-        window. Returns the count."""
-        first = user.first_failure_at_ms
-        if first is None or now - first >= LOCK_WINDOW_MS:
-            failures, first = 1, now
-        else:
-            failures = user.failed_logins + 1
-        locked_until = now + LOCK_MS if failures >= LOCK_FAILURES else None
-        if locked_until is not None:
-            self.store.set_login_state(user.id, 0, None, locked_until)
-            self.store.clear_step_up(user.id)  # a lockout closes every open step-up window
-            self._record(
-                AuditEvent(
-                    AuditAction.LOGIN_LOCKED,
-                    Outcome.INFO,
-                    TargetType.USER,
-                    user.id,
-                    details={"failures": failures, "locked_until_ms": locked_until},
-                )
-            )
-        else:
-            self.store.set_login_state(user.id, failures, first, user.locked_until_ms)
-        return failures
+        window. Returns the count.
 
-    def _new_session(self, user: User, now: float) -> tuple[str, Session]:
+        The count is made by the store from the row as it is now, in one write transaction
+        with the lock, the closing of every step-up window and the audit entry: never from the
+        ``user`` read before the password was verified, which another login may have counted
+        since (docs/scale-out-plan.md, section 3.3)."""
+        async with self.store.write_transaction():
+            counted = await self.store.count_login_failure(
+                user.id, now, window_ms=LOCK_WINDOW_MS, lock_after=LOCK_FAILURES, lock_ms=LOCK_MS
+            )
+            if counted.locked_until_ms is not None:
+                await self.store.clear_step_up(user.id)  # a lockout closes every step-up window
+                await self._record(
+                    AuditEvent(
+                        AuditAction.LOGIN_LOCKED,
+                        Outcome.INFO,
+                        TargetType.USER,
+                        user.id,
+                        details={
+                            "failures": counted.failures,
+                            "locked_until_ms": counted.locked_until_ms,
+                        },
+                    )
+                )
+        return counted.failures
+
+    async def _new_session(self, user: User, now: float) -> tuple[str, Session]:
         session_id = _token(self._random_bytes(SESSION_BYTES))
         session = Session(
             id_hash=_digest(session_id),
@@ -1013,7 +1042,7 @@ class AccountService:
             last_seen_at_ms=now,
             expires_at_ms=now + SESSION_ABSOLUTE_MS,
         )
-        self.store.add_session(session)
+        await self.store.add_session(session)
         return session_id, session
 
     # --- sessions ------------------------------------------------------------------------
@@ -1026,20 +1055,20 @@ class AccountService:
             and now - session.last_seen_at_ms < SESSION_IDLE_MS
         )
 
-    def authenticate(self, session_id: str | None) -> SessionContext:
+    async def authenticate(self, session_id: str | None) -> SessionContext:
         """The session and its user, or ``SessionInvalidError``. Notes the time it was seen,
         writing it at most once a minute."""
         if not session_id:
             raise SessionInvalidError()
-        session = self.store.get_session(_digest(session_id))
+        session = await self.store.get_session(_digest(session_id))
         now = self._now()
         if session is None or not self._live(session, now):
             raise SessionInvalidError()
-        user = self.store.get_user(session.user_id)
+        user = await self.store.get_user(session.user_id)
         if user is None or user.disabled:
             raise SessionInvalidError()
         if now - session.last_seen_at_ms >= LAST_SEEN_WRITE_MS:
-            self.store.touch_session(session.id_hash, now)
+            await self.store.touch_session(session.id_hash, now)
             session = replace(session, last_seen_at_ms=now)
         return SessionContext(user, session, session_id)
 
@@ -1052,9 +1081,9 @@ class AccountService:
         if not hmac.compare_digest(_digest(token or ""), context.session.csrf_hash):
             raise CsrfError()
 
-    def logout(self, context: SessionContext) -> None:
-        self.store.revoke_session(context.session.id_hash)
-        self._record(
+    async def logout(self, context: SessionContext) -> None:
+        await self.store.revoke_session(context.session.id_hash)
+        await self._record(
             AuditEvent(
                 AuditAction.LOGOUT,
                 Outcome.SUCCESS,
@@ -1065,9 +1094,9 @@ class AccountService:
             )
         )
 
-    def live_sessions(self, context: SessionContext) -> list[Session]:
+    async def live_sessions(self, context: SessionContext) -> list[Session]:
         now = self._now()
-        return [s for s in self.store.list_sessions(context.user.id) if self._live(s, now)]
+        return [s for s in await self.store.list_sessions(context.user.id) if self._live(s, now)]
 
     async def change_password(self, context: SessionContext, current: str, new: str) -> int:
         """Change the password: the current one must be right (a wrong one counts towards
@@ -1076,8 +1105,8 @@ class AccountService:
         user = context.user
         if not await self._passwords.verify(user.password_hash, current):
             now = self._now()
-            failures = self._count_failure(user, now)
-            self._record(
+            failures = await self._count_failure(user, now)
+            await self._record(
                 AuditEvent(
                     AuditAction.PASSWORD_CHANGE_FAILED,
                     Outcome.FAILURE,
@@ -1092,26 +1121,28 @@ class AccountService:
             raise PasswordUnchangedError()
         self._policy.check(new, user.username)
         new_hash = await self._passwords.hash(new)
-        self.store.set_password(user.id, new_hash, must_change=False, bootstrap=Bootstrap.NONE)
-        self.store.set_login_state(user.id, 0, None, None)
-        self.store.set_step_up(context.session.id_hash, None)  # this session's window too
-        self._record(
+        await self.store.set_password(
+            user.id, new_hash, must_change=False, bootstrap=Bootstrap.NONE
+        )
+        await self.store.set_login_state(user.id, 0, None, None)
+        await self.store.set_step_up(context.session.id_hash, None)  # this session's window too
+        await self._record(
             AuditEvent(
                 AuditAction.PASSWORD_CHANGED, Outcome.SUCCESS, TargetType.USER, user.id, user.id
             )
         )
-        return self._revoke_all(user, Reason.PASSWORD_CHANGED, keep=context.session.id_hash)
+        return await self._revoke_all(user, Reason.PASSWORD_CHANGED, keep=context.session.id_hash)
 
     # --- retention -----------------------------------------------------------------------
 
-    def prune(self, limit: int | None = None) -> int:
+    async def prune(self, limit: int | None = None) -> int:
         """Delete dead sessions and (with a retention) old audit entries, at most ``limit``
         of each; write any pending count of dropped audit rows. Returns how many rows went."""
         now = self._now()
-        self.audit.flush_dropped(now)
-        removed = self.store.prune_sessions(now, SESSION_IDLE_MS, limit)
+        await self.audit.flush_dropped(now)
+        removed = await self.store.prune_sessions(now, SESSION_IDLE_MS, limit)
         if self.audit_retention_ms is not None:
-            removed += self.audit.prune(now - self.audit_retention_ms, limit)
+            removed += await self.audit.prune(now - self.audit_retention_ms, limit)
         return removed
 
 
@@ -1191,6 +1222,6 @@ async def run_account_retention(
     if batch < 1:
         raise ValueError("batch must be at least 1")
     while True:
-        while service.prune(batch) >= batch:
+        while await service.prune(batch) >= batch:
             await clock.sleep_ms(0)
         await clock.sleep_ms(every_ms)

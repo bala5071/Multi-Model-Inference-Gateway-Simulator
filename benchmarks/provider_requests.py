@@ -36,7 +36,7 @@ import httpx
 from benchmarks.calibrate import describe_machine
 from benchmarks.login import _free_port
 from gateway.applications import SqliteApplicationStore
-from gateway.audit import AuditLog
+from gateway.audit import AuditLog, SqliteAuditStore
 from gateway.auth import AccountService
 from gateway.clock import SystemEpoch, WallClock
 from gateway.database import open_database
@@ -44,8 +44,9 @@ from gateway.egress import EgressRefused, GuardedBackend, system_resolver
 from gateway.metrics import percentile
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.passwords import CHEAP, InlineHashRunner, PasswordHasher, Passwords
-from gateway.roles import RoleStore
-from gateway.users import AccountStore, Bootstrap
+from gateway.roles import SqliteRoleStore
+from gateway.state import run_now
+from gateway.users import Bootstrap, SqliteAccountStore
 from gateway.vault import Binding, Vault
 
 ADMIN = "benchadmin"
@@ -91,22 +92,24 @@ def _prepare(path: Path) -> str:
     MigrationRunner(connection, MIGRATIONS, SystemEpoch()).migrate()
     hasher = PasswordHasher(CHEAP)
     service = AccountService(
-        AccountStore(connection),
-        AuditLog(connection),
+        SqliteAccountStore(connection),
+        AuditLog(SqliteAuditStore(connection)),
         Passwords(hasher, InlineHashRunner()),
-        roles=RoleStore(connection),
+        roles=SqliteRoleStore(connection),
         organizations=SqliteApplicationStore(connection),
         clock=WallClock(),
         epoch=SystemEpoch(),
         secret=secrets.token_bytes(32),
     )
-    service.create_user("benchroot", secrets.token_urlsafe(18), ORG, platform_admin=True)
+    run_now(service.create_user("benchroot", secrets.token_urlsafe(18), ORG, platform_admin=True))
     password = secrets.token_urlsafe(18)
-    user = service.create_user(ADMIN, password, ORG)
-    service.store.set_password(
-        user.id, hasher.hash(password), must_change=False, bootstrap=Bootstrap.NONE
+    user = run_now(service.create_user(ADMIN, password, ORG))
+    run_now(
+        service.store.set_password(
+            user.id, hasher.hash(password), must_change=False, bootstrap=Bootstrap.NONE
+        )
     )
-    service.grant_role(ADMIN, "org_admin", "organization", ORG)
+    run_now(service.grant_role(ADMIN, "org_admin", "organization", ORG))
     connection.close()
     return password
 

@@ -10,8 +10,9 @@ from pathlib import Path
 import pytest
 
 from gateway.apikeys import PEPPER_ENV
-from gateway.audit import AuditAction, AuditLog
+from gateway.audit import AuditAction, AuditLog, SqliteAuditStore
 from gateway.database import open_database
+from gateway.state import run_now
 from helpers import TEST_PEPPER
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -30,7 +31,7 @@ def _entries(
     try:
         return [
             (e.event.action, e.event.actor_user_id, e.event.target_id, dict(e.event.details))
-            for e in AuditLog(connection).entries()
+            for e in run_now(AuditLog(SqliteAuditStore(connection)).entries())
         ]
     finally:
         connection.close()
