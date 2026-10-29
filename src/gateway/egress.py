@@ -70,16 +70,18 @@ class EgressRefused(ProviderError):
 @dataclass(frozen=True, slots=True)
 class EgressScope:
     """Whether the request in progress may reach a hosted destination now. Asked again at every
-    request and every connection, never remembered."""
+    request and every connection, never remembered. A coroutine: the answer is read from the
+    mode store (docs/34-state-interfaces.md), and a store that cannot answer raises, which
+    refuses the connection."""
 
-    may_reach_hosted: Callable[[], bool]
+    may_reach_hosted: Callable[[], Awaitable[bool]]
 
 
 _SCOPE: ContextVar[EgressScope | None] = ContextVar("gateway_egress_scope", default=None)
 
 
 @contextmanager
-def egress_scope(may_reach_hosted: Callable[[], bool]) -> Iterator[None]:
+def egress_scope(may_reach_hosted: Callable[[], Awaitable[bool]]) -> Iterator[None]:
     """Run the block (and the tasks it starts) under this answer to "may it go hosted?"."""
     token = _SCOPE.set(EgressScope(may_reach_hosted))
     try:
@@ -88,10 +90,15 @@ def egress_scope(may_reach_hosted: Callable[[], bool]) -> Iterator[None]:
         _SCOPE.reset(token)
 
 
-def hosted_allowed() -> bool:
+async def hosted_allowed() -> bool:
     """Whether the current scope lets a request reach a hosted destination. No scope: no."""
     scope = _SCOPE.get()
-    return scope is not None and scope.may_reach_hosted()
+    return scope is not None and await scope.may_reach_hosted()
+
+
+async def always_hosted() -> bool:
+    """A scope's answer for a probe an org_admin asked for (docs/33): yes, whatever the mode."""
+    return True
 
 
 def _host(name: str) -> str:
@@ -251,7 +258,7 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
                 socket_options=socket_options,
             )
         # Hosted: refused before the name is even resolved unless the scope allows it now.
-        if not hosted_allowed():
+        if not await hosted_allowed():
             raise EgressRefused("local_only")
         try:
             literal: Address | None = ipaddress.ip_address(host.strip("[]"))
@@ -279,7 +286,7 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
                 raise EgressRefused(reason)
             addresses.append(address)
         # Asked again now: resolving takes time, and the mode may have changed meanwhile.
-        if not hosted_allowed():
+        if not await hosted_allowed():
             raise EgressRefused("local_only")
         # The checked address, not the name: a second resolution could answer differently.
         return await self._inner.connect_tcp(
@@ -336,7 +343,7 @@ class GuardedTransport(httpx.AsyncHTTPTransport):
         url = request.url
         port = url.port or (443 if url.scheme == "https" else 80)
         if not self._local.contains(url.host, port):
-            if not hosted_allowed():
+            if not await hosted_allowed():
                 raise EgressRefused("local_only")
             if url.scheme != "https":
                 raise EgressRefused("not_https")

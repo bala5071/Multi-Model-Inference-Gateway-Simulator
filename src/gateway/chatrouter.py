@@ -165,10 +165,10 @@ class ChatRouter:
 
     # --- the mode, and who may serve ------------------------------------------------------
 
-    def mode(self, organization_id: str, application_id: str) -> Mode:
+    async def mode(self, organization_id: str, application_id: str) -> Mode:
         return effective_mode(
-            self._modes.organization_mode(organization_id),
-            self._modes.application_mode(application_id),
+            await self._modes.organization_mode(organization_id),
+            await self._modes.application_mode(application_id),
         )
 
     def tier_class(self, tier: str) -> str:
@@ -180,17 +180,17 @@ class ChatRouter:
             return LOCAL
         return HOSTED
 
-    def _hosted(self, organization_id: str, tier: str, role: str) -> list[Candidate]:
+    async def _hosted(self, organization_id: str, tier: str, role: str) -> list[Candidate]:
         if self._providers is None:
             return []
         store = self._providers.store
         return [
             Candidate(config.id, HOSTED, config)
-            for config in store.list_for(organization_id)
+            for config in await store.list_for(organization_id)
             if config.serves_tier == tier
             and config.role == role
             and config.is_enabled
-            and store.get_key(config.id) is not None
+            and await store.get_key(config.id) is not None
         ]
 
     def _takes_tools(self, candidate: Candidate, tier: str) -> bool:
@@ -199,19 +199,19 @@ class ChatRouter:
         flag = candidate.config.capabilities.get("supports_tools", {})
         return flag.get("value") is not False
 
-    def candidates(
+    async def candidates(
         self, organization_id: str, application_id: str, tier: str, *, wants_tools: bool
     ) -> list[Candidate]:
         """The candidates for a request routed to ``tier``, in the order its mode gives.
         Raises ``NoCandidateError`` when none may serve it."""
-        mode = self.mode(organization_id, application_id)
+        mode = await self.mode(organization_id, application_id)
         local = Candidate(GATEWAY_PROVIDER, self.tier_class(tier))
         if mode is Mode.LOCAL_ONLY:
             order = [local]
         elif mode is Mode.LOCAL_WITH_HOSTED_FALLBACK:
-            order = [local, *self._hosted(organization_id, tier, "fallback")]
+            order = [local, *await self._hosted(organization_id, tier, "fallback")]
         else:
-            order = [*self._hosted(organization_id, tier, "primary"), local]
+            order = [*await self._hosted(organization_id, tier, "primary"), local]
         allowed = [c for c in order if c.provider_class == LOCAL or may_reach_hosted(mode)]
         if not allowed:
             raise NoCandidateError("no_local_provider")
@@ -234,12 +234,12 @@ class ChatRouter:
         trace: RouteTrace | None = None,
     ) -> RoutedOutcome:
         trace = trace if trace is not None else RouteTrace()
-        order = self.candidates(
+        order = await self.candidates(
             organization_id, application_id, request.model, wants_tools=bool(request.tools)
         )
 
-        def hosted_now() -> bool:
-            return may_reach_hosted(self.mode(organization_id, application_id))
+        async def hosted_now() -> bool:
+            return may_reach_hosted(await self.mode(organization_id, application_id))
 
         first = order[0].provider
         # Why the first candidate was left, then why each later one was: the first is reported.
@@ -266,10 +266,10 @@ class ChatRouter:
         failure: BaseException | None = None
         with egress_scope(hosted_now):
             for candidate in order:
-                if candidate.provider_class == HOSTED and not hosted_now():
+                if candidate.provider_class == HOSTED and not await hosted_now():
                     continue  # the mode was made stricter while this request was in flight
                 if candidate.config is not None:
-                    skipped = self._skip(organization_id, candidate.config)
+                    skipped = await self._skip(organization_id, candidate.config)
                     if skipped is not None:
                         reasons.append(skipped)
                         continue
@@ -282,24 +282,24 @@ class ChatRouter:
                     except asyncio.CancelledError:
                         # The client went away: no verdict, and a half-open breaker's one
                         # probe is free again.
-                        self._account(organization_id, candidate, None)
+                        await self._account(organization_id, candidate, None)
                         raise
                     except Exception as exc:
                         why = trigger(exc)
-                        self._account(organization_id, candidate, why)
+                        await self._account(organization_id, candidate, why)
                         if emitted[0] or why is None:
                             raise  # output has started, or not a trigger: the answer
                         failure = exc
                         retry = why is FallbackReason.INVALID_TOOL_JSON and tries > 0
                         if retry and (
                             candidate.config is None
-                            or self.breakers.admit(organization_id, candidate.provider)
+                            or await self.breakers.admit(organization_id, candidate.provider)
                         ):
                             continue
                         reasons.append(why)
                         break
                     else:
-                        self._account(organization_id, candidate, None, outcome)
+                        await self._account(organization_id, candidate, None, outcome)
                         answered_by(candidate)
                         source = trace.source(outcome.result.usage.estimated)
                         return RoutedOutcome(outcome, source)
@@ -308,16 +308,16 @@ class ChatRouter:
         # Every candidate was skipped (open breakers, unreadable keys, a mode change).
         raise ProviderError(ProviderErrorCode.UPSTREAM_UNAVAILABLE, detail="no_candidate")
 
-    def _skip(self, organization_id: str, config: ProviderConfig) -> FallbackReason | None:
+    async def _skip(self, organization_id: str, config: ProviderConfig) -> FallbackReason | None:
         assert self._providers is not None
-        stored = self._providers.store.get_key(config.id)
+        stored = await self._providers.store.get_key(config.id)
         if stored is None or not self._providers.vault.readable(stored.sealed):
             return FallbackReason.KEY_UNREADABLE
-        if not self.breakers.admit(organization_id, config.id):
+        if not await self.breakers.admit(organization_id, config.id):
             return FallbackReason.CIRCUIT_OPEN
         return None
 
-    def _account(
+    async def _account(
         self,
         organization_id: str,
         candidate: Candidate,
@@ -332,14 +332,14 @@ class ChatRouter:
             budget = config.first_token_budget_ms or DEFAULT_HOSTED_FIRST_TOKEN_MS
             waited = outcome.timing.first_token_ms - outcome.timing.start_ms
             self.breakers.first_token(organization_id, config.id, missed=waited > budget)
-            self.breakers.success(organization_id, config.id)
+            await self.breakers.success(organization_id, config.id)
             return
         if why is FallbackReason.FIRST_TOKEN_BUDGET:
             self.breakers.first_token(organization_id, config.id, missed=True)
         if why in _BREAKER_FAILURES:
-            self.breakers.failure(organization_id, config.id)
+            await self.breakers.failure(organization_id, config.id)
         else:
-            self.breakers.release(organization_id, config.id)
+            await self.breakers.release(organization_id, config.id)
 
     async def _attempt(
         self, candidate: Candidate, request: ChatRequest, relay: ChatDeltaCallback
@@ -350,7 +350,7 @@ class ChatRouter:
         assert self._providers is not None
         assert self._client_factory is not None
         providers = self._providers
-        stored = providers.store.get_key(config.id)
+        stored = await providers.store.get_key(config.id)
         if stored is None:
             raise ProviderError(ProviderErrorCode.UPSTREAM_UNAVAILABLE, detail="no_candidate")
         # A client of its own for every attempt: every request and connection goes through

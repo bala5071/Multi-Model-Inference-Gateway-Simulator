@@ -2,13 +2,14 @@
 
 See docs/28-roles.md. Who may grant what, and the last-admin rule, are in
 ``gateway.auth.AccountService``; what each role allows is ``gateway.permissions``. Store calls
-are synchronous, for the reason given in ``gateway.usage``.
+are coroutines that never suspend, for the reason given in ``gateway.usage``.
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
+from typing import Protocol
 
 from gateway.permissions import Assignment, Role, ScopeType
 
@@ -24,7 +25,31 @@ def check_app_role_name(name: str) -> str:
     return name
 
 
-class RoleStore:
+class RoleStore(Protocol):
+    """Role assignments and application-defined roles (docs/34-state-interfaces.md)."""
+
+    async def assignments_for(self, user_id: str) -> tuple[Assignment, ...]: ...
+
+    async def grant(
+        self, user_id: str, assignment: Assignment, granted_by: str | None, at_ms: float
+    ) -> None:
+        """Raise ``ValueError`` if the user already holds it."""
+        ...
+
+    async def revoke(self, user_id: str, assignment: Assignment) -> bool: ...
+
+    async def enabled_holders(self, assignment: Assignment) -> list[str]:
+        """The ids of enabled users holding exactly this assignment."""
+        ...
+
+    async def platform_admin_exists(self) -> bool: ...
+
+    async def define_app_role(self, application_id: str, name: str, at_ms: float) -> None: ...
+
+    async def app_roles(self, application_id: str) -> list[str]: ...
+
+
+class SqliteRoleStore:
     """The tables of migration 8."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
@@ -36,7 +61,7 @@ class RoleStore:
             raise RuntimeError("role_assignments and app_roles do not exist; run the migrations")
         self._connection = connection
 
-    def assignments_for(self, user_id: str) -> tuple[Assignment, ...]:
+    async def assignments_for(self, user_id: str) -> tuple[Assignment, ...]:
         rows = self._connection.execute(
             "SELECT role, scope_type, scope_id FROM role_assignments WHERE user_id = ?"
             " ORDER BY rowid",
@@ -44,7 +69,7 @@ class RoleStore:
         ).fetchall()
         return tuple(Assignment(role, ScopeType(kind), scope) for role, kind, scope in rows)
 
-    def grant(
+    async def grant(
         self, user_id: str, assignment: Assignment, granted_by: str | None, at_ms: float
     ) -> None:
         """Raise ``ValueError`` if the user already holds it."""
@@ -64,7 +89,7 @@ class RoleStore:
         except sqlite3.IntegrityError as exc:
             raise ValueError("the user already holds that role in that scope") from exc
 
-    def revoke(self, user_id: str, assignment: Assignment) -> bool:
+    async def revoke(self, user_id: str, assignment: Assignment) -> bool:
         cursor = self._connection.execute(
             "DELETE FROM role_assignments WHERE user_id = ? AND role = ? AND scope_type = ?"
             " AND scope_id = ?",
@@ -72,7 +97,7 @@ class RoleStore:
         )
         return cursor.rowcount == 1
 
-    def enabled_holders(self, assignment: Assignment) -> list[str]:
+    async def enabled_holders(self, assignment: Assignment) -> list[str]:
         """The ids of enabled users holding exactly this assignment."""
         rows = self._connection.execute(
             "SELECT r.user_id FROM role_assignments AS r JOIN users AS u ON u.id = r.user_id"
@@ -82,7 +107,7 @@ class RoleStore:
         ).fetchall()
         return [row[0] for row in rows]
 
-    def platform_admin_exists(self) -> bool:
+    async def platform_admin_exists(self) -> bool:
         row = self._connection.execute(
             "SELECT 1 FROM role_assignments WHERE role = ? AND scope_type = ? LIMIT 1",
             (Role.PLATFORM_ADMIN.value, ScopeType.PLATFORM.value),
@@ -91,7 +116,7 @@ class RoleStore:
 
     # --- application-defined roles --------------------------------------------------------
 
-    def define_app_role(self, application_id: str, name: str, at_ms: float) -> None:
+    async def define_app_role(self, application_id: str, name: str, at_ms: float) -> None:
         try:
             self._connection.execute(
                 "INSERT INTO app_roles (application_id, name, created_at_ms) VALUES (?, ?, ?)",
@@ -100,7 +125,7 @@ class RoleStore:
         except sqlite3.IntegrityError as exc:
             raise ValueError("that role exists, or there is no such application") from exc
 
-    def app_roles(self, application_id: str) -> list[str]:
+    async def app_roles(self, application_id: str) -> list[str]:
         rows = self._connection.execute(
             "SELECT name FROM app_roles WHERE application_id = ? ORDER BY rowid", (application_id,)
         ).fetchall()

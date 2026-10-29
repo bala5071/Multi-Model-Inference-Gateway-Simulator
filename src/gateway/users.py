@@ -2,18 +2,19 @@
 
 See docs/27-users-and-sessions.md. A user belongs to one organization. Only an argon2id hash
 of the password is stored; only SHA-256 digests of a session id and its CSRF token. Store
-calls are synchronous, for the reason given in ``gateway.usage``.
+calls are coroutines that never suspend, for the reason given in ``gateway.usage``.
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Any
+from typing import Any, Protocol
+
+from gateway.database import write_transaction
 
 USERNAME_PATTERN = re.compile(r"[a-z0-9._-]{3,64}")
 
@@ -109,7 +110,90 @@ def _session(row: tuple[Any, ...]) -> Session:
     )
 
 
-class AccountStore:
+@dataclass(frozen=True, slots=True)
+class FailureCount:
+    """A wrong password counted against an account: the count it reached, and the end of the
+    lock it caused (None if it caused none)."""
+
+    failures: int
+    locked_until_ms: float | None
+
+
+class AccountStore(Protocol):
+    """Users and sessions (docs/34-state-interfaces.md)."""
+
+    def write_transaction(self) -> AbstractAsyncContextManager[None]:
+        """One write transaction: whatever the block writes, together or not at all."""
+        ...
+
+    async def add_user(self, user: User) -> None:
+        """Raise ``ValueError`` if the username is taken or the organization does not exist."""
+        ...
+
+    async def get_user(self, user_id: str) -> User | None: ...
+
+    async def find_user(self, username: str) -> User | None: ...
+
+    async def page_users(self, organization_id: str, after: str | None, limit: int) -> list[User]:
+        """Up to ``limit`` users of an organization by username, after ``after``."""
+        ...
+
+    async def count_members(self, organization_id: str) -> int: ...
+
+    async def set_login_state(
+        self,
+        user_id: str,
+        failed_logins: int,
+        first_failure_at_ms: float | None,
+        locked_until_ms: float | None,
+    ) -> None: ...
+
+    async def count_login_failure(
+        self, user_id: str, now_ms: float, *, window_ms: float, lock_after: int, lock_ms: float
+    ) -> FailureCount:
+        """Count one wrong password from the row as it is now, never from an earlier read:
+        the count restarts after ``window_ms``, and reaching ``lock_after`` locks the account
+        for ``lock_ms`` and resets the count. Call it inside ``write_transaction``."""
+        ...
+
+    async def set_password(
+        self, user_id: str, password_hash: str, *, must_change: bool, bootstrap: Bootstrap
+    ) -> None: ...
+
+    async def set_password_hash(self, user_id: str, password_hash: str) -> None: ...
+
+    async def set_bootstrap(self, user_id: str, bootstrap: Bootstrap) -> None: ...
+
+    async def set_disabled(self, user_id: str, disabled: bool) -> None: ...
+
+    async def add_session(self, session: Session) -> None: ...
+
+    async def get_session(self, id_hash: str) -> Session | None: ...
+
+    async def touch_session(self, id_hash: str, at_ms: float) -> None: ...
+
+    async def revoke_session(self, id_hash: str) -> bool: ...
+
+    async def revoke_sessions(self, user_id: str, *, keep_id_hash: str | None = None) -> int: ...
+
+    async def set_step_up(self, id_hash: str, until_ms: float | None) -> None: ...
+
+    async def claim_step_up(self, id_hash: str, now_ms: float) -> float | None:
+        """Use up the session's open step-up window: no two calls can both get it."""
+        ...
+
+    async def restore_step_up(self, id_hash: str, until_ms: float) -> bool: ...
+
+    async def clear_step_up(self, user_id: str) -> int: ...
+
+    async def list_sessions(self, user_id: str) -> list[Session]: ...
+
+    async def prune_sessions(
+        self, now_ms: float, idle_ms: float, limit: int | None = None
+    ) -> int: ...
+
+
+class SqliteAccountStore:
     """Users and sessions in the tables of migrations 5, 6 and 8."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
@@ -121,21 +205,12 @@ class AccountStore:
             raise RuntimeError("users and sessions do not exist; run the migrations first")
         self._connection = connection
 
-    @contextmanager
-    def immediate(self) -> Iterator[None]:
-        """One write transaction, taken at once (``BEGIN IMMEDIATE``): another connection
-        cannot write until it ends. Rolled back if the block raises."""
-        self._connection.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-        except BaseException:
-            self._connection.execute("ROLLBACK")
-            raise
-        self._connection.execute("COMMIT")
+    def write_transaction(self) -> AbstractAsyncContextManager[None]:
+        return write_transaction(self._connection)
 
     # --- users ---------------------------------------------------------------------------
 
-    def add_user(self, user: User) -> None:
+    async def add_user(self, user: User) -> None:
         u = user
         try:
             self._connection.execute(
@@ -157,19 +232,19 @@ class AccountStore:
         except sqlite3.IntegrityError as exc:
             raise ValueError(f"username {u.username!r} is taken, or no such organization") from exc
 
-    def get_user(self, user_id: str) -> User | None:
+    async def get_user(self, user_id: str) -> User | None:
         row = self._connection.execute(
             f"SELECT {_USER_COLUMNS} FROM users WHERE id = ?", (user_id,)
         ).fetchone()
         return _user(row) if row is not None else None
 
-    def find_user(self, username: str) -> User | None:
+    async def find_user(self, username: str) -> User | None:
         row = self._connection.execute(
             f"SELECT {_USER_COLUMNS} FROM users WHERE username = ?", (username,)
         ).fetchone()
         return _user(row) if row is not None else None
 
-    def page_users(self, organization_id: str, after: str | None, limit: int) -> list[User]:
+    async def page_users(self, organization_id: str, after: str | None, limit: int) -> list[User]:
         """Up to ``limit`` users of an organization by username, after ``after`` (compared,
         never looked up)."""
         rows = self._connection.execute(
@@ -179,54 +254,80 @@ class AccountStore:
         ).fetchall()
         return [_user(row) for row in rows]
 
-    def count_members(self, organization_id: str) -> int:
+    async def count_members(self, organization_id: str) -> int:
         row = self._connection.execute(
             "SELECT count(*) FROM users WHERE organization_id = ?", (organization_id,)
         ).fetchone()
         return int(row[0])
 
-    def _set(self, user_id: str, sql: str, params: tuple[Any, ...]) -> None:
+    async def _set(self, user_id: str, sql: str, params: tuple[Any, ...]) -> None:
         cursor = self._connection.execute(
             f"UPDATE users SET {sql} WHERE id = ?", (*params, user_id)
         )
         if cursor.rowcount != 1:
             raise KeyError(user_id)
 
-    def set_login_state(
+    async def set_login_state(
         self,
         user_id: str,
         failed_logins: int,
         first_failure_at_ms: float | None,
         locked_until_ms: float | None,
     ) -> None:
-        self._set(
+        await self._set(
             user_id,
             "failed_logins = ?, first_failure_at_ms = ?, locked_until_ms = ?",
             (failed_logins, first_failure_at_ms, locked_until_ms),
         )
 
-    def set_password(
+    async def count_login_failure(
+        self, user_id: str, now_ms: float, *, window_ms: float, lock_after: int, lock_ms: float
+    ) -> FailureCount:
+        # Read and written with no await in between, inside the caller's write transaction:
+        # the count is the row's as it is now (docs/scale-out-plan.md, section 3.3).
+        row = self._connection.execute(
+            "SELECT failed_logins, first_failure_at_ms FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(user_id)
+        failed_logins, first = row
+        if first is None or now_ms - first >= window_ms:
+            failures, first = 1, now_ms
+        else:
+            failures = failed_logins + 1
+        if failures >= lock_after:
+            locked_until = now_ms + lock_ms
+            await self._set(
+                user_id,
+                "failed_logins = 0, first_failure_at_ms = NULL, locked_until_ms = ?",
+                (locked_until,),
+            )
+            return FailureCount(failures, locked_until)
+        await self._set(user_id, "failed_logins = ?, first_failure_at_ms = ?", (failures, first))
+        return FailureCount(failures, None)
+
+    async def set_password(
         self, user_id: str, password_hash: str, *, must_change: bool, bootstrap: Bootstrap
     ) -> None:
-        self._set(
+        await self._set(
             user_id,
             "password_hash = ?, must_change_password = ?, bootstrap = ?",
             (password_hash, int(must_change), int(bootstrap)),
         )
 
-    def set_password_hash(self, user_id: str, password_hash: str) -> None:
+    async def set_password_hash(self, user_id: str, password_hash: str) -> None:
         """Replace the hash only (an upgrade to the current parameters)."""
-        self._set(user_id, "password_hash = ?", (password_hash,))
+        await self._set(user_id, "password_hash = ?", (password_hash,))
 
-    def set_bootstrap(self, user_id: str, bootstrap: Bootstrap) -> None:
-        self._set(user_id, "bootstrap = ?", (int(bootstrap),))
+    async def set_bootstrap(self, user_id: str, bootstrap: Bootstrap) -> None:
+        await self._set(user_id, "bootstrap = ?", (int(bootstrap),))
 
-    def set_disabled(self, user_id: str, disabled: bool) -> None:
-        self._set(user_id, "disabled = ?", (int(disabled),))
+    async def set_disabled(self, user_id: str, disabled: bool) -> None:
+        await self._set(user_id, "disabled = ?", (int(disabled),))
 
     # --- sessions ------------------------------------------------------------------------
 
-    def add_session(self, session: Session) -> None:
+    async def add_session(self, session: Session) -> None:
         s = session
         self._connection.execute(
             f"INSERT INTO sessions ({_SESSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -243,18 +344,18 @@ class AccountStore:
             ),
         )
 
-    def get_session(self, id_hash: str) -> Session | None:
+    async def get_session(self, id_hash: str) -> Session | None:
         row = self._connection.execute(
             f"SELECT {_SESSION_COLUMNS} FROM sessions WHERE id_hash = ?", (id_hash,)
         ).fetchone()
         return _session(row) if row is not None else None
 
-    def touch_session(self, id_hash: str, at_ms: float) -> None:
+    async def touch_session(self, id_hash: str, at_ms: float) -> None:
         self._connection.execute(
             "UPDATE sessions SET last_seen_at_ms = ? WHERE id_hash = ?", (at_ms, id_hash)
         )
 
-    def revoke_session(self, id_hash: str) -> bool:
+    async def revoke_session(self, id_hash: str) -> bool:
         cursor = self._connection.execute(
             "UPDATE sessions SET revoked = 1, step_up_until_ms = NULL WHERE id_hash = ?"
             " AND revoked = 0",
@@ -262,7 +363,7 @@ class AccountStore:
         )
         return cursor.rowcount == 1
 
-    def revoke_sessions(self, user_id: str, *, keep_id_hash: str | None = None) -> int:
+    async def revoke_sessions(self, user_id: str, *, keep_id_hash: str | None = None) -> int:
         """Revoke every live session of ``user_id`` except ``keep_id_hash``. Returns how many."""
         cursor = self._connection.execute(
             "UPDATE sessions SET revoked = 1, step_up_until_ms = NULL WHERE user_id = ?"
@@ -272,17 +373,17 @@ class AccountStore:
         )
         return cursor.rowcount
 
-    def set_step_up(self, id_hash: str, until_ms: float | None) -> None:
+    async def set_step_up(self, id_hash: str, until_ms: float | None) -> None:
         """Open (or, with None, close) this one session's step-up window."""
         self._connection.execute(
             "UPDATE sessions SET step_up_until_ms = ? WHERE id_hash = ?", (until_ms, id_hash)
         )
 
-    def claim_step_up(self, id_hash: str, now_ms: float) -> float | None:
+    async def claim_step_up(self, id_hash: str, now_ms: float) -> float | None:
         """Use up this session's open step-up window (consume-on-use, docs/32): read it and
         close it in one write transaction, so two requests cannot both claim it. Returns the
         window's end, or None if no window was open."""
-        with self.immediate():
+        async with self.write_transaction():
             row = self._connection.execute(
                 "SELECT step_up_until_ms FROM sessions WHERE id_hash = ? AND revoked = 0"
                 " AND step_up_until_ms > ?",
@@ -295,7 +396,7 @@ class AccountStore:
             )
             return float(row[0])
 
-    def restore_step_up(self, id_hash: str, until_ms: float) -> bool:
+    async def restore_step_up(self, id_hash: str, until_ms: float) -> bool:
         """Give a claimed window back, only if nothing has opened or closed it since and the
         session is still live. Returns whether it was given back."""
         cursor = self._connection.execute(
@@ -305,7 +406,7 @@ class AccountStore:
         )
         return cursor.rowcount == 1
 
-    def clear_step_up(self, user_id: str) -> int:
+    async def clear_step_up(self, user_id: str) -> int:
         """Close the step-up window of every session of ``user_id``. Returns how many."""
         cursor = self._connection.execute(
             "UPDATE sessions SET step_up_until_ms = NULL WHERE user_id = ?"
@@ -314,7 +415,7 @@ class AccountStore:
         )
         return cursor.rowcount
 
-    def list_sessions(self, user_id: str) -> list[Session]:
+    async def list_sessions(self, user_id: str) -> list[Session]:
         rows = self._connection.execute(
             f"SELECT {_SESSION_COLUMNS} FROM sessions WHERE user_id = ? AND revoked = 0"
             " ORDER BY created_at_ms, rowid",
@@ -322,7 +423,7 @@ class AccountStore:
         ).fetchall()
         return [_session(row) for row in rows]
 
-    def prune_sessions(self, now_ms: float, idle_ms: float, limit: int | None = None) -> int:
+    async def prune_sessions(self, now_ms: float, idle_ms: float, limit: int | None = None) -> int:
         """Delete sessions that are revoked, past their absolute expiry, or idle for
         ``idle_ms`` or more: none of them can be used again. Returns how many."""
         where = "revoked = 1 OR expires_at_ms <= ? OR last_seen_at_ms <= ?"

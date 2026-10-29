@@ -31,6 +31,7 @@ from gateway.database import open_database
 from gateway.ledger import PRUNE_BATCH
 from gateway.metrics import percentile
 from gateway.migrations import MIGRATIONS, MigrationRunner
+from gateway.state import run_now
 from gateway.usage import SqliteUsageStore
 
 DAY_MS = 86_400_000.0
@@ -90,7 +91,7 @@ def run(rows: int, expired: int, batch: int, directory: Path | None) -> list[Wri
         times, removed = [], 0
         while True:
             started = clock.now_ms()
-            n = store.prune(cutoff, batch)
+            n = run_now(store.prune(cutoff, batch))
             times.append(clock.now_ms() - started)
             removed += n
             if n < batch:
@@ -101,7 +102,7 @@ def run(rows: int, expired: int, batch: int, directory: Path | None) -> list[Wri
 
         connection, store = build(Path(folder) / "unbatched.db", rows, expired)
         started = clock.now_ms()
-        assert store.prune(cutoff) == expired
+        assert run_now(store.prune(cutoff)) == expired
         results.append(_summary("all at once", [clock.now_ms() - started]))
         connection.close()
     return results

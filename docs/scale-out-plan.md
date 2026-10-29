@@ -55,10 +55,10 @@ Two facts decide most rows:
 | **Usage events** (`usage_events`, migrations 1, 3, 13) | SQLite rows, appended by `CostLedger.record` | The rows, yes. The budget built on them, no (next row) | Postgres row, same columns; `seq` an identity column |
 | **Budgets** (`CostLedger._accounts`) | The current period's totals **in process memory**, read from the store only the first time an application is seen in a period; check before the request, charge after (`check_budget`, `record`) | **No.** Each instance enforces the budget on its own totals; N instances can spend up to N budgets (note 21 says this; `ProcessLock` refuses a second process for that reason) | Postgres row per (application, period): `committed_tokens`, `reserved_tokens`, plus a reservation row per admitted request (section 3.1) |
 | **API key hashes** (`api_keys.key_hmac`, migration 2) | SQLite rows; HMAC-SHA256 with `GATEWAY_KEY_PEPPER` | Yes, if every instance has the same pepper | Postgres row, same columns. **Never cached** in Redis or in memory (a revocation must take effect on the next request on every instance) |
-| **Key `last_used_at`** | Pending times in memory per instance (`ApiKeyService._pending`), flushed at most once a minute | Mostly: each instance flushes its own. A plain `SET` can move the time **backwards** when an older flush lands after a newer one | Postgres row, written as `GREATEST(last_used_at_ms, $new)` |
+| **Key `last_used_at`** | Pending times in memory per instance (`ApiKeyService._pending`), flushed at most once a minute | Yes: each instance flushes its own, and the write already never moves the time backwards (`WHERE last_used_at_ms IS NULL OR last_used_at_ms < ?`; corrected in PR 1's plan commit, this row first said otherwise) | Postgres row, the same guarded update |
 | **Applications, organizations** (migrations 2, 4) | SQLite rows | Rows yes; the per-application active-key cap (`ManagementService._check_room` then `add_key`) is a read then a write with no transaction, atomic only within one event loop | Postgres rows; the cap under the write lock (section 3.6) |
 | **Users, lockout** (`users.failed_logins`, `first_failure_at_ms`, `locked_until_ms`, migration 5) | SQLite rows | **No, and not fully even in one process.** `login` reads the user, awaits the password verify (the thread runner yields), then `_count_failure` writes `failed_logins + 1` from the value read **before** the await: two concurrent wrong passwords both write 1. In one process the in-memory `LoginLimiter` still counts both; across instances it does not | Postgres row, the count made in one `UPDATE ... RETURNING` (section 3.3) |
-| **Sessions** (migration 6) | SQLite rows; digests only; `last_seen_at_ms` written at most once a minute | Yes for the rows. `last_seen` can go backwards like `last_used_at` | Postgres row; `last_seen` as `GREATEST` |
+| **Sessions** (migration 6) | SQLite rows; digests only; `last_seen_at_ms` written at most once a minute | Yes for the rows. `touch_session` is a plain `SET`, so an older touch landing after a newer one moves `last_seen` backwards, which can end a session up to a minute early (never late) | Postgres row; `last_seen` as `GREATEST` |
 | **Step-up windows** (`sessions.step_up_until_ms`, migration 9) | SQLite column; consume-on-use claimed by `claim_step_up` in `BEGIN IMMEDIATE` | Only because of SQLite's database lock; a Postgres port that keeps the `SELECT` then `UPDATE` under READ COMMITTED lets two instances claim one window | Postgres column; claimed in one statement (section 3.2) |
 | **Roles** (migration 8), **last-admin guard** (`_guard_last_admin` in `immediate()`) | SQLite rows; the count and the change in one `BEGIN IMMEDIATE` | Only because of SQLite's database lock | Postgres rows, under the write lock (section 3.6) |
 | **Membership of an individual organization** (`count_members` then insert, in `immediate()`) | SQLite | As above | As above |
@@ -549,6 +549,61 @@ order.
 
 The questions PRs 2 and 3 depended on are answered (section 11). Each PR has the template,
 the definition of done, and its note (`docs/34-*` onward).
+
+### PR 1: details settled before building (2026-10-28)
+
+PR 1 is the seam, not the shared backends: everything still runs on SQLite or in memory, and
+the only behaviour change is Q3. Settled from reading the code at `adaaa1e`:
+
+- **Async store protocols.** `UsageStore`, `ApplicationStore` and `ModeStore` already are
+  protocols; their methods become `async`. `AccountStore`, `RoleStore` and `ProviderStore`
+  become protocols too, and today's classes are renamed `SqliteAccountStore`,
+  `SqliteRoleStore` and `SqliteProviderStore`. The audit log's rows go behind an `AuditStore`
+  (`SqliteAuditStore`); `AuditLog` keeps its job (the field allowlist, the cap, retention) over
+  an `AuditStore` and an `AuditCap`. Every implementation is today's code with `async def`: none
+  awaits anything that can suspend, so on a `SimClock` no simulated time passes in a store
+  call, as today.
+- **The write transaction.** Each store's `immediate()` becomes `write_transaction()`, an async
+  context manager: `BEGIN IMMEDIATE` on SQLite (the stores of one database share one
+  connection, so one transaction covers all of them, as today), nothing in memory. The
+  active-key cap and key issuing (section 3.6) move inside it. PR 2 gives it the advisory lock.
+- **Counters, over today's in-memory classes.** `RequestRateLimiter.admit`,
+  `LoginLimiter.blocked`, `record_failure` and `clear` (the login limiter, the step-up session
+  cap and the user-creation cap all use it), the test-connection counts (moved out of
+  `ProviderService` into an `InMemoryTestCounter`), `Breakers.admit`, `release`, `success`,
+  `failure` and `state`, and the audit cap (`InMemoryAuditCap`, out of `AuditLog`) become async
+  behind protocols (`RateLimiter`, `FailureWindow`, `TestCounter`, `BreakerStore`, `AuditCap`).
+  The slow-provider warning stays a synchronous, local part of `Breakers` (decision 11).
+  Internals unchanged.
+- **Budgets.** `CostLedger`'s reads and writes become async behind a `Budgets` protocol
+  (`check_budget`, `record`, `usage`). PR 2 replaces check-and-record by reserve, settle and
+  release; PR 1 does not change what the ledger decides.
+- **`StateBackend`** (`gateway/state.py`): the bundle of stores for one database, built in one
+  place (`sqlite_state(connection)`), used by `create_default_app` and `scripts/manage.py`.
+  `create_app` keeps its parameters. `GATEWAY_STATE` arrives with `shared` in PR 3.
+- **Sync start-up paths.** `create_app` checks every stored application's plan, and the default
+  factory creates the bootstrap admin, before any event loop runs the app. They drive the
+  store coroutines with `run_now`, which completes a coroutine that does not suspend and raises
+  if one does: true of SQLite and memory, and the check that will fail loudly if a network store
+  is ever passed there. PR 3 moves both into the lifespan for `shared`.
+- **Monitoring** reads per-application usage through the ledger: `Monitor.snapshot` becomes
+  async. It still decides nothing.
+- **No coroutine is left un-awaited:** `pytest` turns "coroutine ... was never awaited" into an
+  error (a `filterwarnings` entry), and mypy already reports an unused coroutine.
+- **Q3**, the one behaviour change: `count_login_failure(user_id, now_ms)` on the account
+  store reads the row and writes the new count and lock inside one write transaction, and
+  closes every step-up window of a user it locks, in the same transaction; `AccountService`
+  audits the result. Login and step-up both use it.
+- **Benchmarks that time store calls** (`key_checks`, `usage_store_writes`, `login`,
+  `session_checks`) keep their recorded numbers in notes 19, 20, 24 and 27, each tied to the
+  commit that produced it. PR 1 measures the key check before and after the change on this
+  machine (three runs each) and reports both in its description.
+- **Mutation checks in PR 1:** Q3 (count from the row read before the verify); the
+  early-return mutations of the existing structural tests for login, step-up and the key check,
+  run again after the conversion; `run_now` accepting a coroutine that suspends; a dropped
+  `await` caught by the warning filter.
+- **The note** is `docs/34-state-interfaces.md`; CLAUDE.md's description of the stores
+  ("store calls are synchronous and never awaited") is updated in the same PR.
 
 ## 9. Threat-model additions
 

@@ -71,6 +71,9 @@ extend-immutable-calls = ["fastapi.Depends"]
 python_version = "3.11"
 strict = true
 warn_unreachable = true
+# A coroutine used as a condition is always true (docs/34): `not store.allowed()` without its
+# await would let everything through.
+enable_error_code = ["truthy-bool"]
 files = ["src", "tests", "scripts", "benchmarks"]
 
 [tool.pytest.ini_options]
@@ -80,6 +83,11 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra --strict-markers --strict-config"
 xfail_strict = true
+# A store call is a coroutine (docs/34): one left un-awaited is an error, never a warning.
+filterwarnings = [
+    "error:coroutine .* was never awaited:RuntimeWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+]
 markers = [
     "real_models: needs real model servers running locally; skipped unless GATEWAY_REAL_MODELS=1",
     "live_provider: calls a hosted model provider and can cost money; skipped unless GATEWAY_LIVE_PROVIDERS=1",

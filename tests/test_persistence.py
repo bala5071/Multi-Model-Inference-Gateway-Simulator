@@ -100,19 +100,19 @@ async def test_usage_starts_again_on_the_first_of_the_month(last_second: tuple[i
     clock = SimClock()
     epoch = ClockEpoch(clock, origin_ms=ms(*last_second))
     ledger = CostLedger(clock, epoch=epoch)
-    ledger.record("a", _result(), model="economy", price_multiplier=1.0)
-    old = ledger.usage("a")
+    await ledger.record("a", _result(), model="economy", price_multiplier=1.0)
+    old = await ledger.usage("a")
     assert old.total.billed_tokens == 15
     # The budget would reset in exactly one second.
     with pytest.raises(Exception) as excinfo:  # noqa: PT011
-        ledger.check_budget("a", 15)
+        await ledger.check_budget("a", 15)
     assert getattr(excinfo.value, "retry_after_ms", None) == 1000.0
 
     await clock.sleep_ms(1000.0)  # midnight UTC on the 1st
-    new = ledger.usage("a")
+    new = await ledger.usage("a")
     assert new.period_start_ms == old.period_end_ms == epoch.epoch_ms()
     assert new.total.billed_tokens == 0
-    ledger.check_budget("a", 15)
+    await ledger.check_budget("a", 15)
 
 
 # --- persistent gateways --------------------------------------------------------------------
@@ -142,7 +142,7 @@ async def _persistent(
     connection = open_database(path)
     MigrationRunner(connection, MIGRATIONS, epoch).migrate()
     store = SqliteApplicationStore(connection)
-    seed_demo_applications(store, TIGHT, created_at_ms=epoch.epoch_ms())
+    await seed_demo_applications(store, TIGHT, created_at_ms=epoch.epoch_ms())
     keys = ApiKeyService(store, TEST_PEPPER, epoch, random_bytes=random.Random(key_seed).randbytes)
     usage = SqliteUsageStore(connection)
     registry = build_continuous_registry(clock, seed=7)
@@ -165,7 +165,7 @@ async def test_usage_and_budgets_survive_a_restart(tmp_path: Path) -> None:
     path = tmp_path / "gateway.db"
     origin = ms(2025, 3, 10)
     async with _persistent(path, origin) as (gw, keys):
-        key = keys.issue("small", "k").key
+        key = (await keys.issue("small", "k")).key
         # Fifteen-word prompts that differ from their first word: each bills at least 15.
         first = [(await _generate(gw, key, f"{i} {WORDS}")).status_code for i in range(3)]
         used = (await gw.client.get("/v1/applications/me/usage", headers=bearer(key))).json()
@@ -204,12 +204,12 @@ async def test_a_request_that_straddles_the_month_is_charged_to_the_month_it_fin
     january = ms(2025, 1, 1)
     # Half a second before midnight on 31 December.
     async with _persistent(tmp_path / "gateway.db", january - 500.0) as (gw, keys):
-        key = keys.issue("small", "k").key
+        key = (await keys.issue("small", "k")).key
         long = await _generate(gw, key, "a long answer please", model="premium", max_tokens=200)
         finished_ms = january - 500.0 + gw.clock.now_ms()
         usage = (await gw.client.get("/v1/applications/me/usage", headers=bearer(key))).json()
-        events = gw.store.events("small")
-        december = gw.store.usage_by_model("small", ms(2024, 12, 1), january)
+        events = await gw.store.events("small")
+        december = await gw.store.usage_by_model("small", ms(2024, 12, 1), january)
 
     # Admitted in December (checked against December's budget), finished in January.
     assert long.status_code == 200
@@ -226,7 +226,7 @@ async def test_concurrent_requests_all_pass_the_check_and_overshoot_together(
     tmp_path: Path,
 ) -> None:
     async with _persistent(tmp_path / "gateway.db", ms(2025, 6, 1)) as (gw, keys):
-        key = keys.issue("small", "k").key
+        key = (await keys.issue("small", "k")).key
         answers = await asyncio.gather(
             *(_generate(gw, key, f"{i} distinct prompt words here") for i in range(4))
         )
@@ -259,19 +259,19 @@ async def test_retention_runs_beside_the_server_in_bounded_batches(
     clock = SimClock()
     store = _store(store_kind, tmp_path, clock)
     for i in range(2500):  # far older than the retention
-        store.append(_event(now - 100 * DAY_MS + i))
-    store.append(_event(now - 10 * DAY_MS))  # within it
+        await store.append(_event(now - 100 * DAY_MS + i))
+    await store.append(_event(now - 10 * DAY_MS))  # within it
     ledger = CostLedger(clock, store=store, epoch=ClockEpoch(clock, now), retention_ms=40 * DAY_MS)
 
     # A charge never prunes: the request path does not delete anything.
-    ledger.record("a", _result(), model="economy", price_multiplier=1.0)
-    assert len(store.events()) == 2502
+    await ledger.record("a", _result(), model="economy", price_multiplier=1.0)
+    assert len(await store.events()) == 2502
 
     batches: list[int] = []
     real_prune = store.prune
 
-    def counted(before_ms: float, limit: int | None = None) -> int:
-        removed = real_prune(before_ms, limit)
+    async def counted(before_ms: float, limit: int | None = None) -> int:
+        removed = await real_prune(before_ms, limit)
         batches.append(removed)
         return removed
 
@@ -281,17 +281,17 @@ async def test_retention_runs_beside_the_server_in_bounded_batches(
         await clock.sleep_ms(1.0)
         # Batches of at most 1000, until one comes back short.
         assert batches == [1000, 1000, 500]
-        assert len(store.events()) == 2
+        assert len(await store.events()) == 2
 
-        store.append(_event(now - 90 * DAY_MS))
+        await store.append(_event(now - 90 * DAY_MS))
         await clock.sleep_ms(PRUNE_EVERY_MS - 2.0)
-        assert len(store.events()) == 3  # the next pass is not due yet
+        assert len(await store.events()) == 3  # the next pass is not due yet
         await clock.sleep_ms(2.0)
-        assert len(store.events()) == 2
+        assert len(await store.events()) == 2
         assert batches[3:] == [1]
     finally:
         task.cancel()
-    assert min(e.event.occurred_at_ms for e in store.events()) >= now - 40 * DAY_MS
+    assert min(e.event.occurred_at_ms for e in await store.events()) >= now - 40 * DAY_MS
 
 
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
@@ -303,7 +303,7 @@ async def test_the_retention_loop_never_removes_the_current_month(
     store = _store(store_kind, tmp_path, clock)
     this_month = [ms(2025, 5, 1), ms(2025, 5, 2), ms(2025, 5, 24)]
     for at in [ms(2025, 4, 30, 23), *this_month]:
-        store.append(_event(at))
+        await store.append(_event(at))
     # A retention of one day: everything before 24 May would go, but not this month's.
     ledger = CostLedger(clock, store=store, epoch=ClockEpoch(clock, now), retention_ms=DAY_MS)
     task = asyncio.create_task(run_retention(ledger, clock, batch=1, every_ms=PRUNE_EVERY_MS))
@@ -311,8 +311,8 @@ async def test_the_retention_loop_never_removes_the_current_month(
         await clock.sleep_ms(1.0)
     finally:
         task.cancel()
-    assert [e.event.occurred_at_ms for e in store.events()] == this_month
-    assert ledger.usage("a").total.requests == 3
+    assert [e.event.occurred_at_ms for e in await store.events()] == this_month
+    assert (await ledger.usage("a")).total.requests == 3
 
 
 def test_the_retention_batch_must_be_positive() -> None:
@@ -320,23 +320,23 @@ def test_the_retention_batch_must_be_positive() -> None:
         asyncio.run(run_retention(CostLedger(SimClock()), SimClock(), batch=0))
 
 
-def test_the_current_period_is_kept_whatever_the_retention() -> None:
+async def test_the_current_period_is_kept_whatever_the_retention() -> None:
     clock = SimClock()
     now = ms(2025, 5, 31, 12)
     store = InMemoryUsageStore()
-    store.append(_event(ms(2025, 5, 1)))  # thirty days ago, but this month
-    store.append(_event(ms(2025, 4, 30)))  # last month
+    await store.append(_event(ms(2025, 5, 1)))  # thirty days ago, but this month
+    await store.append(_event(ms(2025, 4, 30)))  # last month
     ledger = CostLedger(clock, store=store, epoch=ClockEpoch(clock, now), retention_ms=1.0)
-    assert ledger.prune() == 1
-    assert [e.event.occurred_at_ms for e in store.events()] == [ms(2025, 5, 1)]
-    assert ledger.usage("a").total.requests == 1
+    assert await ledger.prune() == 1
+    assert [e.event.occurred_at_ms for e in await store.events()] == [ms(2025, 5, 1)]
+    assert (await ledger.usage("a")).total.requests == 1
 
 
-def test_without_a_retention_nothing_is_pruned() -> None:
+async def test_without_a_retention_nothing_is_pruned() -> None:
     store = InMemoryUsageStore()
-    store.append(_event(0.0))
-    assert CostLedger(SimClock(), store=store).prune() == 0
-    assert len(store.events()) == 1
+    await store.append(_event(0.0))
+    assert await CostLedger(SimClock(), store=store).prune() == 0
+    assert len(await store.events()) == 1
 
 
 def test_retention_is_configured_in_days() -> None:

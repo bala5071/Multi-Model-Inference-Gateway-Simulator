@@ -156,7 +156,12 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `periods.py` — `BudgetPeriods`, `CalendarMonthsUTC` (from whole days since the epoch),
   `FixedPeriods` for tests (exists)
 - `usage.py` — `UsageEvent`, the `UsageStore` protocol, `InMemoryUsageStore` (bounded ring)
-  and `SqliteUsageStore`; store calls are synchronous and never awaited (exists)
+  and `SqliteUsageStore`; store calls are coroutines that never suspend (docs/34) (exists)
+- `state.py` — `StateBackend` (the stores of one database, built by `sqlite_state` for the
+  default server and the CLI) and `run_now` (completes a store call outside an event loop,
+  raising if it suspends); every store is a protocol with coroutine methods and
+  `write_transaction()`; counters are behind `RateLimiter`, `FailureWindow`,
+  `ConnectionTestCounter`, `BreakerStore`, `AuditCap` and `Budgets` (docs/34) (exists)
 - `database.py` + `migrations/` — `open_database` (WAL, busy timeout, autocommit) and the
   versioned `MigrationRunner`; migration 1 is `usage_events`, 2 `applications` and
   `api_keys`, 3 an index for retention, 4 `organizations` and a required
@@ -367,7 +372,9 @@ Tests that need a real model server are marked `real_models` and skipped unless
 - Full type hints; mypy runs in strict mode over `src` and `tests`.
 - `from __future__ import annotations` at the top of every module.
 - Frozen dataclasses for value types.
-- Async-first: logic that waits does so through the `Clock`.
+- Async-first: logic that waits does so through the `Clock`. Store calls are coroutines; a
+  missing `await` is caught by mypy's `truthy-bool` and by pytest's never-awaited filter
+  (docs/34). Use `run_now` only where no event loop runs (start-up, sync tests of the CLI).
 - No module-level mutable state.
 - Randomness comes from a seeded `random.Random` instance that is passed in.
 - Line length 100; `ruff format` is the formatter.

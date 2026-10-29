@@ -42,7 +42,7 @@ from gateway.egress import (
 from gateway.events import EventBus
 from gateway.localonly import LocalOnlyPolicy
 from gateway.modes import IN_FLIGHT, Mode, SqliteModeStore, effective_mode, looser_than
-from gateway.providers import ProviderConfig, ProviderService, ProviderStore
+from gateway.providers import ProviderConfig, ProviderService, SqliteProviderStore
 from gateway.redaction import Redactor
 from gateway.usage import ChatSource, SqliteUsageStore
 from gateway.vault import Vault
@@ -110,7 +110,7 @@ class Routing:
     def clock(self) -> Any:
         return self.world.accounts.clock
 
-    def provider(
+    async def provider(
         self,
         provider_id: str,
         host: str,
@@ -132,13 +132,15 @@ class Routing:
             provider_id, "north", "openai_compatible", f"https://{host}/v1", "model-x", tier,
             role, True, True, prices[0], prices[1], capabilities, budget_ms, 0.0,
         )  # fmt: skip
-        self.service.store.add(config)
-        self.service.store.put_key(provider_id, self.service.vault.seal(key, config.binding), 1.0)
+        await self.service.store.add(config)
+        await self.service.store.put_key(
+            provider_id, self.service.vault.seal(key, config.binding), 1.0
+        )
         return config
 
-    def mode(self, organization: Mode, application: Mode | None = None) -> None:
-        self.modes.set_organization_mode("north", organization, 0.0)
-        self.modes.set_application_mode("north-shop", application or organization, 0.0)
+    async def mode(self, organization: Mode, application: Mode | None = None) -> None:
+        await self.modes.set_organization_mode("north", organization, 0.0)
+        await self.modes.set_application_mode("north-shop", application or organization, 0.0)
 
     async def chat(
         self, model: str = "economy", *, stream: bool = False, tools: bool = False
@@ -162,8 +164,8 @@ class Routing:
         names = [n for n in self.resolver.calls if n.endswith(".provider.test")]
         return [c.address for c in self.org_net.connections] + names
 
-    def last_source(self) -> ChatSource | None:
-        events = SqliteUsageStore(self.world.accounts.connection).events("north-shop")
+    async def last_source(self) -> ChatSource | None:
+        events = await SqliteUsageStore(self.world.accounts.connection).events("north-shop")
         return events[-1].event.source
 
     # --- admin ---------------------------------------------------------------------------
@@ -209,7 +211,7 @@ async def routing(
     resolver = FakeResolver(dict(HOSTS))
     org_net, op_net = ScriptedNetwork(), ScriptedNetwork()
     providers = ProviderService(
-        ProviderStore(accounts.connection),
+        SqliteProviderStore(accounts.connection),
         Vault(MASTER),
         accounts.audit,
         clock,
@@ -304,11 +306,11 @@ def test_the_effective_mode_is_decided_in_one_place() -> None:
 
 async def test_local_only_is_the_default_and_answers_locally() -> None:
     async with routing() as r:
-        r.provider(A, "a.provider.test", role="primary")
-        r.provider(B, "b.provider.test", role="fallback")
+        await r.provider(A, "a.provider.test", role="primary")
+        await r.provider(B, "b.provider.test", role="fallback")
         r.op_net.responses = [TEXT]
         response = await r.chat()
-        source = r.last_source()
+        source = await r.last_source()
     assert response.status_code == 200, response.text
     assert _source(response) == ("gateway", "local", None, None)
     assert source == ChatSource("gateway", "local", None, None, False)
@@ -321,12 +323,12 @@ async def test_local_only_never_reaches_hosted_on_any_path() -> None:
     and with a provider's breaker just reset to half-open, streaming and not. Not one hosted
     connection, not one hosted name resolved."""
     async with routing() as r:
-        r.provider(A, "a.provider.test", role="primary", tools=True)
-        r.provider(B, "b.provider.test", role="fallback", tools=True)
+        await r.provider(A, "a.provider.test", role="primary", tools=True)
+        await r.provider(B, "b.provider.test", role="fallback", tools=True)
         r.org_net.responses = [TEXT, GOOD_TOOL] * 10
         # A's breaker: opened, then its time passed, so it would admit one probe now.
         for _ in range(5):
-            r.router.breakers.failure("north", A)
+            await r.router.breakers.failure("north", A)
         await r.clock.sleep_ms(31_000.0)
         answers = []
         for stream in (False, True):
@@ -338,7 +340,7 @@ async def test_local_only_never_reaches_hosted_on_any_path() -> None:
             ):
                 r.op_net.responses = list(scripted)
                 answers.append(await r.chat(stream=stream, tools=tools))
-        assert r.router.breakers.admit("north", A)  # the reset breaker was never used
+        assert await r.router.breakers.admit("north", A)  # the reset breaker was never used
     assert [a.status_code for a in answers] == [502] * 8
     assert r.hosted_contacted() == []
 
@@ -349,15 +351,15 @@ async def test_a_mode_made_stricter_mid_request_stops_the_fallback() -> None:
     The control, without the change, falls back to the hosted provider."""
     for change in (False, True):
         async with routing() as r:
-            r.mode(FALLBACK)
-            r.provider(B, "b.provider.test", role="fallback")
+            await r.mode(FALLBACK)
+            await r.provider(B, "b.provider.test", role="fallback")
             r.org_net.responses = [TEXT]
             gate = Gate(refused())
             r.op_net.responses = [gate]
             request = asyncio.ensure_future(r.chat())
             await gate.reached.wait()
             if change:
-                r.modes.set_organization_mode("north", LOCAL_ONLY, 1.0)
+                await r.modes.set_organization_mode("north", LOCAL_ONLY, 1.0)
             gate.opened.set()
             response = await request
         if change:
@@ -372,14 +374,14 @@ async def test_a_mode_made_stricter_mid_request_is_refused_by_the_guard_too() ->
     """The second layer: even with the router's own check passed, the guard asks the mode
     again when the hosted connection is opened."""
     async with routing() as r:
-        r.mode(PRIMARY)
-        r.provider(A, "a.provider.test", role="primary")
+        await r.mode(PRIMARY)
+        await r.provider(A, "a.provider.test", role="primary")
         gate = Gate(TEXT)
         r.org_net.responses = [gate]
         r.op_net.responses = [TEXT]
 
         async def resolve_then_tighten(host: str, port: int) -> list[str]:
-            r.modes.set_organization_mode("north", LOCAL_ONLY, 1.0)
+            await r.modes.set_organization_mode("north", LOCAL_ONLY, 1.0)
             return list(HOSTS[host])
 
         r.resolver.table.clear()
@@ -408,8 +410,8 @@ async def test_a_stricter_mode_does_not_cut_a_streaming_answer_and_the_guard_ref
     with the router's own checks bypassed (A handed over as a candidate labelled local), the
     guard refuses it before A's name is even resolved."""
     async with routing() as r:
-        r.mode(PRIMARY)
-        config = r.provider(A, "a.provider.test", role="primary")
+        await r.mode(PRIMARY)
+        config = await r.provider(A, "a.provider.test", role="primary")
         alice = await r.login("alice")
         await r.step_up(alice)
         chunks = openai_text("He", "llo").chunks
@@ -423,15 +425,15 @@ async def test_a_stricter_mode_does_not_cut_a_streaming_answer_and_the_guard_ref
         changed = await r.put_mode(alice, "/north/mode", "local_only")
         streaming.resumed.set()
         answer = await request
-        answered_source = r.last_source()
+        answered_source = await r.last_source()
         r.op_net.responses = [TEXT, TEXT]
         next_ = await r.chat()
         resolved = list(r.resolver.calls)
-        monkeypatch.setattr(
-            r.router,
-            "candidates",
-            lambda *a, **k: [Candidate(A, "local", config), Candidate("gateway", "local")],
-        )
+
+        async def handed_over(*_: object, **__: object) -> list[Candidate]:
+            return [Candidate(A, "local", config), Candidate("gateway", "local")]
+
+        monkeypatch.setattr(r.router, "candidates", handed_over)
         bypassed = await r.chat()
         resolved_after = list(r.resolver.calls)
     assert changed.status_code == 200, changed.text
@@ -470,12 +472,12 @@ async def test_each_trigger_falls_back_from_local_to_hosted(
     scripted: list[Any], tools: bool, reason: str
 ) -> None:
     async with routing() as r:
-        r.mode(FALLBACK)
-        r.provider(B, "b.provider.test", role="fallback", tools=True)
+        await r.mode(FALLBACK)
+        await r.provider(B, "b.provider.test", role="fallback", tools=True)
         r.op_net.responses = list(scripted)
         r.org_net.responses = [GOOD_TOOL if tools else TEXT]
         response = await r.chat(tools=tools)
-        source = r.last_source()
+        source = await r.last_source()
     assert response.status_code == 200, response.text
     assert _source(response) == (B, "hosted", "gateway", reason)
     assert source == ChatSource(B, "hosted", "gateway", reason, False)
@@ -484,10 +486,10 @@ async def test_each_trigger_falls_back_from_local_to_hosted(
 
 async def test_an_open_breaker_skips_the_provider_without_contacting_it() -> None:
     async with routing() as r:
-        r.mode(PRIMARY)
-        r.provider(A, "a.provider.test", role="primary")
+        await r.mode(PRIMARY)
+        await r.provider(A, "a.provider.test", role="primary")
         for _ in range(5):
-            r.router.breakers.failure("north", A)
+            await r.router.breakers.failure("north", A)
         r.op_net.responses = [TEXT]
         response = await r.chat()
     assert response.status_code == 200, response.text
@@ -497,9 +499,9 @@ async def test_an_open_breaker_skips_the_provider_without_contacting_it() -> Non
 
 async def test_invalid_tool_json_is_retried_once_on_the_same_provider() -> None:
     async with routing(operator=None) as r:  # the simulator: no tools, so not a candidate
-        r.mode(PRIMARY)
-        r.provider(A, "a.provider.test", role="primary", tools=True)
-        r.provider(B, "b.provider.test", role="primary", tools=True)
+        await r.mode(PRIMARY)
+        await r.provider(A, "a.provider.test", role="primary", tools=True)
+        await r.provider(B, "b.provider.test", role="primary", tools=True)
         r.org_net.responses = [BAD_TOOL, GOOD_TOOL]
         retried = await r.chat(tools=True)
         r.org_net.responses = [BAD_TOOL, BAD_TOOL, GOOD_TOOL]
@@ -516,15 +518,16 @@ async def test_the_invalid_tool_json_retry_is_recorded_once_at_the_organizations
     after a second invalid answer the next provider's answer is billed at its own. One usage
     row per answered request: a failed attempt is not in the ledger."""
     async with routing(operator=None) as r:
-        r.mode(PRIMARY)
-        r.provider(A, "a.provider.test", role="primary", tools=True, prices=(2.0, 4.0))
-        r.provider(B, "b.provider.test", role="primary", tools=True, prices=(3.0, 5.0))
+        await r.mode(PRIMARY)
+        await r.provider(A, "a.provider.test", role="primary", tools=True, prices=(2.0, 4.0))
+        await r.provider(B, "b.provider.test", role="primary", tools=True, prices=(3.0, 5.0))
         r.org_net.responses = [BAD_TOOL, GOOD_TOOL]
         await r.chat(tools=True)
         r.org_net.responses = [BAD_TOOL, BAD_TOOL, GOOD_TOOL]
         await r.chat(tools=True)
         events = [
-            e.event for e in SqliteUsageStore(r.world.accounts.connection).events("north-shop")
+            e.event
+            for e in await SqliteUsageStore(r.world.accounts.connection).events("north-shop")
         ]
     retried, moved_on = events
     assert retried.source == ChatSource(A, "hosted", None, None, False)
@@ -537,11 +540,11 @@ async def test_the_invalid_tool_json_retry_is_recorded_once_at_the_organizations
 async def test_invalid_tool_json_is_never_retried_more_than_once() -> None:
     """A alone, invalid every time: two attempts, then the request's answer; nothing billed."""
     async with routing(operator=None) as r:
-        r.mode(PRIMARY)
-        r.provider(A, "a.provider.test", role="primary", tools=True, prices=(2.0, 4.0))
+        await r.mode(PRIMARY)
+        await r.provider(A, "a.provider.test", role="primary", tools=True, prices=(2.0, 4.0))
         r.org_net.responses = [BAD_TOOL, BAD_TOOL, BAD_TOOL, GOOD_TOOL]
         response = await r.chat(tools=True)
-        events = SqliteUsageStore(r.world.accounts.connection).events("north-shop")
+        events = await SqliteUsageStore(r.world.accounts.connection).events("north-shop")
     assert (response.status_code, _code(response)) == (502, "upstream_malformed")
     assert len(r.org_net.connections) == 2
     assert len(r.org_net.responses) == 2  # the third invalid answer and the good one: unused
@@ -559,8 +562,8 @@ async def test_invalid_tool_json_is_never_retried_more_than_once() -> None:
 )
 async def test_what_is_not_a_trigger_is_the_answer(scripted: bytes, status: int, code: str) -> None:
     async with routing() as r:
-        r.mode(PRIMARY)
-        r.provider(A, "a.provider.test", role="primary")
+        await r.mode(PRIMARY)
+        await r.provider(A, "a.provider.test", role="primary")
         r.org_net.responses = [scripted]
         r.op_net.responses = [TEXT]
         response = await r.chat()
@@ -577,8 +580,8 @@ async def test_never_after_output_has_started(stream: bool) -> None:
     """The primary sends "He", then its connection breaks (a trigger kind of failure): the
     request fails, and the local tier is never tried."""
     async with routing() as r:
-        r.mode(PRIMARY)
-        r.provider(A, "a.provider.test", role="primary")
+        await r.mode(PRIMARY)
+        await r.provider(A, "a.provider.test", role="primary")
         r.org_net.responses = [BROKEN_AFTER_OUTPUT]
         r.op_net.responses = [TEXT]
         response = await r.chat(stream=stream)
@@ -597,11 +600,11 @@ async def test_never_another_tier() -> None:
     """A provider for premium is never a candidate for an economy request, even when the
     economy candidates fail or there are none."""
     async with routing() as r:
-        r.mode(PRIMARY)
-        r.provider(P, "p.provider.test", tier="premium", role="primary")
+        await r.mode(PRIMARY)
+        await r.provider(P, "p.provider.test", tier="premium", role="primary")
         r.op_net.responses = [TEXT]
         only_premium = await r.chat()
-        r.provider(A, "a.provider.test", role="primary")
+        await r.provider(A, "a.provider.test", role="primary")
         r.org_net.responses = [FIVE_XX, TEXT]
         r.op_net.responses = [TEXT]
         economy_failed = await r.chat()
@@ -614,8 +617,8 @@ async def test_never_another_tier() -> None:
 async def test_never_a_model_outside_the_plan() -> None:
     """north-shop's plan has no premium: a provider serving premium changes nothing."""
     async with routing() as r:
-        r.mode(PRIMARY)
-        r.provider(P, "p.provider.test", tier="premium", role="primary")
+        await r.mode(PRIMARY)
+        await r.provider(P, "p.provider.test", tier="premium", role="primary")
         r.org_net.responses = [TEXT]
         response = await r.chat("premium")
     assert (response.status_code, _code(response)) == (403, "model_not_in_plan")
@@ -627,11 +630,11 @@ async def test_never_a_model_outside_the_plan() -> None:
 
 async def test_a_hosted_answer_is_charged_at_the_organizations_prices() -> None:
     async with routing() as r:
-        r.mode(PRIMARY)
-        r.provider(A, "a.provider.test", role="primary", prices=(2.0, 4.0))
+        await r.mode(PRIMARY)
+        await r.provider(A, "a.provider.test", role="primary", prices=(2.0, 4.0))
         r.org_net.responses = [TEXT]
         response = await r.chat()
-        events = SqliteUsageStore(r.world.accounts.connection).events("north-shop")
+        events = await SqliteUsageStore(r.world.accounts.connection).events("north-shop")
     assert response.status_code == 200, response.text
     assert _source(response) == (A, "hosted", None, None)
     event = events[-1].event
@@ -647,7 +650,7 @@ async def test_an_operator_tier_at_a_hosted_destination_is_hosted() -> None:
     async with routing(operator="https://api.operator.test/v1") as r:
         r.op_net.responses = [TEXT]
         refused_ = await r.chat()
-        r.mode(FALLBACK)
+        await r.mode(FALLBACK)
         served = await r.chat()
     assert (refused_.status_code, _code(refused_)) == (503, "no_local_provider")
     assert served.status_code == 200, served.text
@@ -657,8 +660,8 @@ async def test_an_operator_tier_at_a_hosted_destination_is_hosted() -> None:
 
 async def test_streaming_headers_name_the_provider_and_the_fallback() -> None:
     async with routing() as r:
-        r.mode(FALLBACK)
-        r.provider(B, "b.provider.test", role="fallback")
+        await r.mode(FALLBACK)
+        await r.provider(B, "b.provider.test", role="fallback")
         r.op_net.responses = [FIVE_XX]
         r.org_net.responses = [TEXT]
         response = await r.chat(stream=True)
@@ -672,8 +675,8 @@ async def test_streaming_headers_name_the_provider_and_the_fallback() -> None:
 
 async def test_the_breaker_opens_skips_probes_and_closes_with_events() -> None:
     async with routing() as r:
-        r.mode(PRIMARY)
-        r.provider(A, "a.provider.test", role="primary")
+        await r.mode(PRIMARY)
+        await r.provider(A, "a.provider.test", role="primary")
         r.org_net.responses = [FIVE_XX] * 5
         r.op_net.responses = [TEXT] * 9
         for _ in range(5):
@@ -693,8 +696,8 @@ async def test_the_breaker_opens_skips_probes_and_closes_with_events() -> None:
 
 async def test_a_slow_provider_is_flagged_and_cleared() -> None:
     async with routing() as r:
-        r.mode(PRIMARY)
-        r.provider(A, "a.provider.test", role="primary", budget_ms=2_000.0)
+        await r.mode(PRIMARY)
+        await r.provider(A, "a.provider.test", role="primary", budget_ms=2_000.0)
         r.org_net.responses = [HANG] * 3
         r.op_net.responses = [TEXT] * 3
         for _ in range(3):
@@ -724,7 +727,7 @@ async def test_each_mode_change_needs_its_own_password_and_is_audited() -> None:
         again = await r.put_mode(alice, "/north/mode", "hosted_primary_with_local_fallback")
         entries = [
             e.event
-            for e in r.world.accounts.audit.entries()
+            for e in await r.world.accounts.audit.entries()
             if e.event.action is AuditAction.MODE_CHANGED
         ]
     assert first.status_code == 200, first.text
@@ -757,7 +760,7 @@ async def test_an_application_may_not_be_looser_than_its_organization() -> None:
             nina, "/north/applications/north-shop/mode", "hosted_primary_with_local_fallback"
         )
         same = await r.put_mode(nina, "/north/applications/north-shop/mode", "local_only")
-        r.modes.set_organization_mode("north", PRIMARY, 1.0)
+        await r.modes.set_organization_mode("north", PRIMARY, 1.0)
         await r.step_up(nina)
         stricter = await r.put_mode(
             nina, "/north/applications/north-shop/mode", "local_with_hosted_fallback"
@@ -775,14 +778,14 @@ async def test_an_application_may_not_be_looser_than_its_organization() -> None:
 
 async def test_an_organization_made_stricter_takes_its_applications_with_it() -> None:
     async with routing() as r:
-        r.mode(FALLBACK)
-        r.provider(B, "b.provider.test", role="fallback")
+        await r.mode(FALLBACK)
+        await r.provider(B, "b.provider.test", role="fallback")
         r.op_net.responses = [FIVE_XX, FIVE_XX]
         r.org_net.responses = [TEXT]
         before = await r.chat()
-        r.modes.set_organization_mode("north", LOCAL_ONLY, 1.0)
+        await r.modes.set_organization_mode("north", LOCAL_ONLY, 1.0)
         after = await r.chat()
-        stored = r.modes.application_mode("north-shop")
+        stored = await r.modes.application_mode("north-shop")
     assert _source(before) == (B, "hosted", "gateway", "upstream_5xx")
     assert (after.status_code, _code(after)) == (502, "upstream_unavailable")
     assert stored is FALLBACK  # its own value is unchanged; the stricter one applies
@@ -812,31 +815,31 @@ async def test_who_may_set_a_mode_and_missing_looks_forbidden() -> None:
 
 async def test_the_candidates_in_each_mode() -> None:
     async with routing() as r:
-        r.provider(A, "a.provider.test", role="primary", tools=False)
-        r.provider(B, "b.provider.test", role="fallback")
-        r.provider(P, "p.provider.test", tier="premium", role="primary")
+        await r.provider(A, "a.provider.test", role="primary", tools=False)
+        await r.provider(B, "b.provider.test", role="fallback")
+        await r.provider(P, "p.provider.test", tier="premium", role="primary")
 
-        def names(mode: Mode, *, tools: bool = False) -> list[tuple[str, str]]:
-            r.mode(mode)
-            found = r.router.candidates("north", "north-shop", "economy", wants_tools=tools)
+        async def names(mode: Mode, *, tools: bool = False) -> list[tuple[str, str]]:
+            await r.mode(mode)
+            found = await r.router.candidates("north", "north-shop", "economy", wants_tools=tools)
             return [(c.provider, c.provider_class) for c in found]
 
-        assert names(LOCAL_ONLY) == [("gateway", "local")]
-        assert names(FALLBACK) == [("gateway", "local"), (B, "hosted")]
-        assert names(PRIMARY) == [(A, "hosted"), ("gateway", "local")]
+        assert await names(LOCAL_ONLY) == [("gateway", "local")]
+        assert await names(FALLBACK) == [("gateway", "local"), (B, "hosted")]
+        assert await names(PRIMARY) == [(A, "hosted"), ("gateway", "local")]
         # A says it cannot take tools; the operator's server has not said.
-        assert names(PRIMARY, tools=True) == [("gateway", "local")]
+        assert await names(PRIMARY, tools=True) == [("gateway", "local")]
         # A disabled, or without a key, is no candidate at all.
-        r.service.store.delete_key(A)
-        assert names(PRIMARY) == [("gateway", "local")]
+        await r.service.store.delete_key(A)
+        assert await names(PRIMARY) == [("gateway", "local")]
 
 
 async def test_a_provider_whose_key_cannot_be_read_is_skipped_never_contacted() -> None:
     async with routing() as r:
-        r.mode(PRIMARY)
-        config = r.provider(A, "a.provider.test", role="primary")
+        await r.mode(PRIMARY)
+        config = await r.provider(A, "a.provider.test", role="primary")
         # Sealed under a master key this gateway does not have (a lost one).
-        r.service.store.put_key(A, Vault(bytes(range(32, 64))).seal(KEY, config.binding), 2.0)
+        await r.service.store.put_key(A, Vault(bytes(range(32, 64))).seal(KEY, config.binding), 2.0)
         r.op_net.responses = [TEXT]
         response = await r.chat()
     assert response.status_code == 200, response.text

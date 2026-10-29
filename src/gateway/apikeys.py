@@ -115,10 +115,10 @@ class ApiKeyService:
     def _hmac(self, key: str) -> str:
         return hmac.new(self._pepper, key.encode(), hashlib.sha256).hexdigest()
 
-    def issue(
+    async def issue(
         self, application_id: str, label: str, *, expires_at_ms: float | None = None
     ) -> IssuedKey:
-        if self._store.get_application(application_id) is None:
+        if await self._store.get_application(application_id) is None:
             raise ValueError(f"no application {application_id!r}")
         key_id = self._random_bytes(KEY_ID_BYTES).hex()
         secret = base64.urlsafe_b64encode(self._random_bytes(SECRET_BYTES)).rstrip(b"=").decode()
@@ -131,10 +131,10 @@ class ApiKeyService:
             created_at_ms=self._epoch.epoch_ms(),
             expires_at_ms=expires_at_ms,
         )
-        self._store.add_key(record)
+        await self._store.add_key(record)
         return IssuedKey(key, record)
 
-    def authenticate(self, presented: str) -> Application:
+    async def authenticate(self, presented: str) -> Application:
         """The application a key belongs to, or ``InvalidApiKeyError``."""
         match = KEY_PATTERN.fullmatch(presented)
         # The same steps whatever is wrong with the key: one lookup (a malformed key looks up
@@ -142,7 +142,7 @@ class ApiKeyService:
         # dummy digest when there is no record). The lookup brings the application and
         # whether its organization is enabled, so a disabled organization, a revoked or
         # expired key and a gone application are all decided after the comparison, together.
-        found = self._store.lookup_key(match.group("id") if match else _NO_SUCH_ID)
+        found = await self._store.lookup_key(match.group("id") if match else _NO_SUCH_ID)
         expected = found.record.key_hmac if found is not None else _NO_RECORD
         valid = hmac.compare_digest(self._hmac(presented), expected)
         now_ms = self._epoch.epoch_ms()
@@ -158,18 +158,18 @@ class ApiKeyService:
         record, application = found.record, found.application
         self._pending[record.key_id] = now_ms
         if now_ms - self._last_flush_ms >= self._flush_ms:
-            self.flush_last_used()
+            await self.flush_last_used()
         return application
 
-    def flush_last_used(self) -> int:
+    async def flush_last_used(self) -> int:
         """Write the pending last-used times in one transaction. Returns how many keys."""
         pending, self._pending = self._pending, {}
         self._last_flush_ms = self._epoch.epoch_ms()
         if pending:
-            self._store.record_last_used(pending)
+            await self._store.record_last_used(pending)
         return len(pending)
 
-    def rotate(
+    async def rotate(
         self,
         key_id: str,
         *,
@@ -182,21 +182,21 @@ class ApiKeyService:
         sooner, if it already expired sooner)."""
         if grace_ms < 0:
             raise ValueError("grace_ms must not be negative")
-        old = self._store.get_key(key_id)
+        old = await self._store.get_key(key_id)
         if old is None or old.revoked:
             raise ValueError(f"no active key {key_id!r}")
-        new = self.issue(
+        new = await self.issue(
             old.application_id,
             label if label is not None else old.label,
             expires_at_ms=expires_at_ms,
         )
         ends_ms = self._epoch.epoch_ms() + grace_ms
         if old.expires_at_ms is None or ends_ms < old.expires_at_ms:
-            self._store.set_key_expiry(key_id, ends_ms)
+            await self._store.set_key_expiry(key_id, ends_ms)
         return new
 
-    def revoke(self, key_id: str) -> None:
-        self._store.revoke_key(key_id)
+    async def revoke(self, key_id: str) -> None:
+        await self._store.revoke_key(key_id)
 
 
 @dataclass(frozen=True, slots=True)

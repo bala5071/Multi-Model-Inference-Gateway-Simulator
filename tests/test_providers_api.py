@@ -36,8 +36,10 @@ from gateway.providers import (
     ProviderConfig,
     ProviderService,
     ProviderStore,
+    SqliteProviderStore,
 )
 from gateway.redaction import Redactor
+from gateway.state import run_now
 from gateway.vault import Vault, VaultIntegrityError
 from mock_network import FakeResolver, Scripted, ScriptedNetwork, http_response, sse_response
 from mock_providers import openai_text, openai_tools
@@ -69,7 +71,7 @@ def seed_provider(connection: sqlite3.Connection, organization_id: str = "north"
         "prv_00000000000000aa", organization_id, "openai_compatible", f"https://{HOST}/v1",
         "model-x", "standard", "fallback", True, True, None, None, {}, None, 0.0,
     )  # fmt: skip
-    ProviderStore(connection).add(config)
+    run_now(SqliteProviderStore(connection).add(config))
     return config
 
 
@@ -123,7 +125,7 @@ async def rig(world: World | None = None, **service: Any) -> AsyncIterator[Rig]:
     network = ScriptedNetwork()
     resolver = FakeResolver({HOST: [PUBLIC], "inside.provider.test": ["10.0.0.7"]})
     providers = ProviderService(
-        ProviderStore(accounts.connection),
+        SqliteProviderStore(accounts.connection),
         Vault(MASTER),
         accounts.audit,
         accounts.clock,
@@ -285,7 +287,7 @@ async def test_platform_admin_sees_existence_and_state_switches_and_never_a_key(
         assert on.json() == {"provider_id": provider_id, "enabled": True}
     switches = [
         e.event.details["switch"]
-        for e in r.world.accounts.audit.entries()
+        for e in await r.world.accounts.audit.entries()
         if e.event.action in (AuditAction.PROVIDER_DISABLED, AuditAction.PROVIDER_ENABLED)
     ]
     assert switches == ["platform", "organization", "platform"]
@@ -317,7 +319,7 @@ async def test_nothing_crosses_organizations_and_missing_looks_forbidden() -> No
                 )
                 assert len(answers) == 1, (method, path, answers)
                 assert next(iter(answers))[0] == 403
-        stored = r.store.get_key(south)
+        stored = await r.store.get_key(south)
         assert stored is not None  # untouched
         assert r.network.connections == []
 
@@ -365,16 +367,16 @@ async def test_a_new_url_deletes_the_key_and_a_new_model_resets_capabilities() -
     async with rig() as r:
         alice = await r.login("alice")
         provider_id = await _with_key(r, alice)
-        config = r.store.get(provider_id)
+        config = await r.store.get(provider_id)
         assert config is not None
-        r.store.replace(replace(config, capabilities={"supports_tools": {"value": True}}))
+        await r.store.replace(replace(config, capabilities={"supports_tools": {"value": True}}))
         await r.step_up(alice)
         model = await r.call(
             alice, "PATCH", f"/north/providers/{provider_id}", {"model": "model-y"}
         )
         assert model.json()["key_deleted"] is False
         assert model.json()["capabilities"] == {}
-        assert r.store.get_key(provider_id) is not None
+        assert await r.store.get_key(provider_id) is not None
         moved = await r.call(
             alice,
             "PATCH",
@@ -382,7 +384,7 @@ async def test_a_new_url_deletes_the_key_and_a_new_model_resets_capabilities() -
             {"base_url": "https://other.provider.test/v1"},
         )
         assert moved.json()["key_deleted"] is True
-        assert r.store.get_key(provider_id) is None
+        assert await r.store.get_key(provider_id) is None
         bad = await r.call(
             alice,
             "PATCH",
@@ -400,13 +402,13 @@ async def test_a_new_url_or_type_deletes_the_key_in_the_same_transaction(
     async with rig() as r:
         alice = await r.login("alice")
         provider_id = await _with_key(r, alice)
-        before = r.store.get(provider_id)
+        before = await r.store.get(provider_id)
         assert before is not None
         delete_key = r.store.delete_key
 
-        def delete_then_fail(found: str) -> bool:
-            assert delete_key(found)  # the row is gone inside the transaction ...
-            assert r.store.get_key(found) is None
+        async def delete_then_fail(found: str) -> bool:
+            assert await delete_key(found)  # the row is gone inside the transaction ...
+            assert await r.store.get_key(found) is None
             raise RuntimeError("the audit write failed")
 
         monkeypatch.setattr(r.store, "delete_key", delete_then_fail)
@@ -419,8 +421,8 @@ async def test_a_new_url_or_type_deletes_the_key_in_the_same_transaction(
                 {"base_url": "https://other.provider.test/v1"},
             )
         # ... and back after the rollback, with the old URL.
-        assert r.store.get(provider_id) == before
-        assert r.store.get_key(provider_id) is not None
+        assert await r.store.get(provider_id) == before
+        assert await r.store.get_key(provider_id) is not None
 
 
 @pytest.mark.parametrize(
@@ -434,15 +436,15 @@ async def test_the_old_ciphertext_cannot_be_opened_for_the_new_origin_or_type(
     async with rig() as r:
         alice = await r.login("alice")
         provider_id = await _with_key(r, alice)
-        old = r.store.get(provider_id)
-        stored = r.store.get_key(provider_id)
+        old = await r.store.get(provider_id)
+        stored = await r.store.get_key(provider_id)
         assert old is not None
         assert stored is not None
         await r.step_up(alice)
         moved = await r.call(alice, "PATCH", f"/north/providers/{provider_id}", change)
         assert moved.json()["key_deleted"] is True
-        assert r.store.get_key(provider_id) is None
-        new = r.store.get(provider_id)
+        assert await r.store.get_key(provider_id) is None
+        new = await r.store.get(provider_id)
         assert new is not None
     vault = Vault(MASTER)
     assert vault.open(stored.sealed, old.binding).reveal() == KEY  # the ciphertext is sound
@@ -515,11 +517,11 @@ async def test_a_key_is_never_returned_and_each_change_needs_a_fresh_password() 
             "provider_id": provider_id,
             "key_deleted": True,
         }
-        assert r.store.get_key(provider_id) is None
+        assert await r.store.get_key(provider_id) is None
         assert (await r.call(alice, "DELETE", path)).json()["error"]["code"] == STEP_UP_REQUIRED
     consumed = [
         e.event.details.get("step_up_consumed")
-        for e in r.world.accounts.audit.entries()
+        for e in await r.world.accounts.audit.entries()
         if e.event.action in (AuditAction.PROVIDER_KEY_SET, AuditAction.PROVIDER_KEY_DELETED)
     ]
     assert consumed == [True, True]
@@ -562,7 +564,7 @@ async def test_the_window_comes_back_only_if_nothing_was_changed(
         with pytest.raises(RuntimeError):
             await r.call(alice, "PUT", path, {"key": KEY + "z"})
         monkeypatch.undo()
-        assert r.store.get_key(provider_id) is not None
+        assert await r.store.get_key(provider_id) is not None
         after = await r.call(alice, "PUT", path, {"key": KEY})
         assert after.json()["error"]["code"] == STEP_UP_REQUIRED
 
@@ -573,8 +575,8 @@ async def test_deleting_a_provider_deletes_its_key() -> None:
         provider_id = await _with_key(r, alice)
         await r.step_up(alice)
         assert (await r.call(alice, "DELETE", f"/north/providers/{provider_id}")).status_code == 200
-        assert r.store.get(provider_id) is None
-        assert r.store.get_key(provider_id) is None
+        assert await r.store.get(provider_id) is None
+        assert await r.store.get_key(provider_id) is None
         count = r.world.accounts.connection.execute("SELECT count(*) FROM provider_keys").fetchone()
         assert count == (0,)
 
@@ -611,7 +613,7 @@ async def test_test_connection_records_capabilities_with_time_and_model() -> Non
         # Through the guard, to the checked address, with the key only in the request header.
         assert [c.address for c in r.network.connections] == [PUBLIC] * 3
         assert all(f"Bearer {KEY}".encode() in c.written for c in r.network.connections)
-        stored = r.store.get(provider_id)
+        stored = await r.store.get(provider_id)
         assert stored is not None
         assert stored.capabilities == capabilities
         # A new model: the old probe no longer applies.
@@ -640,7 +642,7 @@ async def test_test_connection_failures_are_mapped_and_never_echo_the_key() -> N
         assert KEY not in failed.text
     outcomes = [
         e.event.details["outcome_code"]
-        for e in r.world.accounts.audit.entries()
+        for e in await r.world.accounts.audit.entries()
         if e.event.action is AuditAction.PROVIDER_TESTED
     ]
     assert outcomes == ["no_key", "provider_auth_failed"]
@@ -711,7 +713,7 @@ async def test_test_connection_is_not_a_network_scanner() -> None:
     }
     tested = [
         e.event.details
-        for e in r.world.accounts.audit.entries()
+        for e in await r.world.accounts.audit.entries()
         if e.event.action is AuditAction.PROVIDER_TESTED
     ]
     assert [(d["outcome_code"], d.get("outcome_detail")) for d in tested] == [
@@ -721,7 +723,7 @@ async def test_test_connection_is_not_a_network_scanner() -> None:
         ("upstream_unavailable", "dns_failure"),
         ("upstream_rejected", None),  # nothing derived from the host's body
     ]
-    logged = json.dumps([e.event.details for e in r.world.accounts.audit.entries()])
+    logged = json.dumps([e.event.details for e in await r.world.accounts.audit.entries()])
     assert KEY not in logged
     assert "no such model" not in logged
 
@@ -776,11 +778,11 @@ async def test_an_unreadable_key_is_shown_logged_and_never_used(
     async with rig() as r:
         alice = await r.login("alice")
         provider_id = await _created(r, alice)
-        config = r.store.get(provider_id)
+        config = await r.store.get(provider_id)
         assert config is not None
         # Sealed under a master key the gateway does not have (a lost one).
-        r.store.put_key(provider_id, Vault(OTHER_MASTER).seal(KEY, config.binding), 1.0)
-        assert r.service.warn_unreadable() == 1
+        await r.store.put_key(provider_id, Vault(OTHER_MASTER).seal(KEY, config.binding), 1.0)
+        assert await r.service.warn_unreadable() == 1
         listed = (await r.call(alice, "GET", "/north/providers")).json()["providers"][0]
         assert listed["key"]["key_unreadable"] is True
         for _ in range(2):
@@ -803,4 +805,4 @@ async def test_an_expired_window_cannot_be_used_up() -> None:
         await r.world.accounts.clock.sleep_ms(r.world.accounts.service.step_up_ms)
         late = await r.call(alice, "PUT", f"/north/providers/{provider_id}/key", {"key": KEY})
         assert late.json()["error"]["code"] == STEP_UP_REQUIRED
-        assert r.store.get_key(provider_id) is None
+        assert await r.store.get_key(provider_id) is None

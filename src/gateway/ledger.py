@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from gateway.clock import Clock, ClockEpoch, EpochSource
 from gateway.periods import BudgetPeriods, CalendarMonthsUTC
@@ -27,6 +28,7 @@ __all__ = [
     "ApplicationShare",
     "ApplicationUsage",
     "BudgetExceededError",
+    "Budgets",
     "CostLedger",
     "ModelUsage",
     "OrganizationUsage",
@@ -85,6 +87,26 @@ class BudgetExceededError(Exception):
         )
 
 
+class Budgets(Protocol):
+    """What the request path and monitoring ask of budgets (docs/34-state-interfaces.md):
+    ``CostLedger`` in one process. Scale-out PR 2 replaces check-then-record with reserve,
+    settle and release (docs/scale-out-plan.md, section 3.1)."""
+
+    async def check_budget(self, application_id: str, budget_tokens: int) -> None: ...
+
+    async def record(
+        self,
+        application_id: str,
+        result: RequestResult,
+        *,
+        model: str,
+        price_multiplier: float,
+        source: ChatSource | None = None,
+    ) -> float: ...
+
+    async def usage(self, application_id: str) -> ApplicationUsage: ...
+
+
 @dataclass(slots=True)
 class _Account:
     period_start_ms: float
@@ -127,11 +149,11 @@ class CostLedger:
         self._retention_ms = retention_ms
         self._accounts: dict[str, _Account] = {}
 
-    def _account(self, application_id: str) -> _Account:
+    async def _account(self, application_id: str) -> _Account:
         start_ms, end_ms = self._periods.bounds(self._epoch.epoch_ms())
         account = self._accounts.get(application_id)
         if account is None or account.period_start_ms != start_ms:
-            by_model = self._store.usage_by_model(application_id, start_ms, end_ms)
+            by_model = await self._store.usage_by_model(application_id, start_ms, end_ms)
             total = ModelUsage()
             for usage in by_model.values():
                 total = _add(total, usage)
@@ -139,8 +161,8 @@ class CostLedger:
             self._accounts[application_id] = account
         return account
 
-    def usage(self, application_id: str) -> ApplicationUsage:
-        account = self._account(application_id)
+    async def usage(self, application_id: str) -> ApplicationUsage:
+        account = await self._account(application_id)
         return ApplicationUsage(
             application_id=application_id,
             period_start_ms=account.period_start_ms,
@@ -149,7 +171,7 @@ class CostLedger:
             by_model=dict(account.by_model),
         )
 
-    def organization_usage(
+    async def organization_usage(
         self, organization_id: str, budgets: Mapping[str, int]
     ) -> OrganizationUsage:
         """The usage of an organization's applications, added up. ``budgets`` maps each of
@@ -161,7 +183,7 @@ class CostLedger:
         by_model: dict[str, ModelUsage] = {}
         shares = []
         for application_id in sorted(budgets):
-            usage = self.usage(application_id)
+            usage = await self.usage(application_id)
             total = _add(total, usage.total)
             for model, model_usage in usage.by_model.items():
                 by_model[model] = _add(by_model.get(model, ModelUsage()), model_usage)
@@ -174,23 +196,23 @@ class CostLedger:
     def retention_ms(self) -> float | None:
         return self._retention_ms
 
-    def prune(self, limit: int | None = None) -> int:
+    async def prune(self, limit: int | None = None) -> int:
         """Delete events older than the retention (never the current period's), at most
         ``limit`` of them. Returns how many; 0 without a retention."""
         if self._retention_ms is None:
             return 0
         now_ms = self._epoch.epoch_ms()
         period_start_ms, _ = self._periods.bounds(now_ms)
-        return self._store.prune(min(now_ms - self._retention_ms, period_start_ms), limit)
+        return await self._store.prune(min(now_ms - self._retention_ms, period_start_ms), limit)
 
-    def check_budget(self, application_id: str, budget_tokens: int) -> None:
+    async def check_budget(self, application_id: str, budget_tokens: int) -> None:
         """Raise ``BudgetExceededError`` if the application has no budget left this period.
 
         The check is made before a request runs and the charge after it finishes, so the
         last request admitted, and any others in flight with it, can take usage past the
         budget.
         """
-        usage = self.usage(application_id)
+        usage = await self.usage(application_id)
         if usage.total.billed_tokens >= budget_tokens:
             raise BudgetExceededError(
                 application_id,
@@ -199,7 +221,7 @@ class CostLedger:
                 retry_after_ms=usage.period_end_ms - self._epoch.epoch_ms(),
             )
 
-    def record(
+    async def record(
         self,
         application_id: str,
         result: RequestResult,
@@ -213,8 +235,8 @@ class CostLedger:
         The event is stored first, so a failed write leaves the totals unchanged.
         """
         billed_cost_usd = result.cost_usd * price_multiplier
-        account = self._account(application_id)
-        self._store.append(
+        account = await self._account(application_id)
+        await self._store.append(
             UsageEvent.of(
                 application_id,
                 result,
@@ -258,6 +280,6 @@ async def run_retention(
     if batch < 1:
         raise ValueError("batch must be at least 1")
     while True:
-        while ledger.prune(batch) == batch:
+        while await ledger.prune(batch) == batch:
             await clock.sleep_ms(0)
         await clock.sleep_ms(every_ms)

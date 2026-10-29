@@ -155,19 +155,19 @@ def store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Applicatio
     connection.close()
 
 
-def _two_organizations(store: ApplicationStore, plan: str = "roomy") -> None:
+async def _two_organizations(store: ApplicationStore, plan: str = "roomy") -> None:
     """North and South, each with an application named Shop."""
     for org_id, name in (("north", "North"), ("south", "South")):
-        store.add_organization(new_organization(org_id, name, "business", created_at_ms=1.0))
-        store.add_application(
+        await store.add_organization(new_organization(org_id, name, "business", created_at_ms=1.0))
+        await store.add_application(
             application_from_template(
                 f"{org_id}-shop", "Shop", PLANS, plan, organization_id=org_id, created_at_ms=2.0
             )
         )
 
 
-def test_every_store_starts_with_the_default_organization(store: ApplicationStore) -> None:
-    [default] = store.list_organizations()
+async def test_every_store_starts_with_the_default_organization(store: ApplicationStore) -> None:
+    [default] = await store.list_organizations()
     assert (default.id, default.name, default.kind, default.disabled) == (
         DEFAULT_ORGANIZATION_ID,
         "default",
@@ -176,77 +176,81 @@ def test_every_store_starts_with_the_default_organization(store: ApplicationStor
     )
 
 
-def test_organizations_round_trip_and_their_ids_and_names_are_unique(
+async def test_organizations_round_trip_and_their_ids_and_names_are_unique(
     store: ApplicationStore,
 ) -> None:
     north = new_organization("north", "Caf\u00e9", "individual", created_at_ms=5.0)
-    store.add_organization(north)
-    assert store.get_organization("north") == north
-    assert store.find_organization("Cafe\u0301") == north  # found by its NFC form
-    assert store.find_organization("caf\u00e9") is None  # no case folding
-    assert [o.id for o in store.list_organizations()] == [DEFAULT_ORGANIZATION_ID, "north"]
+    await store.add_organization(north)
+    assert await store.get_organization("north") == north
+    assert await store.find_organization("Cafe\u0301") == north  # found by its NFC form
+    assert await store.find_organization("caf\u00e9") is None  # no case folding
+    assert [o.id for o in await store.list_organizations()] == [DEFAULT_ORGANIZATION_ID, "north"]
     with pytest.raises(ValueError, match="exists"):
-        store.add_organization(new_organization("north", "Other", "business", created_at_ms=0))
+        await store.add_organization(
+            new_organization("north", "Other", "business", created_at_ms=0)
+        )
     with pytest.raises(ValueError, match="already named"):
-        store.add_organization(new_organization("other", "Cafe\u0301", "business", created_at_ms=0))
+        await store.add_organization(
+            new_organization("other", "Cafe\u0301", "business", created_at_ms=0)
+        )
 
 
-def test_an_organization_can_be_disabled_and_enabled(store: ApplicationStore) -> None:
-    store.add_organization(new_organization("north", "North", "business", created_at_ms=0.0))
-    store.set_organization_disabled("north", True)
-    assert store.get_organization("north").disabled is True  # type: ignore[union-attr]
-    store.set_organization_disabled("north", False)
-    assert store.get_organization("north").disabled is False  # type: ignore[union-attr]
+async def test_an_organization_can_be_disabled_and_enabled(store: ApplicationStore) -> None:
+    await store.add_organization(new_organization("north", "North", "business", created_at_ms=0.0))
+    await store.set_organization_disabled("north", True)
+    assert (await store.get_organization("north")).disabled is True  # type: ignore[union-attr]
+    await store.set_organization_disabled("north", False)
+    assert (await store.get_organization("north")).disabled is False  # type: ignore[union-attr]
     with pytest.raises(KeyError):
-        store.set_organization_disabled("nobody", True)
+        await store.set_organization_disabled("nobody", True)
 
 
-def test_names_are_unique_within_an_organization_not_across(store: ApplicationStore) -> None:
-    _two_organizations(store)
-    north = store.list_applications(organization_id="north")
-    south = store.list_applications(organization_id="south")
+async def test_names_are_unique_within_an_organization_not_across(store: ApplicationStore) -> None:
+    await _two_organizations(store)
+    north = await store.list_applications(organization_id="north")
+    south = await store.list_applications(organization_id="south")
     assert [(a.id, a.name) for a in north] == [("north-shop", "Shop")]
     assert [(a.id, a.name) for a in south] == [("south-shop", "Shop")]
-    assert store.list_applications(organization_id=DEFAULT_ORGANIZATION_ID) == []
-    assert [a.id for a in store.list_applications()] == ["north-shop", "south-shop"]
+    assert await store.list_applications(organization_id=DEFAULT_ORGANIZATION_ID) == []
+    assert [a.id for a in await store.list_applications()] == ["north-shop", "south-shop"]
     with pytest.raises(ValueError, match="already has an application named 'Shop'"):
-        store.add_application(
+        await store.add_application(
             application_from_template(
                 "north-shop-2", "Shop", PLANS, "roomy", organization_id="north", created_at_ms=0
             )
         )
     # Different case is a different name.
-    store.add_application(
+    await store.add_application(
         application_from_template(
             "north-shop-3", "SHOP", PLANS, "roomy", organization_id="north", created_at_ms=0
         )
     )
 
 
-def test_an_application_needs_an_enabled_organization_and_a_normalized_name(
+async def test_an_application_needs_an_enabled_organization_and_a_normalized_name(
     store: ApplicationStore,
 ) -> None:
-    def make(org: str, app_id: str = "x") -> None:
-        store.add_application(
+    async def make(org: str, app_id: str = "x") -> None:
+        await store.add_application(
             application_from_template(
                 app_id, "X", PLANS, "roomy", organization_id=org, created_at_ms=0
             )
         )
 
     with pytest.raises(ValueError, match="no organization 'nobody'"):
-        make("nobody")
-    store.add_organization(new_organization("north", "North", "business", created_at_ms=0.0))
-    store.set_organization_disabled("north", True)
+        await make("nobody")
+    await store.add_organization(new_organization("north", "North", "business", created_at_ms=0.0))
+    await store.set_organization_disabled("north", True)
     with pytest.raises(ValueError, match="disabled"):
-        make("north")
-    store.set_organization_disabled("north", False)
-    make("north")
+        await make("north")
+    await store.set_organization_disabled("north", False)
+    await make("north")
     # A name that bypasses application_from_template must already be normalized.
     raw = application_from_template(
         "y", "Y", PLANS, "roomy", organization_id="north", created_at_ms=0
     )
     with pytest.raises(ValueError, match="NFC"):
-        store.add_application(replace(raw, name="Cafe\u0301"))
+        await store.add_application(replace(raw, name="Cafe\u0301"))
 
 
 # --- keys of a disabled organization -------------------------------------------------------
@@ -258,38 +262,39 @@ def _keys(store: ApplicationStore, clock: SimClock) -> ApiKeyService:
     )
 
 
-def test_a_disabled_organizations_keys_stop_working_and_others_do_not(
+async def test_a_disabled_organizations_keys_stop_working_and_others_do_not(
     store: ApplicationStore,
 ) -> None:
-    _two_organizations(store)
+    await _two_organizations(store)
     keys = _keys(store, SimClock())
-    north, south = keys.issue("north-shop", "n").key, keys.issue("south-shop", "s").key
-    store.set_organization_disabled("north", True)
+    north = (await keys.issue("north-shop", "n")).key
+    south = (await keys.issue("south-shop", "s")).key
+    await store.set_organization_disabled("north", True)
     with pytest.raises(InvalidApiKeyError) as excinfo:
-        keys.authenticate(north)
+        await keys.authenticate(north)
     assert str(excinfo.value) == INVALID_KEY_MESSAGE  # the same answer as any bad key
-    assert keys.authenticate(south).id == "south-shop"
+    assert (await keys.authenticate(south)).id == "south-shop"
     # Existing data stays: enabling it again brings the same key back.
-    store.set_organization_disabled("north", False)
-    assert keys.authenticate(north).id == "north-shop"
+    await store.set_organization_disabled("north", False)
+    assert (await keys.authenticate(north)).id == "north-shop"
 
 
-def test_the_key_lookup_brings_the_application_and_its_organization_state(
+async def test_the_key_lookup_brings_the_application_and_its_organization_state(
     store: ApplicationStore,
 ) -> None:
-    _two_organizations(store)
+    await _two_organizations(store)
     keys = _keys(store, SimClock())
-    record = keys.issue("north-shop", "n").record
-    found = store.lookup_key(record.key_id)
+    record = (await keys.issue("north-shop", "n")).record
+    found = await store.lookup_key(record.key_id)
     assert found is not None
     assert (found.record, found.application, found.organization_enabled) == (
         record,
-        store.get_application("north-shop"),
+        await store.get_application("north-shop"),
         True,
     )
-    store.set_organization_disabled("north", True)
-    assert store.lookup_key(record.key_id).organization_enabled is False  # type: ignore[union-attr]
-    assert store.lookup_key("0" * 16) is None
+    await store.set_organization_disabled("north", True)
+    assert (await store.lookup_key(record.key_id)).organization_enabled is False  # type: ignore[union-attr]
+    assert await store.lookup_key("0" * 16) is None
 
 
 # --- usage and budgets never mix -----------------------------------------------------------
@@ -310,11 +315,11 @@ def usage_store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Usag
     connection.close()
 
 
-def test_usage_rolls_up_per_organization_and_never_mixes(
+async def test_usage_rolls_up_per_organization_and_never_mixes(
     store: ApplicationStore, usage_store: UsageStore
 ) -> None:
-    _two_organizations(store)
-    store.add_application(
+    await _two_organizations(store)
+    await store.add_application(
         application_from_template(
             "north-api", "API", PLANS, "tiny", organization_id="north", created_at_ms=0
         )
@@ -327,14 +332,16 @@ def test_usage_rolls_up_per_organization_and_never_mixes(
         ("south-shop", 100, 50),
         ("north-shop", 1, 1),
     ):
-        ledger.record(app_id, _result(tokens_in, tokens_out), model="economy", price_multiplier=2)
+        await ledger.record(
+            app_id, _result(tokens_in, tokens_out), model="economy", price_multiplier=2
+        )
 
-    def budgets(org: str) -> dict[str, int]:
-        apps = store.list_applications(organization_id=org)
+    async def budgets(org: str) -> dict[str, int]:
+        apps = await store.list_applications(organization_id=org)
         return {a.id: a.plan.monthly_token_budget for a in apps}
 
-    north = ledger.organization_usage("north", budgets("north"))
-    south = ledger.organization_usage("south", budgets("south"))
+    north = await ledger.organization_usage("north", await budgets("north"))
+    south = await ledger.organization_usage("south", await budgets("south"))
     assert [(s.application_id, s.used_tokens, s.budget_tokens) for s in north.applications] == [
         ("north-api", 10, 30),
         ("north-shop", 17, 1_000_000),
@@ -348,25 +355,29 @@ def test_usage_rolls_up_per_organization_and_never_mixes(
     assert (south.total.requests, south.total.billed_tokens) == (1, 150)
     assert north.by_model["economy"].billed_cost_usd == pytest.approx(3 * 0.5 * 2)
     # Same name, same period: still two applications, two organizations.
-    assert ledger.usage("north-shop").total.billed_tokens == 17
-    assert ledger.usage("south-shop").total.billed_tokens == 150
+    assert (await ledger.usage("north-shop")).total.billed_tokens == 17
+    assert (await ledger.usage("south-shop")).total.billed_tokens == 150
     # The store query gives the same totals as the ledger's roll-up.
     start, end = north.period_start_ms, north.period_end_ms
-    assert usage_store.usage_by_model_for(budgets("north"), start, end) == north.by_model
-    assert usage_store.usage_by_model_for(budgets("south"), start, end) == south.by_model
-    assert usage_store.usage_by_model_for([], start, end) == {}
-    assert ledger.organization_usage(DEFAULT_ORGANIZATION_ID, {}).total.requests == 0
+    assert (
+        await usage_store.usage_by_model_for(await budgets("north"), start, end) == north.by_model
+    )
+    assert (
+        await usage_store.usage_by_model_for(await budgets("south"), start, end) == south.by_model
+    )
+    assert await usage_store.usage_by_model_for([], start, end) == {}
+    assert (await ledger.organization_usage(DEFAULT_ORGANIZATION_ID, {})).total.requests == 0
 
 
-def test_one_organizations_exhausted_budget_does_not_touch_the_others(
+async def test_one_organizations_exhausted_budget_does_not_touch_the_others(
     store: ApplicationStore,
 ) -> None:
-    _two_organizations(store, plan="tiny")
+    await _two_organizations(store, plan="tiny")
     ledger = CostLedger(SimClock())
-    ledger.record("north-shop", _result(20, 10), model="economy", price_multiplier=1.0)
+    await ledger.record("north-shop", _result(20, 10), model="economy", price_multiplier=1.0)
     with pytest.raises(Exception, match="north-shop"):
-        ledger.check_budget("north-shop", 30)
-    ledger.check_budget("south-shop", 30)
+        await ledger.check_budget("north-shop", 30)
+    await ledger.check_budget("south-shop", 30)
 
 
 # --- over HTTP ------------------------------------------------------------------------------
@@ -381,9 +392,9 @@ async def _gateway(
     connection = open_database(tmp_path / "gateway.db")
     MigrationRunner(connection, MIGRATIONS, epoch).migrate()
     store = SqliteApplicationStore(connection)
-    _two_organizations(store, plan="tiny")
+    await _two_organizations(store, plan="tiny")
     keys = ApiKeyService(store, TEST_PEPPER, epoch, random_bytes=random.Random(9).randbytes)
-    issued = {app: keys.issue(app, "test").key for app in ("north-shop", "south-shop")}
+    issued = {app: (await keys.issue(app, "test")).key for app in ("north-shop", "south-shop")}
     registry = build_continuous_registry(clock, seed=7)
     app = create_app(
         registry,
@@ -432,7 +443,7 @@ async def test_two_organizations_over_http_never_mix(tmp_path: Path) -> None:
         north_usage = (await client.get("/v1/applications/me/usage", headers=north)).json()
         south_usage = (await client.get("/v1/applications/me/usage", headers=south)).json()
 
-        store.set_organization_disabled("north", True)
+        await store.set_organization_disabled("north", True)
         disabled = await client.post("/v1/generate", json=bodies[5], headers=north)
         bad = await client.post("/v1/generate", json=bodies[6], headers=bearer("gwk_nonsense"))
         still = (await client.post("/v1/generate", json=bodies[7], headers=south)).status_code

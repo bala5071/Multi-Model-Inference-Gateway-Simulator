@@ -232,8 +232,8 @@ async def _admin(accounts: Accounts) -> AsyncIterator[httpx.AsyncClient]:
     )
     requires = app.state.requires
 
-    def organization(request: Request) -> Resource | None:
-        found = accounts.organizations.get_organization(request.path_params["org"])
+    async def organization(request: Request) -> Resource | None:
+        found = await accounts.organizations.get_organization(request.path_params["org"])
         return Resource.organization(found.id) if found is not None else None
 
     @app.get("/v1/admin/orgs/{org}/probe", dependencies=[requires("users.list", organization)])
@@ -266,11 +266,11 @@ async def _login(client: httpx.AsyncClient, username: str) -> tuple[str, str]:
 
 
 @pytest.fixture
-def org_accounts() -> Accounts:
+async def org_accounts() -> Accounts:
     """north: alice (org_admin), carol (org_admin), vera (viewer), bob (no role);
     south: sid (org_admin); default: root (platform_admin)."""
     accounts = make_accounts()
-    accounts.organizations.add_organization(
+    await accounts.organizations.add_organization(
         new_organization("south", "South", "business", created_at_ms=0)
     )
     for name, org in (
@@ -289,8 +289,8 @@ def org_accounts() -> Accounts:
         ("vera", "viewer", "north"),
         ("sid", "org_admin", "south"),
     ):
-        service.grant_role(name, role, "organization", org)
-    service.grant_role("root", "platform_admin", "platform", "*")
+        await service.grant_role(name, role, "organization", org)
+    await service.grant_role("root", "platform_admin", "platform", "*")
     return accounts
 
 
@@ -340,7 +340,7 @@ async def test_a_removed_role_is_gone_at_the_next_request(org_accounts: Accounts
         assert (
             await client.get("/v1/admin/orgs/north/probe", headers=cookie(sid))
         ).status_code == 200
-        org_accounts.service.revoke_role("alice", "org_admin", "organization", "north")
+        await org_accounts.service.revoke_role("alice", "org_admin", "organization", "north")
         # The same session, no new login: refused.
         assert (
             await client.get("/v1/admin/orgs/north/probe", headers=cookie(sid))
@@ -348,18 +348,18 @@ async def test_a_removed_role_is_gone_at_the_next_request(org_accounts: Accounts
 
 
 async def test_requires_waits_for_a_password_change(org_accounts: Accounts) -> None:
-    user = org_accounts.store.find_user("alice")
+    user = await org_accounts.store.find_user("alice")
     assert user is not None
     async with _admin(org_accounts) as client:
         sid, _ = await _login(client, "alice")
-        org_accounts.store.set_password(
+        await org_accounts.store.set_password(
             user.id, user.password_hash, must_change=True, bootstrap=user.bootstrap
         )
         blocked = await client.get("/v1/admin/orgs/north/probe", headers=cookie(sid))
     assert blocked.json()["error"]["code"] == "password_change_required"
 
 
-def test_requires_refuses_an_undeclared_action() -> None:
+async def test_requires_refuses_an_undeclared_action() -> None:
     accounts = make_accounts()
     clock = SimClock()
     app = create_app(

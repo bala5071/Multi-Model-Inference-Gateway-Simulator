@@ -52,8 +52,8 @@ def store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Applicatio
     connection.close()
 
 
-def _service(store: ApplicationStore, clock: SimClock, **kwargs: float) -> ApiKeyService:
-    seed_demo_applications(store, load_plans(), created_at_ms=0.0)
+async def _service(store: ApplicationStore, clock: SimClock, **kwargs: float) -> ApiKeyService:
+    await seed_demo_applications(store, load_plans(), created_at_ms=0.0)
     rng = random.Random(1)
     return ApiKeyService(
         store, TEST_PEPPER, ClockEpoch(clock), random_bytes=rng.randbytes, **kwargs
@@ -63,42 +63,42 @@ def _service(store: ApplicationStore, clock: SimClock, **kwargs: float) -> ApiKe
 # --- the stores ------------------------------------------------------------------------------
 
 
-def test_applications_round_trip_in_creation_order(store: ApplicationStore) -> None:
+async def test_applications_round_trip_in_creation_order(store: ApplicationStore) -> None:
     templates = load_plans()
-    made = seed_demo_applications(store, templates, created_at_ms=5.0)
+    made = await seed_demo_applications(store, templates, created_at_ms=5.0)
     assert [a.id for a in made] == ["initech", "globex", "acme"]
-    assert store.list_applications() == made
-    acme = store.get_application("acme")
+    assert await store.list_applications() == made
+    acme = await store.get_application("acme")
     assert acme == Application(
         "acme", "Acme", templates.plans["enterprise"], None, None, 5.0, "default"
     )
-    assert store.get_application("nobody") is None
+    assert await store.get_application("nobody") is None
     # Seeding again creates nothing; a duplicate id is refused.
-    assert seed_demo_applications(store, templates, created_at_ms=6.0) == []
+    assert await seed_demo_applications(store, templates, created_at_ms=6.0) == []
     with pytest.raises(ValueError, match="exists"):
-        store.add_application(made[0])
+        await store.add_application(made[0])
 
 
-def test_key_records_round_trip_and_change(store: ApplicationStore) -> None:
-    seed_demo_applications(store, load_plans(), created_at_ms=0.0)
+async def test_key_records_round_trip_and_change(store: ApplicationStore) -> None:
+    await seed_demo_applications(store, load_plans(), created_at_ms=0.0)
     record = ApiKeyRecord("0123456789abcdef", "acme", "backend", "f" * 64, 10.0)
-    store.add_key(record)
-    assert store.get_key(record.key_id) == record
-    store.set_key_expiry(record.key_id, 99.0)
-    store.record_last_used({record.key_id: 50.0})
-    store.record_last_used({record.key_id: 40.0})  # never moves backwards
-    store.revoke_key(record.key_id)
-    changed = store.get_key(record.key_id)
+    await store.add_key(record)
+    assert await store.get_key(record.key_id) == record
+    await store.set_key_expiry(record.key_id, 99.0)
+    await store.record_last_used({record.key_id: 50.0})
+    await store.record_last_used({record.key_id: 40.0})  # never moves backwards
+    await store.revoke_key(record.key_id)
+    changed = await store.get_key(record.key_id)
     assert changed is not None
     assert (changed.expires_at_ms, changed.last_used_at_ms, changed.revoked) == (99.0, 50.0, True)
-    assert store.list_keys("acme") == [changed]
-    assert store.list_keys("globex") == []
+    assert await store.list_keys("acme") == [changed]
+    assert await store.list_keys("globex") == []
     with pytest.raises(ValueError, match="exists"):
-        store.add_key(record)  # the id exists
+        await store.add_key(record)  # the id exists
     with pytest.raises(ValueError, match="application"):
-        store.add_key(ApiKeyRecord("fedcba9876543210", "nobody", "x", "0" * 64, 0.0))
+        await store.add_key(ApiKeyRecord("fedcba9876543210", "nobody", "x", "0" * 64, 0.0))
     with pytest.raises(KeyError):
-        store.revoke_key("no-such-key")
+        await store.revoke_key("no-such-key")
 
 
 def test_application_from_template_copies_the_plan_and_its_limits() -> None:
@@ -120,11 +120,11 @@ def test_application_from_template_copies_the_plan_and_its_limits() -> None:
 # --- issuing and checking keys ---------------------------------------------------------------
 
 
-def test_a_key_has_a_recognisable_prefix_and_at_least_128_bits_of_secret(
+async def test_a_key_has_a_recognisable_prefix_and_at_least_128_bits_of_secret(
     store: ApplicationStore,
 ) -> None:
-    keys = _service(store, SimClock())
-    issued = [keys.issue("acme", f"k{i}") for i in range(20)]
+    keys = await _service(store, SimClock())
+    issued = [await keys.issue("acme", f"k{i}") for i in range(20)]
     for one in issued:
         match = KEY_PATTERN.fullmatch(one.key)
         assert match is not None
@@ -135,10 +135,10 @@ def test_a_key_has_a_recognisable_prefix_and_at_least_128_bits_of_secret(
     assert apikeys.SECRET_BYTES * 8 >= 128
 
 
-def test_only_the_hmac_is_stored_never_the_key(store: ApplicationStore) -> None:
-    keys = _service(store, SimClock())
-    issued = keys.issue("acme", "backend")
-    record = store.get_key(issued.record.key_id)
+async def test_only_the_hmac_is_stored_never_the_key(store: ApplicationStore) -> None:
+    keys = await _service(store, SimClock())
+    issued = await keys.issue("acme", "backend")
+    record = await store.get_key(issued.record.key_id)
     assert record is not None
     expected = hmac.new(TEST_PEPPER, issued.key.encode(), "sha256").hexdigest()
     assert record.key_hmac == expected
@@ -148,10 +148,10 @@ def test_only_the_hmac_is_stored_never_the_key(store: ApplicationStore) -> None:
     assert TEST_PEPPER.decode() not in repr(keys)
 
 
-def test_the_key_finds_its_application(store: ApplicationStore) -> None:
-    keys = _service(store, SimClock())
-    key = keys.issue("globex", "backend").key
-    assert keys.authenticate(key).id == "globex"
+async def test_the_key_finds_its_application(store: ApplicationStore) -> None:
+    keys = await _service(store, SimClock())
+    key = (await keys.issue("globex", "backend")).key
+    assert (await keys.authenticate(key)).id == "globex"
 
 
 @pytest.mark.parametrize(
@@ -166,59 +166,59 @@ def test_the_key_finds_its_application(store: ApplicationStore) -> None:
     ],
     ids=["wrong-secret", "unknown-id", "truncated", "empty", "doubled-scheme", "upper-case"],
 )
-def test_every_wrong_key_is_the_same_error(store: ApplicationStore, mangle: object) -> None:
-    keys = _service(store, SimClock())
-    key = keys.issue("acme", "backend").key
+async def test_every_wrong_key_is_the_same_error(store: ApplicationStore, mangle: object) -> None:
+    keys = await _service(store, SimClock())
+    key = (await keys.issue("acme", "backend")).key
     assert callable(mangle)
     with pytest.raises(InvalidApiKeyError) as excinfo:
-        keys.authenticate(mangle(key))
+        await keys.authenticate(mangle(key))
     assert str(excinfo.value) == INVALID_KEY_MESSAGE
 
 
 async def test_revoked_expired_and_rotated_keys(store: ApplicationStore) -> None:
     clock = SimClock()
-    keys = _service(store, clock)
-    revoked = keys.issue("acme", "revoked")
-    expiring = keys.issue("acme", "expiring", expires_at_ms=1000.0)
-    old = keys.issue("acme", "old")
+    keys = await _service(store, clock)
+    revoked = await keys.issue("acme", "revoked")
+    expiring = await keys.issue("acme", "expiring", expires_at_ms=1000.0)
+    old = await keys.issue("acme", "old")
 
-    keys.revoke(revoked.record.key_id)
-    new = keys.rotate(old.record.key_id, grace_ms=HOUR_MS)
+    await keys.revoke(revoked.record.key_id)
+    new = await keys.rotate(old.record.key_id, grace_ms=HOUR_MS)
     assert new.record.label == "old"
     assert new.record.application_id == "acme"
 
     with pytest.raises(InvalidApiKeyError):
-        keys.authenticate(revoked.key)
+        await keys.authenticate(revoked.key)
     # Before its expiry and inside the grace period, both still work.
-    assert keys.authenticate(expiring.key).id == "acme"
-    assert keys.authenticate(old.key).id == "acme"
+    assert (await keys.authenticate(expiring.key)).id == "acme"
+    assert (await keys.authenticate(old.key)).id == "acme"
     await clock.sleep_ms(1000.0)
     with pytest.raises(InvalidApiKeyError):
-        keys.authenticate(expiring.key)  # expired exactly at its expiry
+        await keys.authenticate(expiring.key)  # expired exactly at its expiry
     await clock.sleep_ms(HOUR_MS)
     with pytest.raises(InvalidApiKeyError):
-        keys.authenticate(old.key)  # the grace period is over
-    assert keys.authenticate(new.key).id == "acme"
+        await keys.authenticate(old.key)  # the grace period is over
+    assert (await keys.authenticate(new.key)).id == "acme"
     with pytest.raises(ValueError, match="no active key"):
-        keys.rotate(revoked.record.key_id, grace_ms=0.0)
+        await keys.rotate(revoked.record.key_id, grace_ms=0.0)
 
 
-def test_rotation_never_extends_an_earlier_expiry(store: ApplicationStore) -> None:
-    keys = _service(store, SimClock())
-    old = keys.issue("acme", "old", expires_at_ms=10.0)
-    keys.rotate(old.record.key_id, grace_ms=HOUR_MS)
-    record = store.get_key(old.record.key_id)
+async def test_rotation_never_extends_an_earlier_expiry(store: ApplicationStore) -> None:
+    keys = await _service(store, SimClock())
+    old = await keys.issue("acme", "old", expires_at_ms=10.0)
+    await keys.rotate(old.record.key_id, grace_ms=HOUR_MS)
+    record = await store.get_key(old.record.key_id)
     assert record is not None
     assert record.expires_at_ms == 10.0
 
 
-def test_a_key_whose_application_is_gone_is_invalid() -> None:
+async def test_a_key_whose_application_is_gone_is_invalid() -> None:
     store = InMemoryApplicationStore()
-    keys = _service(store, SimClock())
-    key = keys.issue("acme", "backend").key
+    keys = await _service(store, SimClock())
+    key = (await keys.issue("acme", "backend")).key
     del store._applications["acme"]
     with pytest.raises(InvalidApiKeyError):
-        keys.authenticate(key)
+        await keys.authenticate(key)
 
 
 async def test_every_attempt_takes_the_same_steps_whatever_is_wrong_with_the_key(
@@ -230,19 +230,19 @@ async def test_every_attempt_takes_the_same_steps_whatever_is_wrong_with_the_key
     revoked or expired, or belongs to a disabled organization. What timing differences
     remain was not measured (docs/20)."""
     clock = SimClock()
-    keys = _service(store, clock)
-    store.add_organization(new_organization("north", "North", "business", created_at_ms=0.0))
-    store.add_application(
+    keys = await _service(store, clock)
+    await store.add_organization(new_organization("north", "North", "business", created_at_ms=0.0))
+    await store.add_application(
         application_from_template(
             "north-shop", "Shop", load_plans(), "pro", organization_id="north", created_at_ms=0.0
         )
     )
-    disabled = keys.issue("north-shop", "disabled organization").key
-    store.set_organization_disabled("north", True)
-    valid = keys.issue("acme", "valid").key
-    revoked = keys.issue("acme", "revoked")
-    keys.revoke(revoked.record.key_id)
-    expired = keys.issue("acme", "expired", expires_at_ms=1.0)
+    disabled = (await keys.issue("north-shop", "disabled organization")).key
+    await store.set_organization_disabled("north", True)
+    valid = (await keys.issue("acme", "valid")).key
+    revoked = await keys.issue("acme", "revoked")
+    await keys.revoke(revoked.record.key_id)
+    expired = await keys.issue("acme", "expired", expires_at_ms=1.0)
     await clock.sleep_ms(1.0)
     attempts = {
         "valid": valid,
@@ -258,9 +258,9 @@ async def test_every_attempt_takes_the_same_steps_whatever_is_wrong_with_the_key
     steps: list[tuple[str, object]] = []
     real_lookup, real_hmac, real_compare = store.lookup_key, keys._hmac, hmac.compare_digest
 
-    def lookup_key(key_id: str) -> KeyLookup | None:
+    async def lookup_key(key_id: str) -> KeyLookup | None:
         steps.append(("lookup", len(key_id)))
-        return real_lookup(key_id)
+        return await real_lookup(key_id)
 
     def digest(key: str) -> str:
         steps.append(("hmac", None))
@@ -277,7 +277,7 @@ async def test_every_attempt_takes_the_same_steps_whatever_is_wrong_with_the_key
     for name, key in attempts.items():
         steps.clear()
         try:
-            keys.authenticate(key)
+            await keys.authenticate(key)
         except InvalidApiKeyError:
             assert name != "valid"
         assert steps == [("lookup", 16), ("hmac", None), ("compare", (64, 64))], name
@@ -291,39 +291,39 @@ class CountingStore(InMemoryApplicationStore):
         super().__init__()
         self.flushes: list[dict[str, float]] = []
 
-    def record_last_used(self, times_ms: Mapping[str, float]) -> None:
+    async def record_last_used(self, times_ms: Mapping[str, float]) -> None:
         self.flushes.append(dict(times_ms))
-        super().record_last_used(times_ms)
+        await super().record_last_used(times_ms)
 
 
 async def test_last_used_is_written_in_batches_at_most_once_per_interval() -> None:
     clock = SimClock()
     store = CountingStore()
-    keys = _service(store, clock, last_used_flush_ms=60_000.0)
-    a, b = keys.issue("acme", "a"), keys.issue("globex", "b")
+    keys = await _service(store, clock, last_used_flush_ms=60_000.0)
+    a, b = await keys.issue("acme", "a"), await keys.issue("globex", "b")
 
     for _ in range(500):
-        keys.authenticate(a.key)
-        keys.authenticate(b.key)
+        await keys.authenticate(a.key)
+        await keys.authenticate(b.key)
         await clock.sleep_ms(100.0)  # 1000 requests over 50 s: still inside the interval
     assert store.flushes == []
-    assert store.get_key(a.record.key_id).last_used_at_ms is None  # type: ignore[union-attr]
+    assert (await store.get_key(a.record.key_id)).last_used_at_ms is None  # type: ignore[union-attr]
 
     await clock.sleep_ms(10_000.0)
-    keys.authenticate(a.key)  # the first request after the interval writes the batch
+    await keys.authenticate(a.key)  # the first request after the interval writes the batch
     assert len(store.flushes) == 1
     assert set(store.flushes[0]) == {a.record.key_id, b.record.key_id}
-    assert store.get_key(a.record.key_id).last_used_at_ms == clock.now_ms()  # type: ignore[union-attr]
-    assert keys.flush_last_used() == 0  # nothing pending
+    assert (await store.get_key(a.record.key_id)).last_used_at_ms == clock.now_ms()  # type: ignore[union-attr]
+    assert await keys.flush_last_used() == 0  # nothing pending
 
 
-def test_flush_writes_what_is_pending(store: ApplicationStore) -> None:
+async def test_flush_writes_what_is_pending(store: ApplicationStore) -> None:
     clock = SimClock(start_ms=5.0)
-    keys = _service(store, clock)
-    issued = keys.issue("acme", "a")
-    keys.authenticate(issued.key)
-    assert keys.flush_last_used() == 1
-    assert store.get_key(issued.record.key_id).last_used_at_ms == 5.0  # type: ignore[union-attr]
+    keys = await _service(store, clock)
+    issued = await keys.issue("acme", "a")
+    await keys.authenticate(issued.key)
+    assert await keys.flush_last_used() == 1
+    assert (await store.get_key(issued.record.key_id)).last_used_at_ms == 5.0  # type: ignore[union-attr]
 
 
 # --- the pepper ------------------------------------------------------------------------------
@@ -339,12 +339,12 @@ def test_the_pepper_must_be_set_and_long_enough() -> None:
         ApiKeyService(InMemoryApplicationStore(), b"short", ClockEpoch(SimClock()))
 
 
-def test_a_different_pepper_rejects_every_key(store: ApplicationStore) -> None:
-    keys = _service(store, SimClock())
-    key = keys.issue("acme", "backend").key
+async def test_a_different_pepper_rejects_every_key(store: ApplicationStore) -> None:
+    keys = await _service(store, SimClock())
+    key = (await keys.issue("acme", "backend")).key
     other = ApiKeyService(store, b"another-pepper-of-enough-length-0123", ClockEpoch(SimClock()))
     with pytest.raises(InvalidApiKeyError):
-        other.authenticate(key)
+        await other.authenticate(key)
 
 
 # --- the rate limiter ------------------------------------------------------------------------
@@ -354,24 +354,24 @@ async def test_rate_limit_is_a_sliding_minute_per_application() -> None:
     clock = SimClock()
     limiter = RequestRateLimiter(clock)
     for _ in range(3):
-        limiter.admit("a", 3)
+        await limiter.admit("a", 3)
         await clock.sleep_ms(10_000.0)
     with pytest.raises(RateLimitedError) as excinfo:
-        limiter.admit("a", 3)
+        await limiter.admit("a", 3)
     # The oldest of the three started at 0 and leaves the window at 60 s; it is now 30 s.
     assert excinfo.value.retry_after_ms == 30_000.0
-    limiter.admit("b", 3)  # another application has its own window
-    limiter.admit("a", None)  # no limit
+    await limiter.admit("b", 3)  # another application has its own window
+    await limiter.admit("a", None)  # no limit
     await clock.sleep_ms(30_000.0)
-    limiter.admit("a", 3)  # the first left the window
+    await limiter.admit("a", 3)  # the first left the window
 
 
-def test_a_refused_request_does_not_count() -> None:
+async def test_a_refused_request_does_not_count() -> None:
     limiter = RequestRateLimiter(SimClock())
-    limiter.admit("a", 1)
+    await limiter.admit("a", 1)
     for _ in range(5):
         with pytest.raises(RateLimitedError):
-            limiter.admit("a", 1)
+            await limiter.admit("a", 1)
 
 
 def test_the_sqlite_store_needs_the_migrations() -> None:

@@ -30,6 +30,7 @@ from gateway.organizations import DEFAULT_ORGANIZATION_ID
 from gateway.profiles import ModelProfile, Tier
 from gateway.routing import PlansConfig, load_plans
 from gateway.schema import GenerateRequest
+from gateway.state import run_now
 
 # Every value is a power of two (or a small multiple), so expected times computed by hand
 # are exact in floating point and can be compared with ==.
@@ -140,7 +141,7 @@ def application_access(
     store = InMemoryApplicationStore()
     epoch = ClockEpoch(clock)
     if apps is None:
-        seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms())
+        run_now(seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms()))
     else:
         for app_id, plan in apps.items():
             application = application_from_template(
@@ -154,10 +155,12 @@ def application_access(
             if limits and app_id in limits:
                 max_tokens, rpm = limits[app_id]
                 application = replace(application, max_tokens=max_tokens, requests_per_minute=rpm)
-            store.add_application(application)
+            run_now(store.add_application(application))
     rng = random.Random(seed)
     keys = ApiKeyService(store, TEST_PEPPER, epoch, random_bytes=rng.randbytes)
-    issued = {a.id: keys.issue(a.id, "test").key for a in store.list_applications()}
+    issued = {
+        a.id: run_now(keys.issue(a.id, "test")).key for a in run_now(store.list_applications())
+    }
     return ApplicationAccess(keys, templates), issued
 
 
@@ -190,8 +193,8 @@ def default_server_key(application_id: str = "acme") -> str:
     epoch = SystemEpoch()
     MigrationRunner(connection, MIGRATIONS, epoch).migrate()
     store = SqliteApplicationStore(connection)
-    seed_demo_applications(store, load_plans(), created_at_ms=epoch.epoch_ms())
-    key = ApiKeyService(store, TEST_PEPPER, epoch).issue(application_id, "test").key
+    run_now(seed_demo_applications(store, load_plans(), created_at_ms=epoch.epoch_ms()))
+    key = run_now(ApiKeyService(store, TEST_PEPPER, epoch).issue(application_id, "test")).key
     connection.close()
     return key
 

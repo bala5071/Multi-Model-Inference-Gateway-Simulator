@@ -38,7 +38,7 @@ from gateway.adapters import OpenAICompatibleAdapter
 from gateway.apikeys import ApiKeyService, ApplicationAccess
 from gateway.app import create_app
 from gateway.applications import SqliteApplicationStore, seed_demo_applications
-from gateway.audit import AuditLog
+from gateway.audit import AuditLog, SqliteAuditStore
 from gateway.backends import Backend
 from gateway.clock import SystemEpoch, WallClock
 from gateway.continuous import build_continuous_registry
@@ -47,7 +47,7 @@ from gateway.egress import LocalDestinations, operator_client, organization_clie
 from gateway.metrics import percentile
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.modes import InMemoryModeStore, Mode
-from gateway.providers import ProviderConfig, ProviderService, ProviderStore
+from gateway.providers import ProviderConfig, ProviderService, SqliteProviderStore
 from gateway.redaction import Redactor
 from gateway.routing import load_plans
 from gateway.vault import Vault
@@ -107,14 +107,14 @@ async def _case(name: str, rounds: int) -> list[float]:
     MigrationRunner(connection, MIGRATIONS, epoch).migrate()
     store = SqliteApplicationStore(connection)
     templates = load_plans()
-    seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms())
+    await seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms())
     keys = ApiKeyService(store, secrets.token_bytes(32), epoch)
-    api_key = keys.issue(APP, "bench").key
+    api_key = (await keys.issue(APP, "bench")).key
     tls = httpx.create_ssl_context()  # once, as the server does
     providers = ProviderService(
-        ProviderStore(connection),
+        SqliteProviderStore(connection),
         Vault(secrets.token_bytes(32)),
-        AuditLog(connection),
+        AuditLog(SqliteAuditStore(connection)),
         clock,
         epoch,
         Redactor(),
@@ -126,16 +126,18 @@ async def _case(name: str, rounds: int) -> list[float]:
     )
     modes = InMemoryModeStore()
     if name != "operator tier":
-        modes.set_organization_mode(ORG, Mode.HOSTED_PRIMARY_WITH_LOCAL_FALLBACK, 0.0)
-        modes.set_application_mode(APP, Mode.HOSTED_PRIMARY_WITH_LOCAL_FALLBACK, 0.0)
+        await modes.set_organization_mode(ORG, Mode.HOSTED_PRIMARY_WITH_LOCAL_FALLBACK, 0.0)
+        await modes.set_application_mode(APP, Mode.HOSTED_PRIMARY_WITH_LOCAL_FALLBACK, 0.0)
         for provider_id, host in (("prv_00000000000000a1", "a"), ("prv_00000000000000b2", "b")):
             config = ProviderConfig(
                 provider_id, ORG, "openai_compatible", f"https://{host}.provider.bench/v1",
                 "model-x", "economy", "primary", True, True, 1.0, 2.0, {}, None, 0.0,
             )  # fmt: skip
-            providers.store.add(config)
+            await providers.store.add(config)
             key = secrets.token_urlsafe(32)
-            providers.store.put_key(provider_id, providers.vault.seal(key, config.binding), 0.0)
+            await providers.store.put_key(
+                provider_id, providers.vault.seal(key, config.binding), 0.0
+            )
     local = LocalDestinations.parse("127.0.0.1:8081")
     adapters: dict[str, Backend] = {
         "economy": OpenAICompatibleAdapter(
@@ -177,7 +179,7 @@ async def _case(name: str, rounds: int) -> list[float]:
                 times.append(elapsed)
             # Untimed: keep the refusing provider's breaker closed, so every request pays for
             # a real first attempt rather than a skip once the breaker opens.
-            app.state.chat_router.breakers.success(ORG, "prv_00000000000000a1")
+            await app.state.chat_router.breakers.success(ORG, "prv_00000000000000a1")
     await registry.aclose()
     connection.close()
     return times

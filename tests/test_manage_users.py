@@ -9,9 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from gateway.audit import AuditLog
+from gateway.audit import AuditLog, SqliteAuditStore
 from gateway.database import open_database
-from gateway.users import AccountStore, User
+from gateway.state import run_now
+from gateway.users import SqliteAccountStore, User
 from helpers import TEST_PEPPER
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -45,7 +46,7 @@ def prompt(*answers: str) -> Callable[[str], str]:
 def _user(environ: dict[str, str], username: str) -> User | None:
     connection = open_database(environ["GATEWAY_DATABASE"])
     try:
-        return AccountStore(connection).find_user(username)
+        return run_now(SqliteAccountStore(connection).find_user(username))
     finally:
         connection.close()
 
@@ -131,8 +132,8 @@ def test_disable_enable_reset_and_unlock(
     assert manage(["enable-user", "--username", "alice"], environ) == 0
     assert _existing(environ, "alice").disabled is False
     connection = open_database(environ["GATEWAY_DATABASE"])
-    user_id = AccountStore(connection).find_user("alice").id  # type: ignore[union-attr]
-    AccountStore(connection).set_login_state(user_id, 0, None, 9e15)
+    user_id = run_now(SqliteAccountStore(connection).find_user("alice")).id  # type: ignore[union-attr]
+    run_now(SqliteAccountStore(connection).set_login_state(user_id, 0, None, 9e15))
     connection.close()
     assert manage(["unlock-user", "--username", "alice"], environ) == 0
     assert _existing(environ, "alice").locked_until_ms is None
@@ -146,7 +147,9 @@ def test_disable_enable_reset_and_unlock(
     assert "no user 'nobody'" in capsys.readouterr().err
 
     connection = open_database(environ["GATEWAY_DATABASE"])
-    actions = [e.event.action.value for e in AuditLog(connection).entries()]
+    actions = [
+        e.event.action.value for e in run_now(AuditLog(SqliteAuditStore(connection)).entries())
+    ]
     connection.close()
     assert actions == [
         "user_created",

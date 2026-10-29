@@ -16,7 +16,6 @@ import logging
 import math
 import os
 import secrets
-import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -43,9 +42,7 @@ from gateway.apikeys import (
 from gateway.applications import (
     ApiKeyRecord,
     Application,
-    ApplicationStore,
     InMemoryApplicationStore,
-    SqliteApplicationStore,
     seed_demo_applications,
 )
 from gateway.audit import AuditLog, Reason
@@ -144,7 +141,6 @@ from gateway.modes import (
     Mode,
     ModeService,
     ModeStore,
-    SqliteModeStore,
     effective_mode,
 )
 from gateway.monitoring import Monitor, Snapshot, render_prometheus
@@ -172,7 +168,6 @@ from gateway.profiles import PROFILES, Tier, load_calibrated_profiles
 from gateway.providers import (
     ProviderConfig,
     ProviderService,
-    ProviderStore,
     ProviderUnreachedError,
     resolve_provider,
 )
@@ -180,12 +175,12 @@ from gateway.ratelimit import RateLimitedError, RequestRateLimiter
 from gateway.redaction import Redactor
 from gateway.redaction import install as install_redaction
 from gateway.registry import ModelRegistry, UnknownModelError
-from gateway.roles import RoleStore
 from gateway.routing import ModelNotAllowedError, Quality, Router, load_plans, pick_by_quality
 from gateway.schema import GenerateRequest, RequestResult
+from gateway.state import StateBackend, run_now, sqlite_state
 from gateway.timeseries import TimeSeriesStore
-from gateway.usage import ChatSource, SqliteUsageStore, UsageStore
-from gateway.users import AccountStore, User
+from gateway.usage import ChatSource, UsageStore
+from gateway.users import User
 from gateway.vault import Vault, load_master_keys
 from gateway.workload import PlannedRequest
 
@@ -619,7 +614,7 @@ DECLARATION = "__gateway_declaration__"
 Endpoint = TypeVar("Endpoint", bound=Callable[..., Any])
 # Finds the resource a request acts on, or None if it does not exist (answered exactly as a
 # forbidden one is).
-Resolver = Callable[[Request], "Resource | None"]
+Resolver = Callable[[Request], Awaitable["Resource | None"]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -708,18 +703,18 @@ def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
         async def check(
             request: Request, csrf: str | None = Header(default=None, alias=CSRF_HEADER)
         ) -> AsyncIterator[Authorized]:
-            context = service.authenticate(request.cookies.get(SESSION_COOKIE))
+            context = await service.authenticate(request.cookies.get(SESSION_COOKIE))
             if request.method.upper() in STATE_CHANGING:
                 service.check_csrf(context, csrf)
             if context.user.must_change_password:
                 raise PasswordChangeRequiredError()
-            actor = service.actor_for(context.user)
-            resource = resolver(request)
+            actor = await service.actor_for(context.user)
+            resource = await resolver(request)
             decision = authorize(actor, action, resource) if resource is not None else None
             if resource is None or decision is None or not decision.allowed:
                 raise ForbiddenError()
             if not consume:
-                service.check_step_up(context, action)
+                await service.check_step_up(context, action)
                 authorized = Authorized(actor, context, action, resource, decision.reason)
                 # For the refusal handler, which audits a conflict with who, what and where.
                 request.state.authorized = authorized
@@ -728,7 +723,7 @@ def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
             # Consume-on-use: the window is claimed (used up) before the handler, in one
             # transaction, so two requests cannot share it; it is given back only if the
             # handler fails before it has changed anything (docs/32).
-            claimed = service.claim_step_up(context, action)
+            claimed = await service.claim_step_up(context, action)
             token = ConsumeToken()
             authorized = Authorized(actor, context, action, resource, decision.reason, token)
             request.state.authorized = authorized
@@ -736,7 +731,7 @@ def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
                 yield authorized
             except BaseException:
                 if not token.was_changed:
-                    service.restore_step_up(context, claimed)
+                    await service.restore_step_up(context, claimed)
                 raise
 
         setattr(check, DECLARATION, RouteDeclaration("requires", action, "authorize"))
@@ -798,7 +793,7 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
         return response
 
     async def session(request: Request) -> SessionContext:
-        return service.authenticate(request.cookies.get(SESSION_COOKIE))
+        return await service.authenticate(request.cookies.get(SESSION_COOKIE))
 
     async def session_with_csrf(
         context: SessionContext = Depends(session),
@@ -833,7 +828,7 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
         # Every conflict and cap is audited: who, which action, which organization, why.
         authorized: Authorized | None = getattr(request.state, "authorized", None)
         if authorized is not None:
-            service.record_refusal(
+            await service.record_refusal(
                 authorized.actor,
                 authorized.action,
                 authorized.resource.organization_id,
@@ -903,7 +898,7 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
     @app.post("/v1/auth/logout")
     @public_route("the session's own endpoint: the route checks the session itself")
     async def logout(context: SessionContext = Depends(session_with_csrf)) -> JSONResponse:
-        service.logout(context)
+        await service.logout(context)
         return with_cookie(JSONResponse({"logged_out": True}, headers=_NO_STORE), "", clear=True)
 
     @app.get("/v1/auth/me")
@@ -941,7 +936,7 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
     async def sessions(context: SessionContext = Depends(session)) -> JSONResponse:
         if context.user.must_change_password:
             raise PasswordChangeRequiredError()
-        live = service.live_sessions(context)
+        live = await service.live_sessions(context)
         return JSONResponse(
             {
                 "sessions": [
@@ -1038,12 +1033,12 @@ def _admin_routes(
     requires = app.state.requires
     stores = Stores(service.organizations, service.store)
 
-    def organization(request: Request) -> Resource | None:
-        return resolve_organization(stores, request.path_params["org"])
+    async def organization(request: Request) -> Resource | None:
+        return await resolve_organization(stores, request.path_params["org"])
 
-    def member(request: Request) -> Resource | None:
+    async def member(request: Request) -> Resource | None:
         p = request.path_params
-        return resolve_member(stores, p["org"], p["username"])
+        return await resolve_member(stores, p["org"], p["username"])
 
     # Each route's declaration: its action and the resolver of what it acts on (docs/30).
     creating_users = requires("users.create", organization)
@@ -1068,7 +1063,7 @@ def _admin_routes(
     async def create_user(
         org: str, body: CreateUserBody, auth: Authorized = creating_users
     ) -> JSONResponse:
-        service.count_user_creation(auth.context)
+        await service.count_user_creation(auth.context)
         user, temporary = await service.create_user_with_temporary_password(
             body.username, org, actor=auth.actor
         )
@@ -1084,17 +1079,17 @@ def _admin_routes(
         after: str | None = Query(default=None, max_length=64),
         auth: Authorized = listing_users,
     ) -> JSONResponse:
-        page = service.page_users(org, after, limit, actor=auth.actor)
+        page = await service.page_users(org, after, limit, actor=auth.actor)
         return _page_body("users", [user_view(u) for u in page.items], page.next)
 
     @app.post(ORG_PREFIX + "/users/{username}/disable")
     async def disable_user(username: str, auth: Authorized = disabling_users) -> JSONResponse:
-        revoked = service.disable_user(username, actor=auth.actor)
+        revoked = await service.disable_user(username, actor=auth.actor)
         return JSONResponse({"disabled": True, "sessions_revoked": revoked})
 
     @app.post(ORG_PREFIX + "/users/{username}/enable")
     async def enable_user(username: str, auth: Authorized = enabling_users) -> JSONResponse:
-        service.enable_user(username, actor=auth.actor)
+        await service.enable_user(username, actor=auth.actor)
         return JSONResponse({"enabled": True})
 
     @app.post(ORG_PREFIX + "/users/{username}/reset-password")
@@ -1105,20 +1100,20 @@ def _admin_routes(
 
     @app.post(ORG_PREFIX + "/users/{username}/unlock")
     async def unlock_user(username: str, auth: Authorized = unlocking_users) -> JSONResponse:
-        service.unlock_user(username, actor=auth.actor)
+        await service.unlock_user(username, actor=auth.actor)
         return JSONResponse({"unlocked": True})
 
     if management is None:
         return
     keys = management
 
-    def application(request: Request) -> Resource | None:
+    async def application(request: Request) -> Resource | None:
         p = request.path_params
-        return resolve_application(stores, p["org"], p["app"])
+        return await resolve_application(stores, p["org"], p["app"])
 
-    def key(request: Request) -> Resource | None:
+    async def key(request: Request) -> Resource | None:
         p = request.path_params
-        return resolve_key(stores, p["org"], p["app"], p["key_id"])
+        return await resolve_key(stores, p["org"], p["app"], p["key_id"])
 
     creating_applications = requires("applications.create", organization)
     listing_applications = requires("applications.list", organization)
@@ -1162,7 +1157,7 @@ def _admin_routes(
         auth: Authorized = creating_applications,
     ) -> JSONResponse:
         try:
-            made = keys.create_application(org, body.name, body.plan, actor=auth.actor)
+            made = await keys.create_application(org, body.name, body.plan, actor=auth.actor)
         except UnknownPlanError as exc:
             return _invalid("plan", str(exc))
         except ManagementRefusal:
@@ -1178,7 +1173,7 @@ def _admin_routes(
         after: str | None = Query(default=None, max_length=64),
         auth: Authorized = listing_applications,
     ) -> JSONResponse:
-        page = keys.page_applications(org, after, limit, actor=auth.actor)
+        page = await keys.page_applications(org, after, limit, actor=auth.actor)
         return _page_body("applications", [application_view(a) for a in page.items], page.next)
 
     @app.get(ORG_PREFIX + "/applications/{app}")
@@ -1186,7 +1181,7 @@ def _admin_routes(
         app_id: str = Path_(alias="app"),
         auth: Authorized = reading_applications,
     ) -> JSONResponse:
-        return JSONResponse(application_view(keys.read_application(app_id, actor=auth.actor)))
+        return JSONResponse(application_view(await keys.read_application(app_id, actor=auth.actor)))
 
     @app.post(ORG_PREFIX + "/applications/{app}/keys")
     async def issue_key(
@@ -1194,7 +1189,7 @@ def _admin_routes(
         app_id: str = Path_(alias="app"),
         auth: Authorized = issuing_keys,
     ) -> JSONResponse:
-        issued = keys.issue_key(
+        issued = await keys.issue_key(
             app_id, body.label, actor=auth.actor, expires_in_days=body.expires_in_days
         )
         return issued_view(issued)
@@ -1206,7 +1201,7 @@ def _admin_routes(
         after: str | None = Query(default=None, max_length=64),
         auth: Authorized = listing_keys,
     ) -> JSONResponse:
-        page = keys.page_keys(app_id, after, limit, actor=auth.actor)
+        page = await keys.page_keys(app_id, after, limit, actor=auth.actor)
         return _page_body("keys", [key_view(k) for k in page.items], page.next)
 
     @app.post(ORG_PREFIX + "/applications/{app}/keys/{key_id}/rotate")
@@ -1215,7 +1210,7 @@ def _admin_routes(
         body: RotateKeyBody,
         auth: Authorized = rotating_keys,
     ) -> JSONResponse:
-        issued = keys.rotate_key(
+        issued = await keys.rotate_key(
             key_id,
             grace_hours=body.grace_hours,
             actor=auth.actor,
@@ -1225,7 +1220,7 @@ def _admin_routes(
 
     @app.post(ORG_PREFIX + "/applications/{app}/keys/{key_id}/revoke")
     async def revoke_key(key_id: str, auth: Authorized = revoking_keys) -> JSONResponse:
-        keys.revoke_key(key_id, actor=auth.actor)
+        await keys.revoke_key(key_id, actor=auth.actor)
         return JSONResponse({"key_id": key_id, "state": "revoked"})
 
 
@@ -1276,12 +1271,12 @@ def _mode_routes(app: FastAPI, accounts: AccountAccess, modes: ModeService) -> N
     requires = app.state.requires
     stores = Stores(service.organizations, service.store)
 
-    def organization(request: Request) -> Resource | None:
-        return resolve_organization(stores, request.path_params["org"])
+    async def organization(request: Request) -> Resource | None:
+        return await resolve_organization(stores, request.path_params["org"])
 
-    def application(request: Request) -> Resource | None:
+    async def application(request: Request) -> Resource | None:
         p = request.path_params
-        return resolve_application(stores, p["org"], p["app"])
+        return await resolve_application(stores, p["org"], p["app"])
 
     setting_organization = requires("mode.set_organization", organization)
     setting_application = requires("mode.set_application", application)
@@ -1291,7 +1286,9 @@ def _mode_routes(app: FastAPI, accounts: AccountAccess, modes: ModeService) -> N
         org: str, body: SetModeBody, auth: Authorized = setting_organization
     ) -> JSONResponse:
         assert auth.consumed is not None
-        change = modes.set_organization(org, body.mode, actor=auth.actor, marker=auth.consumed)
+        change = await modes.set_organization(
+            org, body.mode, actor=auth.actor, marker=auth.consumed
+        )
         return JSONResponse(
             {
                 "organization_id": org,
@@ -1309,7 +1306,7 @@ def _mode_routes(app: FastAPI, accounts: AccountAccess, modes: ModeService) -> N
         auth: Authorized = setting_application,
     ) -> JSONResponse:
         assert auth.consumed is not None
-        change = modes.set_application(
+        change = await modes.set_application(
             org, app_id, body.mode, actor=auth.actor, marker=auth.consumed
         )
         return JSONResponse(
@@ -1319,7 +1316,8 @@ def _mode_routes(app: FastAPI, accounts: AccountAccess, modes: ModeService) -> N
                 "previous_mode": change.previous,
                 # The stricter of the two, which is what its requests are served under.
                 "effective_mode": effective_mode(
-                    modes.store.organization_mode(org), modes.store.application_mode(app_id)
+                    await modes.store.organization_mode(org),
+                    await modes.store.application_mode(app_id),
                 ),
                 "in_flight": IN_FLIGHT,
             }
@@ -1336,12 +1334,12 @@ def _provider_routes(
     stores = Stores(service.organizations, service.store)
     store = providers.store
 
-    def provider(request: Request) -> Resource | None:
+    async def provider(request: Request) -> Resource | None:
         p = request.path_params
-        return resolve_provider(stores, store, p["org"], p["provider_id"])
+        return await resolve_provider(stores, store, p["org"], p["provider_id"])
 
-    def organization(request: Request) -> Resource | None:
-        return resolve_organization(stores, request.path_params["org"])
+    async def organization(request: Request) -> Resource | None:
+        return await resolve_organization(stores, request.path_params["org"])
 
     listing = requires("providers.list", organization)
     statuses = requires("providers.status", organization)
@@ -1354,16 +1352,16 @@ def _provider_routes(
     setting_keys = requires("provider_keys.set", provider)
     deleting_keys = requires("provider_keys.delete", provider)
 
-    def found(provider_id: str) -> ProviderConfig:
-        config = store.get(provider_id)
+    async def found(provider_id: str) -> ProviderConfig:
+        config = await store.get(provider_id)
         if config is None:  # resolved a moment ago: gone since
             raise ForbiddenError()
         return config
 
-    def view(config: ProviderConfig) -> dict[str, object]:
+    async def view(config: ProviderConfig) -> dict[str, object]:
         """For the organization's admin. Never the key: whether there is one, whether it can be
         read, its last four characters (keys of 20 or more) and when it was set."""
-        key = providers.key_state(config)
+        key = await providers.key_state(config)
         return {
             "provider_id": config.id,
             "type": config.type,
@@ -1385,7 +1383,7 @@ def _provider_routes(
                 "updated_at_ms": key.updated_at_ms,
             },
             "created_at_ms": config.created_at_ms,
-            "circuit": breakers.state(config.organization_id, config.id),
+            "circuit": await breakers.state(config.organization_id, config.id),
             **slow(config),
         }
 
@@ -1403,7 +1401,7 @@ def _provider_routes(
 
     @app.get(ORG_PREFIX + "/providers")
     async def list_providers(org: str, auth: Authorized = listing) -> JSONResponse:
-        return JSONResponse({"providers": [view(c) for c in store.list_for(org)]})
+        return JSONResponse({"providers": [await view(c) for c in await store.list_for(org)]})
 
     @app.get(ORG_PREFIX + "/providers/status")
     async def provider_status(org: str, auth: Authorized = statuses) -> JSONResponse:
@@ -1413,7 +1411,7 @@ def _provider_routes(
             {
                 "providers": [
                     {"provider_id": c.id, "enabled": c.is_enabled, **slow(c)}
-                    for c in store.list_for(org)
+                    for c in await store.list_for(org)
                 ]
             }
         )
@@ -1423,7 +1421,7 @@ def _provider_routes(
         org: str, body: CreateProviderBody, auth: Authorized = creating
     ) -> JSONResponse:
         try:
-            made = providers.create(
+            made = await providers.create(
                 org,
                 type=body.type,
                 base_url=body.base_url,
@@ -1439,7 +1437,7 @@ def _provider_routes(
             raise
         except ValueError as exc:
             return invalid(exc, "type" if "type" in str(exc) else "base_url")
-        return JSONResponse(view(made), status_code=201)
+        return JSONResponse(await view(made), status_code=201)
 
     @app.patch(ORG_PREFIX + "/providers/{provider_id}")
     async def update_provider(
@@ -1447,34 +1445,38 @@ def _provider_routes(
     ) -> JSONResponse:
         changes = body.model_dump(exclude_unset=True)
         try:
-            updated, key_deleted = providers.update(found(provider_id), changes, actor=auth.actor)
+            updated, key_deleted = await providers.update(
+                await found(provider_id), changes, actor=auth.actor
+            )
         except ManagementRefusal:
             raise
         except ValueError as exc:
             return invalid(exc, "type" if "type" in str(exc) else "base_url")
-        return JSONResponse({**view(updated), "key_deleted": key_deleted})
+        return JSONResponse({**await view(updated), "key_deleted": key_deleted})
 
-    def switch(provider_id: str, auth: Authorized, on: bool) -> JSONResponse:
+    async def switch(provider_id: str, auth: Authorized, on: bool) -> JSONResponse:
         # Whose switch: the platform's for platform_admin, the organization's for its
         # org_admin, as authorize allowed it.
         platform = auth.via.startswith("platform_admin")
-        updated = providers.set_switch(found(provider_id), on, platform=platform, actor=auth.actor)
+        updated = await providers.set_switch(
+            await found(provider_id), on, platform=platform, actor=auth.actor
+        )
         if platform:  # platform_admin sees no more than the status
             return JSONResponse({"provider_id": updated.id, "enabled": updated.is_enabled})
-        return JSONResponse(view(updated))
+        return JSONResponse(await view(updated))
 
     @app.post(ORG_PREFIX + "/providers/{provider_id}/disable")
     async def disable_provider(provider_id: str, auth: Authorized = disabling) -> JSONResponse:
-        return switch(provider_id, auth, False)
+        return await switch(provider_id, auth, False)
 
     @app.post(ORG_PREFIX + "/providers/{provider_id}/enable")
     async def enable_provider(provider_id: str, auth: Authorized = enabling) -> JSONResponse:
-        return switch(provider_id, auth, True)
+        return await switch(provider_id, auth, True)
 
     @app.delete(ORG_PREFIX + "/providers/{provider_id}")
     async def delete_provider(provider_id: str, auth: Authorized = deleting) -> JSONResponse:
         assert auth.consumed is not None
-        providers.delete(found(provider_id), actor=auth.actor, marker=auth.consumed)
+        await providers.delete(await found(provider_id), actor=auth.actor, marker=auth.consumed)
         return JSONResponse({"provider_id": provider_id, "deleted": True})
 
     @app.put(ORG_PREFIX + "/providers/{provider_id}/key")
@@ -1484,8 +1486,8 @@ def _provider_routes(
         assert auth.consumed is not None
         with providers.redactor.watching(body.key):
             try:
-                state = providers.set_key(
-                    found(provider_id), body.key, actor=auth.actor, marker=auth.consumed
+                state = await providers.set_key(
+                    await found(provider_id), body.key, actor=auth.actor, marker=auth.consumed
                 )
             except ValueError as exc:
                 if isinstance(exc, ManagementRefusal):
@@ -1500,14 +1502,14 @@ def _provider_routes(
         provider_id: str, auth: Authorized = deleting_keys
     ) -> JSONResponse:
         assert auth.consumed is not None
-        providers.delete_key(found(provider_id), actor=auth.actor, marker=auth.consumed)
+        await providers.delete_key(await found(provider_id), actor=auth.actor, marker=auth.consumed)
         return JSONResponse({"provider_id": provider_id, "key_deleted": True})
 
     @app.post(ORG_PREFIX + "/providers/{provider_id}/test")
     async def test_provider(provider_id: str, auth: Authorized = testing) -> JSONResponse:
         """Spends tokens on the organization's account with this provider (docs/32)."""
         try:
-            capabilities = await providers.test(found(provider_id), actor=auth.actor)
+            capabilities = await providers.test(await found(provider_id), actor=auth.actor)
         except ProviderUnreachedError:
             # One answer for a refused address, no such name, no connection and no answer in
             # time: not a way to map a network (docs/32). The audit entry says which.
@@ -1621,7 +1623,8 @@ def create_app(
     started_ms = clock.now_ms()
     router = Router(applications.templates, registry) if applications is not None else None
     if applications is not None:
-        for application in applications.store.list_applications():
+        # Before any event loop runs the app: a store call that cannot suspend (docs/34).
+        for application in run_now(applications.store.list_applications()):
             Router.check_plan(application.plan, registry)
     rate_limiter = RequestRateLimiter(clock) if applications is not None else None
     ledger = CostLedger(clock, store=usage_store, epoch=epoch, retention_ms=usage_retention_ms)
@@ -1681,7 +1684,7 @@ def create_app(
         # warning for each key no loaded master key can read.
         remove_redaction = install_redaction(providers.redactor) if providers is not None else None
         if providers is not None:
-            providers.warn_unreadable()
+            await providers.warn_unreadable()
         yield
         if remove_redaction is not None:
             remove_redaction()
@@ -1693,7 +1696,7 @@ def create_app(
             await load.stop()
         await registry.aclose()
         if applications is not None:
-            applications.keys.flush_last_used()
+            await applications.keys.flush_last_used()
 
     app = FastAPI(title="Cost-aware multi-model inference gateway", lifespan=lifespan)
     if local_only is not None:
@@ -1859,7 +1862,7 @@ def create_app(
             None,
         )
 
-    def settle(
+    async def settle(
         result: RequestResult,
         *,
         request_id: str,
@@ -1874,7 +1877,7 @@ def create_app(
             monitor.record(model, result.latency_ms)
         cost_usd = result.cost_usd
         if application_id is not None:
-            cost_usd = ledger.record(
+            cost_usd = await ledger.record(
                 application_id, result, model=model, price_multiplier=price_multiplier
             )
         monitoring.completed(
@@ -1937,13 +1940,13 @@ def create_app(
                     )
                 max_tokens = max_tokens or caller.max_tokens
             try:
-                rate_limiter.admit(caller.id, caller.requests_per_minute)
+                await rate_limiter.admit(caller.id, caller.requests_per_minute)
             except RateLimitedError:
                 monitoring.rate_limited(caller.id)
                 raise
             route = router.route(caller, model=body.model, quality=body.quality)
             try:
-                ledger.check_budget(caller.id, route.plan.monthly_token_budget)
+                await ledger.check_budget(caller.id, route.plan.monthly_token_budget)
             except BudgetExceededError as exc:
                 monitoring.budget_exhausted(route.model, exc)
                 raise
@@ -1996,7 +1999,7 @@ def create_app(
             except (QueueFullError, RequestTimeoutError) as exc:
                 status, error, error_headers = failure(exc, model, application_id)
                 return JSONResponse({"error": error}, status_code=status, headers=error_headers)
-            payload = settle(
+            payload = await settle(
                 result,
                 request_id=request_id,
                 model=model,
@@ -2036,7 +2039,7 @@ def create_app(
                         "error", {"code": "cancelled", "message": "The request was cancelled."}
                     )
                 elif (failed := task.exception()) is None:
-                    payload = settle(
+                    payload = await settle(
                         task.result(),
                         request_id=request_id,
                         model=model,
@@ -2065,9 +2068,9 @@ def create_app(
             headers={**headers, "Cache-Control": "no-cache"},
         )
 
-    def usage_body(caller: Application) -> ApplicationUsageResponse:
+    async def usage_body(caller: Application) -> ApplicationUsageResponse:
         plan = caller.plan
-        usage = ledger.usage(caller.id)
+        usage = await ledger.usage(caller.id)
         return ApplicationUsageResponse(
             application_id=caller.id,
             name=caller.name,
@@ -2109,7 +2112,7 @@ def create_app(
             scheme, _, credentials = (authorization or "").strip().partition(" ")
             if scheme.lower() != "bearer" or not credentials.strip():
                 raise ApiKeyRequiredError()
-            return keys.authenticate(credentials.strip())
+            return await keys.authenticate(credentials.strip())
 
         @app.post("/v1/generate", response_model=GenerateResponse)
         @public_route("an application API key, checked by the route")
@@ -2125,7 +2128,7 @@ def create_app(
         async def application_usage(
             caller: Application = Depends(authenticate),
         ) -> ApplicationUsageResponse:
-            return usage_body(caller)
+            return await usage_body(caller)
 
         chat = ChatService(registry, clock, chat_adapters)
         if local_destinations is None:
@@ -2143,7 +2146,7 @@ def create_app(
         app.state.chat_router = chat_router
         chat_epoch = epoch if epoch is not None else ClockEpoch(clock)
 
-        def account_chat(
+        async def account_chat(
             outcome: ChatOutcome,
             caller: Application,
             multiplier: float,
@@ -2159,7 +2162,7 @@ def create_app(
             metrics.record(model, timing)
             if monitor is not None:
                 monitor.record(model, timing.latency_ms)
-            billed = ledger.record(
+            billed = await ledger.record(
                 caller.id, timing, model=model, price_multiplier=multiplier, source=source
             )
             monitoring.completed(
@@ -2229,7 +2232,7 @@ def create_app(
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             try:
-                caller = keys.authenticate(credentials.strip())
+                caller = await keys.authenticate(credentials.strip())
             except InvalidApiKeyError:
                 return _openai_error(
                     401,
@@ -2269,7 +2272,7 @@ def create_app(
                     param="max_tokens",
                 )
             try:
-                rate_limiter.admit(caller.id, caller.requests_per_minute)
+                await rate_limiter.admit(caller.id, caller.requests_per_minute)
             except RateLimitedError as exc:
                 monitoring.rate_limited(caller.id)
                 seconds = max(1, math.ceil(exc.retry_after_ms / 1000))
@@ -2291,7 +2294,7 @@ def create_app(
                     403, "model_not_in_plan", str(exc), kind="permission_error", param="model"
                 )
             try:
-                ledger.check_budget(caller.id, route.plan.monthly_token_budget)
+                await ledger.check_budget(caller.id, route.plan.monthly_token_budget)
             except BudgetExceededError as exc:
                 monitoring.budget_exhausted(route.model, exc)
                 seconds = max(1, math.ceil(exc.retry_after_ms / 1000))
@@ -2311,7 +2314,7 @@ def create_app(
                 return _openai_error(422, "invalid_request", str(exc), param=exc.param)
             try:
                 # Only to answer at once when no candidate may serve it; the router asks again.
-                chat_router.candidates(
+                await chat_router.candidates(
                     caller.organization_id,
                     caller.id,
                     route.model,
@@ -2387,7 +2390,7 @@ def create_app(
                 except CHAT_FAILURES as exc:
                     return failure(exc)
                 outcome = routed.outcome
-                account_chat(outcome, caller, multiplier, route.model, routed.source)
+                await account_chat(outcome, caller, multiplier, route.model, routed.source)
                 result = outcome.result
                 message: dict[str, object] = {
                     "role": "assistant",
@@ -2430,7 +2433,7 @@ def create_app(
                 if isinstance(failed, CHAT_FAILURES):
                     return failure(failed)
                 routed = task.result()  # an answer with no delta at all
-                account_chat(routed.outcome, caller, multiplier, route.model, routed.source)
+                await account_chat(routed.outcome, caller, multiplier, route.model, routed.source)
             include_usage = body.stream_options is not None and body.stream_options.include_usage
 
             async def events(item: ChatDelta | None) -> AsyncIterator[str]:
@@ -2469,7 +2472,7 @@ def create_app(
                     routed = task.result()
                     outcome = routed.outcome
                     if first is not None:
-                        account_chat(outcome, caller, multiplier, route.model, routed.source)
+                        await account_chat(outcome, caller, multiplier, route.model, routed.source)
                     yield chunk(
                         {"index": 0, "delta": {}, "finish_reason": outcome.result.finish_reason}
                     )
@@ -2494,8 +2497,8 @@ def create_app(
     if playground_keys:
         if applications is None or not isinstance(applications.store, InMemoryApplicationStore):
             raise ValueError("playground_keys needs applications in an in-memory store")
-        for application in applications.store.list_applications():
-            issued = applications.keys.issue(application.id, "playground (in memory)")
+        for application in run_now(applications.store.list_applications()):
+            issued = run_now(applications.keys.issue(application.id, "playground (in memory)"))
             playground[application.id] = issued.key
 
     @app.post("/v1/playground/generate", response_model=GenerateResponse)
@@ -2513,7 +2516,7 @@ def create_app(
         key = playground.get(body.application_id)
         if key is None:
             raise InvalidApiKeyError()
-        caller = applications.keys.authenticate(key)
+        caller = await applications.keys.authenticate(key)
         request = GenerateBody.model_validate(body.model_dump(exclude={"application_id"}))
         return await serve(request, response, caller)
 
@@ -2642,7 +2645,7 @@ def create_app(
     # Which applications may use each model, in the order they were created.
     applications_for: dict[str, list[Application]] = {}
     if applications is not None:
-        for application in applications.store.list_applications():
+        for application in run_now(applications.store.list_applications()):
             for allowed in application.plan.models:
                 applications_for.setdefault(allowed, []).append(application)
 
@@ -2753,13 +2756,13 @@ def create_app(
         clock.speed = body.speed
         return JSONResponse(control_status())
 
-    def take_snapshot(*, history_ms: float = 0.0, recent_events: int = 0) -> Snapshot:
+    async def take_snapshot(*, history_ms: float = 0.0, recent_events: int = 0) -> Snapshot:
         # Asking the SLO monitor for a model's health makes it re-evaluate, exactly as
         # GET /v1/overload does.
         health = (
             {name: monitor.health(name) for name in registry.names} if monitor is not None else None
         )
-        return monitoring.snapshot(
+        return await monitoring.snapshot(
             history_ms=history_ms, recent_events=recent_events, health=health
         )
 
@@ -2769,7 +2772,7 @@ def create_app(
         history_s: float = Query(default=0.0, ge=0.0),
         events: int = Query(default=50, ge=0),
     ) -> JSONResponse:
-        snapshot = take_snapshot(history_ms=history_s * 1000, recent_events=events)
+        snapshot = await take_snapshot(history_ms=history_s * 1000, recent_events=events)
         return JSONResponse(dataclasses.asdict(snapshot))
 
     @app.get("/v1/monitor/stream")
@@ -2799,7 +2802,7 @@ def create_app(
             while True:
                 # Taken first: building it can itself change a model's state, and that
                 # event must reach the client before the snapshot showing it.
-                snapshot = take_snapshot(history_ms=history_ms)
+                snapshot = await take_snapshot(history_ms=history_ms)
                 page = bus.since(cursor)
                 cursor = bus.last_seq
                 if page.missed:
@@ -2820,7 +2823,9 @@ def create_app(
     @app.get("/metrics")
     @local_only_route("monitoring.read")
     async def prometheus_metrics() -> Response:
-        return Response(render_prometheus(take_snapshot()), media_type=PROMETHEUS_CONTENT_TYPE)
+        return Response(
+            render_prometheus(await take_snapshot()), media_type=PROMETHEUS_CONTENT_TYPE
+        )
 
     if dashboard_dir is not None and (dashboard_dir / "index.html").is_file():
         app.mount("/dashboard", StaticFiles(directory=dashboard_dir, html=True), name="dashboard")
@@ -2895,7 +2900,7 @@ def create_simulated_live_app(
     templates = load_plans()
     epoch = ClockEpoch(clock)
     store = InMemoryApplicationStore(created_at_ms=epoch.epoch_ms())
-    seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms())
+    run_now(seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms()))
     keys = ApiKeyService(store, secrets.token_bytes(32), epoch)
     return create_app(
         registry,
@@ -2912,8 +2917,7 @@ def create_simulated_live_app(
 
 
 def build_accounts(
-    connection: sqlite3.Connection,
-    organizations: ApplicationStore,
+    state: StateBackend,
     clock: Clock,
     epoch: EpochSource,
     pepper: bytes,
@@ -2928,11 +2932,11 @@ def build_accounts(
     )
     step_up_minutes, step_up_session_failures = step_up_settings(environ)
     service = AccountService(
-        AccountStore(connection),
-        AuditLog(connection),
+        state.accounts,
+        AuditLog(state.audit),
         passwords,
-        roles=RoleStore(connection),
-        organizations=organizations,
+        roles=state.roles,
+        organizations=state.applications,
         clock=clock,
         epoch=epoch,
         secret=pepper,
@@ -2941,7 +2945,8 @@ def build_accounts(
         step_up_session_failures=step_up_session_failures,
         user_create_attempts=user_create_attempts(environ),
     )
-    if service.bootstrap_admin(environ) is BootstrapOutcome.EXISTS_WITH_VARIABLES:
+    # Before any event loop runs the app: store calls that cannot suspend (docs/34).
+    if run_now(service.bootstrap_admin(environ)) is BootstrapOutcome.EXISTS_WITH_VARIABLES:
         still_set = [name for name in (ADMIN_USERNAME_ENV, ADMIN_PASSWORD_ENV) if name in environ]
         logging.getLogger("gateway").warning(
             "A platform_admin exists, so %s %s ignored; remove %s from the environment.",
@@ -3026,11 +3031,10 @@ def create_default_app() -> FastAPI:
             "`--dry-run` shows what it would do), then start the gateway again."
         )
     runner.migrate()
-    access = ApplicationAccess(
-        ApiKeyService(SqliteApplicationStore(database), pepper, epoch), templates
-    )
+    state = sqlite_state(database)
+    access = ApplicationAccess(ApiKeyService(state.applications, pepper, epoch), templates)
     try:
-        accounts = build_accounts(database, access.store, clock, epoch, pepper, os.environ)
+        accounts = build_accounts(state, clock, epoch, pepper, os.environ)
     except BaseException:
         database.close()
         lock.release()
@@ -3068,7 +3072,7 @@ def create_default_app() -> FastAPI:
         clock,
         applications=access,
         accounts=accounts,
-        usage_store=SqliteUsageStore(database),
+        usage_store=state.usage,
         epoch=epoch,
         usage_retention_ms=retention_ms,
         overload=DEFAULT_OVERLOAD,
@@ -3078,7 +3082,7 @@ def create_default_app() -> FastAPI:
         local_only=policy_from(os.environ),
         chat_adapters=chat_adapters,
         providers=ProviderService(
-            ProviderStore(database),
+            state.providers,
             Vault(master, previous_master),
             accounts.service.audit,
             clock,
@@ -3086,7 +3090,7 @@ def create_default_app() -> FastAPI:
             Redactor(),
             lambda: organization_client(system_resolver, ssl_context=tls),
         ),
-        modes=SqliteModeStore(database),
+        modes=state.modes,
         local_destinations=local,
     )
     # Held for the life of the process; released when it exits, however it exits.

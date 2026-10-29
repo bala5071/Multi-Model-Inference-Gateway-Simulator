@@ -39,6 +39,7 @@ from gateway.organizations import new_organization
 from gateway.passwords import PasswordPolicy, load_blocklist
 from gateway.permissions import PERMISSIONS, Resource
 from gateway.routing import PlansConfig, load_plans
+from gateway.state import run_now
 from helpers import TEST_PEPPER
 
 REPO = Path(__file__).resolve().parent.parent
@@ -61,8 +62,10 @@ def make_world(**service: Any) -> World:
     """north: alice and carol (org_admins), vera (viewer), nina (app_admin of north-shop), bob
     (no role); south: sid (org_admin), sam (no role); default: root (platform_admin)."""
     accounts = make_accounts(**service)
-    accounts.organizations.add_organization(
-        new_organization("south", "South", "business", created_at_ms=0)
+    run_now(
+        accounts.organizations.add_organization(
+            new_organization("south", "South", "business", created_at_ms=0)
+        )
     )
     for name, org in (
         ("alice", "north"),
@@ -85,7 +88,7 @@ def make_world(**service: Any) -> World:
         ("north-blog", "north", "Blog"),
         ("south-shop", "south", "Shop"),  # the same name, in another organization
     ):
-        operator.create_application(org, name, "pro", application_id=app_id)
+        run_now(operator.create_application(org, name, "pro", application_id=app_id))
     service_ = accounts.service
     for name, role, scope_type, scope in (
         ("alice", "org_admin", "organization", "north"),
@@ -95,16 +98,16 @@ def make_world(**service: Any) -> World:
         ("sid", "org_admin", "organization", "south"),
         ("root", "platform_admin", "platform", "*"),
     ):
-        service_.grant_role(name, role, scope_type, scope)
+        run_now(service_.grant_role(name, role, scope_type, scope))
     key_ids, api_keys = {}, {}
     for app_id in ("north-shop", "north-blog", "south-shop"):
-        issued = operator.issue_key(app_id, "main")
+        issued = run_now(operator.issue_key(app_id, "main"))
         key_ids[app_id], api_keys[app_id] = issued.record.key_id, issued.key
     return World(accounts, keys, templates, key_ids, api_keys)
 
 
 @pytest.fixture
-def world() -> World:
+async def world() -> World:
     return make_world()
 
 
@@ -174,8 +177,8 @@ def _raw(response: httpx.Response) -> tuple[int, list[tuple[str, str]], bytes]:
     return response.status_code, sorted(response.headers.multi_items()), response.content
 
 
-def _audit(world: World, action: AuditAction) -> list[AuditEntry]:
-    return [e for e in world.accounts.audit.entries() if e.event.action is action]
+async def _audit(world: World, action: AuditAction) -> list[AuditEntry]:
+    return [e for e in await world.accounts.audit.entries() if e.event.action is action]
 
 
 # --- the endpoints, as documented ------------------------------------------------------------
@@ -205,7 +208,7 @@ def documented_endpoints() -> list[Endpoint]:
 ENDPOINTS = documented_endpoints()
 
 
-def test_the_routes_are_the_documented_endpoints() -> None:
+async def test_the_routes_are_the_documented_endpoints() -> None:
     """Every management route, its method and the action it declares, equal the table in
     note 30, and each action's step-up flag equals the permission table's: a route declared
     with a weaker action fails here."""
@@ -270,7 +273,7 @@ async def test_nothing_crosses_organizations_and_missing_looks_forbidden(
             await admin.step_up(alice)
         north_key = world.key_ids["north-shop"]
         south_key = world.key_ids["south-shop"]
-        before = world.accounts.audit.entries()
+        before = await world.accounts.audit.entries()
         for endpoint in ENDPOINTS:
             body = BODIES.get(endpoint.action)
             attempts = {
@@ -310,13 +313,13 @@ async def test_nothing_crosses_organizations_and_missing_looks_forbidden(
             for name, answer in answers.items():
                 assert answer == first, (endpoint.action, name)
         # Refused before anything ran: no change, no step-up entry, no audit at all.
-        assert world.accounts.audit.entries() == before
-    south = world.accounts.store.find_user("sam")
+        assert await world.accounts.audit.entries() == before
+    south = await world.accounts.store.find_user("sam")
     assert south is not None
     assert not south.disabled
-    assert world.keys.store.get_key(south_key) is not None
-    assert not world.keys.store.get_key(south_key).revoked  # type: ignore[union-attr]
-    assert len(world.keys.store.list_applications("south")) == 1
+    assert await world.keys.store.get_key(south_key) is not None
+    assert not (await world.keys.store.get_key(south_key)).revoked  # type: ignore[union-attr]
+    assert len(await world.keys.store.list_applications("south")) == 1
 
 
 async def test_south_can_still_do_all_of_it_to_its_own(world: World) -> None:
@@ -345,7 +348,7 @@ async def test_a_revoked_role_is_gone_at_the_next_request(world: World) -> None:
     async with admin_console(world) as admin:
         alice = await admin.login("alice")
         assert (await admin.get(alice, "/north/users")).status_code == 200
-        world.accounts.service.revoke_role("alice", "org_admin", "organization", "north")
+        await world.accounts.service.revoke_role("alice", "org_admin", "organization", "north")
         assert (await admin.get(alice, "/north/users")).json() == FORBIDDEN
 
 
@@ -392,7 +395,7 @@ async def test_there_is_no_endpoint_for_roles(world: World) -> None:
             response = await admin.post(alice, path, {"role": "org_admin"})
             assert response.status_code in (404, 405), path
     assert not [e for e in ENDPOINTS if "role" in e.path]
-    assert world.accounts.service.list_roles("bob") == ()
+    assert await world.accounts.service.list_roles("bob") == ()
 
 
 # --- step-up -------------------------------------------------------------------------------------
@@ -418,7 +421,7 @@ async def test_every_flagged_endpoint_needs_step_up_over_http(world: World) -> N
             refused = await admin.call(alice, endpoint.method, path, BODIES.get(endpoint.action))
             assert refused.status_code == 403, endpoint
             assert refused.json()["error"]["code"] == STEP_UP_REQUIRED_CODE, endpoint
-        assert len(_audit(world, AuditAction.STEP_UP_REQUIRED)) == len(flagged)
+        assert len(await _audit(world, AuditAction.STEP_UP_REQUIRED)) == len(flagged)
         await admin.step_up(alice)
         # In an order where each one has something to act on.
         for action in (
@@ -445,16 +448,16 @@ async def test_unlocking_needs_step_up_because_it_lifts_a_lockout(world: World) 
                 "/v1/auth/login", json={"username": "bob", "password": "not the password"}
             )
         admin.client.cookies.clear()
-        bob = accounts.store.find_user("bob")
+        bob = await accounts.store.find_user("bob")
         assert bob is not None
         assert accounts.service.is_locked(bob)
         alice = await admin.login("alice")
         refused = await admin.post(alice, "/north/users/bob/unlock")
         assert refused.json()["error"]["code"] == STEP_UP_REQUIRED_CODE
-        assert accounts.service.is_locked(accounts.store.find_user("bob"))  # type: ignore[arg-type]
+        assert accounts.service.is_locked(await accounts.store.find_user("bob"))  # type: ignore[arg-type]
         await admin.step_up(alice)
         assert (await admin.post(alice, "/north/users/bob/unlock")).json() == {"unlocked": True}
-        assert not accounts.service.is_locked(accounts.store.find_user("bob"))  # type: ignore[arg-type]
+        assert not accounts.service.is_locked(await accounts.store.find_user("bob"))  # type: ignore[arg-type]
 
 
 # --- users ---------------------------------------------------------------------------------------
@@ -488,13 +491,13 @@ async def test_creating_a_user_returns_a_temporary_password_once(world: World) -
         refused = await admin.get(newbie, "/north/users")
         assert refused.json()["error"]["code"] == "password_change_required"
         # Only its hash is stored.
-        user = accounts.store.find_user("newbie")
+        user = await accounts.store.find_user("newbie")
         assert user is not None
         assert temporary not in user.password_hash
         [created] = [
-            e for e in _audit(world, AuditAction.USER_CREATED) if e.event.target_id == user.id
+            e for e in await _audit(world, AuditAction.USER_CREATED) if e.event.target_id == user.id
         ]
-        assert created.event.actor_user_id == accounts.store.find_user("alice").id  # type: ignore[union-attr]
+        assert created.event.actor_user_id == (await accounts.store.find_user("alice")).id  # type: ignore[union-attr]
         assert created.event.details["reason"] == "temporary_password"
 
 
@@ -509,7 +512,7 @@ async def test_no_password_is_accepted_over_http(world: World) -> None:
         reset = await admin.post(alice, "/north/users/bob/reset-password", {"new_password": "x"})
         assert reset.status_code == 200  # the body is ignored: the endpoint takes none
         assert "temporary_password" in reset.json()
-    assert world.accounts.store.find_user("newbie") is None
+    assert await world.accounts.store.find_user("newbie") is None
 
 
 async def test_usernames_are_global_and_every_conflict_is_audited(world: World) -> None:
@@ -519,8 +522,8 @@ async def test_usernames_are_global_and_every_conflict_is_audited(world: World) 
         taken = await admin.post(alice, "/north/users", {"username": "sam"})  # sam is in south
         assert taken.status_code == 409
         assert taken.json()["error"]["code"] == "username_taken"
-    [entry] = _audit(world, AuditAction.MANAGEMENT_REFUSED)
-    alice_id = world.accounts.store.find_user("alice").id  # type: ignore[union-attr]
+    [entry] = await _audit(world, AuditAction.MANAGEMENT_REFUSED)
+    alice_id = (await world.accounts.store.find_user("alice")).id  # type: ignore[union-attr]
     assert entry.event.actor_user_id == alice_id
     assert entry.event.target_id == "north"
     assert dict(entry.event.details) == {"reason": "username_taken", "action": "users.create"}
@@ -533,7 +536,9 @@ async def test_an_individual_organization_takes_one_member_over_http(world: Worl
         assert (await admin.post(root, "/solo/users", {"username": "only"})).status_code == 201
         second = await admin.post(root, "/solo/users", {"username": "second"})
         assert (second.status_code, second.json()["error"]["code"]) == (409, "organization_full")
-    reasons = [e.event.details["reason"] for e in _audit(world, AuditAction.MANAGEMENT_REFUSED)]
+    reasons = [
+        e.event.details["reason"] for e in await _audit(world, AuditAction.MANAGEMENT_REFUSED)
+    ]
     assert reasons == ["organization_full"]
 
 
@@ -552,7 +557,7 @@ async def test_user_creation_attempts_are_capped_per_session() -> None:
             (201, None),
             (429, "user_creation_limited"),
         ]
-        assert world.accounts.store.find_user("another") is None
+        assert await world.accounts.store.find_user("another") is None
         # Another session has its own count; this one's ends after an hour.
         carol = await admin.login("carol")
         await admin.step_up(carol)
@@ -563,7 +568,9 @@ async def test_user_creation_attempts_are_capped_per_session() -> None:
         alice = await admin.login("alice")
         await admin.step_up(alice)
         assert (await admin.post(alice, "/north/users", {"username": "third"})).status_code == 201
-    reasons = [e.event.details["reason"] for e in _audit(world, AuditAction.MANAGEMENT_REFUSED)]
+    reasons = [
+        e.event.details["reason"] for e in await _audit(world, AuditAction.MANAGEMENT_REFUSED)
+    ]
     assert reasons == ["username_taken", "username_taken", "user_creation_limited"]
 
 
@@ -578,13 +585,15 @@ async def test_an_admin_cannot_disable_or_reset_their_own_account(world: World) 
                 409,
                 "own_account",
             ), action
-        user = accounts.store.find_user("alice")
+        user = await accounts.store.find_user("alice")
         assert user is not None
         assert not user.disabled
         assert not user.must_change_password
         # Still logged in, still able to act on others.
         assert (await admin.post(alice, "/north/users/bob/disable")).status_code == 200
-    reasons = [e.event.details["reason"] for e in _audit(world, AuditAction.MANAGEMENT_REFUSED)]
+    reasons = [
+        e.event.details["reason"] for e in await _audit(world, AuditAction.MANAGEMENT_REFUSED)
+    ]
     assert reasons == ["own_account", "own_account"]
 
 
@@ -594,7 +603,7 @@ async def test_the_last_org_admin_cannot_be_disabled_over_http(world: World) -> 
         await admin.step_up(root)
         last = await admin.post(root, "/south/users/sid/disable")
         assert (last.status_code, last.json()["error"]["code"]) == (409, "last_admin")
-        user = world.accounts.store.find_user("sid")
+        user = await world.accounts.store.find_user("sid")
         assert user is not None
         assert not user.disabled
         # north has two: one may go, then not the other.
@@ -602,7 +611,9 @@ async def test_the_last_org_admin_cannot_be_disabled_over_http(world: World) -> 
         await admin.step_up(alice)
         assert (await admin.post(alice, "/north/users/carol/disable")).status_code == 200
         assert (await admin.post(root, "/north/users/alice/disable")).status_code == 409
-    reasons = [e.event.details["reason"] for e in _audit(world, AuditAction.MANAGEMENT_REFUSED)]
+    reasons = [
+        e.event.details["reason"] for e in await _audit(world, AuditAction.MANAGEMENT_REFUSED)
+    ]
     assert reasons == ["last_admin", "last_admin"]
 
 
@@ -621,10 +632,10 @@ async def test_a_reset_revokes_every_session_and_closes_step_up(world: World) ->
         temporary = reset.json()["temporary_password"]
         for session in (carol, other):
             assert (await admin.get(session, "/north/users")).status_code == 401
-        user = accounts.store.find_user("carol")
+        user = await accounts.store.find_user("carol")
         assert user is not None
         assert user.must_change_password
-        assert all(s.step_up_until_ms is None for s in accounts.store.list_sessions(user.id))
+        assert all(s.step_up_until_ms is None for s in await accounts.store.list_sessions(user.id))
         stored = accounts.connection.execute(
             "SELECT count(*) FROM sessions WHERE user_id = ? AND step_up_until_ms IS NOT NULL",
             (user.id,),
@@ -649,7 +660,7 @@ async def test_disable_enable_and_unlock(world: World) -> None:
         assert (await admin.client.get("/v1/auth/me", headers=_headers(bob))).status_code == 401
         assert (await admin.post(alice, "/north/users/bob/enable")).json() == {"enabled": True}
         await admin.login("bob")
-    actions = [e.event.action for e in accounts.audit.entries()]
+    actions = [e.event.action for e in await accounts.audit.entries()]
     assert AuditAction.USER_DISABLED in actions
     assert AuditAction.USER_ENABLED in actions
 
@@ -710,11 +721,13 @@ async def test_creating_an_application_from_a_plan_template(world: World) -> Non
         assert read.json() == body
     [created, *_] = [
         e
-        for e in _audit(world, AuditAction.APPLICATION_CREATED)
+        for e in await _audit(world, AuditAction.APPLICATION_CREATED)
         if e.event.target_id == body["application_id"]
     ]
     assert dict(created.event.details) == {"organization_id": "north", "plan": "pro"}
-    reasons = [e.event.details["reason"] for e in _audit(world, AuditAction.MANAGEMENT_REFUSED)]
+    reasons = [
+        e.event.details["reason"] for e in await _audit(world, AuditAction.MANAGEMENT_REFUSED)
+    ]
     assert reasons == ["application_name_taken"]
 
 
@@ -755,7 +768,7 @@ async def test_a_key_is_shown_once_works_and_is_listed_without_secrets(world: Wo
         listed = await admin.get(alice, "/north/applications/north-shop/keys")
         text = listed.text
         assert key not in text
-        record = world.keys.store.get_key(key_id)
+        record = await world.keys.store.get_key(key_id)
         assert record is not None
         assert record.key_hmac not in text
         keys = listed.json()["keys"]
@@ -768,7 +781,9 @@ async def test_a_key_is_shown_once_works_and_is_listed_without_secrets(world: Wo
             "expires_at_ms",
             "last_used_at_ms",
         }
-    [entry] = [e for e in _audit(world, AuditAction.KEY_ISSUED) if e.event.target_id == key_id]
+    [entry] = [
+        e for e in await _audit(world, AuditAction.KEY_ISSUED) if e.event.target_id == key_id
+    ]
     assert entry.event.details["application_id"] == "north-shop"
     assert entry.event.details["organization_id"] == "north"
 
@@ -806,7 +821,9 @@ async def test_key_limits(world: World) -> None:
         # Revoking one makes room.
         assert (await admin.post(alice, f"{path}/{made['key_id']}/revoke")).status_code == 200
         assert (await admin.post(alice, path, {"label": "room again"})).status_code == 201
-    reasons = [e.event.details["reason"] for e in _audit(world, AuditAction.MANAGEMENT_REFUSED)]
+    reasons = [
+        e.event.details["reason"] for e in await _audit(world, AuditAction.MANAGEMENT_REFUSED)
+    ]
     assert reasons == ["key_limit"]
 
 
@@ -844,11 +861,11 @@ async def test_rotation_and_revocation(world: World) -> None:
         revoked = await admin.post(alice, f"/north/applications/north-shop/keys/{new_id}/revoke")
         assert revoked.json() == {"key_id": new_id, "state": "revoked"}
         assert await generate(admin, new_key) == 401
-    [rotation] = _audit(world, AuditAction.KEY_ROTATED)
+    [rotation] = await _audit(world, AuditAction.KEY_ROTATED)
     assert rotation.event.target_id == old_id
     assert rotation.event.details["key_id"] == new_id
     assert rotation.event.details["grace_ms"] == 168 * 60 * MINUTE_MS
-    [revocation] = _audit(world, AuditAction.KEY_REVOKED)
+    [revocation] = await _audit(world, AuditAction.KEY_REVOKED)
     assert revocation.event.target_id == new_id
 
 
@@ -889,27 +906,29 @@ async def test_every_admin_answer_is_no_store(world: World) -> None:
 # --- the resolvers on their own ----------------------------------------------------------------
 
 
-def test_each_resolver_answers_outside_its_organization_as_missing(world: World) -> None:
+async def test_each_resolver_answers_outside_its_organization_as_missing(world: World) -> None:
     stores = Stores(world.accounts.organizations, world.accounts.store)
     north_key, south_key = world.key_ids["north-shop"], world.key_ids["south-shop"]
     blog_key = world.key_ids["north-blog"]
-    assert resolve_organization(stores, "north") is not None
-    assert resolve_organization(stores, "nowhere") is None
-    assert resolve_member(stores, "north", "bob") is not None
-    assert resolve_member(stores, "north", "BOB") is not None
-    assert resolve_member(stores, "north", "sam") is None  # south's
-    assert resolve_member(stores, "north", "ghost") is None
-    assert resolve_member(stores, "north", "not a name!") is None
-    assert resolve_member(stores, "nowhere", "bob") is None
-    assert resolve_application(stores, "north", "north-shop") is not None
-    assert resolve_application(stores, "north", "south-shop") is None  # south's
-    assert resolve_application(stores, "south", "north-shop") is None
-    assert resolve_application(stores, "nowhere", "north-shop") is None
-    assert resolve_key(stores, "north", "north-shop", north_key) is not None
-    assert resolve_key(stores, "north", "north-shop", south_key) is None  # south's
-    assert resolve_key(stores, "north", "north-shop", blog_key) is None  # another application's
-    assert resolve_key(stores, "north", "south-shop", south_key) is None
-    assert resolve_key(stores, "north", "north-shop", MISSING_KEY_ID) is None
+    assert await resolve_organization(stores, "north") is not None
+    assert await resolve_organization(stores, "nowhere") is None
+    assert await resolve_member(stores, "north", "bob") is not None
+    assert await resolve_member(stores, "north", "BOB") is not None
+    assert await resolve_member(stores, "north", "sam") is None  # south's
+    assert await resolve_member(stores, "north", "ghost") is None
+    assert await resolve_member(stores, "north", "not a name!") is None
+    assert await resolve_member(stores, "nowhere", "bob") is None
+    assert await resolve_application(stores, "north", "north-shop") is not None
+    assert await resolve_application(stores, "north", "south-shop") is None  # south's
+    assert await resolve_application(stores, "south", "north-shop") is None
+    assert await resolve_application(stores, "nowhere", "north-shop") is None
+    assert await resolve_key(stores, "north", "north-shop", north_key) is not None
+    assert await resolve_key(stores, "north", "north-shop", south_key) is None  # south's
+    assert (
+        await resolve_key(stores, "north", "north-shop", blog_key) is None
+    )  # another application's
+    assert await resolve_key(stores, "north", "south-shop", south_key) is None
+    assert await resolve_key(stores, "north", "north-shop", MISSING_KEY_ID) is None
 
 
 async def test_behind_a_broken_resolver_the_services_own_check_still_refuses(
@@ -922,16 +941,16 @@ async def test_behind_a_broken_resolver_the_services_own_check_still_refuses(
 
     stores = Stores(world.accounts.organizations, world.accounts.store)
 
-    def any_member(_: Stores, org: str, username: str) -> Any:
-        found = world.accounts.store.find_user(username)
-        return resolve_organization(stores, org) if found is not None else None
+    async def any_member(_: Stores, org: str, username: str) -> Any:
+        found = await world.accounts.store.find_user(username)
+        return await resolve_organization(stores, org) if found is not None else None
 
-    def any_application(_: Stores, org: str, app: str) -> Any:
-        found = world.accounts.organizations.get_application(app)
+    async def any_application(_: Stores, org: str, app: str) -> Any:
+        found = await world.accounts.organizations.get_application(app)
         return None if found is None else Resource.application(org, app)
 
-    def any_key(_: Stores, org: str, app: str, key_id: str) -> Any:
-        return any_application(_, org, app)
+    async def any_key(_: Stores, org: str, app: str, key_id: str) -> Any:
+        return await any_application(_, org, app)
 
     monkeypatch.setattr(app_module, "resolve_member", any_member)
     monkeypatch.setattr(app_module, "resolve_application", any_application)
@@ -951,8 +970,8 @@ async def test_behind_a_broken_resolver_the_services_own_check_still_refuses(
         ):
             answer = _raw(await admin.call(alice, method, path, body))
             assert answer == missing, path
-    sam = world.accounts.store.find_user("sam")
+    sam = await world.accounts.store.find_user("sam")
     assert sam is not None
     assert not sam.disabled
-    assert not world.keys.store.get_key(south_key).revoked  # type: ignore[union-attr]
-    assert len(world.keys.store.list_keys("south-shop")) == 1
+    assert not (await world.keys.store.get_key(south_key)).revoked  # type: ignore[union-attr]
+    assert len(await world.keys.store.list_keys("south-shop")) == 1

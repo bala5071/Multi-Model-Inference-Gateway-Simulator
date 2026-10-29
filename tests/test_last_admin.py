@@ -36,19 +36,19 @@ def _service(path: Path, *, busy_timeout_ms: int | None = None) -> AccountServic
 
 
 @pytest.fixture
-def path(tmp_path: Path) -> Path:
+async def path(tmp_path: Path) -> Path:
     """north, with two org_admins: alice and carol."""
     database = tmp_path / "gateway.db"
     connection = open_database(database)
     MigrationRunner(connection, MIGRATIONS, ClockEpoch(SimClock())).migrate()
     connection.close()
     service = _service(database)
-    service._organizations.add_organization(
+    await service._organizations.add_organization(
         new_organization("north", "North", "business", created_at_ms=0)
     )
     for name in ("alice", "carol"):
-        service.create_user(name, PASSWORD, "north")
-        service.grant_role(name, "org_admin", "organization", "north")
+        await service.create_user(name, PASSWORD, "north")
+        await service.grant_role(name, "org_admin", "organization", "north")
     return database
 
 
@@ -64,15 +64,15 @@ def _holders(path: Path) -> list[str]:
     return [row[0] for row in rows]
 
 
-def test_two_revocations_back_to_back_leave_one(path: Path) -> None:
+async def test_two_revocations_back_to_back_leave_one(path: Path) -> None:
     service = _service(path)
-    service.revoke_role("alice", "org_admin", "organization", "north")
+    await service.revoke_role("alice", "org_admin", "organization", "north")
     with pytest.raises(LastAdminError, match="last org_admin of organization 'north'"):
-        service.revoke_role("carol", "org_admin", "organization", "north")
+        await service.revoke_role("carol", "org_admin", "organization", "north")
     assert _holders(path) == ["carol"]
 
 
-def test_a_revocation_from_another_connection_cannot_slip_in_between(
+async def test_a_revocation_from_another_connection_cannot_slip_in_between(
     path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """While one connection counts the other admins and revokes, a second connection's
@@ -83,42 +83,44 @@ def test_a_revocation_from_another_connection_cannot_slip_in_between(
     outcomes: list[str] = []
     counting = first.roles.enabled_holders
 
-    def count_then_race(assignment: Assignment) -> list[str]:
-        holders = counting(assignment)
+    async def count_then_race(assignment: Assignment) -> list[str]:
+        holders = await counting(assignment)
         if assignment == NORTH_ADMIN and not outcomes:
             try:
-                second.revoke_role("carol", "org_admin", "organization", "north")
+                await second.revoke_role("carol", "org_admin", "organization", "north")
                 outcomes.append("revoked in between")
             except sqlite3.OperationalError as exc:
                 outcomes.append(f"held off: {exc}")
         return holders
 
     monkeypatch.setattr(first.roles, "enabled_holders", count_then_race)
-    first.revoke_role("alice", "org_admin", "organization", "north")
+    await first.revoke_role("alice", "org_admin", "organization", "north")
     assert outcomes == ["held off: database is locked"]
     with pytest.raises(LastAdminError):
-        second.revoke_role("carol", "org_admin", "organization", "north")
+        await second.revoke_role("carol", "org_admin", "organization", "north")
     assert _holders(path) == ["carol"]
 
 
-def test_disabling_is_guarded_the_same_way(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_disabling_is_guarded_the_same_way(
+    path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     first = _service(path)
     second = _service(path, busy_timeout_ms=0)
     outcomes: list[str] = []
     counting = first.roles.enabled_holders
 
-    def count_then_race(assignment: Assignment) -> list[str]:
-        holders = counting(assignment)
+    async def count_then_race(assignment: Assignment) -> list[str]:
+        holders = await counting(assignment)
         if assignment == NORTH_ADMIN and not outcomes:
             try:
-                second.disable_user("carol")
+                await second.disable_user("carol")
                 outcomes.append("disabled in between")
             except sqlite3.OperationalError as exc:
                 outcomes.append(f"held off: {exc}")
         return holders
 
     monkeypatch.setattr(first.roles, "enabled_holders", count_then_race)
-    first.disable_user("alice")
+    await first.disable_user("alice")
     assert outcomes == ["held off: database is locked"]
     with pytest.raises(LastAdminError):
-        second.disable_user("carol")
+        await second.disable_user("carol")

@@ -49,9 +49,9 @@ def test_a_derivation_can_never_be_an_api_key_hmac() -> None:
 
 async def test_the_csrf_token_uses_the_csrf_key_and_rotating_the_pepper_invalidates_it() -> None:
     accounts = make_accounts()
-    accounts.service.create_user("alice", PASSWORD, "north")
+    await accounts.service.create_user("alice", PASSWORD, "north")
     login = await accounts.service.login("alice", PASSWORD)
-    context = accounts.service.authenticate(login.session_id)
+    context = await accounts.service.authenticate(login.session_id)
     csrf_key = derive_key(TEST_PEPPER, KeyPurpose.CSRF_TOKEN)
     assert login.csrf_token == csrf_token_for(csrf_key, login.session_id)
     # Not keyed by the pepper itself, nor by the session id alone.
@@ -69,7 +69,7 @@ async def test_the_csrf_token_uses_the_csrf_key_and_rotating_the_pepper_invalida
         accounts.organizations,
         secret=OTHER_PEPPER,
     )
-    context = rotated.authenticate(login.session_id)
+    context = await rotated.authenticate(login.session_id)
     assert rotated.csrf_token(context) != login.csrf_token
     with pytest.raises(CsrfError):
         rotated.check_csrf(context, rotated.csrf_token(context))

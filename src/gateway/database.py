@@ -10,7 +10,8 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 # How long a write waits for another connection's lock before failing, in milliseconds.
@@ -81,6 +82,22 @@ def open_database(path: str | Path, *, synchronous: str = "FULL") -> sqlite3.Con
     connection.execute(f"PRAGMA synchronous = {synchronous}")
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+@asynccontextmanager
+async def write_transaction(connection: sqlite3.Connection) -> AsyncIterator[None]:
+    """One write transaction on ``connection``, taken at once (``BEGIN IMMEDIATE``): another
+    connection cannot write until it ends, and it waits for one that is writing for at most
+    the busy timeout, then fails with nothing written. Rolled back if the block raises. The
+    stores of one database share its connection, so it covers all their writes. Every
+    SQLite store's ``write_transaction()`` is this (docs/34-state-interfaces.md)."""
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except BaseException:
+        connection.execute("ROLLBACK")
+        raise
+    connection.execute("COMMIT")
 
 
 class DatabaseInUseError(RuntimeError):

@@ -13,7 +13,9 @@ import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from gateway.app import create_default_app
+from gateway.providers import SqliteProviderStore
 from gateway.redaction import REDACTED, Redactor, install
+from gateway.state import run_now
 from gateway.vault import (
     VAULT_KEY_ENV,
     VAULT_KEY_PREVIOUS_ENV,
@@ -135,14 +137,17 @@ def test_rotation_through_the_cli(tmp_path: Path, capsys: pytest.CaptureFixture[
     from gateway.clock import ClockEpoch, SimClock
     from gateway.database import open_database
     from gateway.migrations import MIGRATIONS, MigrationRunner
-    from gateway.providers import ProviderStore
     from test_providers_api import seed_provider
 
     path = tmp_path / "gateway.db"
     connection = open_database(path)
     MigrationRunner(connection, MIGRATIONS, ClockEpoch(SimClock())).migrate()
     config = seed_provider(connection)
-    ProviderStore(connection).put_key(config.id, Vault(OTHER).seal(KEY, config.binding), 1.0)
+    run_now(
+        SqliteProviderStore(connection).put_key(
+            config.id, Vault(OTHER).seal(KEY, config.binding), 1.0
+        )
+    )
     connection.close()
     environ = {
         "GATEWAY_DATABASE": str(path),
@@ -154,7 +159,7 @@ def test_rotation_through_the_cli(tmp_path: Path, capsys: pytest.CaptureFixture[
     assert "re-sealed 1 provider key(s)" in err
     assert len(list(tmp_path.glob("gateway.db.before-vault-rotation-*.db"))) == 1
     connection = open_database(path)
-    stored = ProviderStore(connection).get_key(config.id)
+    stored = run_now(SqliteProviderStore(connection).get_key(config.id))
     assert stored is not None
     assert Vault(MASTER).open(stored.sealed, config.binding).reveal() == KEY
     connection.close()
@@ -326,13 +331,15 @@ async def test_a_backup_restored_under_another_master_key_starts_with_keys_unrea
     from gateway.clock import ClockEpoch, SimClock
     from gateway.database import backup_database, open_database, restore_database
     from gateway.migrations import MIGRATIONS, MigrationRunner
-    from gateway.providers import ProviderService, ProviderStore
+    from gateway.providers import ProviderService
     from test_providers_api import seed_provider
 
     original = open_database(tmp_path / "original.db")
     MigrationRunner(original, MIGRATIONS, ClockEpoch(SimClock())).migrate()
     config = seed_provider(original)
-    ProviderStore(original).put_key(config.id, Vault(MASTER).seal(KEY, config.binding), 1.0)
+    await SqliteProviderStore(original).put_key(
+        config.id, Vault(MASTER).seal(KEY, config.binding), 1.0
+    )
     backup_database(original, tmp_path / "backup.db")
     original.close()
     served = tmp_path / "restored.db"
@@ -350,7 +357,7 @@ async def test_a_backup_restored_under_another_master_key_starts_with_keys_unrea
             ):
                 health = (await client.get("/healthz")).status_code
                 providers: ProviderService = app.state.providers
-                state = providers.key_state(config)
+                state = await providers.key_state(config)
         finally:
             app.state.database_lock.release()
         return health, state.present, state.readable
