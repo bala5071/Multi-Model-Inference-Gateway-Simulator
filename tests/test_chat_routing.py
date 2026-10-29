@@ -27,7 +27,8 @@ from accounts_helpers import PASSWORD
 from gateway.adapters import OpenAICompatibleAdapter
 from gateway.apikeys import ApplicationAccess
 from gateway.app import create_app
-from gateway.audit import AuditAction
+from gateway.applications import SqliteApplicationStore
+from gateway.audit import AuditAction, SqliteAuditStore
 from gateway.auth import AccountAccess
 from gateway.backends import Backend
 from gateway.chatrouter import Candidate, ChatRouter
@@ -45,7 +46,9 @@ from gateway.modes import IN_FLIGHT, Mode, SqliteModeStore, effective_mode, loos
 from gateway.providers import ProviderConfig, ProviderService, SqliteProviderStore
 from gateway.ratelimit import RequestRateLimiter
 from gateway.redaction import Redactor
+from gateway.roles import SqliteRoleStore
 from gateway.usage import ChatSource, SqliteUsageStore
+from gateway.users import SqliteAccountStore
 from gateway.vault import Vault
 from mock_network import HANG, Breaks, FakeResolver, Gate, Pauses, ScriptedNetwork, http_response
 from mock_network import sse_response as sse
@@ -951,3 +954,82 @@ async def test_the_most_counter_calls_one_chat_request_makes(
     assert counting.calls == ["rate"] + ["admit", "failure"] * 6
     assert len(counting.calls) == 1 + 4 * 3
     assert counting.most_at_once == 1
+
+
+# --- the durable store calls of one chat request (docs/36) ---------------------------------------
+
+DURABLE_STORES = (
+    SqliteApplicationStore,
+    SqliteUsageStore,
+    SqliteModeStore,
+    SqliteProviderStore,
+    SqliteAccountStore,
+    SqliteAuditStore,
+    SqliteRoleStore,
+)
+
+
+def _count_store_calls(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
+    """Every store call, by method name: on Postgres each is one statement, one round trip."""
+    for store in DURABLE_STORES:
+        for name, method in list(vars(store).items()):
+            if name.startswith("_") or not inspect.iscoroutinefunction(method):
+                continue
+
+            def counted(name: str = name, method: Any = method) -> Any:
+                async def call(self: Any, *args: Any, **kwargs: Any) -> Any:
+                    calls.append(name)
+                    return await method(self, *args, **kwargs)
+
+                return call
+
+            monkeypatch.setattr(store, name, counted())
+
+
+async def test_the_durable_store_calls_one_chat_request_makes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Which requests touch the durable store (Postgres in shared mode), and how often: the key
+    with its application and the database's time, the period's usage once per application per
+    process, the two modes and the organization's providers with their keys when it has any,
+    the key again for the attempt, and the usage row. One after another, never at once."""
+    calls: list[str] = []
+    async with routing(operator=None) as r:
+        _count_store_calls(monkeypatch, calls)
+        assert (await r.chat()).status_code == 200
+        first = list(calls)
+        calls.clear()
+        assert (await r.chat()).status_code == 200
+        again = list(calls)
+        monkeypatch.undo()
+        await r.mode(PRIMARY)
+        await r.provider(P, "p.provider.test", role="primary")
+        r.org_net.responses = [TEXT]
+        calls.clear()
+        _count_store_calls(monkeypatch, calls)
+        hosted = await r.chat()
+        assert hosted.headers["x-provider"] == P
+        with_provider = list(calls)
+    modes = ["organization_mode", "application_mode"]
+    # The gateway's own tier (local_only): the key, the period's usage on the first request
+    # only, the modes at the decision and again in flight (docs/33), and the usage row.
+    assert first == ["lookup_key", "usage_by_model", *modes, *modes, "append"]
+    assert again == ["lookup_key", *modes, *modes, "append"]
+    # An organization's provider: the candidates (the modes, the providers, each one's key)
+    # worked out by the handler before admission and again by the router; the modes before the
+    # attempt; the key read to skip an unreadable one and again to lease it; then the modes
+    # three times more, asked by the egress scope (docs/33: at every request and connection).
+    candidates = [*modes, "list_for", "get_key"]
+    assert with_provider == [
+        "lookup_key",
+        *candidates,
+        *candidates,
+        *modes,
+        "get_key",
+        "get_key",
+        *modes,
+        *modes,
+        *modes,
+        "append",
+    ]
+    assert (len(first), len(again), len(with_provider)) == (7, 6, 20)
