@@ -162,6 +162,13 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   raising if it suspends); every store is a protocol with coroutine methods and
   `write_transaction()`; counters are behind `RateLimiter`, `FailureWindow`,
   `ConnectionTestCounter`, `BreakerStore`, `AuditCap` and `Budgets` (docs/34) (exists)
+- `counters.py` — `SharedCounters` and `CounterWatch`: what `create_app` takes when the
+  counters are shared (docs/35) (exists)
+- `valkey.py` — `ValkeyCounters`: the rate limit, the login limiter, the step-up and
+  user-creation caps, the test-connection counts, the breakers and the audit cap in Valkey,
+  each atomic rule one Lua script, every key an HMAC; missing is forbidden; `ValkeyWatch`
+  (the settings and the skew at startup, the skew and the run id every 30 s);
+  `GATEWAY_COUNTERS=valkey` and `GATEWAY_VALKEY_URL`. Budgets are not in it (exists)
 - `database.py` + `migrations/` — `open_database` (WAL, busy timeout, autocommit) and the
   versioned `MigrationRunner`; migration 1 is `usage_events`, 2 `applications` and
   `api_keys`, 3 an index for retention, 4 `organizations` and a required
@@ -252,6 +259,8 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
 - `benchmarks/chat_routing.py` — a chat request routed to an organization's provider, against
   the operator's tier, and with a fallback, in process on scripted providers; the numbers in
   `docs/33` (exists)
+- `benchmarks/counter_calls.py` — one counter call in memory and against Valkey (needs
+  `GATEWAY_VALKEY_URL`); the numbers in `docs/35` (exists)
 - `benchmarks/management_requests.py` — management reads and key writes on the running
   server, beside `/healthz` and `/v1/auth/me`; the numbers in `docs/30` (exists)
 
@@ -336,7 +345,9 @@ it would be ignored, never committed, and a test passing locally would fail in C
 databases in `tmp_path` at run time instead.
 
 Tests that need a real model server are marked `real_models` and skipped unless
-`GATEWAY_REAL_MODELS=1`; CI never runs them.
+`GATEWAY_REAL_MODELS=1`; CI never runs them. Tests marked `valkey` need the Valkey of
+`docker-compose.valkey.yml` (the operator starts it) and run when `GATEWAY_TEST_VALKEY_URL` is
+set; CI's `valkey` job runs them.
 
 ## Hard rules
 

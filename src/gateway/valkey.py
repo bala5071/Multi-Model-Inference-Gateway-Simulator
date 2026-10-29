@@ -74,7 +74,8 @@ CHECK_EVERY_MS = 30_000.0
 MINUTE_MS = 60_000.0
 DAY_MS = 24 * 60 * MINUTE_MS
 # How long a breaker's state, a dropped-row count and a restart marker are kept when untouched.
-KEEP_MS = DAY_MS
+# An integer: PEXPIRE takes whole milliseconds and refuses "86400000.0".
+KEEP_MS = int(DAY_MS)
 # How long a half-open probe holds its slot if its instance dies before reporting (decision 10).
 PROBE_MS = 120_000.0
 
@@ -609,7 +610,7 @@ class ValkeyWatch:
         await on_restart(run_id)
         marker = f"{c.prefix}restart:{run_id}"
         # One audit row per restart, whichever instance sees it first.
-        first = await self._raw(lambda: c.client.set(marker, "1", nx=True, px=int(KEEP_MS)))
+        first = await self._raw(lambda: c.client.set(marker, "1", nx=True, px=KEEP_MS))
         if first and self.audit is not None:
             await self.audit.write(
                 AuditEvent(
