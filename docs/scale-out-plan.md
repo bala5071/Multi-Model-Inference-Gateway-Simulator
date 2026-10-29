@@ -647,6 +647,50 @@ the only behaviour change is Q3. Settled from reading the code at `adaaa1e`:
 - **The note** is `docs/34-state-interfaces.md`; CLAUDE.md's description of the stores
   ("store calls are synchronous and never awaited") is updated in the same PR.
 
+### PR 3: Postgres, settled before building (2026-10-29)
+
+Answers given before building (2026-10-29):
+
+- **`asyncpg` 0.32.0**, pinned exactly: PyPI provenance attestations from `MagicStack/asyncpg`'s
+  `release.yml`, and the tag's commit is the one the release run built (`docs/licenses.md`).
+- **Postgres 18.6, pinned at the digest recorded on 2026-10-07**
+  (`postgres:18.6-trixie@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336`):
+  it meets the two-week rule. The current tags were rebuilt 2026-10-28 for Debian base layers,
+  with the same PostgreSQL package.
+- **Budgets move to PR 3b.** That covers the reservation (3.1), the per-tier settings of Q2 and
+  the two-instance budget-edge test of Q1. Until PR 3b lands, `GATEWAY_STATE=shared` refuses to
+  start, so two instances can never each spend one budget. Section 8's row for PR 3 is narrowed
+  accordingly; PR 3b follows PR 3 and comes before PR 2b.
+
+Settled from the code:
+
+- **Stores** (`gateway/postgres.py`): a Postgres implementation of every durable store protocol
+  of PR 1, over one baseline schema (`pg0001`, the tables of SQLite migrations 1 to 13). The
+  schema version is applied under an advisory lock. A test checks that the two schemas have the
+  same tables and columns. SQLite stays the default.
+- **Two pools.** `write_transaction()` takes a connection from the management pool, and every
+  call outside one uses the request pool. Inside a transaction every store uses that
+  transaction's connection (a context variable).
+- **The lock (3.6).** One global transaction-level advisory lock, taken with
+  `pg_try_advisory_xact_lock` in a loop on the injected clock, up to
+  `GATEWAY_STATE_LOCK_TIMEOUT_MS` (default 2000). At the limit nothing is written and the answer
+  is `503 state_unavailable`. `statement_timeout` and `idle_in_transaction_session_timeout` bound
+  the holder.
+- **Time (3.8).** One SQL function, `gateway_now_ms()`, is `clock_timestamp()` in production; a
+  test schema replaces it with one that reads a row the test sets.
+  - The statements that decide a window read it: the step-up claim, the lockout count.
+  - The services read it through a new `StoreClock` on the state bundle: one `now_ms()` per
+    operation for sessions, step-up, the lockout, and key expiry. On SQLite and in memory it is
+    the injected epoch, as before.
+  - Valkey's skew check measures against it when Postgres is configured.
+- **Q3 on Postgres:** `count_login_failure` is one `UPDATE ... RETURNING`.
+- **Migration:** `scripts/manage.py migrate-to-postgres` (with `--dry-run`), and
+  `migrate-to-sqlite` back into a new file (section 2.3, 2.4).
+- **`/readyz`**: ready or not, nothing more.
+- **Tests and compose:** tests marked `postgres` run when `GATEWAY_TEST_POSTGRES_URL` is set,
+  each in a schema of its own. `docker-compose.postgres.yml` (127.0.0.1 only, data on a tmpfs)
+  and a CI job run them. The operator starts the compose file locally.
+
 ## 9. Threat-model additions
 
 - **Two new network peers** holding everything: Postgres holds key HMACs, password hashes,
