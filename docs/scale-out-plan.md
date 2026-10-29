@@ -1,9 +1,12 @@
 # Scale-out plan: several gateway instances on Postgres and Redis
 
-Status: **draft, waiting for approval** (it touches authentication, sessions, step-up, the
-lockout, provider keys at rest, a migration path for every table, and two new network surfaces:
-the gateway's connections to Postgres and to Redis). Branch `scale-out/plan`, from `main` at
-`8bebbe8`. Plan only: no code, no dependency added.
+Status: **approved 2026-10-28** (PR #21), with the answers to Q1 to Q4 and three additions
+folded in below (section 3.8 for time, section 3.6 for the lock, section 11 for the answers).
+It needed approval because it touches authentication, sessions, step-up, the lockout, provider
+keys at rest, a migration path for every table, and two new network surfaces: the gateway's
+connections to Postgres and to Redis. Branch `scale-out/plan`, from `main` at `8bebbe8`. PR 1 is
+being built (`scale-out/step-1`, from this branch); PRs 2 to 4 are not started. Valkey and
+`asyncpg` still need the provenance check, in the PR that adds each.
 
 **Goal.** Run several gateway instances behind a load balancer, sharing state through Postgres
 (durable rows) and Redis (short-window counters), so that every rule the gateway enforces today
@@ -22,7 +25,10 @@ each with a test (section 5):
    against both and compares every response and every stored row).
 3. Where requests overlap, the shared backends are stricter in exactly the places listed in
    section 3, and nowhere else. The one that a user could notice is the budget edge (section
-   3.1): it needs an answer (question Q1).
+   3.1, answered by Q1).
+
+One deliberate exception, approved as Q3: the account lockout's lost update (section 3.3) is
+fixed on SQLite too, in PR 1, and named as a behaviour change there.
 
 ## 1. Every piece of state the gateway holds today
 
@@ -36,7 +42,8 @@ Two facts decide most rows:
   the process start, so two instances' readings cannot be compared. Every in-memory window
   today (rate limits, the login limiter, the step-up and user-creation caps, test-connection
   counts, the circuit breakers) is timed on that clock. Anything shared must be timed on
-  `EpochSource` (calendar time), which is what the stored rows already use (decision 3).
+  calendar time: Postgres's for windows held in Postgres, the instance's `EpochSource` within a
+  tested skew bound for windows held in Redis (section 3.8).
 - **Many checks are atomic today only because the event loop is single-threaded,** or because
   SQLite's `BEGIN IMMEDIATE` takes a lock on the whole database. Neither holds across
   processes on Postgres. Each such check is listed below and handled in section 3.
@@ -193,8 +200,14 @@ totals are not even shared. The plan:
   INSERT INTO budget_reservations (...) VALUES (..., $expires_at);
   ```
   `$tokens` is the request's upper bound: its prompt tokens (cached tokens not subtracted) plus
-  its `max_tokens` (the request's, or the plan's, which today is also used when a request asks
-  for none). With no bound at all, see question Q2.
+  its completion bound, capped at the tier's context limit (Q2):
+  `min(prompt + completion_bound, context_tokens)`. The completion bound is the request's
+  `max_tokens`, else the plan's (which today is also used when a request asks for none), else
+  the tier's `reserve_completion_tokens`. `context_tokens` and `reserve_completion_tokens` are
+  per-tier settings in `backends.yaml`, operator-supplied like the placeholder prices: no
+  number is shipped for them, and `shared` refuses to start while a tier lacks either
+  (decision 18). The reservation is a bound for admission only: settle reconciles to the
+  actual billed tokens, so nothing is ever charged from it.
 - **Settle** when the request finishes, in one transaction: delete the reservation row; if it
   was there, `reserved_tokens -= tokens`; always `committed_tokens += billed`; append the usage
   event. A reservation already swept is not subtracted twice.
@@ -212,10 +225,9 @@ budget by at most its own bound, as one request can today.
 **The rule that changes.** The admission condition counts in-flight reservations
 (`committed + reserved < budget`). Sequential requests get exactly today's answers (no
 reservation is in flight when the next is checked). Concurrent requests at the edge are refused
-where today they are admitted. Q1 asks whether that is wanted, or whether to require the whole
-bound to fit (`committed + reserved + tokens <= budget`, never over budget, stricter for
-sequential requests too). The plan proposes the first. The SQLite ledger is not changed in
-either case (section 6).
+where today they are admitted. Approved as Q1, over the alternative of requiring the whole
+bound to fit (`committed + reserved + tokens <= budget`, never over budget, but stricter for
+sequential requests too). The SQLite ledger is not changed (section 6).
 
 ### 3.2 Step-up: consume-on-use claimed once
 
@@ -248,9 +260,14 @@ Login keeps its structure: one lookup, one verify, then the decision; every refu
 same steps (the structural test of `docs/27` runs on both backends). The lockout check itself
 reads `locked_until_ms` after the verify, as today.
 
-This also fixes the lost update that exists in one process today (section 1.1). Fixing it on
-SQLite as well changes one-instance behaviour (concurrent wrong passwords count fully), so it
-is asked as Q3 rather than folded in.
+This also fixes the lost update that exists in one process today (section 1.1). **Approved as
+Q3: fixed on SQLite too, in PR 1,** as a named, deliberate behaviour change: concurrent wrong
+passwords now each count. On SQLite the count is one store call, `count_login_failure`, that
+reads the row and writes the new count inside `BEGIN IMMEDIATE` (atomic: SQLite admits one
+writer), instead of the service writing a count computed from the row it read before the
+password verify. A regression test makes two wrong-password logins both read the user before
+either counts (a hash runner that waits on an event), and asserts 2; the mutation (compute
+from the stale row again) gives 1 and must fail it.
 
 ### 3.4 Sliding windows in Redis
 
@@ -281,11 +298,38 @@ user's name and seat checked again after the hash, the application-mode bound, a
 provider changes with their audit rows. Two more are atomic today only because nothing awaits
 between the read and the write: the active-key cap and key issuing.
 
-On Postgres, `write_transaction()` takes `pg_advisory_xact_lock(<one fixed key>)`: one global
-write lock for management writes, which is exactly SQLite's semantics (decision 6). These are
-administrative writes, rare next to requests; none of the request path (budgets, step-up
-claims, the lockout, sessions) goes through it. The active-key cap and key issuing move into
-it.
+On Postgres, `write_transaction()` takes one transaction-level advisory lock on a fixed key:
+one global write lock for management writes, which is exactly SQLite's semantics (decision 6).
+These are administrative writes, rare next to requests; none of the request path (key checks,
+budgets, step-up claims, the lockout, sessions, chat admission) goes through it. The
+active-key cap and key issuing move into it.
+
+**Acquisition has a timeout and fails closed** (added on approval). The lock is taken with
+`pg_try_advisory_xact_lock` in a loop with backoff on the injected clock, up to
+`GATEWAY_STATE_LOCK_TIMEOUT_MS` (default 2000, decision 20); at the timeout the transaction
+rolls back, nothing is written, and the request gets `503 state_unavailable`. A consume-on-use
+step-up window is given back, because nothing changed (the `requires` rule of docs/32). The
+holder is bounded too: `SET LOCAL statement_timeout` and `idle_in_transaction_session_timeout`
+end a transaction that stalls, so a stuck holder releases the lock instead of keeping every
+other management write waiting. On SQLite the existing `busy_timeout` (5 s) is the same
+bound: a writer that cannot get the database lock fails with nothing written, as today; PR 1
+does not change what that answers.
+
+**A slow management write does not delay chat admission** (added on approval). Two things make
+that true, and each has a test:
+
+- Admission never takes the advisory lock (above).
+- Admission never waits for a connection a management write holds: the Postgres stores use two
+  connection pools, one for the request path and one for management (decision 19), so a
+  management transaction that holds the lock and its connection takes nothing from requests.
+
+The test: on two instances, a management write is held inside the lock (a test hook that
+waits on an event inside the transaction, with every management connection also checked out);
+while it is held, chat requests on both instances are admitted, served and settled; only then
+is the event set. The test waits on states, never on times. Its mutations: take the lock in
+`reserve()`, and serve admission from the management pool; each makes the requests wait for
+the event, and the test fails (by a bounded wait that reports which requests had not
+finished).
 
 ### 3.7 Circuit breakers
 
@@ -296,6 +340,66 @@ instances probes. A probe whose instance dies would hold `probing` forever, so i
 expiry (the tier's total timeout); this is new and is decision 10. Transitions are returned by
 the script and published by the instance that made them as `circuit_breaker` events on its own
 `EventBus`, so monitoring stays local and decides nothing.
+
+### 3.8 Time: whose clock decides a window (added on approval)
+
+A window that decides a security outcome must not depend on which instance's clock read it.
+Two rules, one per store:
+
+**Windows held in Postgres use Postgres's time.** These are the account lockout (5 failures in
+15 minutes, locked for 15), the step-up window (opened, checked, claimed, given back), session
+idle and absolute expiry, `last_seen`, API key expiry and the rotation grace, the budget
+period, and reservation expiry. Every statement that decides one of them reads the time in
+SQL, from one function, `gateway_now_ms()`, never from a parameter the instance sends. A
+request that needs the time for several decisions (authenticate a session, then check its
+step-up window) takes it once, returned with the row it first reads, and uses that one value
+throughout, so no decision in one request sees two clocks. Whatever is stored as a time
+(`locked_until_ms`, `step_up_until_ms`, `expires_at_ms`) is computed from it too.
+
+`gateway_now_ms()` is how this stays injectable: in production it returns
+`clock_timestamp()` in epoch milliseconds; the test schema replaces it with a function that
+reads a one-row table the test sets, which is the Postgres side of the test's `EpochSource`.
+The instance's own `EpochSource` is then used for nothing these windows decide in `shared`
+mode. On SQLite and in memory nothing changes: one process, one clock.
+
+**Windows held in Redis use the instance's `EpochSource`, with a stated and tested skew
+bound.** These are the request rate limit, the login limiter, the step-up session cap, the
+user-creation cap, the test-connection counts, the audit cap's minute and the circuit
+breakers. Redis's own `TIME` is not used: it would be a second clock outside the injected
+ones. The bound, `GATEWAY_STATE_MAX_SKEW_MS`, default 1000 (decision 21):
+
+- Each instance compares its `EpochSource` with `gateway_now_ms()` at startup and every 30
+  seconds, taking the midpoint of the round trip; beyond the bound it refuses to start, or
+  reports not ready and refuses every request that would use a Redis window, until a check
+  passes again (fail closed).
+- **What the bound tolerates, stated:** with every instance within `s` of Postgres, any two
+  are within `2s` of each other. A sliding window of length `W` then behaves, across
+  instances, as one between `W - 2s` and `W + 2s` long: a limit of `L` a minute can admit at
+  most `L` plus the requests that arrive in a `2s` slice at the edge of the window, and a
+  breaker can open or half-open up to `2s` early or late. Nothing that a Redis window decides
+  is durable: the lockout itself, step-up windows and budgets are in Postgres, under the first
+  rule.
+- **Tested:** two instances with their epochs offset by just under the bound in opposite
+  directions; the rate limit and the login limiter admit no more than the stated tolerance
+  allows, and exactly the limit when requests are spread inside the window. An offset just
+  over the bound: the instance refuses to start, and a running instance that drifts past it
+  reports not ready and refuses at once. Mutation: disable the periodic check, and the drift
+  test fails.
+
+### 3.9 Redis restarts (Q4)
+
+Approved: a Redis restart resets its counters and that is accepted, because the per-account
+lockout and step-up consume-on-use (and budgets, sessions and key state) are in Postgres and do
+not depend on Redis. The restart is detected and recorded, never silent:
+
+- Each instance reads Redis's `run_id` (`INFO server`) at startup, on every reconnect, and with
+  the 30-second skew check. A `run_id` that differs from the last one seen is a restart.
+- On a restart the instance publishes a `state_store_restarted` event on its `EventBus` and
+  counts it in a Prometheus counter (`gateway_state_store_restarts_total{store="redis"}`). Each
+  instance reports what it saw; nothing decides anything from them (monitoring watches only).
+  The event is also written to the audit log once per `run_id` (the first instance to `SET NX`
+  a key holding the new `run_id` writes it), so the record survives the instance.
+- The exposure is in the threat model (section 9).
 
 ## 4. Failure behaviour: missing is forbidden, never open
 
@@ -309,7 +413,9 @@ answer ever reveals which store is down beyond that.
 | **Postgres, at settle time** (the request ran, the charge fails) | The answer has been sent; the usage cannot be lost silently. The settle is retried with backoff in the instance until it succeeds or the instance stops; while any settle is pending the instance reports not ready and admits nothing new. An instance that stops with a settle pending logs the reservation id (nothing of the request) and the sweep releases the reservation; the usage of that request is lost and counted in a metric (decision 8) |
 | **Redis** | Rate limit: refused (503, not 429: the caller did nothing wrong). Login limiter: the login is refused after the same steps as every other refusal. Step-up and user-creation caps: refused. Test-connection: refused. Audit unknown-user cap: the row is **dropped and counted locally** (writing it would let a flood through the cap; the local count is written as a `rows_dropped` entry once Redis is back) |
 | **Redis, breakers** | Every organization provider is treated as open: skipped with `circuit_open`. That only ever narrows where a prompt can go: `local_only` is unaffected, the fallback modes fall back to the gateway's tier as their mode allows, never further |
-| **Redis restart (empty)** | Not detectable per key. Every counter it held covers at most one hour, so the loss is bounded by its window; the durable controls (the account lockout, budgets, step-up windows, sessions) are in Postgres and survive. The startup check requires `maxmemory-policy noeviction` (an evicted counter is a forgotten failure: open) and appendonly persistence, and refuses to start without them (decision 9) |
+| **Redis restart (empty)** | Accepted (Q4). Every counter it held covers at most one hour, so the loss is bounded by its window; the durable controls (the account lockout, step-up consume-on-use, budgets, sessions) are in Postgres and survive. Detected by `run_id` and recorded as an event, a metric and one audit row (section 3.9). The startup check requires `maxmemory-policy noeviction` (an evicted counter is a forgotten failure: open) and appendonly persistence, and refuses to start without them (decision 9) |
+| **The management write lock** | Not acquired within `GATEWAY_STATE_LOCK_TIMEOUT_MS`: rolled back, nothing written, `503 state_unavailable`, a consume-on-use window given back (section 3.6). Chat admission does not take it |
+| **Clock skew past the bound** | Refuses to start; when it happens while running, not ready, and every request that would use a Redis window is refused until a check passes (section 3.8) |
 | **Either, at startup** | The instance refuses to start, as it does today without `GATEWAY_VAULT_KEY` |
 | **Slow** | Every call has a timeout on the injected clock (decision 7); a timeout is unavailability, with the effects above |
 
@@ -325,8 +431,10 @@ Every one of these has a test with the store made unavailable (section 5.4).
   unless `GATEWAY_TEST_POSTGRES_URL` and `GATEWAY_TEST_REDIS_URL` are set; unlike `real_models`,
   **CI runs them**, in a new job with Postgres and Valkey service containers on Linux
   (decision 4). Each test gets its own Postgres schema and Redis key prefix, dropped after.
-- Time in `shared` tests comes from a `ClockEpoch` over a `SimClock` with no sleepers, moved
-  explicitly by the test: awaiting network I/O must not let simulated time jump.
+- Time in `shared` tests is set by the test, never real: Postgres's through the test
+  `gateway_now_ms()` (section 3.8), each instance's through a `ClockEpoch` over a `SimClock`
+  with no sleepers, both moved explicitly together (or apart, for the skew tests): awaiting
+  network I/O must not let simulated time jump.
 
 ### 5.2 Two-instance tests
 
@@ -367,6 +475,12 @@ then the code is restored byte for byte and the tests pass again (shown in each 
 | Write lock: `write_transaction()` without the advisory lock | Last-admin, membership and key-cap two-instance tests |
 | `last_used_at` / `last_seen`: plain `SET` | Not-backwards test |
 | Fail closed: each "unavailable" branch changed to admit | Its section 5.4 test |
+| Lockout on SQLite (PR 1, Q3): count from the row read before the verify | The concurrent wrong-password regression test |
+| Admission takes the management lock, or uses the management pool | The slow-management-write test (section 3.6) |
+| Lock acquisition without the timeout | The lock-timeout test: a held lock must give 503 with nothing written, not a hang (bounded wait) |
+| A Postgres-held window decided with the instance's time instead of `gateway_now_ms()` | The skewed-instance lockout and step-up tests |
+| The periodic skew check disabled | The drift test (section 3.8) |
+| Restart detection compares nothing | The Redis restart test: restart the container, expect one event per instance and one audit row |
 
 The interleaving these tests need has to happen on every run, not by luck: each mutated form
 has a read and a write separated by a network round trip, and the tests start all requests
@@ -428,12 +542,12 @@ order.
 | PR | Branch | What | Behaviour change |
 |---|---|---|---|
 | 0 | `scale-out/plan` | This plan | None |
-| 1 | `scale-out/step-1` | Every store behind a protocol, async; `StateBackend` with `memory` and `sqlite`; `write_transaction()`; the window, budget, breaker and audit-cap protocols over today's in-memory classes | None: the same tests, the perf gate and the protected outputs unchanged |
+| 1 | `scale-out/step-1` | Every store behind a protocol, async; `StateBackend` with `memory` and `sqlite`; `write_transaction()`; the window, budget, breaker and audit-cap protocols over today's in-memory classes; the lockout fix on SQLite (Q3) | One, named: concurrent wrong passwords each count (Q3). Otherwise the same tests, the perf gate and the protected outputs unchanged |
 | 2 | `scale-out/step-2` | Postgres: `asyncpg` (provenance check), `pg0001`, every durable store, the budget reservation, the step-up claim, the lockout update, the write lock, `migrate-to-postgres` and back; contract tests on Postgres; the CI service job | Only with `GATEWAY_STATE=shared`, which is not yet startable |
 | 3 | `scale-out/step-3` | Redis: `redis` (provenance check), the window script, the audit cap, the breakers, the startup checks; `GATEWAY_STATE=shared` startable; `/readyz`; the failure behaviour | Only with `shared` |
 | 4 | `scale-out/step-4` | The two-instance tests in process and in two processes, the mutation table, the failure tests, `benchmarks/shared_state.py`, the note, the compose file for a two-instance demo on Postgres and Valkey | None |
 
-PRs 2 and 3 need plan approval items answered first (section 10). Each PR has the template,
+The questions PRs 2 and 3 depended on are answered (section 11). Each PR has the template,
 the definition of done, and its note (`docs/34-*` onward).
 
 ## 9. Threat-model additions
@@ -448,10 +562,18 @@ the definition of done, and its note (`docs/34-*` onward).
 - **Anyone who can write to Postgres owns the gateway**, as anyone who can write the SQLite file
   does today. Least-privilege database roles: the gateway's role can read and write its tables
   and cannot alter schema; migrations run under a separate role (decision 5).
-- **Clock skew between instances** shifts every window by the skew (a limit can be off by the
-  requests in that slice) and the step-up window's end. Instances must run NTP; the startup
-  check compares the instance's epoch with Postgres's `now()` and refuses beyond 2 s (decision
-  3).
+- **A Redis restart resets every Redis counter** (accepted, Q4). After one, an attacker gets a
+  fresh window on each: up to 5 more login attempts per username in the limiter (the account
+  lockout in Postgres still caps a real account at 5 failures per 15 minutes), a full minute's
+  rate limit per application, a fresh step-up failure cap per session, a fresh user-creation
+  and test-connection allowance, a fresh audit cap minute, and every breaker closed again (one
+  more round of failures before a failing provider is skipped). Someone who can restart Redis
+  at will can repeat this once per restart; restarts are recorded (section 3.9), so it cannot
+  happen unseen. Not exposed: the account lockout, step-up consume-on-use, budgets, sessions,
+  keys, and every provider and mode setting.
+- **Clock skew between instances.** Windows held in Postgres use Postgres's time and are not
+  affected. Windows held in Redis tolerate a stated skew (section 3.8): each instance stays
+  within `GATEWAY_STATE_MAX_SKEW_MS` of Postgres, or refuses. Instances must run NTP.
 - **A load balancer is a new forwarding layer.** `LocalOnlyMiddleware` already never trusts
   forwarding headers; behind a load balancer every peer is the balancer, so the local-only
   surfaces (monitoring, `/v1/admin`, the dashboard) must not be routed through it at all. Not
@@ -468,9 +590,9 @@ Numbered so they can be objected to.
    call a yield point on `SimClock`.
 2. **TLS required to Postgres and Redis off loopback,** with `GATEWAY_STATE_PRIVATE_NETWORK=1`
    to allow plain connections on a network the operator vouches for.
-3. **Shared windows are timed on `EpochSource`, not `WallClock` and not the server's clock**
-   (`TIME` in Redis, `now()` in Postgres), so the injectable-clock rule holds and tests stay
-   deterministic; with the 2 s skew check at startup.
+3. **Superseded on approval by section 3.8:** windows held in Postgres use Postgres's time
+   through `gateway_now_ms()`; windows held in Redis use the instance's `EpochSource` within a
+   tested skew bound. Redis's `TIME` is never used.
 4. **Valkey, not Redis,** in CI and compose, for the license; the gateway speaks the protocol
    and works with either.
 5. **Two migration series kept in step** (`m00NN` and `pg00NN` in the same PR), with a
@@ -500,20 +622,40 @@ Numbered so they can be objected to.
     instance, at the cost of one Postgres lookup per request (measured in PR 4).
 17. **`ProcessLock` stays for SQLite only;** one process per SQLite database remains the rule.
 
-## 11. Questions to answer before PR 2
+Added with the approved answers (2026-10-28):
 
-- **Q1. The budget edge.** Admit when `committed + reserved < budget` (proposed: sequential
-  requests unchanged, concurrent requests at the edge refused where today they are admitted;
-  at most one request's bound over budget), or when `committed + reserved + tokens <= budget`
-  (never over budget; a request whose bound does not fit is refused even when tokens remain)?
-- **Q2. A request with no bound** (no `max_tokens` from the request or the plan): reserve the
-  prompt plus a configured default, or refuse such requests under `shared`?
-- **Q3. The lockout lost update in one process today** (section 3.3): fix it on SQLite too, as
-  its own small PR with its mutation check (a deliberate one-instance behaviour change), or
-  leave SQLite as it is?
-- **Q4. Shared Redis restart:** accept the reset of at most one window (proposed), or refuse
-  logins for one lockout window after a Redis restart is detected (safer, locks everyone out
-  for 15 minutes)?
+18. **The tier's `context_tokens` and `reserve_completion_tokens` are operator settings with
+    no shipped value,** like the placeholder prices: no number is invented for them, and
+    `shared` refuses to start without them. The simulated wiring never reserves, so it needs
+    neither.
+19. **Two Postgres connection pools,** request path and management, so a management
+    transaction never holds a connection admission needs.
+20. **The lock is taken by a try-lock loop on the injected clock** rather than a blocking
+    `pg_advisory_xact_lock` under `lock_timeout`: the timeout is then on the same clock as
+    every other timeout, and testable on simulated time.
+21. **The skew bound defaults to 1000 ms** for Redis-held windows, checked every 30 s; the
+    tolerance this gives is stated in section 3.8 rather than assumed.
+22. **The Q3 fix goes in PR 1,** because the atomic `count_login_failure` is one of the store
+    methods PR 1 introduces; it is the one behaviour change PR 1 makes, named in its
+    description.
+
+## 11. Questions, answered 2026-10-28
+
+- **Q1. The budget edge:** admit when `committed + reserved < budget` (the proposal).
+  Sequential requests unchanged; concurrent requests at the edge refused where today they are
+  admitted; at most one request's bound over budget.
+- **Q2. The reservation's bound:** the prompt plus a per-tier configured default, capped at
+  the model's context limit, reconciled to actual usage at settle (section 3.1).
+- **Q3. The lockout lost update:** fixed on SQLite too, by an atomic increment, with a
+  regression test and a mutation check, named as a deliberate behaviour change (section 3.3;
+  in PR 1).
+- **Q4. Redis restarts:** the counter reset is accepted; the per-account lockout and step-up
+  consume-on-use stay in Postgres; a restart is detected and recorded as an event and a
+  metric; the exposure is in the threat model (sections 3.9 and 9).
+
+Added on approval: windows that decide security outcomes use Postgres's time, or a stated and
+tested skew (section 3.8); a test that a slow management write under the lock does not delay
+chat admission, and lock acquisition with a timeout that fails closed (section 3.6).
 
 ## 12. Not built
 

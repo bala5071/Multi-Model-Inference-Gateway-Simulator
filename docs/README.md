@@ -21,7 +21,7 @@ or Python and Node, start from [note 18](18-demo.md).
 | [platform-plan.md](platform-plan.md) | Applications, API keys and persistent usage: the concept map, migration order and risks. A plan, not a record of what was built |
 | [identity-plan.md](identity-plan.md) | A2: users, organizations, roles, sessions, signed access tokens, step-up, the audit log, and what stays local until A8. A plan, not a record of what was built |
 | [provider-plan.md](provider-plan.md) | A5: provider adapters, the chat endpoint, the key vault, provider settings and fallback modes. Approved; a plan, not a record of what was built |
-| [scale-out-plan.md](scale-out-plan.md) | Several gateway instances on Postgres and Redis: every piece of state, the atomic operations, failing closed, the migration from SQLite and back. A draft plan, waiting for approval |
+| [scale-out-plan.md](scale-out-plan.md) | Several gateway instances on Postgres and Redis: every piece of state, the atomic operations, failing closed, the migration from SQLite and back. Approved; a plan, not a record of what was built |
 
 ## Design notes, in the order things were built
 
