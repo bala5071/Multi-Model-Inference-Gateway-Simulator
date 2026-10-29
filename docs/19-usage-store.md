@@ -33,7 +33,8 @@ Code: `src/gateway/usage.py`, `src/gateway/database.py`, `src/gateway/migrations
   was created, as before). Step 3 will pass a stored anchor so a restart keeps the period.
 - **Store calls are synchronous and never awaited.** `SimClock` moves time forward when the
   event loop is idle, and a write handed to a thread makes the loop look idle. The store
-  protocol has no async methods, and a test checks that.
+  protocol has no async methods, and a test checks that. (Since note 34 the methods are
+  coroutines that never suspend, which keeps the same guarantee; the test checks that.)
 
 ## The epoch source
 
