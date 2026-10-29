@@ -499,9 +499,7 @@ class AccountService:
         # Checked again with the insert, in one transaction: on a store shared by several
         # instances another may have taken the name or the seat since (section 3.6).
         async with self.store.write_transaction():
-            organization = await self._check_new_user(
-                name, organization_id, actor, platform_admin
-            )
+            organization = await self._check_new_user(name, organization_id, actor, platform_admin)
             outsider = actor is None or (
                 actor.holds(Role.PLATFORM_ADMIN) and actor.organization_id != organization.id
             )
