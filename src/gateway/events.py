@@ -20,6 +20,8 @@ EVENT_TYPES = (
     "budget_exhausted",
     # An organization provider's circuit breaker moved (docs/33).
     "circuit_breaker",
+    # The shared counter store came back empty after a restart (docs/35).
+    "state_store_restarted",
 )
 
 

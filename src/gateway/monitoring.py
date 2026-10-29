@@ -313,6 +313,11 @@ class Monitor:
         rejection; it never reached a model, so no model series and no event."""
         self._series.application_rejected(application_id, "rate_limited")
 
+    def state_store_restarted(self, store: str) -> None:
+        """The shared counter store restarted and its counters are empty (docs/35). Counted
+        in ``gateway_events_total{type="state_store_restarted"}`` like every event."""
+        self._events.publish("state_store_restarted", store=store)
+
     def slo_transition(self, transition: Transition) -> None:
         """For ``SloMonitor(on_transition=...)``."""
         self._series.set_degraded(transition.model, transition.degraded)

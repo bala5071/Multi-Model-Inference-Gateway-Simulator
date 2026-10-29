@@ -13,6 +13,8 @@ from gateway.vault import VAULT_KEY_ENV
 from helpers import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME, TEST_PEPPER, TEST_VAULT_KEY
 
 REAL_MODELS_ENV = "GATEWAY_REAL_MODELS"
+# A Valkey for the tests marked valkey (docker-compose.valkey.yml), e.g. redis://127.0.0.1:6380/0.
+VALKEY_URL_ENV = "GATEWAY_TEST_VALKEY_URL"
 # Live calls to hosted providers (docs/31): never in CI, never by default.
 LIVE_PROVIDERS_ENV = "GATEWAY_LIVE_PROVIDERS"
 
@@ -28,6 +30,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     They need model servers running on this machine (see docs/12-real-models.md), which CI
     does not have. Run them with ``GATEWAY_REAL_MODELS=1 uv run pytest -m real_models``.
     """
+    valkey = bool(os.environ.get(VALKEY_URL_ENV))
+    skip_valkey = pytest.mark.skip(
+        reason=f"needs Valkey (docker-compose.valkey.yml); set {VALKEY_URL_ENV} to run"
+    )
     real = os.environ.get(REAL_MODELS_ENV) == "1"
     live = os.environ.get(LIVE_PROVIDERS_ENV) == "1"
     skip_real = pytest.mark.skip(reason=f"needs real model servers; set {REAL_MODELS_ENV}=1 to run")
@@ -35,6 +41,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         reason=f"calls a hosted provider and can cost money; set {LIVE_PROVIDERS_ENV}=1 to run"
     )
     for item in items:
+        if "valkey" in item.keywords and not valkey:
+            item.add_marker(skip_valkey)
         if "real_models" in item.keywords and not real:
             item.add_marker(skip_real)
         if "live_provider" in item.keywords and not live:

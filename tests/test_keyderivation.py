@@ -22,7 +22,7 @@ OTHER_PEPPER = b"a different test pepper, long enough to be one"
 def test_every_purpose_has_its_own_label() -> None:
     labels = [purpose.value for purpose in KeyPurpose]
     assert len(set(labels)) == len(labels)
-    assert set(labels) == {"csrf token", "login limiter"}
+    assert set(labels) == {"csrf token", "login limiter", "counter keys"}
 
 
 def test_derived_keys_differ_from_each_other_and_from_the_pepper() -> None:

@@ -798,7 +798,8 @@
       "timeout": 0,
       "downgrade": 1,
       "budget_exhausted": 0,
-      "circuit_breaker": 0
+      "circuit_breaker": 0,
+      "state_store_restarted": 0
     },
     "recent": [
       {

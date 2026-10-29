@@ -15,8 +15,8 @@ import httpx
 
 from gateway.app import create_app
 from gateway.applications import SqliteApplicationStore
-from gateway.audit import AuditLog, SqliteAuditStore
-from gateway.auth import SESSION_COOKIE, AccountAccess, AccountService
+from gateway.audit import AuditCap, AuditLog, SqliteAuditStore
+from gateway.auth import SESSION_COOKIE, AccountAccess, AccountService, AccountWindows
 from gateway.clock import ClockEpoch, SimClock
 from gateway.continuous import build_continuous_registry
 from gateway.database import open_database
@@ -61,11 +61,15 @@ def make_service(
     unknown_user_rows_per_minute: int = 60,
     secret: bytes = TEST_PEPPER,
     user_create_attempts: int = 10,
+    windows: AccountWindows | None = None,
+    audit_cap: AuditCap | None = None,
 ) -> AccountService:
     return AccountService(
         SqliteAccountStore(connection),
         AuditLog(
-            SqliteAuditStore(connection), unknown_user_rows_per_minute=unknown_user_rows_per_minute
+            SqliteAuditStore(connection),
+            cap=audit_cap,
+            unknown_user_rows_per_minute=unknown_user_rows_per_minute,
         ),
         Passwords(PasswordHasher(CHEAP), InlineHashRunner()),
         roles=SqliteRoleStore(connection),
@@ -76,6 +80,7 @@ def make_service(
         random_bytes=random.Random(seed).randbytes,
         audit_retention_ms=audit_retention_ms,
         user_create_attempts=user_create_attempts,
+        windows=windows,
     )
 
 

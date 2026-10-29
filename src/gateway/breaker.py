@@ -60,7 +60,6 @@ class _Breaker:
         "open_ms",
         "open_until_ms",
         "probing",
-        "slow_since_ms",
         "state",
         "successes",
     )
@@ -72,8 +71,33 @@ class _Breaker:
         self.open_until_ms = 0.0
         self.open_ms = 0.0
         self.probing = False
-        self.misses = 0
-        self.slow_since_ms: float | None = None
+
+
+class SlowWarnings:
+    """The slow-provider warning per (organization, provider), in this instance's memory: a
+    warning seen by one instance is still true, so it is never shared
+    (docs/scale-out-plan.md, decision 11)."""
+
+    def __init__(self, clock: Clock, *, slow_after: int = SLOW_AFTER) -> None:
+        self._clock = clock
+        self._slow_after = slow_after
+        self._seen: dict[tuple[str, str], SlowWarning] = {}
+
+    def first_token(self, organization_id: str, provider_id: str, *, missed: bool) -> None:
+        """A hosted answer's first token came within its budget, or did not."""
+        key = (organization_id, provider_id)
+        if not missed:
+            self._seen[key] = SlowWarning(None, 0)
+            return
+        before = self._seen.get(key, SlowWarning(None, 0))
+        misses = before.consecutive_misses + 1
+        since = before.slow_since_ms
+        if misses >= self._slow_after and since is None:
+            since = self._clock.now_ms()
+        self._seen[key] = SlowWarning(since, misses)
+
+    def slow(self, organization_id: str, provider_id: str) -> SlowWarning:
+        return self._seen.get((organization_id, provider_id), SlowWarning(None, 0))
 
 
 class BreakerStore(Protocol):
@@ -110,7 +134,7 @@ class Breakers:
         self._open_ms = open_ms
         self._max_open_ms = max_open_ms
         self._close_after = close_after
-        self._slow_after = slow_after
+        self.warnings = SlowWarnings(clock, slow_after=slow_after)
         self._breakers: dict[tuple[str, str], _Breaker] = {}
 
     def _get(self, organization_id: str, provider_id: str) -> _Breaker:
@@ -181,17 +205,7 @@ class Breakers:
 
     def first_token(self, organization_id: str, provider_id: str, *, missed: bool) -> None:
         """A hosted answer's first token came within its budget, or did not."""
-        breaker = self._get(organization_id, provider_id)
-        if not missed:
-            breaker.misses = 0
-            breaker.slow_since_ms = None
-            return
-        breaker.misses += 1
-        if breaker.misses >= self._slow_after and breaker.slow_since_ms is None:
-            breaker.slow_since_ms = self._clock.now_ms()
+        self.warnings.first_token(organization_id, provider_id, missed=missed)
 
     def slow(self, organization_id: str, provider_id: str) -> SlowWarning:
-        breaker = self._breakers.get((organization_id, provider_id))
-        if breaker is None:
-            return SlowWarning(None, 0)
-        return SlowWarning(breaker.slow_since_ms, breaker.misses)
+        return self.warnings.slow(organization_id, provider_id)

@@ -33,7 +33,7 @@ from enum import StrEnum
 import httpx
 
 from gateway.adapters.base import HttpAdapter
-from gateway.breaker import Breakers
+from gateway.breaker import BreakerStore, SlowWarnings
 from gateway.chat import (
     ChatDelta,
     ChatDeltaCallback,
@@ -149,16 +149,19 @@ class ChatRouter:
         self,
         chat: ChatService,
         modes: ModeStore,
-        breakers: Breakers,
+        breakers: BreakerStore,
         local: LocalDestinations,
         providers: ProviderService | None = None,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
+        *,
+        warnings: SlowWarnings,
     ) -> None:
         if (providers is None) != (client_factory is None):
             raise ValueError("organization providers need their guarded client factory")
         self._chat = chat
         self._modes = modes
         self.breakers = breakers
+        self.warnings = warnings
         self._local = local
         self._providers = providers
         self._client_factory = client_factory
@@ -331,11 +334,11 @@ class ChatRouter:
         if outcome is not None:
             budget = config.first_token_budget_ms or DEFAULT_HOSTED_FIRST_TOKEN_MS
             waited = outcome.timing.first_token_ms - outcome.timing.start_ms
-            self.breakers.first_token(organization_id, config.id, missed=waited > budget)
+            self.warnings.first_token(organization_id, config.id, missed=waited > budget)
             await self.breakers.success(organization_id, config.id)
             return
         if why is FallbackReason.FIRST_TOKEN_BUDGET:
-            self.breakers.first_token(organization_id, config.id, missed=True)
+            self.warnings.first_token(organization_id, config.id, missed=True)
         if why in _BREAKER_FAILURES:
             await self.breakers.failure(organization_id, config.id)
         else:

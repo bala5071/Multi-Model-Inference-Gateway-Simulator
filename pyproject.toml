@@ -92,4 +92,5 @@ filterwarnings = [
 markers = [
     "real_models: needs real model servers running locally; skipped unless GATEWAY_REAL_MODELS=1",
     "live_provider: calls a hosted model provider and can cost money; skipped unless GATEWAY_LIVE_PROVIDERS=1",
+    "valkey: needs a Valkey server (docker-compose.valkey.yml); skipped unless GATEWAY_TEST_VALKEY_URL is set",
 ]

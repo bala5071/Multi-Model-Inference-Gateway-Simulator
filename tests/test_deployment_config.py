@@ -108,3 +108,17 @@ def test_the_readme_makes_its_admin_password_at_run_time_and_keeps_it_out_of_git
         ["git", "check-ignore", "--no-index", "-q", "gateway.env"], cwd=REPO, check=False
     )
     assert ignored.returncode == 0
+
+
+def test_the_valkey_compose_file_is_pinned_local_and_keeps_every_counter() -> None:
+    """The tests' Valkey (docs/35): the digest recorded in docs/licenses.md, published on this
+    machine only, and run so that no counter is evicted or lost on a restart."""
+    data: dict[str, Any] = yaml.safe_load((REPO / "docker-compose.valkey.yml").read_text("utf-8"))
+    valkey = data["services"]["valkey"]
+    image = valkey["image"]
+    assert image.startswith("valkey/valkey:9.0.7@sha256:")
+    assert image.split("@", 1)[1] in (REPO / "docs" / "licenses.md").read_text("utf-8")
+    assert valkey["ports"] == ["127.0.0.1:6380:6379"]
+    command = valkey["command"]
+    assert command[command.index("--maxmemory-policy") + 1] == "noeviction"
+    assert command[command.index("--appendonly") + 1] == "yes"

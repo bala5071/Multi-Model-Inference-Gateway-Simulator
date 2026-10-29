@@ -25,6 +25,8 @@ class KeyPurpose(StrEnum):
 
     CSRF_TOKEN = "csrf token"
     LOGIN_LIMITER = "login limiter"
+    # The names of shared counters in Valkey (docs/35): no username or digest appears there.
+    COUNTER_KEYS = "counter keys"
 
 
 def derive_key(secret: bytes, purpose: KeyPurpose) -> bytes:
