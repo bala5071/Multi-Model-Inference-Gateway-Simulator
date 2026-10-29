@@ -48,6 +48,7 @@ from gateway.clock import SimClock
 from gateway.continuous import build_continuous_registry
 from gateway.passwords import Argon2Parameters, PasswordHasher, PasswordPolicyError
 from gateway.permissions import Assignment, ScopeType
+from gateway.state import StateUnavailableError
 from gateway.users import Bootstrap, normalize_username
 from helpers import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME, default_server
 
@@ -284,8 +285,35 @@ async def _every_refusal(accounts: Accounts) -> dict[str, tuple[str, str]]:
     }
 
 
-async def test_every_refused_login_gets_the_same_bytes(accounts: Accounts) -> None:
+UNREACHABLE = "unreachable"
+
+
+def _account_database_down_for(
+    accounts: Accounts, monkeypatch: pytest.MonkeyPatch, username: str
+) -> dict[str, tuple[str, str]]:
+    """The account database cannot answer a lookup of ``username`` (Postgres down, docs/36);
+    returns that case, with the account's right password."""
+    real_find = accounts.service.store.find_user
+
+    def find_user(name: str) -> Any:
+        if name == username:
+
+            async def down() -> None:
+                raise StateUnavailableError("test: the account database is down")
+
+            return down()
+        return real_find(name)
+
+    monkeypatch.setattr(accounts.service.store, "find_user", find_user)
+    return {"account database down, right password": (username, PASSWORD)}
+
+
+async def test_every_refused_login_gets_the_same_bytes(
+    accounts: Accounts, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cases = await _every_refusal(accounts)
+    await accounts.service.create_user(UNREACHABLE, PASSWORD, "north")
+    cases |= _account_database_down_for(accounts, monkeypatch, UNREACHABLE)
     async with console(accounts) as c:
         answers = {
             name: _raw((await http_login(c, *credentials))[0])
@@ -307,6 +335,8 @@ async def test_every_login_takes_the_same_steps_whatever_is_wrong(
     cases = await _every_refusal(accounts)
     await accounts.service.create_user("good", PASSWORD, "north")
     cases["success"] = ("good", PASSWORD)
+    await accounts.service.create_user(UNREACHABLE, PASSWORD, "north")
+    cases |= _account_database_down_for(accounts, monkeypatch, UNREACHABLE)
     service = accounts.service
     steps: list[tuple[str, object]] = []
     real_find, real_verify = service.store.find_user, service._passwords.hasher.verify

@@ -76,6 +76,7 @@ from gateway.permissions import (
     authorize,
 )
 from gateway.roles import RoleStore
+from gateway.state import StateUnavailableError
 from gateway.users import AccountStore, Bootstrap, Session, User, normalize_username
 
 MINUTE_MS = 60_000.0
@@ -978,7 +979,14 @@ class AccountService:
             name: str | None = normalize_username(username)
         except ValueError:
             name = None
-        user = await self.store.find_user(name if name is not None else _NO_SUCH_USERNAME)
+        try:
+            user = await self.store.find_user(name if name is not None else _NO_SUCH_USERNAME)
+        except StateUnavailableError:
+            # The account database cannot answer: refused as any refusal, after the same
+            # steps (the dummy hash), so the answer and its timing say nothing about why. No
+            # audit row: it would go to the database that is down (docs/36-postgres.md).
+            await self._passwords.check(self._dummy_hash, password)
+            raise LoginFailedError() from None
         stored = user.password_hash if user is not None else self._dummy_hash
         verification = await self._passwords.check(stored, password)
         now = await self._now()
@@ -1047,11 +1055,12 @@ class AccountService:
         """Count a wrong password against the account; lock it at the fifth within the
         window. Returns the count.
 
-        The count is made by the store from the row as it is now, in one write transaction
-        with the lock, the closing of every step-up window and the audit entry: never from the
-        ``user`` read before the password was verified, which another login may have counted
-        since (docs/scale-out-plan.md, section 3.3)."""
-        async with self.store.write_transaction():
+        The count is made by the store from the row as it is now, in one transaction with the
+        lock, the closing of every step-up window and the audit entry: never from the ``user``
+        read before the password was verified, which another login may have counted since
+        (docs/scale-out-plan.md, section 3.3). A request's transaction: on Postgres it does
+        not take the management write lock (section 3.6)."""
+        async with self.store.request_transaction():
             counted = await self.store.count_login_failure(
                 user.id, now, window_ms=LOCK_WINDOW_MS, lock_after=LOCK_FAILURES, lock_ms=LOCK_MS
             )
