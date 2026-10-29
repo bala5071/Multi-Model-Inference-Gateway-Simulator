@@ -6,7 +6,11 @@ docs/35 quotes. Each row is one call, awaited on the event loop, as the request 
 - "rate limit": ``RateLimiter.admit`` for an application with a limit no call reaches (the
   window script: trim, count, add);
 - "login limiter check": ``FailureWindow.blocked`` (one ``ZCOUNT``);
-- "breaker admit": ``BreakerStore.admit`` on a closed breaker (the breaker script).
+- "breaker admit": ``BreakerStore.admit`` on a closed breaker (the breaker script);
+- "chat worst case, N providers": what one chat request makes at most (docs/35): one rate-limit
+  call, then for each of N hosted providers admit, failure, admit (the invalid-tool-JSON
+  retry), failure, one after another: 1 + 4N calls. Fresh provider ids each time, so every
+  breaker is closed as on a first attempt.
 
 The Valkey rows include the timeout on the injected clock that every call has. The Valkey must
 be the operator's (docker-compose.valkey.yml); keys are written under a prefix of their own and
@@ -19,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import itertools
 import os
 import secrets
 from collections.abc import Awaitable, Callable, Sequence
@@ -28,10 +33,10 @@ from redis.asyncio import Redis
 from benchmarks.calibrate import describe_machine
 from benchmarks.usage_store_writes import WriteTimes
 from gateway.auth import LoginLimiter
-from gateway.breaker import Breakers
+from gateway.breaker import Breakers, BreakerStore
 from gateway.clock import SystemEpoch, WallClock
 from gateway.metrics import percentile
-from gateway.ratelimit import RequestRateLimiter
+from gateway.ratelimit import RateLimiter, RequestRateLimiter
 from gateway.valkey import URL_ENV, ValkeyCounters
 
 WARMUP_CALLS = 20
@@ -73,6 +78,21 @@ async def run(calls: int, url: str) -> list[WriteTimes]:
         shared.breakers(),
     )
     key = own_login.key("bench")
+    sequence = itertools.count()
+
+    def chat_worst_case(
+        limiter: RateLimiter, store: BreakerStore, providers: int
+    ) -> Callable[[], Awaitable[object]]:
+        async def one_request() -> None:
+            await limiter.admit("bench", NEVER_REACHED)
+            for _ in range(providers):
+                provider = f"prv_bench_{next(sequence)}"
+                for _ in range(2):
+                    await store.admit("org", provider)
+                    await store.failure("org", provider)
+
+        return one_request
+
     results = [
         await _times("rate limit, memory", calls, lambda: own_rate.admit("bench", NEVER_REACHED)),
         await _times("rate limit, valkey", calls, lambda: rate.admit("bench", NEVER_REACHED)),
@@ -81,6 +101,18 @@ async def run(calls: int, url: str) -> list[WriteTimes]:
         await _times("breaker admit, memory", calls, lambda: own_breakers.admit("org", "prv")),
         await _times("breaker admit, valkey", calls, lambda: breakers.admit("org", "prv")),
     ]
+    for providers in (1, 3):
+        for where, limiter, store in (
+            ("memory", own_rate, own_breakers),
+            ("valkey", rate, breakers),
+        ):
+            results.append(
+                await _times(
+                    f"chat worst, N={providers}, {where}",
+                    calls,
+                    chat_worst_case(limiter, store, providers),
+                )
+            )
     async for name in shared.client.scan_iter(match=prefix + "*"):
         await shared.client.delete(name)
     await shared.aclose()

@@ -43,6 +43,7 @@ from gateway.events import EventBus
 from gateway.localonly import LocalOnlyPolicy
 from gateway.modes import IN_FLIGHT, Mode, SqliteModeStore, effective_mode, looser_than
 from gateway.providers import ProviderConfig, ProviderService, SqliteProviderStore
+from gateway.ratelimit import RequestRateLimiter
 from gateway.redaction import Redactor
 from gateway.usage import ChatSource, SqliteUsageStore
 from gateway.vault import Vault
@@ -900,3 +901,53 @@ def test_the_shared_tls_context_is_pinned(monkeypatch: pytest.MonkeyPatch, tmp_p
         assert context.get_ca_certs() == trusted
     assert inspect.signature(factory).parameters == {}
     assert tuple(f.name for f in dataclasses.fields(ProviderConfig)) == PROVIDER_FIELDS
+
+
+class _Counting:
+    """Counts the calls made on a counter, and the most made at once."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.in_flight = 0
+        self.most_at_once = 0
+
+    def wrap(self, name: str, call: Any) -> Any:
+        async def counted(*args: Any, **kwargs: Any) -> Any:
+            self.calls.append(name)
+            self.in_flight += 1
+            self.most_at_once = max(self.most_at_once, self.in_flight)
+            try:
+                return await call(*args, **kwargs)
+            finally:
+                self.in_flight -= 1
+
+        return counted
+
+
+async def test_the_most_counter_calls_one_chat_request_makes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worst case for the shared counters (docs/35): every hosted provider is tried and
+    each gives invalid tool JSON twice, so each is admitted, reported, admitted again for the
+    one retry, and reported again. One rate-limit call, then four breaker calls per provider,
+    one after another: 1 + 4N, never two at once."""
+    counting = _Counting()
+    real_admit = RequestRateLimiter.admit
+
+    async def admit(self: RequestRateLimiter, *args: Any) -> None:
+        await counting.wrap("rate", lambda: real_admit(self, *args))()
+
+    monkeypatch.setattr(RequestRateLimiter, "admit", admit)
+    async with routing(operator=None) as r:
+        await r.mode(PRIMARY)
+        for provider_id, host in ((A, "a"), (B, "b"), (P, "p")):
+            await r.provider(provider_id, f"{host}.provider.test", role="primary", tools=True)
+        breakers = r.router.breakers
+        for op in ("admit", "release", "success", "failure"):
+            monkeypatch.setattr(breakers, op, counting.wrap(op, getattr(breakers, op)))
+        r.org_net.responses = [BAD_TOOL] * 6
+        answer = await r.chat(tools=True)
+    assert answer.status_code == 502
+    assert counting.calls == ["rate"] + ["admit", "failure"] * 6
+    assert len(counting.calls) == 1 + 4 * 3
+    assert counting.most_at_once == 1

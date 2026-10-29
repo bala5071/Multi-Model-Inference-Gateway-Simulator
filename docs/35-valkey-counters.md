@@ -34,8 +34,8 @@ decided:
 | Counter | When Valkey cannot answer |
 |---|---|
 | Rate limit | the request is refused: 503 `state_unavailable`; no model sees it |
-| Login limiter | `blocked` says yes: the login is refused with the same bytes as every refusal, after the same steps (lookup, verify). A failure that cannot be recorded is not; its attempt was refused anyway |
-| Step-up session cap | `blocked` says yes: refused (403 `step_up_failed`, as every refusal) |
+| Login limiter (`POST /v1/auth/login`) | **Every login is refused**, the right password too: 401 `invalid_credentials`, the same bytes as every refusal, after the same steps (one lookup, one verify). **The per-account lockout still applies:** it is in the account database (SQLite today, Postgres after PR 3), not in Valkey, so a wrong password is still verified and counted there, and five lock the account as they would with Valkey up. Only the limiter's own count of that failure is lost (decision 3 of the PR) |
+| Step-up session cap (`POST /v1/auth/step-up`) | **Every step-up is refused at once**, before any password is verified: 403 `step_up_failed`, as every refusal. Since no password is tried, nothing is counted against the account, and the endpoint cannot be used to guess one |
 | User-creation cap | `admit` says no: refused (429 `user_creation_limited`) |
 | Test-connection counts | 503 `state_unavailable`; no test is run |
 | Circuit breakers | `admit` says no: the provider is skipped, so a request never goes further than its mode allows because of it; `state` reports `open`; reports are dropped |
@@ -44,6 +44,22 @@ decided:
 
 A 503 never says which store or why; the log does, without the address or what was sent. The
 URL may carry a password: it is in no error, log record or repr (tested, with a planted control).
+
+Tested against an address where nothing listens: the right password refused, five wrong ones
+locking the account in its database, and a step-up refused with no password verified.
+`POST /v1/auth/change-password` does not use Valkey: it verifies the current password and
+counts a wrong one against the account, as before.
+
+## One chat request: how many calls
+
+A chat request makes one rate-limit call, then, for each organization provider it tries, a
+breaker `admit` and a report (`success`, `failure` or `release`); the one retry after invalid
+tool JSON adds another `admit` and report. The worst case, every hosted provider tried and each
+retried, is **1 + 4N calls for N providers**, made **one after another**, never pipelined or at
+once: each decides whether the next is made (tested: 13 calls for three providers, never two in
+flight). A provider whose breaker is open costs one call (the refused `admit`). N is the number
+of the organization's enabled providers for the tier and role, which nothing caps. What the
+sequence costs is measured in Timing below.
 
 ## Restarts and the clock
 

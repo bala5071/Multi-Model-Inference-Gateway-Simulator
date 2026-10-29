@@ -394,8 +394,10 @@ not depend on Redis. The restart is detected and recorded, never silent:
 
 - Each instance reads Redis's `run_id` (`INFO server`) at startup, on every reconnect, and with
   the 30-second skew check. A `run_id` that differs from the last one seen is a restart.
-- On a restart the instance publishes a `state_store_restarted` event on its `EventBus` and
-  counts it in a Prometheus counter (`gateway_state_store_restarts_total{store="redis"}`). Each
+- On a restart the instance publishes a `state_store_restarted` event on its `EventBus`, which
+  the existing per-type event counter counts in Prometheus:
+  `gateway_events_total{type="state_store_restarted"}` (as built in PR 2; this line first named
+  a separate `gateway_state_store_restarts_total` family, which was not built). Each
   instance reports what it saw; nothing decides anything from them (monitoring watches only).
   The event is also written to the audit log once per `run_id` (the first instance to `SET NX`
   a key holding the new `run_id` writes it), so the record survives the instance.

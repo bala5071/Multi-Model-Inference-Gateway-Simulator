@@ -18,7 +18,7 @@ import pytest
 from benchmarks import counter_calls
 from redis.asyncio import Redis
 
-from accounts_helpers import PASSWORD, make_accounts
+from accounts_helpers import PASSWORD, make_accounts, make_service
 from gateway.app import create_app
 from gateway.audit import (
     AuditAction,
@@ -33,6 +33,7 @@ from gateway.auth import (
     LOCK_WINDOW_MS,
     AccountWindows,
     LoginFailedError,
+    StepUpFailedError,
 )
 from gateway.breaker import BreakerState, Transition
 from gateway.clock import SimClock, SystemEpoch, WallClock
@@ -512,9 +513,68 @@ async def test_the_counter_benchmark_times_each_call_and_leaves_no_key() -> None
         "login check, valkey",
         "breaker admit, memory",
         "breaker admit, valkey",
+        "chat worst, N=1, memory",
+        "chat worst, N=1, valkey",
+        "chat worst, N=3, memory",
+        "chat worst, N=3, valkey",
     ]
     client = Redis.from_url(url, decode_responses=True)
     try:
         assert [k async for k in client.scan_iter(match="gwbench:*")] == []
     finally:
         await client.aclose()
+
+
+async def test_while_valkey_is_unreachable_logins_and_step_ups_are_refused_and_the_lockout_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Login: every attempt refused (401, the same bytes as every refusal); a wrong password is
+    still verified and counted against the account in its database, so five lock it, as with
+    Valkey up. Step-up: refused at once by the session cap, before any password is verified,
+    so nothing is counted and no guess is tried (docs/35)."""
+    counters = counters_on(NOWHERE, ManualEpoch(), prefix="gwtest:nowhere:", timeout_ms=300.0)
+    try:
+        accounts = make_accounts()  # the account database, and a session made while all is well
+        await accounts.service.create_user("alice", PASSWORD, "north")
+        await accounts.service.change_password(
+            await accounts.service.authenticate(
+                (await accounts.service.login("alice", PASSWORD)).session_id
+            ),
+            PASSWORD,
+            "a different long passphrase here",
+        )
+        live = await accounts.service.login("alice", "a different long passphrase here")
+        windows = AccountWindows(
+            counters.failure_window("login", LOCK_FAILURES, LOCK_WINDOW_MS),
+            counters.failure_window("step-up", 3, 300_000.0),
+            counters.failure_window("user-create", 10, 3_600_000.0),
+        )
+        down = make_service(
+            accounts.clock, accounts.epoch, accounts.connection, accounts.organizations,
+            windows=windows,
+        )  # fmt: skip
+        verified: list[str] = []
+        real_verify = down._passwords.hasher.verify
+
+        def verify(stored: str, password: str) -> bool:
+            verified.append(password)
+            return real_verify(stored, password)
+
+        monkeypatch.setattr(down._passwords.hasher, "verify", verify)
+
+        context = await down.authenticate(live.session_id)
+        with pytest.raises(StepUpFailedError):
+            await down.step_up(context, "a different long passphrase here")
+        assert verified == []  # refused before any password was tried
+
+        with pytest.raises(LoginFailedError):  # the right password: refused
+            await down.login("alice", "a different long passphrase here")
+        for _ in range(LOCK_FAILURES):
+            with pytest.raises(LoginFailedError):
+                await down.login("alice", "not the password at all")
+        user = await accounts.store.find_user("alice")
+        assert user is not None
+        assert user.locked_until_ms is not None  # locked in the account database, as ever
+        assert len(verified) == 1 + LOCK_FAILURES  # every login still verified its password
+    finally:
+        await counters.aclose()
