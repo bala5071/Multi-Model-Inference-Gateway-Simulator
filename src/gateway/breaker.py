@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 
 from gateway.clock import Clock
 
@@ -75,6 +76,22 @@ class _Breaker:
         self.slow_since_ms: float | None = None
 
 
+class BreakerStore(Protocol):
+    """The circuit breakers' state per (organization, provider), as the router uses it
+    (docs/34-state-interfaces.md). The slow-provider warning is not part of it: it stays with
+    each instance (docs/scale-out-plan.md, decision 11)."""
+
+    async def admit(self, organization_id: str, provider_id: str) -> bool: ...
+
+    async def release(self, organization_id: str, provider_id: str) -> None: ...
+
+    async def success(self, organization_id: str, provider_id: str) -> None: ...
+
+    async def failure(self, organization_id: str, provider_id: str) -> None: ...
+
+    async def state(self, organization_id: str, provider_id: str) -> BreakerState: ...
+
+
 class Breakers:
     def __init__(
         self,
@@ -116,7 +133,7 @@ class Breakers:
         breaker.probing = False
         self._move(key, breaker, BreakerState.OPEN)
 
-    def admit(self, organization_id: str, provider_id: str) -> bool:
+    async def admit(self, organization_id: str, provider_id: str) -> bool:
         """Whether a request may try this provider now. When an open breaker's time has
         passed it turns half-open and admits exactly one request until that one reports."""
         key = (organization_id, provider_id)
@@ -131,12 +148,12 @@ class Breakers:
             breaker.probing = True
         return True
 
-    def release(self, organization_id: str, provider_id: str) -> None:
+    async def release(self, organization_id: str, provider_id: str) -> None:
         """An admitted request ended without a verdict (cancelled, or a non-trigger failure):
         let the next one probe."""
         self._get(organization_id, provider_id).probing = False
 
-    def success(self, organization_id: str, provider_id: str) -> None:
+    async def success(self, organization_id: str, provider_id: str) -> None:
         key = (organization_id, provider_id)
         breaker = self._get(*key)
         breaker.failures = 0
@@ -148,7 +165,7 @@ class Breakers:
                 breaker.open_ms = 0.0
                 self._move(key, breaker, BreakerState.CLOSED)
 
-    def failure(self, organization_id: str, provider_id: str) -> None:
+    async def failure(self, organization_id: str, provider_id: str) -> None:
         key = (organization_id, provider_id)
         breaker = self._get(*key)
         breaker.probing = False
@@ -159,7 +176,7 @@ class Breakers:
         if breaker.failures >= self._failure_threshold:
             self._open(key, breaker, self._open_ms)
 
-    def state(self, organization_id: str, provider_id: str) -> BreakerState:
+    async def state(self, organization_id: str, provider_id: str) -> BreakerState:
         return self._get(organization_id, provider_id).state
 
     def first_token(self, organization_id: str, provider_id: str, *, missed: bool) -> None:

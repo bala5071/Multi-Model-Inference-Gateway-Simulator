@@ -14,37 +14,37 @@ def make() -> tuple[Breakers, SimClock, list[Transition]]:
     return Breakers(clock, moves.append), clock, moves
 
 
-def fail(breakers: Breakers, times: int) -> None:
+async def fail(breakers: Breakers, times: int) -> None:
     for _ in range(times):
-        assert breakers.admit(ORG, PROVIDER)
-        breakers.failure(ORG, PROVIDER)
+        assert await breakers.admit(ORG, PROVIDER)
+        await breakers.failure(ORG, PROVIDER)
 
 
-def test_five_consecutive_failures_open_it_and_a_success_resets_the_count() -> None:
+async def test_five_consecutive_failures_open_it_and_a_success_resets_the_count() -> None:
     breakers, _, moves = make()
-    fail(breakers, 4)
-    breakers.success(ORG, PROVIDER)
-    fail(breakers, 4)
-    assert breakers.state(ORG, PROVIDER) is BreakerState.CLOSED
-    fail(breakers, 1)
-    assert breakers.state(ORG, PROVIDER) is BreakerState.OPEN
-    assert not breakers.admit(ORG, PROVIDER)
+    await fail(breakers, 4)
+    await breakers.success(ORG, PROVIDER)
+    await fail(breakers, 4)
+    assert await breakers.state(ORG, PROVIDER) is BreakerState.CLOSED
+    await fail(breakers, 1)
+    assert await breakers.state(ORG, PROVIDER) is BreakerState.OPEN
+    assert not await breakers.admit(ORG, PROVIDER)
     assert moves == [Transition(ORG, PROVIDER, BreakerState.OPEN, 30_000.0)]
 
 
 async def test_half_open_admits_one_probe_and_two_successes_close_it() -> None:
     breakers, clock, moves = make()
-    fail(breakers, 5)
+    await fail(breakers, 5)
     await clock.sleep_ms(29_999.0)
-    assert not breakers.admit(ORG, PROVIDER)
+    assert not await breakers.admit(ORG, PROVIDER)
     await clock.sleep_ms(1.0)
-    assert breakers.admit(ORG, PROVIDER)  # the probe
-    assert not breakers.admit(ORG, PROVIDER)  # only one at a time
-    breakers.success(ORG, PROVIDER)
-    assert breakers.state(ORG, PROVIDER) is BreakerState.HALF_OPEN  # one is not enough
-    assert breakers.admit(ORG, PROVIDER)
-    breakers.success(ORG, PROVIDER)
-    assert breakers.state(ORG, PROVIDER) is BreakerState.CLOSED
+    assert await breakers.admit(ORG, PROVIDER)  # the probe
+    assert not await breakers.admit(ORG, PROVIDER)  # only one at a time
+    await breakers.success(ORG, PROVIDER)
+    assert await breakers.state(ORG, PROVIDER) is BreakerState.HALF_OPEN  # one is not enough
+    assert await breakers.admit(ORG, PROVIDER)
+    await breakers.success(ORG, PROVIDER)
+    assert await breakers.state(ORG, PROVIDER) is BreakerState.CLOSED
     assert [m.state for m in moves] == [
         BreakerState.OPEN,
         BreakerState.HALF_OPEN,
@@ -54,30 +54,30 @@ async def test_half_open_admits_one_probe_and_two_successes_close_it() -> None:
 
 async def test_a_failed_probe_doubles_the_open_time_up_to_five_minutes() -> None:
     breakers, clock, moves = make()
-    fail(breakers, 5)
+    await fail(breakers, 5)
     for _ in range(6):
         await clock.sleep_ms(moves[-1].open_ms or 0.0)
-        assert breakers.admit(ORG, PROVIDER)
-        breakers.failure(ORG, PROVIDER)
+        assert await breakers.admit(ORG, PROVIDER)
+        await breakers.failure(ORG, PROVIDER)
     opened = [m.open_ms for m in moves if m.state is BreakerState.OPEN]
     assert opened == [30_000.0, 60_000.0, 120_000.0, 240_000.0, 300_000.0, 300_000.0, 300_000.0]
 
 
 async def test_a_probe_without_a_verdict_frees_the_slot() -> None:
     breakers, clock, _ = make()
-    fail(breakers, 5)
+    await fail(breakers, 5)
     await clock.sleep_ms(30_000.0)
-    assert breakers.admit(ORG, PROVIDER)
-    breakers.release(ORG, PROVIDER)  # cancelled, or a failure that is not a trigger
-    assert breakers.admit(ORG, PROVIDER)
+    assert await breakers.admit(ORG, PROVIDER)
+    await breakers.release(ORG, PROVIDER)  # cancelled, or a failure that is not a trigger
+    assert await breakers.admit(ORG, PROVIDER)
 
 
-def test_breakers_are_per_organization_and_provider() -> None:
+async def test_breakers_are_per_organization_and_provider() -> None:
     breakers, _, _ = make()
-    fail(breakers, 5)
-    assert not breakers.admit(ORG, PROVIDER)
-    assert breakers.admit("south", PROVIDER)
-    assert breakers.admit(ORG, "prv_00000000000000b2")
+    await fail(breakers, 5)
+    assert not await breakers.admit(ORG, PROVIDER)
+    assert await breakers.admit("south", PROVIDER)
+    assert await breakers.admit(ORG, "prv_00000000000000b2")
 
 
 async def test_three_missed_budgets_flag_a_slow_provider_and_one_in_budget_clears_it() -> None:

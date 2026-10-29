@@ -105,7 +105,7 @@ async def _exercise(
     await registry.aclose()
 
     # Three requests, three usage rows: the database was really written to.
-    assert [s.event.request_id for s in store.events()] == ["req-1", "req-2", "req-3"]
+    assert [s.event.request_id for s in await store.events()] == ["req-1", "req-2", "req-3"]
     monitoring: Monitor = app.state.monitoring
     events = [dataclasses.asdict(e) for e in monitoring.events.since(0).events]
     places = {

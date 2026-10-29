@@ -4,6 +4,7 @@ leaks anywhere the gateway writes. See docs/20-applications-api-keys.md."""
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import logging
@@ -67,7 +68,7 @@ async def _gateway(tmp_path: Path, templates: PlansConfig | None = None) -> Asyn
     connection = open_database(db_path)
     MigrationRunner(connection, MIGRATIONS, epoch).migrate()
     store = SqliteApplicationStore(connection)
-    seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms())
+    await seed_demo_applications(store, templates, created_at_ms=epoch.epoch_ms())
     keys = ApiKeyService(store, TEST_PEPPER, epoch, random_bytes=random.Random(3).randbytes)
     registry = build_continuous_registry(clock, seed=7)
     app = create_app(registry, clock, applications=ApplicationAccess(keys, templates))
@@ -107,10 +108,10 @@ async def test_the_key_is_checked_before_the_body(tmp_path: Path) -> None:
 
 async def test_key_lifecycle_through_the_api(tmp_path: Path) -> None:
     async with _gateway(tmp_path) as gw:
-        old = gw.keys.issue("acme", "backend")
+        old = await gw.keys.issue("acme", "backend")
         assert (await gw.generate(old.key)).status_code == 200
 
-        new = gw.keys.rotate(old.record.key_id, grace_ms=HOUR_MS)
+        new = await gw.keys.rotate(old.record.key_id, grace_ms=HOUR_MS)
         # During the grace period both keys work, for the same application.
         assert (await gw.generate(old.key)).status_code == 200
         assert (await gw.generate(new.key)).status_code == 200
@@ -118,27 +119,27 @@ async def test_key_lifecycle_through_the_api(tmp_path: Path) -> None:
         assert (await gw.generate(old.key)).status_code == 401
         assert (await gw.generate(new.key)).status_code == 200
 
-        gw.keys.revoke(new.record.key_id)
+        await gw.keys.revoke(new.record.key_id)
         assert (await gw.generate(new.key)).status_code == 401
         assert (await gw.usage(old.key)).status_code == 401
 
-        gw.keys.flush_last_used()
-        records = gw.keys.store.list_keys("acme")
+        await gw.keys.flush_last_used()
+        records = await gw.keys.store.list_keys("acme")
         # Two keys, both used, both now refused; the four served requests were acme's.
         assert [(r.label, r.revoked) for r in records] == [("backend", False), ("backend", True)]
         assert all(r.last_used_at_ms is not None for r in records)
-        third = gw.keys.issue("acme", "check").key
+        third = (await gw.keys.issue("acme", "check")).key
         assert (await gw.usage(third)).json()["total"]["requests"] == 4
 
 
 async def test_every_bad_key_gets_the_identical_answer(tmp_path: Path) -> None:
     async with _gateway(tmp_path) as gw:
-        valid = gw.keys.issue("acme", "valid")
-        revoked = gw.keys.issue("acme", "revoked")
-        gw.keys.revoke(revoked.record.key_id)
-        expired = gw.keys.issue("acme", "expired", expires_at_ms=gw.keys._epoch.epoch_ms())
-        rotated = gw.keys.issue("acme", "rotated")
-        gw.keys.rotate(rotated.record.key_id, grace_ms=0.0)
+        valid = await gw.keys.issue("acme", "valid")
+        revoked = await gw.keys.issue("acme", "revoked")
+        await gw.keys.revoke(revoked.record.key_id)
+        expired = await gw.keys.issue("acme", "expired", expires_at_ms=gw.keys._epoch.epoch_ms())
+        rotated = await gw.keys.issue("acme", "rotated")
+        await gw.keys.rotate(rotated.record.key_id, grace_ms=0.0)
         candidates = {
             "unknown": UNKNOWN_KEY,
             "malformed": "not-a-key",
@@ -167,8 +168,8 @@ async def test_every_bad_key_gets_the_identical_answer(tmp_path: Path) -> None:
 
 async def test_an_application_sees_only_its_own_usage(tmp_path: Path) -> None:
     async with _gateway(tmp_path) as gw:
-        acme = gw.keys.issue("acme", "a").key
-        globex = gw.keys.issue("globex", "g").key
+        acme = (await gw.keys.issue("acme", "a")).key
+        globex = (await gw.keys.issue("globex", "g")).key
         for _ in range(3):
             await gw.generate(acme)
         await gw.generate(globex, model="standard")
@@ -189,8 +190,8 @@ async def test_budgets_are_per_application(tmp_path: Path) -> None:
         applications={"a": DemoApplication("A", "tiny"), "b": DemoApplication("B", "tiny")},
     )
     async with _gateway(tmp_path, templates) as gw:
-        a = gw.keys.issue("a", "a").key
-        b = gw.keys.issue("b", "b").key
+        a = (await gw.keys.issue("a", "a")).key
+        b = (await gw.keys.issue("b", "b")).key
         # Prompts that differ from their first word, so no prefix is reused (and left unbilled).
         statuses = [(await gw.generate(a, prompt=f"{i} {PROMPT}")).status_code for i in range(3)]
         other = (await gw.generate(b)).status_code
@@ -204,8 +205,8 @@ async def test_budgets_are_per_application(tmp_path: Path) -> None:
 async def test_requests_per_minute_limit_answers_429_with_retry_after(tmp_path: Path) -> None:
     templates = replace(load_plans(), limits={"pro": PlanLimits(requests_per_minute=2)})
     async with _gateway(tmp_path, templates) as gw:
-        globex = gw.keys.issue("globex", "g").key
-        acme = gw.keys.issue("acme", "a").key
+        globex = (await gw.keys.issue("globex", "g")).key
+        acme = (await gw.keys.issue("acme", "a")).key
         first = [(await gw.generate(globex)).status_code for _ in range(2)]
         limited = await gw.generate(globex)
         elsewhere = await gw.generate(acme)  # enterprise has no limit
@@ -239,7 +240,7 @@ async def test_max_tokens_ceiling_refuses_more_and_caps_requests_that_ask_for_no
 ) -> None:
     templates = replace(load_plans(), limits={"free": PlanLimits(max_tokens=3)})
     async with _gateway(tmp_path, templates) as gw:
-        initech = gw.keys.issue("initech", "i").key
+        initech = (await gw.keys.issue("initech", "i")).key
         too_many = await gw.generate(initech, max_tokens=4)
         unspecified = await gw.generate(initech, max_tokens=None)
         within = await gw.generate(initech, max_tokens=2)
@@ -272,8 +273,10 @@ def test_the_default_server_refuses_to_start_without_the_pepper(
 async def test_a_key_issued_by_the_cli_works_against_the_default_server(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert manage(["seed-demo"]) == 0
-    assert manage(["create-key", "--application", "globex", "--label", "cli"]) == 0
+    # The CLI runs its own event loop (asyncio.run), so it runs on a thread of its own here.
+    assert await asyncio.to_thread(manage, ["seed-demo"]) == 0
+    created = ["create-key", "--application", "globex", "--label", "cli"]
+    assert await asyncio.to_thread(manage, created) == 0
     key = capsys.readouterr().out.strip()
     transport = httpx.ASGITransport(app=create_default_app())
     async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
@@ -407,10 +410,10 @@ async def test_no_key_or_pepper_appears_anywhere(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     async with _gateway(tmp_path) as gw:
-        good = gw.keys.issue("acme", "good")
-        revoked = gw.keys.issue("acme", "revoked")
-        gw.keys.revoke(revoked.record.key_id)
-        rotated = gw.keys.rotate(good.record.key_id, grace_ms=HOUR_MS)
+        good = await gw.keys.issue("acme", "good")
+        revoked = await gw.keys.issue("acme", "revoked")
+        await gw.keys.revoke(revoked.record.key_id)
+        rotated = await gw.keys.rotate(good.record.key_id, grace_ms=HOUR_MS)
         answers = []
         for key in (good.key, revoked.key, rotated.key, UNKNOWN_KEY):
             for body in ({}, {"model": "premium-x"}, {"stream": True}, {"tenant_id": "acme"}):
@@ -418,7 +421,7 @@ async def test_no_key_or_pepper_appears_anywhere(
             answers.append((await gw.usage(key)).content)
         for path in ("/v1/monitor/snapshot?history_s=900&events=1000", "/metrics", "/"):
             answers.append((await gw.client.get(path)).content)
-        gw.keys.flush_last_used()
+        await gw.keys.flush_last_used()
         places = _places(gw, caplog, answers)
     output = capfd.readouterr()
     places["test output"] = (output.out + output.err).encode()

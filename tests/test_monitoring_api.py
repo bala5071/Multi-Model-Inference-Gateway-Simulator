@@ -1061,7 +1061,7 @@ async def test_metrics_endpoint_covers_applications_slo_and_every_line_is_well_f
     assert 'gateway_events_total{type="state_change"} 1' in samples
 
 
-def test_prometheus_label_values_are_escaped() -> None:
+async def test_prometheus_label_values_are_escaped() -> None:
     clock = SimClock()
     registry = ModelRegistry()
     registry.register('we"ird\\name\n', _worker(clock))
@@ -1073,7 +1073,7 @@ def test_prometheus_label_values_are_escaped() -> None:
         events=EventBus(clock),
     )
 
-    text = render_prometheus(monitor.snapshot())
+    text = render_prometheus(await monitor.snapshot())
 
     assert 'gateway_in_flight_requests{model="we\\"ird\\\\name\\n"} 0' in text.splitlines()
 

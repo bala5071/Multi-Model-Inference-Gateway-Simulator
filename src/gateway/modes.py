@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -32,6 +32,7 @@ from gateway.audit import (
     TargetType,
 )
 from gateway.clock import EpochSource
+from gateway.database import write_transaction
 from gateway.management import ManagementRefusal
 from gateway.permissions import Actor
 
@@ -72,15 +73,17 @@ def may_reach_hosted(mode: Mode) -> bool:
 
 
 class ModeStore(Protocol):
-    def immediate(self) -> contextlib.AbstractContextManager[None]: ...
+    def write_transaction(self) -> contextlib.AbstractAsyncContextManager[None]: ...
 
-    def organization_mode(self, organization_id: str) -> Mode: ...
+    async def organization_mode(self, organization_id: str) -> Mode: ...
 
-    def application_mode(self, application_id: str) -> Mode: ...
+    async def application_mode(self, application_id: str) -> Mode: ...
 
-    def set_organization_mode(self, organization_id: str, mode: Mode, at_ms: float) -> None: ...
+    async def set_organization_mode(
+        self, organization_id: str, mode: Mode, at_ms: float
+    ) -> None: ...
 
-    def set_application_mode(self, application_id: str, mode: Mode, at_ms: float) -> None: ...
+    async def set_application_mode(self, application_id: str, mode: Mode, at_ms: float) -> None: ...
 
 
 class InMemoryModeStore:
@@ -89,20 +92,20 @@ class InMemoryModeStore:
     def __init__(self) -> None:
         self._modes: dict[tuple[str, str], Mode] = {}
 
-    @contextmanager
-    def immediate(self) -> Iterator[None]:
+    @asynccontextmanager
+    async def write_transaction(self) -> AsyncIterator[None]:
         yield
 
-    def organization_mode(self, organization_id: str) -> Mode:
+    async def organization_mode(self, organization_id: str) -> Mode:
         return self._modes.get(("organization", organization_id), DEFAULT_MODE)
 
-    def application_mode(self, application_id: str) -> Mode:
+    async def application_mode(self, application_id: str) -> Mode:
         return self._modes.get(("application", application_id), DEFAULT_MODE)
 
-    def set_organization_mode(self, organization_id: str, mode: Mode, at_ms: float) -> None:
+    async def set_organization_mode(self, organization_id: str, mode: Mode, at_ms: float) -> None:
         self._modes[("organization", organization_id)] = Mode(mode)
 
-    def set_application_mode(self, application_id: str, mode: Mode, at_ms: float) -> None:
+    async def set_application_mode(self, application_id: str, mode: Mode, at_ms: float) -> None:
         self._modes[("application", application_id)] = Mode(mode)
 
 
@@ -112,24 +115,17 @@ class SqliteModeStore:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
-    @contextmanager
-    def immediate(self) -> Iterator[None]:
+    def write_transaction(self) -> contextlib.AbstractAsyncContextManager[None]:
         """One write transaction: the mode and its audit entry together, or neither."""
-        self._connection.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-        except BaseException:
-            self._connection.execute("ROLLBACK")
-            raise
-        self._connection.execute("COMMIT")
+        return write_transaction(self._connection)
 
-    def _get(self, scope_type: str, scope_id: str) -> Mode:
+    async def _get(self, scope_type: str, scope_id: str) -> Mode:
         row = self._connection.execute(
             "SELECT mode FROM modes WHERE scope_type = ? AND scope_id = ?", (scope_type, scope_id)
         ).fetchone()
         return Mode(row[0]) if row is not None else DEFAULT_MODE
 
-    def _set(self, scope_type: str, scope_id: str, mode: Mode, at_ms: float) -> None:
+    async def _set(self, scope_type: str, scope_id: str, mode: Mode, at_ms: float) -> None:
         self._connection.execute(
             "INSERT INTO modes (scope_type, scope_id, mode, updated_at_ms) VALUES (?, ?, ?, ?)"
             " ON CONFLICT (scope_type, scope_id)"
@@ -137,17 +133,17 @@ class SqliteModeStore:
             (scope_type, scope_id, Mode(mode).value, at_ms),
         )
 
-    def organization_mode(self, organization_id: str) -> Mode:
-        return self._get("organization", organization_id)
+    async def organization_mode(self, organization_id: str) -> Mode:
+        return await self._get("organization", organization_id)
 
-    def application_mode(self, application_id: str) -> Mode:
-        return self._get("application", application_id)
+    async def application_mode(self, application_id: str) -> Mode:
+        return await self._get("application", application_id)
 
-    def set_organization_mode(self, organization_id: str, mode: Mode, at_ms: float) -> None:
-        self._set("organization", organization_id, mode, at_ms)
+    async def set_organization_mode(self, organization_id: str, mode: Mode, at_ms: float) -> None:
+        await self._set("organization", organization_id, mode, at_ms)
 
-    def set_application_mode(self, application_id: str, mode: Mode, at_ms: float) -> None:
-        self._set("application", application_id, mode, at_ms)
+    async def set_application_mode(self, application_id: str, mode: Mode, at_ms: float) -> None:
+        await self._set("application", application_id, mode, at_ms)
 
 
 class ChangeMarker(Protocol):
@@ -171,7 +167,7 @@ class ModeService:
         self._audit = audit
         self._epoch = epoch
 
-    def _record(
+    async def _record(
         self, target: TargetType, target_id: str, organization_id: str, change: ModeChange,
         actor: Actor,
     ) -> None:  # fmt: skip
@@ -182,7 +178,7 @@ class ModeService:
         }
         if ORGANIZATION_ID_PATTERN.fullmatch(organization_id):
             details["organization_id"] = organization_id
-        self._audit.write(
+        await self._audit.write(
             AuditEvent(
                 AuditAction.MODE_CHANGED,
                 Outcome.SUCCESS,
@@ -194,19 +190,21 @@ class ModeService:
             self._epoch.epoch_ms(),
         )
 
-    def set_organization(
+    async def set_organization(
         self, organization_id: str, mode: Mode, *, actor: Actor, marker: ChangeMarker
     ) -> ModeChange:
         """An organization's mode. Its applications follow it when it is stricter than theirs:
         ``effective_mode`` takes the stricter, without their stored values changing."""
-        with self.store.immediate():
-            change = ModeChange(self.store.organization_mode(organization_id), mode)
-            self.store.set_organization_mode(organization_id, mode, self._epoch.epoch_ms())
-            self._record(TargetType.ORGANIZATION, organization_id, organization_id, change, actor)
+        async with self.store.write_transaction():
+            change = ModeChange(await self.store.organization_mode(organization_id), mode)
+            await self.store.set_organization_mode(organization_id, mode, self._epoch.epoch_ms())
+            await self._record(
+                TargetType.ORGANIZATION, organization_id, organization_id, change, actor
+            )
             marker.changed()
         return change
 
-    def set_application(
+    async def set_application(
         self,
         organization_id: str,
         application_id: str,
@@ -218,17 +216,19 @@ class ModeService:
         """An application's mode: as strict as its organization's or stricter, else 409
         ``mode_looser_than_organization`` (refused before any change, so the step-up window is
         given back)."""
-        with self.store.immediate():
+        async with self.store.write_transaction():
             # Read in the same transaction as the write: no organization change slips between.
-            bound = self.store.organization_mode(organization_id)
+            bound = await self.store.organization_mode(organization_id)
             if looser_than(mode, bound):
                 raise ManagementRefusal(
                     Reason.MODE_LOOSER_THAN_ORGANIZATION,
                     f"the organization's mode is {bound.value}; an application may be as "
                     "strict or stricter, never looser",
                 )
-            change = ModeChange(self.store.application_mode(application_id), mode)
-            self.store.set_application_mode(application_id, mode, self._epoch.epoch_ms())
-            self._record(TargetType.APPLICATION, application_id, organization_id, change, actor)
+            change = ModeChange(await self.store.application_mode(application_id), mode)
+            await self.store.set_application_mode(application_id, mode, self._epoch.epoch_ms())
+            await self._record(
+                TargetType.APPLICATION, application_id, organization_id, change, actor
+            )
             marker.changed()
         return change

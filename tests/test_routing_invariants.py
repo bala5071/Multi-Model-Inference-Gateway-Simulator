@@ -113,7 +113,7 @@ async def test_no_request_ever_leaves_its_plan_its_tier_or_its_providers() -> No
         store = r.world.keys.store
         for number in range(CASES):
             case = _random_case(rng, number)
-            store.add_application(
+            await store.add_application(
                 Application(
                     case.application_id,
                     f"Invariant {number}",
@@ -124,14 +124,14 @@ async def test_no_request_ever_leaves_its_plan_its_tier_or_its_providers() -> No
                     "north",
                 )
             )
-            api_key = r.world.keys.issue(case.application_id, "main").key
-            r.modes.set_organization_mode("north", case.organization_mode, 0.0)
-            r.modes.set_application_mode(case.application_id, case.application_mode, 0.0)
+            api_key = (await r.world.keys.issue(case.application_id, "main")).key
+            await r.modes.set_organization_mode("north", case.organization_mode, 0.0)
+            await r.modes.set_application_mode(case.application_id, case.application_mode, 0.0)
             for address, config in case.providers.items():
                 r.resolver.table[f"{config.id}.provider.test"] = [address]
-                r.service.store.add(config)
+                await r.service.store.add(config)
                 if config.id in case.keyed:
-                    r.service.store.put_key(
+                    await r.service.store.put_key(
                         config.id, r.service.vault.seal(KEY, config.binding), 0.0
                     )
             failures: list[Any] = [TEXT, FIVE_XX, refused()]
@@ -186,8 +186,8 @@ async def test_no_request_ever_leaves_its_plan_its_tier_or_its_providers() -> No
             seen["fallbacks"] += "x-fallback-from" in response.headers
             # Each case is its own world of providers: the next one starts with none.
             for config in case.providers.values():
-                r.service.store.delete(config.id)
-        assert r.service.store.list_all() == []
+                await r.service.store.delete(config.id)
+        assert await r.service.store.list_all() == []
     # Not vacuous: every kind of outcome happened, many times over.
     assert all(count >= 20 for count in seen.values()), seen
 

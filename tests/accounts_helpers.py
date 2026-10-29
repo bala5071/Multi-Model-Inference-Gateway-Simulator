@@ -15,7 +15,7 @@ import httpx
 
 from gateway.app import create_app
 from gateway.applications import SqliteApplicationStore
-from gateway.audit import AuditLog
+from gateway.audit import AuditLog, SqliteAuditStore
 from gateway.auth import SESSION_COOKIE, AccountAccess, AccountService
 from gateway.clock import ClockEpoch, SimClock
 from gateway.continuous import build_continuous_registry
@@ -24,8 +24,9 @@ from gateway.localonly import LocalOnlyPolicy
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.organizations import new_organization
 from gateway.passwords import CHEAP, InlineHashRunner, PasswordHasher, Passwords
-from gateway.roles import RoleStore
-from gateway.users import AccountStore, Bootstrap, User
+from gateway.roles import SqliteRoleStore
+from gateway.state import run_now
+from gateway.users import AccountStore, Bootstrap, SqliteAccountStore, User
 from helpers import TEST_PEPPER
 
 ORIGIN_MS = 1.75e12
@@ -62,10 +63,12 @@ def make_service(
     user_create_attempts: int = 10,
 ) -> AccountService:
     return AccountService(
-        AccountStore(connection),
-        AuditLog(connection, unknown_user_rows_per_minute=unknown_user_rows_per_minute),
+        SqliteAccountStore(connection),
+        AuditLog(
+            SqliteAuditStore(connection), unknown_user_rows_per_minute=unknown_user_rows_per_minute
+        ),
         Passwords(PasswordHasher(CHEAP), InlineHashRunner()),
-        roles=RoleStore(connection),
+        roles=SqliteRoleStore(connection),
         organizations=organizations,
         clock=clock,
         epoch=epoch,
@@ -80,12 +83,14 @@ def ready_user(accounts: Accounts, username: str, password: str, org: str) -> Us
     """A user who has already set their own password: created as the operator would
     (which makes the password one to change), then changed, as the user's first login
     would."""
-    user = accounts.service.create_user(username, password, org)
+    user = run_now(accounts.service.create_user(username, password, org))
     hasher = PasswordHasher(CHEAP)
-    accounts.store.set_password(
-        user.id, hasher.hash(password), must_change=False, bootstrap=Bootstrap.NONE
+    run_now(
+        accounts.store.set_password(
+            user.id, hasher.hash(password), must_change=False, bootstrap=Bootstrap.NONE
+        )
     )
-    found = accounts.store.get_user(user.id)
+    found = run_now(accounts.store.get_user(user.id))
     assert found is not None
     return found
 
@@ -96,8 +101,16 @@ def make_accounts(**kwargs: object) -> Accounts:
     connection = open_database(":memory:")
     MigrationRunner(connection, MIGRATIONS, epoch).migrate()
     organizations = SqliteApplicationStore(connection)
-    organizations.add_organization(new_organization("solo", "Solo", "individual", created_at_ms=0))
-    organizations.add_organization(new_organization("north", "North", "business", created_at_ms=0))
+    run_now(
+        organizations.add_organization(
+            new_organization("solo", "Solo", "individual", created_at_ms=0)
+        )
+    )
+    run_now(
+        organizations.add_organization(
+            new_organization("north", "North", "business", created_at_ms=0)
+        )
+    )
     service = make_service(clock, epoch, connection, organizations, **kwargs)  # type: ignore[arg-type]
     return Accounts(clock, epoch, connection, organizations, service.store, service.audit, service)
 

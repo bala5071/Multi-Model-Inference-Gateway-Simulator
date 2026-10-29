@@ -4,6 +4,7 @@ docs/27-users-and-sessions.md."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -64,8 +65,8 @@ async def _scenario(accounts: Accounts) -> tuple[dict[str, str], dict[str, str],
     """Exercise logins and record what came back. Returns the responses, the secrets used or
     issued, and objects whose repr might be logged."""
     service = accounts.service
-    service.create_user("alice", PASSWORD, "north")
-    service.bootstrap_admin({ADMIN_USERNAME_ENV: "root", ADMIN_PASSWORD_ENV: ADMIN_PASSWORD})
+    await service.create_user("alice", PASSWORD, "north")
+    await service.bootstrap_admin({ADMIN_USERNAME_ENV: "root", ADMIN_PASSWORD_ENV: ADMIN_PASSWORD})
     responses: dict[str, str] = {}
     secrets: dict[str, str] = {
         "alice's password": PASSWORD,
@@ -137,10 +138,10 @@ async def _scenario(accounts: Accounts) -> tuple[dict[str, str], dict[str, str],
     except LoginFailedError as exc:
         objects.append(exc)
     try:
-        service.create_user("dora", "dora is my password", "north")
+        await service.create_user("dora", "dora is my password", "north")
     except PasswordPolicyError as exc:
         objects.append(exc)
-    objects.extend([service.store.find_user("alice"), service.store.list_sessions("x")])
+    objects.extend([await service.store.find_user("alice"), await service.store.list_sessions("x")])
     return responses, secrets, objects
 
 
@@ -158,8 +159,10 @@ async def test_no_secret_appears_anywhere_and_the_scan_would_see_one(
         "GATEWAY_ARGON2_TIME_COST": "1",
     }
     answers = iter([CLI_PASSWORD, CLI_PASSWORD, CLI_PASSWORD, CLI_PASSWORD])
-    assert manage(["create-user", "--username", "erin"], environ, lambda _: next(answers)) == 0
-    assert manage(["reset-password", "--username", "erin"], environ, lambda _: next(answers)) == 0
+    # The CLI runs its own event loop (asyncio.run), so it runs on a thread of its own here.
+    for command in ("create-user", "reset-password"):
+        args = [command, "--username", "erin"]
+        assert await asyncio.to_thread(manage, args, environ, lambda _: next(answers)) == 0
     secrets["cli password"] = CLI_PASSWORD
 
     # Every digest the database holds is a secret everywhere else.
@@ -373,8 +376,8 @@ async def test_a_provider_key_appears_only_in_the_requests_that_carry_it(
         objects = [
             r.service,
             r.service.vault,
-            r.store.get(provider_id),
-            r.store.get_key(provider_id),
+            await r.store.get(provider_id),
+            await r.store.get_key(provider_id),
         ]
         sent = b"".join(bytes(c.written) for c in r.network.connections)
 
@@ -569,11 +572,11 @@ async def test_a_provider_key_through_routed_chat_with_failures_and_fallbacks(
     caplog.set_level(logging.DEBUG)
     responses: dict[str, str] = {}
     async with routing() as r:
-        r.mode(PRIMARY)
+        await r.mode(PRIMARY)
         a = "prv_00000000000000a1"
         b = "prv_00000000000000b2"
-        r.provider(a, "a.provider.test", role="primary", key=key_a)
-        r.provider(b, "b.provider.test", role="primary", key=key_b)
+        await r.provider(a, "a.provider.test", role="primary", key=key_a)
+        await r.provider(b, "b.provider.test", role="primary", key=key_b)
 
         def echo(status: str) -> bytes:
             body = json.dumps({"error": {"message": f"key {key_a} rejected"}}).encode()

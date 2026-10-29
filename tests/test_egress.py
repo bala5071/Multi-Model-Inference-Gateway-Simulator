@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from collections.abc import Awaitable, Callable
 from functools import partial
 from pathlib import Path
 
@@ -71,9 +72,18 @@ def test_public_addresses_are_allowed(address: str) -> None:
     assert refusal(ipaddress.ip_address(address)) is None
 
 
+def answer(value: Callable[[], bool]) -> Callable[[], Awaitable[bool]]:
+    """A scope's answer, asked afresh each time, as the router's reads the mode store."""
+
+    async def ask() -> bool:
+        return value()
+
+    return ask
+
+
 async def _get(client: httpx.AsyncClient, url: str) -> httpx.Response:
     """A request in a scope that may reach hosted destinations."""
-    with egress_scope(lambda: True):
+    with egress_scope(answer(lambda: True)):
         return await client.get(url)
 
 
@@ -209,7 +219,7 @@ def test_every_reason_the_guard_gives_can_be_audited() -> None:
 async def test_with_no_scope_a_hosted_destination_is_refused_before_resolving() -> None:
     network = ScriptedNetwork([http_response(b"{}")])
     resolver = FakeResolver({"api.example.test": [PUBLIC]})
-    assert not hosted_allowed()
+    assert not await hosted_allowed()
     async with organization_client(resolver, inner=network) as client:
         with pytest.raises(EgressRefused) as refused:
             await client.get("https://api.example.test/")
@@ -225,7 +235,7 @@ async def test_a_scope_that_says_no_refuses_and_is_asked_at_every_request() -> N
     resolver = FakeResolver({"api.example.test": [PUBLIC]})
     allowed = [True]
     async with organization_client(resolver, inner=network) as client:
-        with egress_scope(lambda: allowed[0]):
+        with egress_scope(answer(lambda: allowed[0])):
             first = await client.get("https://api.example.test/a")
             allowed[0] = False
             with pytest.raises(EgressRefused) as refused:
@@ -236,11 +246,27 @@ async def test_a_scope_that_says_no_refuses_and_is_asked_at_every_request() -> N
     assert b"GET /b" not in bytes(network.connections[0].written)
 
 
+async def test_a_scope_whose_answer_cannot_be_read_refuses_the_connection() -> None:
+    """The answer is read from the mode store (docs/34): a store that cannot answer raises, and
+    nothing leaves the machine, not even the name."""
+    network = ScriptedNetwork([http_response(b"{}")])
+    resolver = FakeResolver({"api.example.test": [PUBLIC]})
+
+    async def unreadable() -> bool:
+        raise ConnectionError("the mode store is unavailable")
+
+    async with organization_client(resolver, inner=network) as client:
+        with egress_scope(unreadable), pytest.raises(ConnectionError):
+            await client.get("https://api.example.test/")
+    assert resolver.calls == []
+    assert network.connections == []
+
+
 async def test_the_connect_check_refuses_without_the_transport() -> None:
     """The backend refuses on its own, for any caller that reaches it another way."""
     network = ScriptedNetwork([http_response(b"{}")])
     backend = GuardedBackend(FakeResolver({"api.example.test": [PUBLIC]}), network)
-    with egress_scope(lambda: False), pytest.raises(EgressRefused) as refused:
+    with egress_scope(answer(lambda: False)), pytest.raises(EgressRefused) as refused:
         await backend.connect_tcp("api.example.test", 443)
     assert refused.value.detail == "local_only"
     assert network.connections == []
@@ -279,10 +305,13 @@ async def test_the_operator_client_holds_anything_else_to_the_hosted_rules() -> 
             ("https://gpu.lan/", True, "private"),  # not on the list, so not reachable
         ]
         for url, scope, reason in cases:
-            with egress_scope(partial(bool, scope)), pytest.raises(EgressRefused) as refused:
+            with (
+                egress_scope(answer(partial(bool, scope))),
+                pytest.raises(EgressRefused) as refused,
+            ):
                 await client.get(url)
             assert refused.value.detail == reason, url
-        with egress_scope(lambda: True):
+        with egress_scope(answer(lambda: True)):
             hosted = await client.get("https://api.example.test/")
     assert hosted.status_code == 200
     assert [c.address for c in network.connections] == [PUBLIC]

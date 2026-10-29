@@ -16,7 +16,7 @@ See docs/32-provider-settings-and-vault.md and docs/provider-plan.md, sections 3
 - **A key the loaded master keys cannot read** (``key_unreadable``) is shown as such, logged as a
   warning once per provider at startup and once at first use, and never tried with another key.
 
-Store calls are synchronous, for the reason given in ``gateway.usage``.
+Store calls are coroutines that never suspend, for the reason given in ``gateway.usage``.
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ import logging
 import secrets
 import sqlite3
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
@@ -54,7 +54,8 @@ from gateway.chat import (
     ToolSpec,
 )
 from gateway.clock import Clock, EpochSource
-from gateway.egress import check_base_url, egress_scope
+from gateway.database import write_transaction
+from gateway.egress import always_hosted, check_base_url, egress_scope
 from gateway.management import ManagementRefusal, Stores
 from gateway.overload import RequestTimeoutError, run_with_timeout
 from gateway.permissions import Actor, Resource
@@ -141,7 +142,35 @@ def _config(row: tuple[Any, ...]) -> ProviderConfig:
     )  # fmt: skip
 
 
-class ProviderStore:
+class ProviderStore(Protocol):
+    """Providers and their sealed keys (docs/34-state-interfaces.md)."""
+
+    def write_transaction(self) -> AbstractAsyncContextManager[None]: ...
+
+    async def add(self, config: ProviderConfig) -> None:
+        """Raise ``ManagementRefusal`` (``provider_exists``) for a duplicate."""
+        ...
+
+    async def get(self, provider_id: str) -> ProviderConfig | None: ...
+
+    async def list_for(self, organization_id: str) -> list[ProviderConfig]: ...
+
+    async def list_all(self) -> list[ProviderConfig]: ...
+
+    async def replace(self, config: ProviderConfig) -> None: ...
+
+    async def delete(self, provider_id: str) -> None: ...
+
+    async def get_key(self, provider_id: str) -> StoredKey | None: ...
+
+    async def put_key(self, provider_id: str, sealed: SealedKey, at_ms: float) -> None: ...
+
+    async def delete_key(self, provider_id: str) -> bool: ...
+
+    async def all_keys(self) -> list[StoredKey]: ...
+
+
+class SqliteProviderStore:
     """The tables of migrations 10 and 11."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
@@ -153,17 +182,10 @@ class ProviderStore:
             raise RuntimeError("provider_configs and provider_keys do not exist; run migrations")
         self._connection = connection
 
-    @contextmanager
-    def immediate(self) -> Iterator[None]:
-        self._connection.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-        except BaseException:
-            self._connection.execute("ROLLBACK")
-            raise
-        self._connection.execute("COMMIT")
+    def write_transaction(self) -> AbstractAsyncContextManager[None]:
+        return write_transaction(self._connection)
 
-    def add(self, config: ProviderConfig) -> None:
+    async def add(self, config: ProviderConfig) -> None:
         c = config
         try:
             self._connection.execute(
@@ -182,26 +204,26 @@ class ProviderStore:
                 "this organization already has a provider of that type, URL and model",
             ) from exc
 
-    def get(self, provider_id: str) -> ProviderConfig | None:
+    async def get(self, provider_id: str) -> ProviderConfig | None:
         row = self._connection.execute(
             f"SELECT {_COLUMNS} FROM provider_configs WHERE id = ?", (provider_id,)
         ).fetchone()
         return _config(row) if row is not None else None
 
-    def list_for(self, organization_id: str) -> list[ProviderConfig]:
+    async def list_for(self, organization_id: str) -> list[ProviderConfig]:
         rows = self._connection.execute(
             f"SELECT {_COLUMNS} FROM provider_configs WHERE organization_id = ? ORDER BY id",
             (organization_id,),
         ).fetchall()
         return [_config(row) for row in rows]
 
-    def list_all(self) -> list[ProviderConfig]:
+    async def list_all(self) -> list[ProviderConfig]:
         rows = self._connection.execute(
             f"SELECT {_COLUMNS} FROM provider_configs ORDER BY id"
         ).fetchall()
         return [_config(row) for row in rows]
 
-    def replace(self, config: ProviderConfig) -> None:
+    async def replace(self, config: ProviderConfig) -> None:
         c = config
         try:
             self._connection.execute(
@@ -221,11 +243,11 @@ class ProviderStore:
                 "this organization already has a provider of that type, URL and model",
             ) from exc
 
-    def delete(self, provider_id: str) -> None:
+    async def delete(self, provider_id: str) -> None:
         self._connection.execute("DELETE FROM provider_keys WHERE provider_id = ?", (provider_id,))
         self._connection.execute("DELETE FROM provider_configs WHERE id = ?", (provider_id,))
 
-    def get_key(self, provider_id: str) -> StoredKey | None:
+    async def get_key(self, provider_id: str) -> StoredKey | None:
         row = self._connection.execute(
             "SELECT provider_id, key_id, nonce, ciphertext, last4, created_at_ms, updated_at_ms"
             " FROM provider_keys WHERE provider_id = ?",
@@ -238,7 +260,7 @@ class ProviderStore:
             pid, SealedKey(key_id, bytes(nonce), bytes(ciphertext), last4), created, updated
         )
 
-    def put_key(self, provider_id: str, sealed: SealedKey, at_ms: float) -> None:
+    async def put_key(self, provider_id: str, sealed: SealedKey, at_ms: float) -> None:
         """Insert or overwrite the key (in the caller's transaction, if any)."""
         self._connection.execute(
             "INSERT INTO provider_keys (provider_id, key_id, nonce, ciphertext, last4,"
@@ -257,28 +279,77 @@ class ProviderStore:
             ),
         )
 
-    def delete_key(self, provider_id: str) -> bool:
+    async def delete_key(self, provider_id: str) -> bool:
         cursor = self._connection.execute(
             "DELETE FROM provider_keys WHERE provider_id = ?", (provider_id,)
         )
         return cursor.rowcount == 1
 
-    def all_keys(self) -> list[StoredKey]:
+    async def all_keys(self) -> list[StoredKey]:
         ids = [r[0] for r in self._connection.execute("SELECT provider_id FROM provider_keys")]
-        return [k for k in (self.get_key(i) for i in ids) if k is not None]
+        return [k for k in [await self.get_key(i) for i in ids] if k is not None]
 
 
-def resolve_provider(
+async def resolve_provider(
     stores: Stores, providers: ProviderStore, organization_id: str, provider_id: str
 ) -> Resource | None:
     """The organization, as the resource a provider action acts on, if the provider exists
     **and belongs to it**."""
-    if stores.organizations.get_organization(organization_id) is None:
+    if await stores.organizations.get_organization(organization_id) is None:
         return None
-    found = providers.get(provider_id)
+    found = await providers.get(provider_id)
     if found is None or found.organization_id != organization_id:
         return None
     return Resource.organization(organization_id)
+
+
+class ConnectionTestCounter(Protocol):
+    """How many test-connections a provider and an organization have had in the last hour
+    (docs/34-state-interfaces.md)."""
+
+    async def count(self, provider_id: str, organization_id: str) -> None:
+        """Count one test of the provider, or raise ``ManagementRefusal``
+        (``test_rate_limited``) counting nothing: both windows or neither."""
+        ...
+
+
+class InMemoryConnectionTestCounter:
+    """At most so many tests of one provider an hour, and of all an organization's providers
+    together (one provider per address would get round the first), in this process's memory,
+    on the injected clock."""
+
+    def __init__(
+        self,
+        clock: Clock,
+        tests_per_hour: int = TESTS_PER_HOUR,
+        tests_per_organization_hour: int = TESTS_PER_ORGANIZATION_HOUR,
+    ) -> None:
+        self._clock = clock
+        self._tests_per_hour = tests_per_hour
+        self._tests_per_organization_hour = tests_per_organization_hour
+        self._tests: dict[str, deque[float]] = {}
+        self._organization_tests: dict[str, deque[float]] = {}
+
+    async def count(self, provider_id: str, organization_id: str) -> None:
+        now = self._clock.now_ms()
+        windows = (
+            (self._tests.setdefault(provider_id, deque()), self._tests_per_hour, "a provider"),
+            (
+                self._organization_tests.setdefault(organization_id, deque()),
+                self._tests_per_organization_hour,
+                "an organization's providers",
+            ),
+        )
+        for times, limit, what in windows:
+            while times and now - times[0] >= HOUR_MS:
+                times.popleft()
+            if len(times) >= limit:
+                raise ManagementRefusal(
+                    Reason.TEST_RATE_LIMITED,
+                    f"at most {limit} tests of {what} an hour; try again later",
+                )
+        for times, _, _ in windows:
+            times.append(now)
 
 
 class ChangeMarker(Protocol):
@@ -313,6 +384,7 @@ class ProviderService:
         tests_per_hour: int = TESTS_PER_HOUR,
         tests_per_organization_hour: int = TESTS_PER_ORGANIZATION_HOUR,
         random_bytes: Callable[[int], bytes] = secrets.token_bytes,
+        test_counter: ConnectionTestCounter | None = None,
     ) -> None:
         self.store = store
         self.vault = vault
@@ -321,11 +393,12 @@ class ProviderService:
         self._clock = clock
         self._epoch = epoch
         self._client_factory = client_factory
-        self._tests_per_hour = tests_per_hour
         self._random_bytes = random_bytes
-        self._tests_per_organization_hour = tests_per_organization_hour
-        self._tests: dict[str, deque[float]] = {}
-        self._organization_tests: dict[str, deque[float]] = {}
+        self._tests: ConnectionTestCounter = (
+            test_counter
+            if test_counter is not None
+            else InMemoryConnectionTestCounter(clock, tests_per_hour, tests_per_organization_hour)
+        )
         self._warned_at_use: set[str] = set()
 
     def __repr__(self) -> str:
@@ -339,7 +412,7 @@ class ProviderService:
     def _now(self) -> float:
         return self._epoch.epoch_ms()
 
-    def _record(
+    async def _record(
         self,
         action: AuditAction,
         config: ProviderConfig,
@@ -351,26 +424,26 @@ class ProviderService:
         extra: dict[str, object] = {"provider_type": config.type, **details}
         if ORGANIZATION_ID_PATTERN.fullmatch(org):
             extra["organization_id"] = org
-        self.audit.write(
+        await self.audit.write(
             AuditEvent(action, outcome, TargetType.PROVIDER, config.id, actor.user_id, extra),
             self._now(),
         )
 
     # --- reading ---------------------------------------------------------------------------
 
-    def key_state(self, config: ProviderConfig) -> KeyState:
-        stored = self.store.get_key(config.id)
+    async def key_state(self, config: ProviderConfig) -> KeyState:
+        stored = await self.store.get_key(config.id)
         if stored is None:
             return KeyState(False, False, None, None)
         return KeyState(
             True, self.vault.readable(stored.sealed), stored.sealed.last4, stored.updated_at_ms
         )
 
-    def warn_unreadable(self) -> int:
+    async def warn_unreadable(self) -> int:
         """At startup: a warning for each provider whose key no loaded master key can read (the
         provider id and the missing key id, nothing else). Returns how many."""
         count = 0
-        for stored in self.store.all_keys():
+        for stored in await self.store.all_keys():
             if not self.vault.readable(stored.sealed):
                 LOG.warning(
                     "provider %s: its key was sealed under master key %s, which is not loaded; "
@@ -383,7 +456,7 @@ class ProviderService:
 
     # --- changing --------------------------------------------------------------------------
 
-    def create(
+    async def create(
         self,
         organization_id: str,
         *,
@@ -416,11 +489,11 @@ class ProviderService:
             first_token_budget_ms=first_token_budget_ms,
             created_at_ms=self._now(),
         )
-        self.store.add(config)
-        self._record(AuditAction.PROVIDER_CREATED, config, actor)
+        await self.store.add(config)
+        await self._record(AuditAction.PROVIDER_CREATED, config, actor)
         return config
 
-    def update(
+    async def update(
         self, config: ProviderConfig, changes: Mapping[str, Any], *, actor: Actor
     ) -> tuple[ProviderConfig, bool]:
         """Apply ``changes``; returns the provider and whether its key was deleted (a type or
@@ -433,18 +506,20 @@ class ProviderService:
         rebound = (updated.type, updated.base_url) != (config.type, config.base_url)
         if updated.model != config.model or rebound:
             updated = replace(updated, capabilities={})  # probed with another model: unknown
-        with self.store.immediate():
-            self.store.replace(updated)
-            key_deleted = self.store.delete_key(config.id) if rebound else False
-            self._record(AuditAction.PROVIDER_UPDATED, updated, actor, key_deleted=key_deleted)
+        async with self.store.write_transaction():
+            await self.store.replace(updated)
+            key_deleted = await self.store.delete_key(config.id) if rebound else False
+            await self._record(
+                AuditAction.PROVIDER_UPDATED, updated, actor, key_deleted=key_deleted
+            )
         return updated, key_deleted
 
-    def set_switch(
+    async def set_switch(
         self, config: ProviderConfig, on: bool, *, platform: bool, actor: Actor
     ) -> ProviderConfig:
         updated = replace(config, platform_enabled=on) if platform else replace(config, enabled=on)
-        self.store.replace(updated)
-        self._record(
+        await self.store.replace(updated)
+        await self._record(
             AuditAction.PROVIDER_ENABLED if on else AuditAction.PROVIDER_DISABLED,
             updated,
             actor,
@@ -452,13 +527,13 @@ class ProviderService:
         )
         return updated
 
-    def delete(self, config: ProviderConfig, *, actor: Actor, marker: ChangeMarker) -> None:
-        with self.store.immediate():
-            self.store.delete(config.id)
-            self._record(AuditAction.PROVIDER_DELETED, config, actor, step_up_consumed=True)
+    async def delete(self, config: ProviderConfig, *, actor: Actor, marker: ChangeMarker) -> None:
+        async with self.store.write_transaction():
+            await self.store.delete(config.id)
+            await self._record(AuditAction.PROVIDER_DELETED, config, actor, step_up_consumed=True)
             marker.changed()
 
-    def set_key(
+    async def set_key(
         self, config: ProviderConfig, key: str, *, actor: Actor, marker: ChangeMarker
     ) -> KeyState:
         """Seal and store ``key`` as it arrived; the API never returns it."""
@@ -472,43 +547,24 @@ class ProviderService:
             )
         with self.redactor.watching(key):
             sealed = self.vault.seal(key, config.binding)
-        with self.store.immediate():
-            self.store.put_key(config.id, sealed, self._now())
-            self._record(AuditAction.PROVIDER_KEY_SET, config, actor, step_up_consumed=True)
+        async with self.store.write_transaction():
+            await self.store.put_key(config.id, sealed, self._now())
+            await self._record(AuditAction.PROVIDER_KEY_SET, config, actor, step_up_consumed=True)
             marker.changed()
-        return self.key_state(config)
+        return await self.key_state(config)
 
-    def delete_key(self, config: ProviderConfig, *, actor: Actor, marker: ChangeMarker) -> None:
-        with self.store.immediate():
-            if not self.store.delete_key(config.id):
+    async def delete_key(
+        self, config: ProviderConfig, *, actor: Actor, marker: ChangeMarker
+    ) -> None:
+        async with self.store.write_transaction():
+            if not await self.store.delete_key(config.id):
                 raise ManagementRefusal(Reason.NO_KEY, "this provider has no key to delete")
-            self._record(AuditAction.PROVIDER_KEY_DELETED, config, actor, step_up_consumed=True)
+            await self._record(
+                AuditAction.PROVIDER_KEY_DELETED, config, actor, step_up_consumed=True
+            )
             marker.changed()
 
     # --- test-connection -------------------------------------------------------------------
-
-    def _count_test(self, config: ProviderConfig) -> None:
-        """At most so many tests of one provider an hour, and of all an organization's
-        providers together (one provider per address would get round the first)."""
-        now = self._clock.now_ms()
-        windows = (
-            (self._tests.setdefault(config.id, deque()), self._tests_per_hour, "a provider"),
-            (
-                self._organization_tests.setdefault(config.organization_id, deque()),
-                self._tests_per_organization_hour,
-                "an organization's providers",
-            ),
-        )
-        for times, limit, what in windows:
-            while times and now - times[0] >= HOUR_MS:
-                times.popleft()
-            if len(times) >= limit:
-                raise ManagementRefusal(
-                    Reason.TEST_RATE_LIMITED,
-                    f"at most {limit} tests of {what} an hour; try again later",
-                )
-        for times, _, _ in windows:
-            times.append(now)
 
     def adapter(self, config: ProviderConfig, client: httpx.AsyncClient) -> HttpAdapter:
         kind = AnthropicAdapter if config.type == "anthropic" else OpenAICompatibleAdapter
@@ -520,10 +576,10 @@ class ProviderService:
         raises ``ProviderUnreachedError`` when the host was not reached (which way goes to the
         audit only), ``ProviderError`` (mapped, never the provider's text) when it answered, or
         ``ManagementRefusal``."""
-        self._count_test(config)
-        stored = self.store.get_key(config.id)
+        await self._tests.count(config.id, config.organization_id)
+        stored = await self.store.get_key(config.id)
         if stored is None:
-            self._record(
+            await self._record(
                 AuditAction.PROVIDER_TESTED, config, actor, Outcome.FAILURE, outcome_code="no_key"
             )
             raise ManagementRefusal(Reason.NO_KEY, "this provider has no key: set one first")
@@ -535,7 +591,7 @@ class ProviderService:
                     config.id,
                     stored.sealed.key_id,
                 )
-            self._record(
+            await self._record(
                 AuditAction.PROVIDER_TESTED,
                 config,
                 actor,
@@ -548,7 +604,7 @@ class ProviderService:
         try:
             capabilities = await self._probe(config, stored)
         except (KeyUnreadableError, VaultIntegrityError):
-            self._record(
+            await self._record(
                 AuditAction.PROVIDER_TESTED,
                 config,
                 actor,
@@ -560,7 +616,7 @@ class ProviderService:
             ) from None
         except ProviderError as exc:
             detail = {"outcome_detail": exc.detail} if unreached(exc) and exc.detail else {}
-            self._record(
+            await self._record(
                 AuditAction.PROVIDER_TESTED,
                 config,
                 actor,
@@ -571,10 +627,10 @@ class ProviderService:
             if unreached(exc):
                 raise ProviderUnreachedError from None
             raise
-        current = self.store.get(config.id)
+        current = await self.store.get(config.id)
         if current is not None and current.model == config.model:
-            self.store.replace(replace(current, capabilities=capabilities))
-        self._record(AuditAction.PROVIDER_TESTED, config, actor, outcome_code="ok")
+            await self.store.replace(replace(current, capabilities=capabilities))
+        await self._record(AuditAction.PROVIDER_TESTED, config, actor, outcome_code="ok")
         return capabilities
 
     async def _probe(self, config: ProviderConfig, stored: StoredKey) -> dict[str, Any]:
@@ -591,7 +647,7 @@ class ProviderService:
 
         # An org_admin asked for this probe of a hosted provider: fixed prompts, audited,
         # whatever the organization's mode (docs/33). The guard's other rules still apply.
-        with egress_scope(lambda: True):
+        with egress_scope(always_hosted):
             return await self._probe_under_scope(config, stored, flag)
 
     async def _probe_under_scope(

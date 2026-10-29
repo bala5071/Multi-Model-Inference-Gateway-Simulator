@@ -33,7 +33,7 @@ from benchmarks.calibrate import describe_machine
 from benchmarks.key_checks import WARMUP_CHECKS, _times
 from benchmarks.usage_store_writes import WriteTimes
 from gateway.applications import SqliteApplicationStore
-from gateway.audit import AuditLog
+from gateway.audit import AuditLog, SqliteAuditStore
 from gateway.auth import LAST_SEEN_WRITE_MS, AccountService
 from gateway.clock import SystemEpoch, WallClock
 from gateway.database import open_database
@@ -41,8 +41,9 @@ from gateway.metrics import percentile
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.passwords import CHEAP, InlineHashRunner, PasswordHasher, Passwords
 from gateway.permissions import Resource, authorize
-from gateway.roles import RoleStore
-from gateway.users import AccountStore
+from gateway.roles import SqliteRoleStore
+from gateway.state import run_now
+from gateway.users import SqliteAccountStore
 
 
 def run(checks: int, directory: Path | None) -> list[WriteTimes]:
@@ -50,33 +51,35 @@ def run(checks: int, directory: Path | None) -> list[WriteTimes]:
     with tempfile.TemporaryDirectory(dir=directory, ignore_cleanup_errors=True) as folder:
         connection = open_database(Path(folder) / "sessions.db")
         MigrationRunner(connection, MIGRATIONS, epoch).migrate()
-        store = AccountStore(connection)
+        store = SqliteAccountStore(connection)
         # The hashing cost does not matter here: only the session check is timed.
         service = AccountService(
             store,
-            AuditLog(connection),
+            AuditLog(SqliteAuditStore(connection)),
             Passwords(PasswordHasher(CHEAP), InlineHashRunner()),
-            roles=RoleStore(connection),
+            roles=SqliteRoleStore(connection),
             organizations=SqliteApplicationStore(connection),
             clock=WallClock(),
             epoch=epoch,
             secret=secrets.token_bytes(32),
         )
         password = secrets.token_urlsafe(18)
-        service.create_user("bench", password, "default")
+        run_now(service.create_user("bench", password, "default"))
         login = asyncio.run(service.login("bench", password))
         id_hash = login.session.id_hash
         results = [
-            _times("check, no write", checks, lambda: service.authenticate(login.session_id))
+            _times(
+                "check, no write", checks, lambda: run_now(service.authenticate(login.session_id))
+            )
         ]
         # What requires() does on each management request (docs/28): the session check, then
         # the actor's roles and organization read afresh, then authorize.
-        service.grant_role("bench", "org_admin", "organization", "default")
+        run_now(service.grant_role("bench", "org_admin", "organization", "default"))
         resource = Resource.organization("default")
 
         def check_and_authorize() -> None:
-            context = service.authenticate(login.session_id)
-            actor = service.actor_for(context.user)
+            context = run_now(service.authenticate(login.session_id))
+            actor = run_now(service.actor_for(context.user))
             if not authorize(actor, "users.list", resource).allowed:
                 raise RuntimeError("the benchmark's user should be allowed")
 
@@ -94,7 +97,7 @@ def run(checks: int, directory: Path | None) -> list[WriteTimes]:
         for i in range(WARMUP_CHECKS + checks):
             stale()
             started = clock.now_ms()
-            service.authenticate(login.session_id)
+            run_now(service.authenticate(login.session_id))
             if i >= WARMUP_CHECKS:
                 times.append(clock.now_ms() - started)
         results.append(

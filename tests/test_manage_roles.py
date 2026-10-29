@@ -8,10 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from gateway.audit import AuditLog
+from gateway.audit import AuditLog, SqliteAuditStore
 from gateway.database import open_database
-from gateway.roles import RoleStore
-from gateway.users import AccountStore, User
+from gateway.roles import SqliteRoleStore
+from gateway.state import run_now
+from gateway.users import SqliteAccountStore, User
 from helpers import TEST_PEPPER
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -41,7 +42,7 @@ def run(environ: dict[str, str], line: str) -> int:
 def _user(environ: dict[str, str], username: str) -> User:
     connection = open_database(environ["GATEWAY_DATABASE"])
     try:
-        user = AccountStore(connection).find_user(username)
+        user = run_now(SqliteAccountStore(connection).find_user(username))
     finally:
         connection.close()
     assert user is not None
@@ -99,9 +100,9 @@ def test_the_creation_is_audited_with_the_operator_acting_as_a_user(
 ) -> None:
     assert run(world, "create-user --username carl --organization north --as root") == 0
     connection = open_database(world["GATEWAY_DATABASE"])
-    root = AccountStore(connection).find_user("root")
-    carl = AccountStore(connection).find_user("carl")
-    entries = AuditLog(connection).entries()
+    root = run_now(SqliteAccountStore(connection).find_user("root"))
+    carl = run_now(SqliteAccountStore(connection).find_user("carl"))
+    entries = run_now(AuditLog(SqliteAuditStore(connection)).entries())
     connection.close()
     assert root is not None
     assert carl is not None
@@ -194,7 +195,7 @@ def test_application_roles_must_be_defined_and_grant_nothing(
     assert run(world, "grant-role --username bob --role clinic_staff --application north-shop") == 1
     assert "defines no role 'clinic_staff'" in capsys.readouterr().err
     connection = open_database(world["GATEWAY_DATABASE"])
-    RoleStore(connection).define_app_role("north-shop", "clinic_staff", 0.0)
+    run_now(SqliteRoleStore(connection).define_app_role("north-shop", "clinic_staff", 0.0))
     connection.close()
     assert run(world, "grant-role --username bob --role clinic_staff --application north-shop") == 0
     # It grants nothing in the gateway: bob still cannot list north's roles.

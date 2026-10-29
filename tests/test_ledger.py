@@ -28,23 +28,23 @@ def _result(
     )
 
 
-def test_new_application_has_no_usage() -> None:
-    usage = CostLedger(SimClock()).usage("t1")
+async def test_new_application_has_no_usage() -> None:
+    usage = await CostLedger(SimClock()).usage("t1")
     assert usage.total == ModelUsage()
     assert usage.by_model == {}
     assert (usage.period_start_ms, usage.period_end_ms) == (0.0, JANUARY_1970_MS)
 
 
-def test_record_adds_tokens_and_cost_and_returns_the_billed_amount() -> None:
+async def test_record_adds_tokens_and_cost_and_returns_the_billed_amount() -> None:
     ledger = CostLedger(SimClock())
 
-    first = ledger.record("t1", _result(100, 20, 0.5), model="economy", price_multiplier=0.8)
-    second = ledger.record(
+    first = await ledger.record("t1", _result(100, 20, 0.5), model="economy", price_multiplier=0.8)
+    second = await ledger.record(
         "t1", _result(60, 10, 0.25, cached_tokens=40), model="premium", price_multiplier=0.8
     )
 
     assert (first, second) == (0.5 * 0.8, 0.25 * 0.8)
-    usage = ledger.usage("t1")
+    usage = await ledger.usage("t1")
     assert usage.total == ModelUsage(
         requests=2,
         prompt_tokens=160,
@@ -61,72 +61,74 @@ def test_record_adds_tokens_and_cost_and_returns_the_billed_amount() -> None:
     }
 
 
-def test_zero_multiplier_tracks_tokens_and_base_cost_but_bills_nothing() -> None:
+async def test_zero_multiplier_tracks_tokens_and_base_cost_but_bills_nothing() -> None:
     ledger = CostLedger(SimClock())
-    assert ledger.record("t1", _result(10, 5, 0.3), model="economy", price_multiplier=0.0) == 0.0
-    total = ledger.usage("t1").total
+    assert (
+        await ledger.record("t1", _result(10, 5, 0.3), model="economy", price_multiplier=0.0) == 0.0
+    )
+    total = (await ledger.usage("t1")).total
     assert (total.billed_tokens, total.base_cost_usd, total.billed_cost_usd) == (15, 0.3, 0.0)
 
 
-def test_applications_are_accounted_separately() -> None:
+async def test_applications_are_accounted_separately() -> None:
     ledger = CostLedger(SimClock())
-    ledger.record("t1", _result(10, 5, 0.1), model="economy", price_multiplier=1.0)
-    ledger.record("t2", _result(7, 3, 0.2), model="economy", price_multiplier=1.0)
+    await ledger.record("t1", _result(10, 5, 0.1), model="economy", price_multiplier=1.0)
+    await ledger.record("t2", _result(7, 3, 0.2), model="economy", price_multiplier=1.0)
 
-    assert ledger.usage("t1").total.billed_tokens == 15
-    assert ledger.usage("t2").total.billed_tokens == 10
-    assert ledger.usage("t3").total.billed_tokens == 0
+    assert (await ledger.usage("t1")).total.billed_tokens == 15
+    assert (await ledger.usage("t2")).total.billed_tokens == 10
+    assert (await ledger.usage("t3")).total.billed_tokens == 0
 
 
-def test_budget_check_passes_until_the_budget_is_used_up() -> None:
+async def test_budget_check_passes_until_the_budget_is_used_up() -> None:
     ledger = CostLedger(SimClock())
-    ledger.check_budget("t1", 30)
-    ledger.record("t1", _result(10, 5, 0.1), model="economy", price_multiplier=1.0)
-    ledger.check_budget("t1", 30)  # 15 of 30
-    ledger.record("t1", _result(10, 5, 0.1), model="economy", price_multiplier=1.0)
+    await ledger.check_budget("t1", 30)
+    await ledger.record("t1", _result(10, 5, 0.1), model="economy", price_multiplier=1.0)
+    await ledger.check_budget("t1", 30)  # 15 of 30
+    await ledger.record("t1", _result(10, 5, 0.1), model="economy", price_multiplier=1.0)
 
     with pytest.raises(BudgetExceededError) as excinfo:
-        ledger.check_budget("t1", 30)  # 30 of 30
+        await ledger.check_budget("t1", 30)  # 30 of 30
 
     error = excinfo.value
     assert (error.application_id, error.used_tokens, error.budget_tokens) == ("t1", 30, 30)
     assert error.retry_after_ms == JANUARY_1970_MS
     assert "used 30 of its 30 token budget" in str(error)
-    ledger.check_budget("t1", 31)
-    ledger.check_budget("t2", 30)  # another application is unaffected
+    await ledger.check_budget("t1", 31)
+    await ledger.check_budget("t2", 30)  # another application is unaffected
 
 
-def test_zero_budget_is_exhausted_from_the_start() -> None:
+async def test_zero_budget_is_exhausted_from_the_start() -> None:
     with pytest.raises(BudgetExceededError):
-        CostLedger(SimClock()).check_budget("t1", 0)
+        await CostLedger(SimClock()).check_budget("t1", 0)
 
 
 async def test_usage_resets_when_the_period_rolls_over() -> None:
     clock = SimClock(start_ms=500.0)
     ledger = CostLedger(clock, periods=FixedPeriods(500.0, 1000.0))
-    ledger.record("t1", _result(10, 5, 0.1), model="economy", price_multiplier=1.0)
+    await ledger.record("t1", _result(10, 5, 0.1), model="economy", price_multiplier=1.0)
 
     await clock.sleep_ms(999.0)  # still inside the first period, which is 500..1500
-    usage = ledger.usage("t1")
+    usage = await ledger.usage("t1")
     assert usage.total.billed_tokens == 15
     assert (usage.period_start_ms, usage.period_end_ms) == (500.0, 1500.0)
     with pytest.raises(BudgetExceededError) as excinfo:
-        ledger.check_budget("t1", 15)
+        await ledger.check_budget("t1", 15)
     assert excinfo.value.retry_after_ms == 1.0
 
     await clock.sleep_ms(1.0)  # the second period begins exactly at 1500
-    usage = ledger.usage("t1")
+    usage = await ledger.usage("t1")
     assert usage.total == ModelUsage()
     assert usage.by_model == {}
     assert (usage.period_start_ms, usage.period_end_ms) == (1500.0, 2500.0)
-    ledger.check_budget("t1", 15)
+    await ledger.check_budget("t1", 15)
 
 
 async def test_a_application_first_seen_in_a_later_period_gets_that_period() -> None:
     clock = SimClock()
     ledger = CostLedger(clock, periods=FixedPeriods(0.0, 1000.0))
     await clock.sleep_ms(2500.0)
-    usage = ledger.usage("late")
+    usage = await ledger.usage("late")
     assert (usage.period_start_ms, usage.period_end_ms) == (2000.0, 3000.0)
 
 

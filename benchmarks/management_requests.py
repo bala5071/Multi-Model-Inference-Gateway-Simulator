@@ -38,7 +38,7 @@ from benchmarks.calibrate import describe_machine
 from benchmarks.login import _free_port
 from gateway.apikeys import ApiKeyService
 from gateway.applications import SqliteApplicationStore
-from gateway.audit import AuditLog
+from gateway.audit import AuditLog, SqliteAuditStore
 from gateway.auth import AccountService
 from gateway.clock import SystemEpoch, WallClock
 from gateway.database import open_database
@@ -52,9 +52,10 @@ from gateway.passwords import (
     Passwords,
     parameters_from,
 )
-from gateway.roles import RoleStore
+from gateway.roles import SqliteRoleStore
 from gateway.routing import load_plans
-from gateway.users import AccountStore, Bootstrap
+from gateway.state import run_now
+from gateway.users import Bootstrap, SqliteAccountStore
 
 ADMIN = "benchadmin"
 ORG = "default"
@@ -71,26 +72,30 @@ def _prepare(path: Path, pepper: bytes, environ: dict[str, str]) -> tuple[str, s
     hasher = PasswordHasher(parameters_from(environ, PRODUCTION))
     store = SqliteApplicationStore(connection)
     service = AccountService(
-        AccountStore(connection),
-        AuditLog(connection),
+        SqliteAccountStore(connection),
+        AuditLog(SqliteAuditStore(connection)),
         Passwords(hasher, InlineHashRunner()),
-        roles=RoleStore(connection),
+        roles=SqliteRoleStore(connection),
         organizations=store,
         clock=WallClock(),
         epoch=SystemEpoch(),
         secret=secrets.token_bytes(32),
     )
-    service.create_user("benchroot", secrets.token_urlsafe(18), ORG, platform_admin=True)
+    run_now(service.create_user("benchroot", secrets.token_urlsafe(18), ORG, platform_admin=True))
     password = secrets.token_urlsafe(18)
-    user = service.create_user(ADMIN, password, ORG)
+    user = run_now(service.create_user(ADMIN, password, ORG))
     # As if it had logged in once and chosen this password.
-    service.store.set_password(
-        user.id, hasher.hash(password), must_change=False, bootstrap=Bootstrap.NONE
+    run_now(
+        service.store.set_password(
+            user.id, hasher.hash(password), must_change=False, bootstrap=Bootstrap.NONE
+        )
     )
-    service.grant_role(ADMIN, "org_admin", "organization", ORG)
+    run_now(service.grant_role(ADMIN, "org_admin", "organization", ORG))
     keys = ApiKeyService(store, pepper, SystemEpoch())
-    operator = ManagementService(keys, load_plans(), AuditLog(connection), SystemEpoch())
-    application = operator.create_application(ORG, "Bench", "pro")
+    operator = ManagementService(
+        keys, load_plans(), AuditLog(SqliteAuditStore(connection)), SystemEpoch()
+    )
+    application = run_now(operator.create_application(ORG, "Bench", "pro"))
     connection.close()
     return password, application.id
 

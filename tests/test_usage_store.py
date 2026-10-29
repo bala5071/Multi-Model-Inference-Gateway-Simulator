@@ -15,10 +15,12 @@ from gateway.ledger import CostLedger
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.periods import FixedPeriods
 from gateway.schema import RequestResult
+from gateway.state import run_now
 from gateway.usage import (
     InMemoryUsageStore,
     ModelUsage,
     SqliteUsageStore,
+    StoredUsageEvent,
     UsageEvent,
     UsageStore,
 )
@@ -53,49 +55,58 @@ def store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[UsageStore
         connection.close()
 
 
-def test_append_returns_increasing_unique_keys(store: UsageStore) -> None:
-    seqs = [store.append(_event()) for _ in range(3)]
+async def test_append_returns_increasing_unique_keys(store: UsageStore) -> None:
+    seqs = [await store.append(_event()) for _ in range(3)]
     assert seqs == sorted(set(seqs))
     # The same response id three times is three rows: req-N is not the key.
-    assert [s.event.request_id for s in store.events()] == ["req-1"] * 3
-    assert [s.seq for s in store.events()] == seqs
+    assert [s.event.request_id for s in await store.events()] == ["req-1"] * 3
+    assert [s.seq for s in await store.events()] == seqs
 
 
-def test_events_round_trip_exactly(store: UsageStore) -> None:
+async def test_events_round_trip_exactly(store: UsageStore) -> None:
     event = UsageEvent("a1", "req-7", "premium", 123, 23, 45, 0.1 + 0.2, 0.3 * 0.8, 1.5e12)
-    seq = store.append(event)
-    [stored] = store.events()
+    seq = await store.append(event)
+    [stored] = await store.events()
     assert (stored.seq, stored.event) == (seq, event)
 
 
-def test_usage_by_model_sums_one_application_in_a_half_open_range(store: UsageStore) -> None:
-    store.append(_event("a1", at=99.0))  # before
-    store.append(_event("a1", at=100.0, model="premium", prompt=10, cached=4, completion=5))
-    store.append(_event("a1", at=150.0, prompt=20, completion=1))
-    store.append(_event("a2", at=150.0))  # another application
-    store.append(_event("a1", at=200.0))  # the end is excluded
+async def test_usage_by_model_sums_one_application_in_a_half_open_range(store: UsageStore) -> None:
+    await store.append(_event("a1", at=99.0))  # before
+    await store.append(_event("a1", at=100.0, model="premium", prompt=10, cached=4, completion=5))
+    await store.append(_event("a1", at=150.0, prompt=20, completion=1))
+    await store.append(_event("a2", at=150.0))  # another application
+    await store.append(_event("a1", at=200.0))  # the end is excluded
 
-    by_model = store.usage_by_model("a1", 100.0, 200.0)
+    by_model = await store.usage_by_model("a1", 100.0, 200.0)
 
     assert set(by_model) == {"premium", "economy"}
     assert by_model["premium"] == ModelUsage(1, 10, 4, 5, 0.25, 0.5)
     assert by_model["economy"] == ModelUsage(1, 20, 0, 1, 0.25, 0.5)
-    assert store.usage_by_model("nobody", 0.0, 1e15) == {}
-    assert [s.event.application_id for s in store.events("a2")] == ["a2"]
+    assert await store.usage_by_model("nobody", 0.0, 1e15) == {}
+    assert [s.event.application_id for s in await store.events("a2")] == ["a2"]
 
 
-def test_store_methods_are_synchronous() -> None:
-    # Awaiting a store, or moving it onto a thread, would let a SimClock's time jump.
+def test_store_calls_are_coroutines_that_never_suspend(store: UsageStore) -> None:
+    # A store call that suspended would let a SimClock's time jump (docs/34): each completes
+    # under run_now, which raises if one suspends.
     for cls in (InMemoryUsageStore, SqliteUsageStore):
-        for name in ("append", "usage_by_model", "events"):
-            assert not inspect.iscoroutinefunction(getattr(cls, name)), (cls, name)
+        for name in ("append", "usage_by_model", "usage_by_model_for", "events", "prune"):
+            assert inspect.iscoroutinefunction(getattr(cls, name)), (cls, name)
+    seq = run_now(store.append(_event()))
+    assert run_now(store.events()) == [StoredUsageEvent(seq, _event())]
+    assert set(run_now(store.usage_by_model("a1", 0.0, 1e13))) == {"economy"}
+    assert set(run_now(store.usage_by_model_for(["a1"], 0.0, 1e13))) == {"economy"}
+    assert run_now(store.prune(1e13)) == 1
 
 
-def test_in_memory_store_is_bounded() -> None:
+async def test_in_memory_store_is_bounded() -> None:
     store = InMemoryUsageStore(max_events=2)
     for i in range(5):
-        store.append(_event(request=f"req-{i}"))
-    assert [(s.seq, s.event.request_id) for s in store.events()] == [(4, "req-3"), (5, "req-4")]
+        await store.append(_event(request=f"req-{i}"))
+    assert [(s.seq, s.event.request_id) for s in await store.events()] == [
+        (4, "req-3"),
+        (5, "req-4"),
+    ]
     with pytest.raises(ValueError, match="max_events"):
         InMemoryUsageStore(max_events=0)
 
@@ -103,20 +114,20 @@ def test_in_memory_store_is_bounded() -> None:
 # --- SQLite ---------------------------------------------------------------------------------
 
 
-def test_a_restarted_process_gets_new_keys_and_keeps_the_old_rows(tmp_path: Path) -> None:
+async def test_a_restarted_process_gets_new_keys_and_keeps_the_old_rows(tmp_path: Path) -> None:
     path = tmp_path / "usage.db"
     first = _migrated(path)
     # Each process numbers its responses from req-1.
-    a = SqliteUsageStore(first).append(_event(request="req-1"))
-    b = SqliteUsageStore(first).append(_event(request="req-2"))
+    a = await SqliteUsageStore(first).append(_event(request="req-1"))
+    b = await SqliteUsageStore(first).append(_event(request="req-2"))
     first.close()
 
     second = _migrated(path)
     store = SqliteUsageStore(second)
-    c = store.append(_event(request="req-1"))
+    c = await store.append(_event(request="req-1"))
 
     assert a < b < c
-    assert [(s.seq, s.event.request_id) for s in store.events()] == [
+    assert [(s.seq, s.event.request_id) for s in await store.events()] == [
         (a, "req-1"),
         (b, "req-2"),
         (c, "req-1"),
@@ -124,13 +135,13 @@ def test_a_restarted_process_gets_new_keys_and_keeps_the_old_rows(tmp_path: Path
     second.close()
 
 
-def test_keys_are_never_reused_even_after_the_newest_row_is_deleted(tmp_path: Path) -> None:
+async def test_keys_are_never_reused_even_after_the_newest_row_is_deleted(tmp_path: Path) -> None:
     connection = _migrated(tmp_path / "usage.db")
     store = SqliteUsageStore(connection)
-    store.append(_event())
-    newest = store.append(_event())
+    await store.append(_event())
+    newest = await store.append(_event())
     connection.execute("DELETE FROM usage_events WHERE seq = ?", (newest,))
-    assert store.append(_event()) == newest + 1
+    assert await store.append(_event()) == newest + 1
     connection.close()
 
 
@@ -176,44 +187,46 @@ def _result(request_id: str, tokens_in: int, tokens_out: int, cost: float) -> Re
     return RequestResult(request_id, "m", 0.0, 0.0, 1.0, 2.0, tokens_in, tokens_out, cost)
 
 
-def test_the_ledger_stores_one_event_per_charge(store: UsageStore) -> None:
+async def test_the_ledger_stores_one_event_per_charge(store: UsageStore) -> None:
     clock = SimClock(start_ms=10.0)
     ledger = CostLedger(clock, store=store, epoch=ClockEpoch(clock, origin_ms=1e12))
 
-    ledger.record("t1", _result("req-1", 10, 5, 0.5), model="economy", price_multiplier=0.8)
-    ledger.record("t2", _result("req-2", 7, 3, 0.25), model="premium", price_multiplier=1.0)
+    await ledger.record("t1", _result("req-1", 10, 5, 0.5), model="economy", price_multiplier=0.8)
+    await ledger.record("t2", _result("req-2", 7, 3, 0.25), model="premium", price_multiplier=1.0)
 
-    assert [s.event for s in store.events()] == [
+    assert [s.event for s in await store.events()] == [
         UsageEvent("t1", "req-1", "economy", 10, 0, 5, 0.5, 0.5 * 0.8, 1e12 + 10.0),
         UsageEvent("t2", "req-2", "premium", 7, 0, 3, 0.25, 0.25, 1e12 + 10.0),
     ]
 
 
-def test_a_new_ledger_on_the_same_database_sees_the_stored_usage(tmp_path: Path) -> None:
+async def test_a_new_ledger_on_the_same_database_sees_the_stored_usage(tmp_path: Path) -> None:
     path = tmp_path / "usage.db"
     clock = SimClock()
     epoch = ClockEpoch(clock, origin_ms=1e12)
     first = _migrated(path)
     ledger = CostLedger(clock, store=SqliteUsageStore(first), epoch=epoch)
     for i in range(3):
-        ledger.record("t1", _result(f"req-{i}", 10, 5, 0.1), model="economy", price_multiplier=1.0)
-    before = ledger.usage("t1")
+        await ledger.record(
+            "t1", _result(f"req-{i}", 10, 5, 0.1), model="economy", price_multiplier=1.0
+        )
+    before = await ledger.usage("t1")
     first.close()
 
     second = _migrated(path)
     restarted = CostLedger(clock, store=SqliteUsageStore(second), epoch=epoch)
 
-    assert restarted.usage("t1") == before
-    assert restarted.usage("t1").total.billed_tokens == 45
+    assert await restarted.usage("t1") == before
+    assert (await restarted.usage("t1")).total.billed_tokens == 45
     second.close()
 
 
-def test_stored_usage_from_an_earlier_period_does_not_count(tmp_path: Path) -> None:
+async def test_stored_usage_from_an_earlier_period_does_not_count(tmp_path: Path) -> None:
     connection = _migrated(tmp_path / "usage.db")
     store = SqliteUsageStore(connection)
-    store.append(_event("t1", at=999.0))  # the period before
+    await store.append(_event("t1", at=999.0))  # the period before
     clock = SimClock(start_ms=1500.0)
     ledger = CostLedger(clock, periods=FixedPeriods(0.0, 1000.0), store=store)
-    usage = ledger.usage("t1")
+    usage = await ledger.usage("t1")
     assert (usage.period_start_ms, usage.total) == (1000.0, ModelUsage())
     connection.close()

@@ -14,6 +14,7 @@ from gateway.applications import SqliteApplicationStore
 from gateway.clock import ClockEpoch, SimClock
 from gateway.database import ProcessLock, check_backup, open_database
 from gateway.migrations import MIGRATIONS, MigrationRunner
+from gateway.state import run_now
 from helpers import TEST_PEPPER, version3_database
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -43,7 +44,9 @@ def _authenticate(environ: dict[str, str], key: str) -> str:
     connection = open_database(environ["GATEWAY_DATABASE"])
     try:
         store = SqliteApplicationStore(connection)
-        return ApiKeyService(store, TEST_PEPPER, ClockEpoch(SimClock())).authenticate(key).id
+        return run_now(
+            ApiKeyService(store, TEST_PEPPER, ClockEpoch(SimClock())).authenticate(key)
+        ).id
     finally:
         connection.close()
 
