@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
+from pathlib import Path
 
 import httpx
 import pytest
@@ -26,6 +28,7 @@ from gateway.audit import (
     AuditEvent,
     AuditLog,
     Outcome,
+    SqliteAuditStore,
     TargetType,
 )
 from gateway.auth import (
@@ -39,8 +42,9 @@ from gateway.breaker import BreakerState, Transition
 from gateway.clock import SimClock, SystemEpoch, WallClock
 from gateway.continuous import build_continuous_registry
 from gateway.counters import OnRestart
+from gateway.database import open_database
 from gateway.management import ManagementRefusal
-from gateway.state import StateUnavailableError
+from gateway.state import StateUnavailableError, run_now
 from gateway.valkey import (
     COUNTERS_ENV,
     MAX_SKEW_ENV,
@@ -59,6 +63,9 @@ from valkey_helpers import (
     counters_on,
     instances,
 )
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+from manage import main as manage
 
 PROMPT = "one two three four five six seven eight nine ten"
 ORG, PROVIDER = "north", "prv_00000000000000aa"
@@ -578,3 +585,45 @@ async def test_while_valkey_is_unreachable_logins_and_step_ups_are_refused_and_t
         assert len(verified) == 1 + LOCK_FAILURES  # every login still verified its password
     finally:
         await counters.aclose()
+
+
+def test_the_cli_works_with_valkey_down(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The operator's way in during an outage (docs/35, the runbook): ``scripts/manage.py`` uses
+    no shared counter, so it works with the server's settings pointing at a Valkey that does
+    not answer. Every recovery command, and every one is audited as usual."""
+    environ = {
+        "GATEWAY_DATABASE": str(tmp_path / "gateway.db"),
+        "GATEWAY_KEY_PEPPER": TEST_PEPPER.decode(),
+        "GATEWAY_ARGON2_MEMORY_KIB": "8",
+        "GATEWAY_ARGON2_TIME_COST": "1",
+        COUNTERS_ENV: "valkey",
+        URL_ENV: NOWHERE,
+    }
+    other = "seven copper kites at dawn"
+    answers = iter([PASSWORD, PASSWORD, PASSWORD, PASSWORD, other, other])
+
+    def read(_: str) -> str:
+        return next(answers)
+
+    commands = [
+        ["create-user", "--username", "root", "--platform-admin"],
+        ["create-user", "--username", "alice", "--organization", "default"],
+        ["unlock-user", "--username", "root"],
+        ["reset-password", "--username", "root"],
+        ["disable-user", "--username", "alice"],
+        ["enable-user", "--username", "alice"],
+        ["create-application", "--organization", "default", "--id", "shop", "--name", "Shop",
+         "--plan", "pro"],
+        ["list-keys", "--application", "shop"],
+    ]  # fmt: skip
+    results = [manage(command, environ, read) for command in commands]
+    assert results == [0] * len(commands), capsys.readouterr().err
+    connection = open_database(environ["GATEWAY_DATABASE"])
+    try:
+        actions = [
+            e.event.action.value for e in run_now(AuditLog(SqliteAuditStore(connection)).entries())
+        ]
+    finally:
+        connection.close()
+    for action in ("user_created", "user_unlocked", "password_reset", "user_disabled"):
+        assert action in actions

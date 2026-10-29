@@ -95,6 +95,44 @@ probe; 10 unknown-user rows against a cap of 3, three written and one `audit_row
 entry of 7 from six concurrent flushes; the test-connection windows counting in both or
 neither. The budget edge (Q1) is tested with the budgets, in the Postgres PR.
 
+## During a Valkey outage: runbook
+
+**What you see.** Warnings in the log, `... refused: the shared counters are unavailable
+(<error type>)`, never the address. Requests answered 503 `state_unavailable`; console logins
+answered 401 to everyone. If Valkey is down when an instance starts, the instance does not start.
+
+**What is refused, and what keeps working:**
+
+| | During the outage |
+|---|---|
+| Generate and chat for an application **with** a requests-per-minute limit | refused, 503 `state_unavailable` |
+| Generate and chat for an application **without** one | served: no counter is asked (its budget, in the database, still applies) |
+| A chat request's organization providers | skipped (breaker `admit` refused): every mode has the gateway's own tier as a candidate, which answers; the request fails only if that tier cannot serve it (for instance tools it does not support) |
+| Console login | refused for everyone, 401 |
+| Sessions logged in before the outage | still work: a session is checked in the account database only |
+| Step-up | a new window cannot be opened (403); a window opened before the outage stays usable until it ends |
+| Actions that need step-up | only within a window opened before the outage |
+| Creating a user over HTTP | refused (429 `user_creation_limited`) |
+| Test-connection | refused, 503 |
+| Unknown-user audit rows | not written, counted, and written as one `audit_rows_dropped` entry per minute later |
+| The per-account lockout, budgets, keys, revocation | unchanged: they are in the database |
+| `scripts/manage.py` | **works**: it uses no shared counter (tested with the settings pointing at a Valkey that does not answer) |
+
+**How an admin gets in.** Not through the console: logins are refused by design, the bootstrap
+admin's too. An admin who was already logged in keeps that session for whatever needs no new
+step-up. Otherwise the operator works on the host with `scripts/manage.py`: `unlock-user`,
+`reset-password`, `disable-user` and `enable-user`, `grant-role` and `revoke-role`,
+`create-application`, `create-key`, `rotate-key` and `revoke-key`, `disable-organization`. Each
+is audited as usual.
+
+**Getting the service back.** When Valkey answers again, every counter is used again at once: no
+restart is needed. A Valkey that restarted empty is recorded (an event on each instance, one
+audit row). Check that it still runs with `maxmemory-policy noeviction` and `appendonly yes`,
+or the next start is refused. Until Postgres each instance has its own database, so
+`GATEWAY_COUNTERS=memory` and a restart gives each instance its own counters again: the
+service comes back, but no limit is shared until Valkey is. That is the operator's choice to
+make, not an automatic one.
+
 ## Threat-model additions
 
 - **A Valkey restart resets every shared counter** (accepted, Q4): one fresh window for the
@@ -128,7 +166,25 @@ timeout on the injected clock.
 | breaker admit (the breaker script), in memory | 0.000 | 0.000 | 0.001 |
 | breaker admit, Valkey | 0.719 to 0.736 | 0.677 to 0.684 | 1.309 to 1.698 |
 
-So each shared counter call adds about 0.6 to 0.8 ms (mean) here. A generate request with an
-application key makes one (the rate limit); a login one or two; a chat request one or two per
-organization provider it tries. The default (`memory`) path is unchanged: the perf gate is
-+0.0% on every model and the protected outputs match.
+So each shared counter call added about 0.6 to 0.8 ms (mean) in that session.
+
+**A second session, with the chat worst case** (2026-10-29, at `eb1ecdb`, the same machine, image
+and command; Valkey freshly started). Per call it measured higher than the first session, by
+more than the spread between runs: the cause was not measured, so both are recorded.
+
+| Three runs, 2,000 each | mean ms | p50 ms | p99 ms |
+|---|---|---|---|
+| rate limit, Valkey | 1.251 to 1.304 | 1.110 to 1.145 | 2.936 to 3.391 |
+| login check, Valkey | 1.028 to 1.188 | 0.940 to 1.077 | 2.354 to 2.728 |
+| breaker admit, Valkey | 1.214 to 1.313 | 1.070 to 1.188 | 3.039 to 3.671 |
+| chat worst case, N = 1 (5 calls in sequence), memory | 0.004 to 0.005 | 0.004 | 0.009 to 0.016 |
+| chat worst case, N = 1, Valkey | 5.982 to 6.802 | 5.528 to 6.085 | 12.977 to 14.362 |
+| chat worst case, N = 3 (13 calls in sequence), memory | 0.012 to 0.013 | 0.010 | 0.038 to 0.051 |
+| chat worst case, N = 3, Valkey | 15.682 to 16.782 | 14.701 to 16.032 | 28.719 to 30.017 |
+
+So the counters add, in this session, about 6 to 7 ms to a chat request that tries one provider
+and retries it, and about 16 to 17 ms (mean; 29 to 30 ms at p99) to one that does so for three,
+before any provider time: each attempt also waits on the provider, up to its first-token budget
+(10 s by default). A generate request with an application key makes one call (the rate limit),
+a login one or two. The default (`memory`) path is unchanged: the perf gate is +0.0% on every
+model and the protected outputs match.
