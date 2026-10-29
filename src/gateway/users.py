@@ -126,6 +126,13 @@ class AccountStore(Protocol):
         """One write transaction: whatever the block writes, together or not at all."""
         ...
 
+    def request_transaction(self) -> AbstractAsyncContextManager[None]:
+        """A request's own writes (a wrong password counted, with its lockout and audit row),
+        together or not at all, without the management write lock: on Postgres that lock is
+        for management writes only (docs/scale-out-plan.md, section 3.6). On SQLite the same
+        as ``write_transaction``."""
+        ...
+
     async def add_user(self, user: User) -> None:
         """Raise ``ValueError`` if the username is taken or the organization does not exist."""
         ...
@@ -206,6 +213,9 @@ class SqliteAccountStore:
         self._connection = connection
 
     def write_transaction(self) -> AbstractAsyncContextManager[None]:
+        return write_transaction(self._connection)
+
+    def request_transaction(self) -> AbstractAsyncContextManager[None]:
         return write_transaction(self._connection)
 
     # --- users ---------------------------------------------------------------------------

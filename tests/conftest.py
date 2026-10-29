@@ -15,6 +15,9 @@ from helpers import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME, TEST_PEPPER, TEST_
 REAL_MODELS_ENV = "GATEWAY_REAL_MODELS"
 # A Valkey for the tests marked valkey (docker-compose.valkey.yml), e.g. redis://127.0.0.1:6380/0.
 VALKEY_URL_ENV = "GATEWAY_TEST_VALKEY_URL"
+# A Postgres for the tests marked postgres (docker-compose.postgres.yml), e.g.
+# postgresql://postgres@127.0.0.1:5433/postgres. Each test works in a schema of its own.
+POSTGRES_URL_ENV = "GATEWAY_TEST_POSTGRES_URL"
 # Live calls to hosted providers (docs/31): never in CI, never by default.
 LIVE_PROVIDERS_ENV = "GATEWAY_LIVE_PROVIDERS"
 
@@ -34,6 +37,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     skip_valkey = pytest.mark.skip(
         reason=f"needs Valkey (docker-compose.valkey.yml); set {VALKEY_URL_ENV} to run"
     )
+    postgres = bool(os.environ.get(POSTGRES_URL_ENV))
+    skip_postgres = pytest.mark.skip(
+        reason=f"needs Postgres (docker-compose.postgres.yml); set {POSTGRES_URL_ENV} to run"
+    )
     real = os.environ.get(REAL_MODELS_ENV) == "1"
     live = os.environ.get(LIVE_PROVIDERS_ENV) == "1"
     skip_real = pytest.mark.skip(reason=f"needs real model servers; set {REAL_MODELS_ENV}=1 to run")
@@ -41,6 +48,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         reason=f"calls a hosted provider and can cost money; set {LIVE_PROVIDERS_ENV}=1 to run"
     )
     for item in items:
+        if "postgres" in item.keywords and not postgres:
+            item.add_marker(skip_postgres)
         if "valkey" in item.keywords and not valkey:
             item.add_marker(skip_valkey)
         if "real_models" in item.keywords and not real:
