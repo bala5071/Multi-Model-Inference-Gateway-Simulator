@@ -39,6 +39,7 @@ def test_counts_list_every_type_and_only_known_types_are_accepted() -> None:
         "downgrade": 1,
         "budget_exhausted": 0,
         "circuit_breaker": 0,
+        "state_store_restarted": 0,
     }
     assert tuple(bus.counts) == EVENT_TYPES
     with pytest.raises(ValueError, match="unknown event type 'surprise'"):

@@ -56,6 +56,8 @@ class AuditAction(StrEnum):
     PASSWORD_RESET = "password_reset"
     SESSIONS_REVOKED = "sessions_revoked"
     ROWS_DROPPED = "audit_rows_dropped"
+    # A shared counter store came back empty (docs/35): written once per restart.
+    STATE_STORE_RESTARTED = "state_store_restarted"
     ROLE_GRANTED = "role_granted"
     ROLE_REVOKED = "role_revoked"
     STEP_UP_GRANTED = "step_up_granted"
@@ -91,6 +93,7 @@ class TargetType(StrEnum):
     SESSION = "session"
     UNKNOWN_USER = "unknown_user"
     AUDIT_LOG = "audit_log"
+    STATE_STORE = "state_store"
     ORGANIZATION = "organization"
     APPLICATION = "application"
     API_KEY = "api_key"
@@ -143,6 +146,7 @@ DETAIL_FIELDS: Mapping[str, type] = {
     "password_rehashed": bool,
     "dropped": int,
     "minute_start_ms": float,
+    "store": str,
     "must_change_password": bool,
     "role": str,
     "scope_type": str,
@@ -180,6 +184,7 @@ _MODES = frozenset(
 )
 # The string details that take only these values.
 FIXED_VALUES: Mapping[str, frozenset[str]] = {
+    "store": frozenset({"valkey"}),
     "provider_type": frozenset({"openai_compatible", "anthropic"}),
     "switch": frozenset({"organization", "platform"}),
     "old_mode": _MODES,
@@ -460,24 +465,25 @@ class AuditLog:
         return True
 
     async def flush_dropped(self, now_ms: float) -> int:
-        """Once the minute that dropped rows is over, write how many. Returns that count."""
-        found = await self._cap.collect(now_ms)
-        if found is None:
-            return 0
-        await self._store.insert(
-            AuditEvent(
-                AuditAction.ROWS_DROPPED,
-                Outcome.INFO,
-                TargetType.AUDIT_LOG,
-                details={
-                    "reason": Reason.UNKNOWN_USER_CAP,
-                    "dropped": found.dropped,
-                    "minute_start_ms": found.minute_start_ms,
-                },
-            ),
-            found.minute_start_ms + MINUTE_MS,
-        )
-        return found.dropped
+        """Once a minute that dropped rows is over, write how many: one entry per minute
+        (a shared cap can hold several). Returns the count written."""
+        written = 0
+        while (found := await self._cap.collect(now_ms)) is not None:
+            await self._store.insert(
+                AuditEvent(
+                    AuditAction.ROWS_DROPPED,
+                    Outcome.INFO,
+                    TargetType.AUDIT_LOG,
+                    details={
+                        "reason": Reason.UNKNOWN_USER_CAP,
+                        "dropped": found.dropped,
+                        "minute_start_ms": found.minute_start_ms,
+                    },
+                ),
+                found.minute_start_ms + MINUTE_MS,
+            )
+            written += found.dropped
+        return written
 
     async def entries(self) -> list[AuditEntry]:
         return await self._store.entries()

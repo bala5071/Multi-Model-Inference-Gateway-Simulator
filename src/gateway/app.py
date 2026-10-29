@@ -45,7 +45,7 @@ from gateway.applications import (
     InMemoryApplicationStore,
     seed_demo_applications,
 )
-from gateway.audit import AuditLog, Reason
+from gateway.audit import DEFAULT_UNKNOWN_USER_ROWS_PER_MINUTE, AuditLog, Reason
 from gateway.auth import (
     ADMIN_PASSWORD_ENV,
     ADMIN_USERNAME_ENV,
@@ -55,8 +55,11 @@ from gateway.auth import (
     SESSION_COOKIE,
     STEP_UP_FAILED_MESSAGE,
     STEP_UP_REQUIRED_MESSAGE,
+    STEP_UP_SESSION_WINDOW_MS,
+    USER_CREATE_WINDOW_MS,
     AccountAccess,
     AccountService,
+    AccountWindows,
     BootstrapOutcome,
     CsrfError,
     CurrentPasswordIncorrectError,
@@ -78,7 +81,7 @@ from gateway.backend_config import (
     load_backend_config,
 )
 from gateway.backends import Backend, BackendError
-from gateway.breaker import Breakers, Transition
+from gateway.breaker import Breakers, BreakerStore, SlowWarnings, Transition
 from gateway.chat import (
     TOOL_NAME_PATTERN,
     ChatDelta,
@@ -96,6 +99,7 @@ from gateway.chatrouter import ChatRouter, NoCandidateError, RoutedOutcome, Rout
 from gateway.chatservice import GATEWAY_PROVIDER, ChatOutcome, ChatService
 from gateway.clock import Clock, ClockEpoch, EpochSource, PacedSimClock, SystemEpoch, WallClock
 from gateway.continuous import RequestTooLargeError, build_continuous_registry
+from gateway.counters import SharedCounters
 from gateway.database import ProcessLock, database_path, open_database
 from gateway.egress import (
     LOCAL_ALLOW_ENV,
@@ -171,16 +175,17 @@ from gateway.providers import (
     ProviderUnreachedError,
     resolve_provider,
 )
-from gateway.ratelimit import RateLimitedError, RequestRateLimiter
+from gateway.ratelimit import RateLimitedError, RateLimiter, RequestRateLimiter
 from gateway.redaction import Redactor
 from gateway.redaction import install as install_redaction
 from gateway.registry import ModelRegistry, UnknownModelError
 from gateway.routing import ModelNotAllowedError, Quality, Router, load_plans, pick_by_quality
 from gateway.schema import GenerateRequest, RequestResult
-from gateway.state import StateBackend, run_now, sqlite_state
+from gateway.state import StateBackend, StateUnavailableError, run_now, sqlite_state
 from gateway.timeseries import TimeSeriesStore
 from gateway.usage import ChatSource, UsageStore
 from gateway.users import User
+from gateway.valkey import ValkeyCounters, account_windows, shared_counters_from
 from gateway.vault import Vault, load_master_keys
 from gateway.workload import PlannedRequest
 
@@ -1325,7 +1330,11 @@ def _mode_routes(app: FastAPI, accounts: AccountAccess, modes: ModeService) -> N
 
 
 def _provider_routes(
-    app: FastAPI, accounts: AccountAccess, providers: ProviderService, breakers: Breakers
+    app: FastAPI,
+    accounts: AccountAccess,
+    providers: ProviderService,
+    breakers: BreakerStore,
+    warnings: SlowWarnings,
 ) -> None:
     """The provider endpoints under /v1/admin/orgs/{org}/providers (docs/32), each through
     ``requires``; key changes are consume-on-use."""
@@ -1390,7 +1399,7 @@ def _provider_routes(
     def slow(config: ProviderConfig) -> dict[str, object]:
         """The slow-provider warning (docs/33): set after consecutive missed first-token
         budgets, cleared by an answer within budget."""
-        warning = breakers.slow(config.organization_id, config.id)
+        warning = warnings.slow(config.organization_id, config.id)
         return {
             "slow_since_ms": warning.slow_since_ms,
             "consecutive_misses": warning.consecutive_misses,
@@ -1561,6 +1570,7 @@ def create_app(
     providers: ProviderService | None = None,
     modes: ModeStore | None = None,
     local_destinations: LocalDestinations | None = None,
+    counters: SharedCounters | None = None,
 ) -> FastAPI:
     """Build the API around an already wired registry.
 
@@ -1626,7 +1636,11 @@ def create_app(
         # Before any event loop runs the app: a store call that cannot suspend (docs/34).
         for application in run_now(applications.store.list_applications()):
             Router.check_plan(application.plan, registry)
-    rate_limiter = RequestRateLimiter(clock) if applications is not None else None
+    rate_limiter: RateLimiter | None = None
+    if applications is not None:
+        rate_limiter = (
+            counters.rate_limiter() if counters is not None else RequestRateLimiter(clock)
+        )
     ledger = CostLedger(clock, store=usage_store, epoch=epoch, retention_ms=usage_retention_ms)
     timeout_ms = overload.request_timeout_ms if overload is not None else None
     slo_policy = overload.slo if overload is not None else None
@@ -1660,13 +1674,30 @@ def create_app(
             open_ms=moved.open_ms,
         )
 
-    breakers = Breakers(clock, breaker_moved)
+    # Shared: every instance's breaker state is one; the slow-provider warning stays this
+    # instance's own (docs/35).
+    breakers: BreakerStore
+    if counters is not None:
+        breakers, warnings = counters.breakers(breaker_moved), SlowWarnings(clock)
+    else:
+        own = Breakers(clock, breaker_moved)
+        breakers, warnings = own, own.warnings
 
     # Filled in further down, once the generate handler it sends through exists.
     load: LoadController | None = None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        # Shared counters are checked before anything is served: a store that could lose a
+        # count, or a clock too far from it, refuses the start (docs/35).
+        watching = None
+        if counters is not None:
+
+            async def restarted(_: str) -> None:
+                monitoring.state_store_restarted("valkey")
+
+            await counters.watch.start(restarted)
+            watching = asyncio.create_task(counters.watch.run(restarted))
         if load is not None and autostart_load is not None:
             await load.start(autostart_load, seed)
         # Retention runs beside the server, never on a request (docs/21).
@@ -1697,6 +1728,10 @@ def create_app(
         await registry.aclose()
         if applications is not None:
             await applications.keys.flush_last_used()
+        if watching is not None:
+            watching.cancel()
+        if counters is not None:
+            await counters.aclose()
 
     app = FastAPI(title="Cost-aware multi-model inference gateway", lifespan=lifespan)
     if local_only is not None:
@@ -1719,7 +1754,7 @@ def create_app(
         _admin_routes(app, accounts, management)
         if providers is not None:
             app.state.providers = providers
-            _provider_routes(app, accounts, providers, breakers)
+            _provider_routes(app, accounts, providers, breakers, warnings)
             if management is not None:
                 _mode_routes(
                     app,
@@ -1785,6 +1820,17 @@ def create_app(
             "invalid_api_key",
             INVALID_KEY_MESSAGE,
             headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
+        )
+
+    @app.exception_handler(StateUnavailableError)
+    async def state_unavailable(_: Request, exc: StateUnavailableError) -> JSONResponse:
+        # A shared counter could not answer: what it would have decided is refused (docs/35).
+        # Never which store or why: that is in the log.
+        return _error(
+            503,
+            "state_unavailable",
+            "The gateway cannot check this request's limits right now. Try again later.",
+            headers=_NO_STORE,
         )
 
     @app.exception_handler(RateLimitedError)
@@ -2142,6 +2188,7 @@ def create_app(
             local_destinations,
             providers,
             providers.client_factory if providers is not None else None,
+            warnings=warnings,
         )
         app.state.chat_router = chat_router
         chat_epoch = epoch if epoch is not None else ClockEpoch(clock)
@@ -2922,18 +2969,37 @@ def build_accounts(
     epoch: EpochSource,
     pepper: bytes,
     environ: Mapping[str, str],
+    *,
+    shared: ValkeyCounters | None = None,
 ) -> AccountAccess:
     """Console accounts for the default server (docs/27): argon2id at the configured
     parameters on a 2-thread runner, the audit log and its retention, the bootstrap admin
     from the environment (or ``BootstrapError`` if there is no admin and no way to make one),
-    and the cookie's ``Secure`` flag from ``GATEWAY_COOKIE_SECURE``."""
+    and the cookie's ``Secure`` flag from ``GATEWAY_COOKIE_SECURE``. With ``shared`` counters
+    the login limiter, the step-up and user-creation caps and the audit cap are shared, and
+    the watch writes its restart row to this audit log (docs/35)."""
     passwords = Passwords(
         PasswordHasher(parameters_from(environ, PRODUCTION)), ThreadHashRunner(max_workers=2)
     )
     step_up_minutes, step_up_session_failures = step_up_settings(environ)
+    creation_attempts = user_create_attempts(environ)
+    audit = AuditLog(state.audit)
+    windows = None
+    if shared is not None:
+        audit = AuditLog(state.audit, cap=shared.audit_cap(DEFAULT_UNKNOWN_USER_ROWS_PER_MINUTE))
+        shared.watch.audit = audit
+        windows = AccountWindows(
+            *account_windows(
+                shared,
+                step_up_session_failures=step_up_session_failures,
+                step_up_window_ms=STEP_UP_SESSION_WINDOW_MS,
+                user_create_attempts=creation_attempts,
+                user_create_window_ms=USER_CREATE_WINDOW_MS,
+            )
+        )
     service = AccountService(
         state.accounts,
-        AuditLog(state.audit),
+        audit,
         passwords,
         roles=state.roles,
         organizations=state.applications,
@@ -2943,7 +3009,8 @@ def build_accounts(
         audit_retention_ms=audit_retention_ms(environ),
         step_up_minutes=step_up_minutes,
         step_up_session_failures=step_up_session_failures,
-        user_create_attempts=user_create_attempts(environ),
+        user_create_attempts=creation_attempts,
+        windows=windows,
     )
     # Before any event loop runs the app: store calls that cannot suspend (docs/34).
     if run_now(service.bootstrap_admin(environ)) is BootstrapOutcome.EXISTS_WITH_VARIABLES:
@@ -3034,7 +3101,9 @@ def create_default_app() -> FastAPI:
     state = sqlite_state(database)
     access = ApplicationAccess(ApiKeyService(state.applications, pepper, epoch), templates)
     try:
-        accounts = build_accounts(state, clock, epoch, pepper, os.environ)
+        # Counters shared with other instances, or this process's own (docs/35).
+        shared = shared_counters_from(os.environ, clock, epoch, pepper)
+        accounts = build_accounts(state, clock, epoch, pepper, os.environ, shared=shared)
     except BaseException:
         database.close()
         lock.release()
@@ -3089,9 +3158,11 @@ def create_default_app() -> FastAPI:
             epoch,
             Redactor(),
             lambda: organization_client(system_resolver, ssl_context=tls),
+            test_counter=shared.connection_tests() if shared is not None else None,
         ),
         modes=state.modes,
         local_destinations=local,
+        counters=shared,
     )
     # Held for the life of the process; released when it exits, however it exits.
     app.state.database_lock = lock

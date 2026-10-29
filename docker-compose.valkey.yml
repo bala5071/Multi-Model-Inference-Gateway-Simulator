@@ -1,0 +1,21 @@
+# Valkey for the shared-counter tests (docs/35-valkey-counters.md). Not the demo, which is
+# docker-compose.yml.
+#
+#   docker compose -f docker-compose.valkey.yml up --detach --wait
+#   GATEWAY_TEST_VALKEY_URL=redis://127.0.0.1:6380/0 uv run pytest -m valkey
+#   docker compose -f docker-compose.valkey.yml down
+#
+# The image is pinned by digest (tags are rebuilt daily); why 9.0.7 is in docs/licenses.md.
+# The server keeps every counter (no eviction, append-only): the gateway refuses to start
+# against one that might not. Published on this machine only; no password, so never expose it.
+services:
+  valkey:
+    image: valkey/valkey:9.0.7@sha256:7e1deda01b64ece3167d370ab5be3452d29734feec22cbcbc69b3a64f6859d6d
+    command: ["valkey-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15

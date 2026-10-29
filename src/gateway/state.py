@@ -31,6 +31,12 @@ from gateway.users import AccountStore, SqliteAccountStore
 T = TypeVar("T")
 
 
+class StateUnavailableError(Exception):
+    """A shared store or counter could not answer (unreachable, too slow, or the instance's
+    clock too far from it). Whatever it would have decided is refused: answered 503
+    ``state_unavailable``, never admitted (docs/scale-out-plan.md, section 4)."""
+
+
 class StoreSuspendedError(RuntimeError):
     """A store call given to ``run_now`` waited for something: it needs an event loop."""
 

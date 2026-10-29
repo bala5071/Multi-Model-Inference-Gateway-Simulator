@@ -26,9 +26,35 @@ choice of licenses (`A OR B`) is allowed if one of them is.
 Their own dependencies come with them and are pinned by `uv.lock`: argon2-cffi-bindings
 26.1.0 (MIT), cffi 2.1.1 (MIT-0), pycparser 3.11 (BSD-3-Clause).
 
+## Added for scale-out PR 2 (Valkey counters), pinned exactly
+
+| Package | Version | License | Why it is needed | Alternative considered |
+|---|---|---|---|---|
+| redis | 8.1.0 | MIT | The client for the shared counters in Valkey, through `redis.asyncio` (docs/scale-out-plan.md, PR 2) | A RESP client written here: one dependency fewer, but a protocol client is where framing and reconnection bugs live; `valkey-glide`: a Rust core, a larger supply chain |
+
+Provenance, checked 2026-10-29: author "Redis Inc." `<oss@redis.com>`; project
+`github.com/redis/redis-py` (since 2009, not a fork); uploaded 2026-07-30 (three months old);
+wheel sha256 `a4fe1aac3d3b3cc791d4b3d5931c5a956045dc951ee74d1c913ee3ac4d2ee9fb`, sdist
+`6e1a19beef9225c83efd689c7e6b7da2d5215b1f42cd13b7fc3714d0a09c7b25` (the same in `uv.lock`).
+**No PyPI provenance attestation**: the project publishes with an API token, not trusted
+publishing. In its place: release `v8.1.0` was published at 08:50:17Z, the repository's
+`pypi-publish.yaml` run for it succeeded from 08:50:19Z, PyPI received the wheel at 08:50:58Z,
+and **all 121 files of the wheel are byte-identical to the repository at tag `v8.1.0` (commit
+`e013126df18e476fbb8b8215f040f39bd3242683`)**. The tag's `pyproject.toml` declares the same
+dependencies as the metadata. Added with the operator's agreement given that evidence.
+
+Its one dependency, `async-timeout` 5.0.1 (Apache-2.0, `aio-libs/async-timeout`, 2024-11-06), is
+needed only on Python before 3.11.3; neither CI version installs it.
+
+## Services used in tests, CI and compose (not shipped)
+
+| Service | Version | License | Where | Provenance |
+|---|---|---|---|---|
+| Valkey | `valkey/valkey:9.0.7@sha256:7e1deda01b64ece3167d370ab5be3452d29734feec22cbcbc69b3a64f6859d6d` | BSD-3-Clause | `docker-compose.valkey.yml`, the CI `valkey` job | Built and pushed by `valkey-io/valkey-container`'s CI from its `mainline` branch (the push run of 2026-10-27 00:13Z matches the tag dates); tags are rebuilt daily, so it is pinned by digest. **An exception to the two-week rule, agreed 2026-10-29:** every current tag was two days old, a security release on all lines (GHSA-f4q9-j22m-xqq9), and the newest older tag, 9.0.6, lacks the fix |
+
 ## Every runtime dependency
 
-As resolved in `uv.lock` for Python 3.11 and 3.12.
+As resolved in `uv.lock` for Python 3.11 and 3.12 (`async-timeout`, Apache-2.0, only before 3.11.3).
 
 | Package | License |
 |---|---|
@@ -52,6 +78,7 @@ As resolved in `uv.lock` for Python 3.11 and 3.12.
 | pydantic-core | MIT |
 | pyjwt | MIT |
 | pyyaml | MIT |
+| redis | MIT |
 | starlette | BSD-3-Clause |
 | typing-extensions | PSF-2.0 |
 | typing-inspection | MIT |

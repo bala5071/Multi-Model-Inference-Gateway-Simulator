@@ -193,7 +193,23 @@ class FailureWindow(Protocol):
 
     async def record_failure(self, key: str) -> None: ...
 
+    async def admit(self, key: str) -> bool:
+        """Count one event for ``key`` unless it has reached the limit, in one step: False,
+        counting nothing, if it has (or if the count cannot be made)."""
+        ...
+
     async def clear(self, key: str) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class AccountWindows:
+    """The three failure windows of the account service, when they are not this process's
+    own (``LoginLimiter``s): the login limiter, the step-up session cap and the user-creation
+    cap, each with its own limit and window (docs/35)."""
+
+    login: FailureWindow
+    step_up: FailureWindow
+    user_creation: FailureWindow
 
 
 class LoginLimiter:
@@ -240,6 +256,12 @@ class LoginLimiter:
         self._failures.move_to_end(key)
         while len(self._failures) > self._max_entries:
             self._failures.popitem(last=False)
+
+    async def admit(self, key: str) -> bool:
+        if await self.blocked(key):
+            return False
+        await self.record_failure(key)
+        return True
 
     async def clear(self, key: str) -> None:
         self._failures.pop(key, None)
@@ -303,6 +325,7 @@ class AccountService:
         step_up_minutes: float = DEFAULT_STEP_UP_MINUTES,
         step_up_session_failures: int = DEFAULT_STEP_UP_SESSION_FAILURES,
         user_create_attempts: int = DEFAULT_USER_CREATE_ATTEMPTS,
+        windows: AccountWindows | None = None,
     ) -> None:
         if not 1 <= step_up_minutes <= 60:
             raise ValueError("step-up lasts from 1 to 60 minutes")
@@ -322,26 +345,36 @@ class AccountService:
         # One key per purpose, derived from ``secret`` (the pepper on the server); neither
         # is the pepper itself, and neither equals the other.
         self._csrf_key = derive_key(secret, KeyPurpose.CSRF_TOKEN)
-        self.limiter: FailureWindow = LoginLimiter(
-            clock, derive_key(secret, KeyPurpose.LOGIN_LIMITER)
+        self.limiter: FailureWindow = (
+            windows.login
+            if windows is not None
+            else LoginLimiter(clock, derive_key(secret, KeyPurpose.LOGIN_LIMITER))
         )
         self.audit_retention_ms = audit_retention_ms
         self.step_up_ms = step_up_minutes * MINUTE_MS
         # Failed step-ups per session (by its digest), in memory, on the injected clock:
         # past the cap, the endpoint refuses without verifying.
-        self._step_up_failures: FailureWindow = LoginLimiter(
-            clock,
-            derive_key(secret, KeyPurpose.LOGIN_LIMITER),
-            max_failures=step_up_session_failures,
-            window_ms=STEP_UP_SESSION_WINDOW_MS,
+        self._step_up_failures: FailureWindow = (
+            windows.step_up
+            if windows is not None
+            else LoginLimiter(
+                clock,
+                derive_key(secret, KeyPurpose.LOGIN_LIMITER),
+                max_failures=step_up_session_failures,
+                window_ms=STEP_UP_SESSION_WINDOW_MS,
+            )
         )
         # User-creation attempts per session (by its digest), in memory: every attempt counts,
         # whatever its outcome, so the cap bounds how many usernames a session can probe.
-        self._creation_attempts: FailureWindow = LoginLimiter(
-            clock,
-            derive_key(secret, KeyPurpose.LOGIN_LIMITER),
-            max_failures=user_create_attempts,
-            window_ms=USER_CREATE_WINDOW_MS,
+        self._creation_attempts: FailureWindow = (
+            windows.user_creation
+            if windows is not None
+            else LoginLimiter(
+                clock,
+                derive_key(secret, KeyPurpose.LOGIN_LIMITER),
+                max_failures=user_create_attempts,
+                window_ms=USER_CREATE_WINDOW_MS,
+            )
         )
         # A real argon2 hash at the current parameters, of a password nobody knows: what an
         # unknown username is verified against, so it costs what a real verify costs.
@@ -705,13 +738,12 @@ class AccountService:
         """Count one user-creation attempt by this session, or refuse it past the cap
         (``GATEWAY_USER_CREATE_ATTEMPTS`` an hour): every attempt counts, whatever its outcome,
         so a session cannot probe many usernames."""
-        key = context.session.id_hash
-        if await self._creation_attempts.blocked(key):
+        # Checked and counted in one step: two instances cannot both take the last attempt.
+        if not await self._creation_attempts.admit(context.session.id_hash):
             raise ManagementRefusal(
                 Reason.USER_CREATION_LIMITED,
                 "this session has tried to create too many users this hour; try again later",
             )
-        await self._creation_attempts.record_failure(key)
 
     async def record_refusal(
         self, actor: Actor, action: str, organization_id: str | None, reason: Reason
