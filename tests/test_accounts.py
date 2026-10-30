@@ -481,7 +481,7 @@ async def test_a_login_upgrades_a_hash_made_with_other_parameters(accounts: Acco
     user = await accounts.store.find_user("alice")
     assert user is not None
     older = PasswordHasher(Argon2Parameters(time_cost=2, memory_cost_kib=16)).hash(PASSWORD)
-    await accounts.store.set_password_hash(user.id, older)
+    await accounts.store.set_password_hash(user.id, older, replacing=user.password_hash)
     await accounts.service.login("alice", PASSWORD)
     upgraded = await accounts.store.find_user("alice")
     assert upgraded is not None

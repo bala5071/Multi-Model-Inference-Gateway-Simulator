@@ -33,7 +33,7 @@ import hashlib
 import hmac
 import secrets
 from collections import OrderedDict, deque
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
@@ -152,6 +152,10 @@ class StepUpFailedError(Exception):
 
 class StepUpRequiredError(Exception):
     """An action flagged for step-up, on a session whose window is not open."""
+
+
+class _PlatformAdminExistsError(Exception):
+    """A platform_admin was created by another instance while this one bootstrapped."""
 
 
 class BootstrapError(Exception):
@@ -492,6 +496,31 @@ class AccountService:
         An account made by a platform_admin who is not a member of its organization, or by
         the operator at the CLI, must change its password at first login: whoever made it
         knows that password. Hashes synchronously (CLI and startup only)."""
+        return await self._create_user(
+            username,
+            password,
+            organization_id,
+            actor=actor,
+            platform_admin=platform_admin,
+            must_change_password=must_change_password,
+            bootstrap=bootstrap,
+            reason=reason,
+        )
+
+    async def _create_user(
+        self,
+        username: str,
+        password: str,
+        organization_id: str,
+        *,
+        actor: Actor | None,
+        platform_admin: bool,
+        must_change_password: bool,
+        bootstrap: Bootstrap,
+        reason: Reason,
+        precondition: Callable[[], Awaitable[None]] | None = None,
+    ) -> User:
+        """``create_user``, with ``precondition`` checked in the same write transaction."""
         name = normalize_username(username)
         await self._check_new_user(name, organization_id, actor, platform_admin)
         self._policy.check(password, name)
@@ -499,6 +528,8 @@ class AccountService:
         # Checked again with the insert, in one transaction: on a store shared by several
         # instances another may have taken the name or the seat since (section 3.6).
         async with self.store.write_transaction():
+            if precondition is not None:
+                await precondition()
             organization = await self._check_new_user(name, organization_id, actor, platform_admin)
             outsider = actor is None or (
                 actor.holds(Role.PLATFORM_ADMIN) and actor.organization_id != organization.id
@@ -608,16 +639,27 @@ class AccountService:
                 "at its first login), or create one with `uv run python scripts/manage.py "
                 "create-user --platform-admin`."
             )
+
+        async def still_none() -> None:
+            # Checked again with the insert: another instance starting at the same moment may
+            # have created the first one since (docs/36).
+            if await self.roles.platform_admin_exists():
+                raise _PlatformAdminExistsError()
+
         try:
-            await self.create_user(
+            await self._create_user(
                 username,
                 password,
                 DEFAULT_ORGANIZATION_ID,
+                actor=None,
                 platform_admin=True,
                 must_change_password=True,
                 bootstrap=Bootstrap.UNUSED,
                 reason=Reason.BOOTSTRAP,
+                precondition=still_none,
             )
+        except _PlatformAdminExistsError:
+            return BootstrapOutcome.EXISTS_WITH_VARIABLES
         except ValueError as exc:  # the policy's message names the rule, never the password
             raise BootstrapError(
                 f"{ADMIN_USERNAME_ENV}/{ADMIN_PASSWORD_ENV} cannot create the admin: {exc}"
@@ -720,13 +762,14 @@ class AccountService:
     async def _apply_reset(self, user: User, password_hash: str, actor: Actor | None) -> int:
         """The new hash, to be changed at the next login; no lock; every session revoked, which
         closes every step-up window with it (``revoke_sessions`` clears them in the same
-        update)."""
-        await self.store.set_password(
-            user.id, password_hash, must_change=True, bootstrap=Bootstrap.NONE
-        )
-        await self.store.set_login_state(user.id, 0, None, None)
-        await self._record(self._user_event(AuditAction.PASSWORD_RESET, user, actor))
-        return await self._revoke_all(user, Reason.PASSWORD_RESET)
+        update). One transaction: a password change in flight sees all of it or none."""
+        async with self.store.write_transaction():
+            await self.store.set_password(
+                user.id, password_hash, must_change=True, bootstrap=Bootstrap.NONE
+            )
+            await self.store.set_login_state(user.id, 0, None, None)
+            await self._record(self._user_event(AuditAction.PASSWORD_RESET, user, actor))
+            return await self._revoke_all(user, Reason.PASSWORD_RESET)
 
     async def unlock_user(self, username: str, *, actor: Actor | None = None) -> None:
         user = await self._user_by_name(username)
@@ -931,7 +974,9 @@ class AccountService:
             )
             raise StepUpFailedError()
         if verification.upgraded_hash is not None:
-            await self.store.set_password_hash(user.id, verification.upgraded_hash)
+            await self.store.set_password_hash(
+                user.id, verification.upgraded_hash, replacing=user.password_hash
+            )
         until = now + self.step_up_ms
         await self.store.set_step_up(session.id_hash, until)
         await self._record(
@@ -1009,6 +1054,9 @@ class AccountService:
             reason = Reason.RATE_LIMITED
         elif user.bootstrap is Bootstrap.USED and user.must_change_password:
             reason = Reason.BOOTSTRAP_USED
+        elif user.bootstrap is Bootstrap.UNUSED and not await self.store.use_bootstrap(user.id):
+            # Another login used it since this one read the user: it lets in one login only.
+            reason = Reason.BOOTSTRAP_USED
         if reason is not None:
             await self._failed(user, reason, key, now)
             raise LoginFailedError()
@@ -1017,9 +1065,9 @@ class AccountService:
         if user.failed_logins or user.locked_until_ms is not None:
             await self.store.set_login_state(user.id, 0, None, None)
         if verification.upgraded_hash is not None:
-            await self.store.set_password_hash(user.id, verification.upgraded_hash)
-        if user.bootstrap is Bootstrap.UNUSED:
-            await self.store.set_bootstrap(user.id, Bootstrap.USED)
+            await self.store.set_password_hash(
+                user.id, verification.upgraded_hash, replacing=user.password_hash
+            )
         session_id, session = await self._new_session(user, now)
         await self._record(
             AuditEvent(
@@ -1175,17 +1223,37 @@ class AccountService:
             raise PasswordUnchangedError()
         self._policy.check(new, user.username)
         new_hash = await self._passwords.hash(new)
-        await self.store.set_password(
-            user.id, new_hash, must_change=False, bootstrap=Bootstrap.NONE
-        )
-        await self.store.set_login_state(user.id, 0, None, None)
-        await self.store.set_step_up(context.session.id_hash, None)  # this session's window too
-        await self._record(
-            AuditEvent(
-                AuditAction.PASSWORD_CHANGED, Outcome.SUCCESS, TargetType.USER, user.id, user.id
+        # Checked again with the writes, in one transaction: the two hashes gave an admin time
+        # to reset the password, disable the account or end this session, and none of that may
+        # be overwritten by a change verified against the password as it was.
+        async with self.store.write_transaction():
+            stored = await self.store.get_user(user.id)
+            session = await self.store.get_session(context.session.id_hash)
+            if (
+                stored is None
+                or stored.disabled
+                or stored.password_hash != user.password_hash
+                or session is None
+                or session.revoked
+            ):
+                raise SessionInvalidError()
+            await self.store.set_password(
+                user.id, new_hash, must_change=False, bootstrap=Bootstrap.NONE
             )
-        )
-        return await self._revoke_all(user, Reason.PASSWORD_CHANGED, keep=context.session.id_hash)
+            await self.store.set_login_state(user.id, 0, None, None)
+            await self.store.set_step_up(context.session.id_hash, None)  # this session's too
+            await self._record(
+                AuditEvent(
+                    AuditAction.PASSWORD_CHANGED,
+                    Outcome.SUCCESS,
+                    TargetType.USER,
+                    user.id,
+                    user.id,
+                )
+            )
+            return await self._revoke_all(
+                user, Reason.PASSWORD_CHANGED, keep=context.session.id_hash
+            )
 
     # --- retention -----------------------------------------------------------------------
 

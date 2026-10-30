@@ -820,11 +820,26 @@ class PostgresAccountStore(_Store):
             int(bootstrap),
         )
 
-    async def set_password_hash(self, user_id: str, password_hash: str) -> None:
-        await self._set(user_id, "password_hash = $1", password_hash)
+    async def set_password_hash(self, user_id: str, password_hash: str, *, replacing: str) -> bool:
+        changed = await self._execute(
+            "UPDATE users SET password_hash = $1 WHERE id = $2 AND password_hash = $3",
+            password_hash,
+            user_id,
+            replacing,
+        )
+        return changed == 1
 
     async def set_bootstrap(self, user_id: str, bootstrap: Bootstrap) -> None:
         await self._set(user_id, "bootstrap = $1", int(bootstrap))
+
+    async def use_bootstrap(self, user_id: str) -> bool:
+        changed = await self._execute(
+            "UPDATE users SET bootstrap = $1 WHERE id = $2 AND bootstrap = $3",
+            int(Bootstrap.USED),
+            user_id,
+            int(Bootstrap.UNUSED),
+        )
+        return changed == 1
 
     async def set_disabled(self, user_id: str, disabled: bool) -> None:
         await self._set(user_id, "disabled = $1", int(disabled))
@@ -1159,7 +1174,10 @@ class PostgresProviderStore(_Store):
         )
 
     async def all_keys(self) -> list[StoredKey]:
-        ids = [r[0] for r in await self._fetch("SELECT provider_id FROM provider_keys")]
+        ids = [
+            r[0]
+            for r in await self._fetch("SELECT provider_id FROM provider_keys ORDER BY provider_id")
+        ]
         return [k for k in [await self.get_key(i) for i in ids] if k is not None]
 
 

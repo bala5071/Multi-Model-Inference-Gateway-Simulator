@@ -167,9 +167,17 @@ class AccountStore(Protocol):
         self, user_id: str, password_hash: str, *, must_change: bool, bootstrap: Bootstrap
     ) -> None: ...
 
-    async def set_password_hash(self, user_id: str, password_hash: str) -> None: ...
+    async def set_password_hash(self, user_id: str, password_hash: str, *, replacing: str) -> bool:
+        """Replace the hash with an upgrade of it, only if it is still ``replacing`` (the one
+        just verified): a password set meanwhile is never overwritten. Returns whether it was."""
+        ...
 
     async def set_bootstrap(self, user_id: str, bootstrap: Bootstrap) -> None: ...
+
+    async def use_bootstrap(self, user_id: str) -> bool:
+        """Mark an unused bootstrap password used, in one statement: True for the one call that
+        did, so the password lets in one login, however many arrive together."""
+        ...
 
     async def set_disabled(self, user_id: str, disabled: bool) -> None: ...
 
@@ -325,12 +333,23 @@ class SqliteAccountStore:
             (password_hash, int(must_change), int(bootstrap)),
         )
 
-    async def set_password_hash(self, user_id: str, password_hash: str) -> None:
-        """Replace the hash only (an upgrade to the current parameters)."""
-        await self._set(user_id, "password_hash = ?", (password_hash,))
+    async def set_password_hash(self, user_id: str, password_hash: str, *, replacing: str) -> bool:
+        """Replace the hash only (an upgrade to the current parameters), if unchanged."""
+        cursor = self._connection.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?",
+            (password_hash, user_id, replacing),
+        )
+        return cursor.rowcount == 1
 
     async def set_bootstrap(self, user_id: str, bootstrap: Bootstrap) -> None:
         await self._set(user_id, "bootstrap = ?", (int(bootstrap),))
+
+    async def use_bootstrap(self, user_id: str) -> bool:
+        cursor = self._connection.execute(
+            "UPDATE users SET bootstrap = ? WHERE id = ? AND bootstrap = ?",
+            (int(Bootstrap.USED), user_id, int(Bootstrap.UNUSED)),
+        )
+        return cursor.rowcount == 1
 
     async def set_disabled(self, user_id: str, disabled: bool) -> None:
         await self._set(user_id, "disabled = ?", (int(disabled),))
