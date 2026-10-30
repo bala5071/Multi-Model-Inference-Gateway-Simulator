@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import json
 import logging
 import math
@@ -31,27 +32,40 @@ from redis.asyncio import Redis
 from gateway.apikeys import ApiKeyService, ApplicationAccess
 from gateway.app import RESERVATION_MARGIN_MS, create_app, create_default_app
 from gateway.applications import application_from_template
+from gateway.audit import AuditLog
 from gateway.backend_config import TierBudget
-from gateway.clock import Clock, ClockEpoch, SimClock, WallClock
+from gateway.clock import Clock, ClockEpoch, SimClock, SystemEpoch, WallClock
 from gateway.continuous import build_continuous_registry
+from gateway.egress import organization_client
 from gateway.ledger import Expired, Reservation
+from gateway.modes import Mode
 from gateway.overload import OverloadPolicy
 from gateway.periods import CalendarMonthsUTC
 from gateway.postgres import (
     BUDGET_TABLES,
     PG_BUDGETS,
+    PostgresAccountStore,
     PostgresApplicationStore,
+    PostgresAuditStore,
     PostgresBudgets,
     PostgresDatabase,
+    PostgresModeStore,
+    PostgresProviderStore,
+    PostgresUsageStore,
     postgres_state,
 )
 from gateway.profiles import Tier
+from gateway.providers import ProviderConfig, ProviderService
+from gateway.redaction import Redactor
 from gateway.routing import load_plans
 from gateway.schema import RequestResult
 from gateway.state import StateUnavailableError
 from gateway.valkey import ValkeyCounters
+from gateway.vault import Vault
 from helpers import TEST_PEPPER, TEST_PROFILES, bearer
+from mock_network import FakeResolver, ScriptedNetwork
 from postgres_helpers import POSTGRES_URL_ENV, PgWorld, pg_world
+from test_chat_routing import HOSTS, MASTER, TEXT, TLS, P
 from valkey_helpers import VALKEY_URL_ENV, ManualEpoch, ScriptedClient
 
 postgres = pytest.mark.postgres
@@ -65,6 +79,8 @@ HOLD_MS = TIMEOUT_MS + RESERVATION_MARGIN_MS
 STATE_BOUND_S = 10.0  # how long a test waits for a state before it reports it never came
 # The bound of a generate request for PROMPT with max_tokens 2 (Q2, B4).
 BOUND = len(PROMPT.encode()) + 2
+PRIMARY = Mode.HOSTED_PRIMARY_WITH_LOCAL_FALLBACK
+PROVIDER_KEY = "sk-planted-budget-routing-key-0123456789abcd"  # a test value
 # Planted in the shared server's Postgres URL, to be looked for everywhere.
 PLANTED = "planted-shared-pg-password-7e2b"
 
@@ -346,6 +362,11 @@ async def test_a_dead_instances_reservation_expires_and_the_customer_is_told_whe
                 refused = await client.post("/v1/generate", json=body, headers=bearer(key))
                 assert refused.status_code == 429
                 assert refused.json()["error"]["code"] == "budget_exhausted"
+                assert refused.json()["error"]["message"] == (
+                    f"Application 'acme' has used 0 of its {BOUND} token budget for this "
+                    f"period, and {BOUND} tokens are held by requests in progress. Retry in "
+                    f"{math.ceil(HOLD_MS / 1000)} seconds, when they have finished or expired."
+                )
                 assert refused.headers["retry-after"] == str(math.ceil(HOLD_MS / 1000))
                 await world.set_time(NOW + HOLD_MS - 1.0)
                 assert await budgets.sweep() == []
@@ -782,3 +803,107 @@ async def test_the_store_calls_of_a_chat_request_and_a_generate_request_in_share
                     assert generate == ["lookup_key", "reserve", "settle", "append"]
         finally:
             await registry.aclose()
+
+
+@postgres
+async def test_the_store_calls_of_a_chat_request_an_organization_provider_serves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The organization-provider path in shared mode, counted on the Postgres stores: every
+    public store call and every budget call, one after another, for one chat request that the
+    organization's primary provider answers. Note 36's 20 calls with its ``append`` replaced by
+    a reserve and a settle (the usage row appended inside the settle)."""
+    clock = WallClock()  # the modes are read inside the timed work: see the test above
+    calls: list[str] = []
+    async with pg_world() as world:
+        await world.set_time(NOW)
+        [db] = world.instances
+        key = await _application(db, 10**9)
+        state = postgres_state(db)
+        resolver, org_net = FakeResolver(dict(HOSTS)), ScriptedNetwork()
+        providers = ProviderService(
+            state.providers,
+            Vault(MASTER),
+            AuditLog(state.audit),
+            clock,
+            SystemEpoch(),
+            Redactor(),
+            lambda: organization_client(resolver, inner=org_net, ssl_context=TLS),
+        )
+        config = ProviderConfig(
+            P, "default", "openai_compatible", "https://p.provider.test/v1", "model-x",
+            "economy", "primary", True, True, None, None, {}, None, 0.0,
+        )  # fmt: skip
+        await state.providers.add(config)
+        await state.providers.put_key(P, providers.vault.seal(PROVIDER_KEY, config.binding), 1.0)
+        await state.modes.set_organization_mode("default", PRIMARY, 0.0)
+        await state.modes.set_application_mode("acme", PRIMARY, 0.0)
+        org_net.responses = [TEXT]
+        registry = build_continuous_registry(clock, seed=7, profiles=TEST_PROFILES)
+        app = create_app(
+            registry,
+            clock,
+            applications=ApplicationAccess(
+                ApiKeyService(state.applications, TEST_PEPPER, SystemEpoch(), store_clock=db),
+                PLANS,
+            ),
+            usage_store=state.usage,
+            epoch=SystemEpoch(),
+            modes=state.modes,
+            providers=providers,
+            startup_applications=[],
+            overload=OverloadPolicy(request_timeout_ms=TIMEOUT_MS),
+            budgets=PostgresBudgets(db, clock),
+            reservation_bounds=BOUNDS,
+        )
+        for cls in (
+            PostgresApplicationStore,
+            PostgresModeStore,
+            PostgresProviderStore,
+            PostgresUsageStore,
+            PostgresAccountStore,
+            PostgresAuditStore,
+            PostgresBudgets,
+        ):
+            for name, method in list(vars(cls).items()):
+                if name.startswith("_") or not inspect.iscoroutinefunction(method):
+                    continue
+
+                def counted(name: str = name, method: Any = method) -> Any:
+                    async def call(self: Any, *args: Any, **kwargs: Any) -> Any:
+                        calls.append(name)
+                        return await method(self, *args, **kwargs)
+
+                    return call
+
+                monkeypatch.setattr(cls, name, counted())
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://gw"
+            ) as client:
+                answer = await client.post(
+                    "/v1/chat/completions",
+                    json={"model": "economy", "messages": [{"role": "user", "content": "Hi."}]},
+                    headers=bearer(key),
+                )
+        finally:
+            await registry.aclose()
+        assert answer.status_code == 200, answer.text
+        assert answer.headers["x-provider"] == P
+    modes = ["organization_mode", "application_mode"]
+    candidates = [*modes, "list_for", "get_key"]
+    assert calls == [
+        "lookup_key",
+        "reserve",
+        *candidates,  # the handler's, before admission to a candidate
+        *candidates,  # the router's
+        *modes,  # before the attempt
+        "get_key",  # skipped if unreadable
+        "get_key",  # leased
+        *modes,
+        *modes,
+        *modes,  # the egress scope, at the request and its connection
+        "settle",
+        "append",  # inside the settle's transaction
+    ]
+    assert len(calls) - 1 == 21  # store calls; the append is a statement of the settle

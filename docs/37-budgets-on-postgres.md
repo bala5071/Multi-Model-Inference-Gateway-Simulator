@@ -87,10 +87,16 @@ expired; the hang-up test on Postgres caught this, and mutation B10 shows it.
   `gateway_events_total{type="reservation_expired"}`. So a dead instance's reservation is held
   for at most 210 s.
 - **What the customer sees.** If the leaked reservation is what fills the budget, the
-  application's requests get `429 budget_exhausted`, the same body as any budget refusal. The
-  only difference is `Retry-After` (B3): when the counter's committed tokens alone are below
-  the budget, it is the time until the earliest in-flight reservation expires, the latest
-  moment room is certain to return. Before, it would have said the end of the period.
+  application's requests get `429 budget_exhausted`, with the same code and fields as any
+  budget refusal. Two things differ when the counter's committed tokens alone are below the
+  budget:
+  - **`Retry-After` (B3)** is the time until the earliest in-flight reservation expires, the
+    latest moment room is certain to return; before, it would have said the end of the period.
+  - **The message** says that tokens are held by requests in progress, instead of when the
+    budget resets: "Application 'acme' has used 30 of its 100 token budget for this period,
+    and 80 tokens are held by requests in progress. Retry in 5 seconds, when they have finished
+    or expired." A budget that is really used up keeps "The budget resets in N seconds."
+    (Changed on approval.)
 - **The dead request's usage is lost** (decision 8 of the plan): its instance never settled
   it, and the expiry event records it. If the instance comes back and settles it late, the
   settle charges the usage and does not take the reservation off a second time.
@@ -191,20 +197,22 @@ one round trip, and so is the reset asyncpg sends when a connection goes back to
 - **settle:** 9 round trips: `BEGIN`, `SET`, the time, the settlement `INSERT`, the take-off,
   the usage `INSERT`, the commit `UPDATE`, `COMMIT`, the reset.
 
-Counted by `test_the_store_calls_of_a_chat_request_and_a_generate_request_in_shared_mode`,
-the store calls of one request in shared mode, the first of a period and after:
+Counted on the Postgres stores by
+`test_the_store_calls_of_a_chat_request_and_a_generate_request_in_shared_mode` and
+`test_the_store_calls_of_a_chat_request_an_organization_provider_serves`, the store calls of one
+request in shared mode (the first two the same for the first request of a period and after):
 
 | Request | Store calls, one after another |
 |---|---|
 | Chat on the gateway's tier | 7: `lookup_key`, reserve, the two modes twice, settle (its usage row inside) |
+| Chat served by an organization provider | 21: `lookup_key`; reserve; the candidates twice (the two modes, `list_for`, `get_key`); the modes; `get_key` twice (skip, lease); the modes three times (the egress scope); settle (its usage row inside) |
 | `/v1/generate` | 3: `lookup_key`, reserve, settle |
 
 Note 36's chat request made 6 on SQLite after the period's first (`lookup_key`, the modes
 twice, `append`), and 7 on the first, which read the period's totals. In shared mode the
-reserve and the settle replace `append` and that read, every time. A chat request served by an
-organization provider makes the same exchange: one call more than note 36's 20. That count is
-reasoned from the code, not measured: its test (`test_chat_routing.py`) runs on the in-memory
-ledger. The timing is below.
+reserve and the settle replace `append` and that read, every time: one call more than note 36's
+6 and 20. PR 3c's single read of the modes would take 10 of the provider path's 21 away. The
+timing is below.
 
 ## Threat-model additions
 

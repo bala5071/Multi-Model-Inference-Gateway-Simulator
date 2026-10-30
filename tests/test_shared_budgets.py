@@ -321,6 +321,37 @@ async def test_a_refused_reservation_holds_nothing_and_says_when_room_returns() 
     assert g.budgets.ends == []
 
 
+async def test_a_refusal_by_requests_in_progress_says_so_and_keeps_its_code_and_retry_after() -> (
+    None
+):
+    """The in-flight 429: the same code, fields and Retry-After; the words say that tokens are
+    held by requests in progress. A budget really used up still says when it resets."""
+    held = BudgetExceededError("acme", 30, 100, retry_after_ms=4_200.0, held_tokens=80)
+    async with gateway(budgets=RecordingBudgets(refuse=held)) as g:
+        generated, chatted = await g.generate(), await g.chat()
+    expected = (
+        "Application 'acme' has used 30 of its 100 token budget for this period, and 80 tokens "
+        "are held by requests in progress. Retry in 5 seconds, when they have finished or expired."
+    )
+    assert generated.json()["error"]["message"] == chatted.json()["error"]["message"] == expected
+    assert (
+        generated.json()["error"]["code"] == chatted.json()["error"]["code"] == "budget_exhausted"
+    )
+    assert generated.headers["retry-after"] == chatted.headers["retry-after"] == "5"
+    assert {k: v for k, v in generated.json()["error"].items() if k != "message"} == {
+        "code": "budget_exhausted",
+        "used_tokens": 30,
+        "budget_tokens": 100,
+        "retry_after_s": 5,
+    }
+    used_up = BudgetExceededError("acme", 100, 100, retry_after_ms=4_200.0, held_tokens=80)
+    assert not used_up.in_flight
+    assert used_up.when(5) == "The budget resets in 5 seconds."
+    assert (
+        str(used_up) == "Application 'acme' has used 100 of its 100 token budget for this period."
+    )
+
+
 # --- the bound (Q2, B4) -----------------------------------------------------------------------
 
 

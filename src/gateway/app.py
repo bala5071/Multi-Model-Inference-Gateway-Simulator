@@ -2029,7 +2029,7 @@ def create_app(
         return _error(
             429,
             "budget_exhausted",
-            f"{exc} The budget resets in {retry_after_s} seconds.",
+            f"{exc} {exc.when(retry_after_s)}",
             headers={"Retry-After": str(retry_after_s)},
             used_tokens=exc.used_tokens,
             budget_tokens=exc.budget_tokens,
@@ -2545,7 +2545,7 @@ def create_app(
                 return _openai_error(
                     429,
                     "budget_exhausted",
-                    f"{exc} The budget resets in {seconds} seconds.",
+                    f"{exc} {exc.when(seconds)}",
                     kind="rate_limit_error",
                     headers={"Retry-After": str(seconds)},
                 )

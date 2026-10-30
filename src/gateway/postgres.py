@@ -1501,13 +1501,14 @@ class PostgresBudgets:
         self, application_id: str, budget_tokens: int, start: float, end: float, now: float
     ) -> BudgetExceededError:
         row = await self._store._row(
-            "SELECT committed_tokens, (SELECT min(expires_at_ms) FROM budget_reservations"
+            "SELECT committed_tokens, reserved_tokens,"
+            " (SELECT min(expires_at_ms) FROM budget_reservations"
             " WHERE application_id = $1 AND period_start_ms = $2)"
             " FROM budget_counters WHERE application_id = $1 AND period_start_ms = $2",
             application_id,
             start,
         )
-        committed, earliest = _tuple(row)
+        committed, reserved, earliest = _tuple(row)
         # B3: refused only because of what is in flight, room comes back when the earliest
         # reservation ends, at the latest at its expiry; otherwise at the end of the period.
         if committed < budget_tokens and earliest is not None:
@@ -1515,7 +1516,11 @@ class PostgresBudgets:
         else:
             retry_after_ms = end - now
         return BudgetExceededError(
-            application_id, int(committed), budget_tokens, retry_after_ms=retry_after_ms
+            application_id,
+            int(committed),
+            budget_tokens,
+            retry_after_ms=retry_after_ms,
+            held_tokens=int(reserved),
         )
 
     async def settle(

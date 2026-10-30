@@ -80,6 +80,12 @@ carry a password), `GATEWAY_STATE_MAX_SKEW_MS`. The database is still one proces
 file (note 21): until Postgres, shared counters do not make two instances share keys, sessions
 or usage.
 
+**Changed in PR 3b (note 37):** a `GATEWAY_VALKEY_URL` whose host is not this machine (not
+loopback, not a Unix socket) must be a `rediss://` address with the client's certificate and
+host-name checks left on, or the server refuses to start; `GATEWAY_STATE_PRIVATE_NETWORK=1`
+lets a plain address through for a network the operator vouches for. This holds with SQLite as
+well as in shared mode: a remote plain `redis://` address that started before now refuses.
+
 ## Tests
 
 `docker-compose.valkey.yml` runs the pinned Valkey on 127.0.0.1:6380; tests marked `valkey` run

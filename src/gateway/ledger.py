@@ -88,17 +88,47 @@ class OrganizationUsage:
 
 
 class BudgetExceededError(Exception):
+    """No room in the budget. ``held_tokens`` are reserved by the application's requests in
+    progress (shared budgets, docs/37); when what is used is below the budget, they are what
+    fills it, and the room comes back as they finish rather than when the period ends."""
+
     def __init__(
-        self, application_id: str, used_tokens: int, budget_tokens: int, retry_after_ms: float
+        self,
+        application_id: str,
+        used_tokens: int,
+        budget_tokens: int,
+        retry_after_ms: float,
+        *,
+        held_tokens: int = 0,
     ) -> None:
         self.application_id = application_id
         self.used_tokens = used_tokens
         self.budget_tokens = budget_tokens
         self.retry_after_ms = retry_after_ms
-        super().__init__(
-            f"Application {application_id!r} has used {used_tokens} of its {budget_tokens} token "
-            f"budget for this period."
-        )
+        self.held_tokens = held_tokens
+        if self.in_flight:
+            message = (
+                f"Application {application_id!r} has used {used_tokens} of its {budget_tokens} "
+                f"token budget for this period, and {held_tokens} tokens are held by requests in "
+                f"progress."
+            )
+        else:
+            message = (
+                f"Application {application_id!r} has used {used_tokens} of its {budget_tokens} "
+                f"token budget for this period."
+            )
+        super().__init__(message)
+
+    @property
+    def in_flight(self) -> bool:
+        """Refused only because of requests in progress."""
+        return self.held_tokens > 0 and self.used_tokens < self.budget_tokens
+
+    def when(self, seconds: int) -> str:
+        """The sentence after the message: when to try again, and why then."""
+        if self.in_flight:
+            return f"Retry in {seconds} seconds, when they have finished or expired."
+        return f"The budget resets in {seconds} seconds."
 
 
 @dataclass(frozen=True, slots=True)
