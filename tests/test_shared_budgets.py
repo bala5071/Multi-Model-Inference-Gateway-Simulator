@@ -328,7 +328,7 @@ async def test_a_request_reserves_its_prompt_and_its_completion_capped_at_the_co
     async with gateway(limits={"acme": (None, None)}) as g:
         await g.generate(prompt="abc", max_tokens=10)  # its own max_tokens
         await g.generate(prompt="abc")  # none: the tier's default
-        await g.generate(prompt="été")  # bytes, not characters: 5
+        await g.generate(prompt="\u00e9t\u00e9")  # bytes, not characters: 5
         await g.generate(prompt="x " * 3000, max_tokens=8)  # past the context
         messages = [{"role": "user", "content": "abc"}]
         await g.chat(messages=messages, max_tokens=5)
