@@ -88,6 +88,8 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+# The limit on one test, in seconds; twice it ends the run (tests/conftest.py, docs/36).
+gateway_test_timeout_s = "60"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra --strict-markers --strict-config"
 xfail_strict = true

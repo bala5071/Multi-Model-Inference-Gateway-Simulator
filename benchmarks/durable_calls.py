@@ -13,10 +13,12 @@ the request path makes it:
 - "chat, one provider": the twenty of a chat request served by one organization provider.
 
 The Postgres rows run on the request pool, in a schema of their own, dropped afterwards (never
-anything else). The address comes from ``GATEWAY_POSTGRES_URL`` and is never printed.
+anything else). The address comes from ``GATEWAY_POSTGRES_URL`` and is never printed. The
+compose file's test database has no password, which the gateway refuses unless
+``GATEWAY_POSTGRES_TEST_NO_PASSWORD=1`` says it is a test database:
 
     GATEWAY_POSTGRES_URL=postgresql://postgres@127.0.0.1:5433/postgres \\
-        uv run python -m benchmarks.durable_calls
+    GATEWAY_POSTGRES_TEST_NO_PASSWORD=1 uv run python -m benchmarks.durable_calls
 """
 
 from __future__ import annotations
@@ -136,7 +138,7 @@ async def run(calls: int, url: str) -> list[WriteTimes]:
     admin = await asyncpg.connect(url)
     await admin.execute(f"CREATE SCHEMA {schema}")
     try:
-        db = await PostgresDatabase.connect(url, WallClock(), schema=schema)
+        db = await PostgresDatabase.connect(url, WallClock(), env=os.environ, schema=schema)
         try:
             await apply_schema(db)
             results += await _measure("postgres", postgres_state(db), calls)

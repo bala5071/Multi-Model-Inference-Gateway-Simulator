@@ -66,7 +66,7 @@ import os
 import secrets
 import sqlite3
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from gateway.apikeys import ApiKeyService, load_pepper
@@ -112,7 +112,7 @@ from gateway.pg_migrate import (
     migrate_to_sqlite,
 )
 from gateway.postgres import URL_ENV as POSTGRES_URL_ENV
-from gateway.postgres import PostgresDatabase
+from gateway.postgres import PostgresDatabase, PostgresPasswordMissingError
 from gateway.routing import PlansConfig, load_plans
 from gateway.state import StateBackend, StateUnavailableError, sqlite_state
 from gateway.vault import (
@@ -503,9 +503,11 @@ async def _store_command(
         print(issued.key)
 
 
-async def _to_postgres(connection: sqlite3.Connection, url: str, dry_run: bool) -> MigrationReport:
+async def _to_postgres(
+    connection: sqlite3.Connection, url: str, dry_run: bool, env: Mapping[str, str]
+) -> MigrationReport:
     db = await PostgresDatabase.connect(
-        url, WallClock(), request_pool_size=1, management_pool_size=1
+        url, WallClock(), env=env, request_pool_size=1, management_pool_size=1
     )
     try:
         return await migrate_to_postgres(connection, db, dry_run=dry_run)
@@ -513,9 +515,11 @@ async def _to_postgres(connection: sqlite3.Connection, url: str, dry_run: bool) 
         await db.aclose()
 
 
-async def _to_sqlite(url: str, target: Path, dry_run: bool) -> MigrationReport:
+async def _to_sqlite(
+    url: str, target: Path, dry_run: bool, env: Mapping[str, str]
+) -> MigrationReport:
     db = await PostgresDatabase.connect(
-        url, WallClock(), request_pool_size=1, management_pool_size=1
+        url, WallClock(), env=env, request_pool_size=1, management_pool_size=1
     )
     try:
         return await migrate_to_sqlite(db, target, dry_run=dry_run)
@@ -532,7 +536,7 @@ def postgres_migration(args: argparse.Namespace, env: dict[str, str]) -> int:
         return 1
     try:
         if args.command == "migrate-to-sqlite":
-            report = asyncio.run(_to_sqlite(url, args.to, args.dry_run))
+            report = asyncio.run(_to_sqlite(url, args.to, args.dry_run, env))
         else:
             path = database_path(env)
             if not path.exists():
@@ -543,12 +547,17 @@ def postgres_migration(args: argparse.Namespace, env: dict[str, str]) -> int:
             try:
                 connection = open_database(path)
                 try:
-                    report = asyncio.run(_to_postgres(connection, url, args.dry_run))
+                    report = asyncio.run(_to_postgres(connection, url, args.dry_run, env))
                 finally:
                     connection.close()
             finally:
                 lock.release()
-    except (MigrationRefused, DatabaseInUseError, RuntimeError) as exc:
+    except (
+        MigrationRefused,
+        DatabaseInUseError,
+        PostgresPasswordMissingError,
+        RuntimeError,
+    ) as exc:
         _note(f"error: {exc}")
         return 1
     except StateUnavailableError:

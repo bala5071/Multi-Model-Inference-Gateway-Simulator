@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import faulthandler
+import functools
+import inspect
 import os
 import sqlite3
+import sys
+import threading
+from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,9 +30,81 @@ POSTGRES_URL_ENV = "GATEWAY_TEST_POSTGRES_URL"
 LIVE_PROVIDERS_ENV = "GATEWAY_LIVE_PROVIDERS"
 
 
+# The suite-wide limit on one test, in seconds (``gateway_test_timeout_s`` in pyproject.toml; a
+# run may change it with ``-o gateway_test_timeout_s=N``). No test can hang on a lock or on
+# another instance: an async test past it is cancelled and fails; anything still running at
+# twice it, a sync test or a wait cancelling cannot reach, ends the run with every thread's
+# traceback.
+TIMEOUT_INI = "gateway_test_timeout_s"
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addini(TIMEOUT_INI, "the limit on one test, in seconds", default="60")
+
+
+def _limit_s(config: pytest.Config) -> float:
+    return float(config.getini(TIMEOUT_INI))
+
+
+def _end_the_run(item: pytest.Item, after_s: float) -> None:
+    """Out of pytest's capture, so it is seen: which test, and where every thread waits."""
+    capture = item.config.pluginmanager.getplugin("capturemanager")
+    if capture is not None:
+        capture.suspend_global_capture(in_=True)
+    sys.stderr.write(
+        f"\n{item.nodeid}: still running after {after_s:g} s, twice the limit per test "
+        f"({TIMEOUT_INI}); ending the run\n"
+    )
+    sys.stderr.flush()
+    faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+    sys.stderr.flush()
+    os._exit(1)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_protocol(item: pytest.Item) -> Generator[None, object, object]:
+    """The hard limit: setup, call and teardown of one test, whatever they wait on."""
+    after_s = 2 * _limit_s(item.config)
+    watchdog = threading.Timer(after_s, _end_the_run, (item, after_s))
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        return (yield)
+    finally:
+        watchdog.cancel()
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
+    """The limit on an async test: cancelled at it, and failed with the limit named."""
+    if not isinstance(item, pytest.Function) or not inspect.iscoroutinefunction(item.obj):
+        return (yield)
+    test, limit = item.obj, _limit_s(item.config)
+
+    @functools.wraps(test)
+    async def bounded(*args: Any, **kwargs: Any) -> Any:
+        deadline = asyncio.timeout(limit)
+        try:
+            async with deadline:
+                return await test(*args, **kwargs)
+        except TimeoutError:
+            if deadline.expired():
+                pytest.fail(f"over the suite's limit of {limit:g} s per test ({TIMEOUT_INI})")
+            raise
+
+    item.obj = bounded
+    try:
+        return (yield)
+    finally:
+        item.obj = test
+
+
 def pytest_report_header(config: pytest.Config) -> str:
     """The SQLite the stores and migrations run on (it is whatever Python was built with)."""
-    return f"SQLite {sqlite3.sqlite_version} (Python's sqlite3 module)"
+    return (
+        f"SQLite {sqlite3.sqlite_version} (Python's sqlite3 module); "
+        f"limit per test {_limit_s(config):g} s, the run ends at {2 * _limit_s(config):g} s"
+    )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

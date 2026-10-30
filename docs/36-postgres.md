@@ -93,6 +93,22 @@ A refused login takes the same steps as every other refusal:
 `test_every_login_takes_the_same_steps_whatever_is_wrong` has this case, and its early-return
 mutation (no verify) fails it.
 
+## A limit on every test
+
+`gateway_test_timeout_s` in `pyproject.toml` is 60 seconds; `-o gateway_test_timeout_s=N`
+changes it for one run. It is built in `tests/conftest.py`, without a dependency:
+
+- An async test past the limit is cancelled (`asyncio.timeout`) and fails, naming the limit.
+  Every wait on a lock or on another instance is an await, so this is how such a test ends.
+- Any test still running at twice the limit (a sync test, or a wait that cancelling cannot
+  reach) ends the run: a watchdog thread suspends pytest's capture, prints the test's id and
+  every thread's traceback, and exits with status 1.
+
+`tests/test_suite_timeout.py` runs a test that never finishes of each kind
+(`tests/hang_cases.py`, which the suite does not collect) with a limit of one second.
+The Postgres tests' own waits stay bounded at 10 seconds (`STATE_BOUND_S`), so they report which
+state never came, well before the suite's limit.
+
 ## Which requests touch Postgres on the chat path
 
 Counted by `test_the_durable_store_calls_one_chat_request_makes` (store calls are the same on
@@ -106,7 +122,8 @@ SQLite and Postgres; on Postgres each is one statement and one round trip, one a
 
 `/v1/generate` makes `lookup_key`, the period's totals on the first request, and `append`.
 None of them takes the write lock or a management connection. The batched `last_used_at`
-write (note 20) is one more statement per flush, not per request.
+write (note 20) is one more statement per flush, not per request. PR 3c reads each mode
+once per request: 12 of the 20 calls of a provider-served request are those re-reads.
 
 ## Migration and rollback
 
@@ -140,6 +157,14 @@ GATEWAY_TEST_POSTGRES_URL=postgresql://postgres@127.0.0.1:5433/postgres uv run p
 docker compose -f docker-compose.postgres.yml down
 ```
 
+**A URL without a password is refused at start-up** (`check_postgres_url`, called by
+`PostgresDatabase.connect` before any connection is tried, so no caller can skip it). Only a
+test database may go without one, and only when `GATEWAY_POSTGRES_TEST_NO_PASSWORD=1` says so.
+The tests pass that setting explicitly (`TEST_DATABASE_ENV` in `tests/postgres_helpers.py`);
+the CLI and the benchmark read it from the environment. The password must be in the URL, after
+the user name or as the `password` parameter: `PGPASSWORD` and a password file do not count,
+because the URL is the one secret setting. The refusal names the setting and nothing of the URL.
+
 The image is pinned by digest (`docs/licenses.md`). It is published on 127.0.0.1 only and
 trusts every connection: it has no password, so there is no credential to keep or reuse, and it
 is for tests only, never exposed. Its data lives on a tmpfs at `/var/lib/postgresql`, the path
@@ -154,6 +179,9 @@ dropped afterwards; CI's `postgres` job runs them.
   error, a log record, a repr or the CLI's output. `PostgresDatabase.connect` reports only the
   error's type. A leak scan plants a password in the URL, uses and breaks the stores, and finds
   it nowhere; planted in a row, the same scan finds it.
+- **No password by mistake:** a production URL that lost its password would connect to a
+  server that trusts the connection. The start-up guard refuses it unless the test
+  setting is on.
 - **The write lock is a single point of contention for management writes.** A slow or stuck
   holder delays them by at most the lock timeout, then they are refused (503) with nothing
   written. Requests never take it.
@@ -171,7 +199,7 @@ write was looked at.
 
 | Path | Check, then write | Now | Shown by (mutation) |
 |---|---|---|---|
-| The seven rules of section 3.6 | last org_admin and platform_admin; an individual organization's one member; a new user's name and seat; the application-mode bound; provider changes with their audit rows; the active-key cap; key issuing | one write transaction (since PR 1) | the write lock skipped (M4) fails the two-instance rules test and the bootstrap test |
+| The seven rules of section 3.6 | last org_admin and platform_admin; an individual organization's one member; a new user's name and seat; the application-mode bound; provider changes with their audit rows; the active-key cap; key issuing | one write transaction (since PR 1) | the write lock skipped (M4) fails the two-instance rules test and the bootstrap test; the mode bound and the provider audit rows each have their own two-instance test (M26, M27) |
 | `create_user` (CLI, bootstrap admin) | the seat and the name, then the insert, with the hash between | checked again in one write transaction | two-instance seat test (M11, M25) |
 | `bootstrap_admin` | no platform_admin yet, then the creation | checked again in the creation's transaction | two instances bootstrapping at once (M12) |
 | A login with the bootstrap password | unused, then marked used, with the verify between | one statement (`use_bootstrap`) | two logins on two instances (M13; M23 for SQLite) |

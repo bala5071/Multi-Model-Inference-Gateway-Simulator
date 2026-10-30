@@ -26,6 +26,7 @@ import json
 from collections.abc import AsyncIterator, Collection, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import asyncpg
 
@@ -68,6 +69,9 @@ from gateway.users import (
 from gateway.vault import SealedKey
 
 URL_ENV = "GATEWAY_POSTGRES_URL"
+# A Postgres URL without a password is refused unless this is "1": only the test database of
+# docker-compose.postgres.yml, which trusts every local connection, goes without one.
+NO_PASSWORD_FOR_TESTS_ENV = "GATEWAY_POSTGRES_TEST_NO_PASSWORD"
 LOCK_TIMEOUT_ENV = "GATEWAY_STATE_LOCK_TIMEOUT_MS"
 DEFAULT_LOCK_TIMEOUT_MS = 2000.0
 # How long a management transaction may run, and sit idle, before Postgres ends it: a stuck
@@ -229,6 +233,37 @@ TABLES = (
 )
 
 
+class PostgresPasswordMissingError(Exception):
+    """The Postgres URL carries no password and the test setting is off. The message names
+    neither the address nor anything else from the URL."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            f"the Postgres URL has no password; only a test database may go without one, with "
+            f"{NO_PASSWORD_FOR_TESTS_ENV}=1"
+        )
+
+
+def _has_password(url: str) -> bool:
+    """A non-empty password in the URL, after the user name or as the ``password`` parameter.
+    Not ``PGPASSWORD`` or a password file: the URL is the one secret setting (docs/36)."""
+    try:
+        parts = urlsplit(url)
+        given = parts.password
+    except ValueError:
+        return False
+    return bool(given) or any(parse_qs(parts.query).get("password", []))
+
+
+def check_postgres_url(url: str, env: Mapping[str, str]) -> None:
+    """At start-up, before connecting: ``PostgresPasswordMissingError`` for a URL without a
+    password, unless ``NO_PASSWORD_FOR_TESTS_ENV`` is ``1``."""
+    if env.get(NO_PASSWORD_FOR_TESTS_ENV) == "1":
+        return
+    if not _has_password(url):
+        raise PostgresPasswordMissingError()
+
+
 class PostgresDatabase:
     """One gateway instance's Postgres: two pools, the write lock, and the clock of the
     database's windows (it is a ``StoreClock``)."""
@@ -258,12 +293,16 @@ class PostgresDatabase:
         url: str,
         clock: Clock,
         *,
+        env: Mapping[str, str],
         schema: str | None = None,
         request_pool_size: int = 10,
         management_pool_size: int = 2,
         lock_timeout_ms: float = DEFAULT_LOCK_TIMEOUT_MS,
     ) -> PostgresDatabase:
-        """Both pools, or ``StateUnavailableError`` (never the address or the password)."""
+        """Both pools, or ``StateUnavailableError`` (never the address or the password).
+        ``env`` is the process's environment: a URL without a password is refused first
+        (``check_postgres_url``)."""
+        check_postgres_url(url, env)
         settings = {"search_path": schema} if schema is not None else None
         try:
             requests = await asyncpg.create_pool(

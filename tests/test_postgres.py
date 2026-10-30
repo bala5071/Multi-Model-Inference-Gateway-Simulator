@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import os
 import re
@@ -53,7 +54,7 @@ from gateway.database import open_database
 from gateway.localonly import LocalOnlyPolicy
 from gateway.management import KeyLimits, ManagementRefusal, ManagementService
 from gateway.migrations import MIGRATIONS, MigrationRunner
-from gateway.modes import Mode
+from gateway.modes import DEFAULT_MODE, Mode, ModeService, looser_than
 from gateway.organizations import new_organization
 from gateway.permissions import Actor, Assignment, Role, ScopeType
 from gateway.pg_migrate import (
@@ -66,12 +67,16 @@ from gateway.pg_migrate import (
     migrate_to_sqlite,
 )
 from gateway.postgres import (
+    NO_PASSWORD_FOR_TESTS_ENV,
     PG_BASELINE,
     TABLES,
     WRITE_LOCK,
     PostgresApplicationStore,
     PostgresDatabase,
+    PostgresModeStore,
+    PostgresPasswordMissingError,
     PostgresProviderStore,
+    check_postgres_url,
     postgres_state,
 )
 from gateway.providers import (
@@ -94,7 +99,13 @@ from gateway.usage import UsageEvent
 from gateway.users import Bootstrap, Session, User
 from gateway.vault import VAULT_KEY_ENV, SealedKey, Vault
 from helpers import TEST_PEPPER, application_access, bearer
-from postgres_helpers import POSTGRES_URL_ENV, PgWorld, pg_accounts, pg_world
+from postgres_helpers import (
+    POSTGRES_URL_ENV,
+    TEST_DATABASE_ENV,
+    PgWorld,
+    pg_accounts,
+    pg_world,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from manage import main as manage
@@ -191,7 +202,7 @@ async def test_an_unreachable_postgres_is_refused_without_its_address(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     with pytest.raises(StateUnavailableError) as raised:
-        await PostgresDatabase.connect(NOWHERE, WallClock())
+        await PostgresDatabase.connect(NOWHERE, WallClock(), env={})
     seen = [str(raised.value), repr(raised.value), caplog.text]
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is not None
@@ -220,6 +231,78 @@ def test_the_migration_commands_never_print_the_address(
     assert not (tmp_path / "back.db").exists()
     assert manage(["migrate-to-postgres"], {"GATEWAY_DATABASE": str(database)}) == 1
     assert "GATEWAY_POSTGRES_URL" in capsys.readouterr().err
+
+
+# --- a URL without a password (no server) ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://gateway@127.0.0.1:1/gateway",
+        "postgresql://gateway:@127.0.0.1:1/gateway",
+        "postgresql://127.0.0.1:1/gateway",
+        "postgresql:///gateway?host=/run/postgresql",
+        "postgresql://gateway@127.0.0.1:1/gateway?password=",
+        "postgresql://gateway@[::1/gateway",
+    ],
+)
+async def test_a_postgres_url_without_a_password_is_refused_before_connecting(
+    url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refused at start-up, before any connection is tried, and the message holds nothing of
+    the URL. A password in the environment does not count: the URL is the one setting."""
+    monkeypatch.setenv("PGPASSWORD", PLANTED)
+    tried: list[str] = []
+
+    async def create_pool(*args: Any, **kwargs: Any) -> Any:
+        tried.append("pool")
+        raise AssertionError("connected")
+
+    monkeypatch.setattr(asyncpg, "create_pool", create_pool)
+    for env in ({}, {NO_PASSWORD_FOR_TESTS_ENV: "0"}, {NO_PASSWORD_FOR_TESTS_ENV: "yes"}):
+        with pytest.raises(PostgresPasswordMissingError) as raised:
+            await PostgresDatabase.connect(url, WallClock(), env=env)
+        assert NO_PASSWORD_FOR_TESTS_ENV in str(raised.value)
+        for text in (str(raised.value), repr(raised.value)):
+            for part in ("127.0.0.1", "gateway@", PLANTED):
+                assert part not in text, text
+    assert tried == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"postgresql://gateway:{PLANTED}@127.0.0.1:1/gateway",
+        f"postgres://gateway@127.0.0.1:1/gateway?password={PLANTED}",
+    ],
+)
+def test_a_postgres_url_with_a_password_passes_the_guard(url: str) -> None:
+    check_postgres_url(url, {})
+
+
+def test_the_test_setting_lets_a_url_without_a_password_through() -> None:
+    check_postgres_url("postgresql://postgres@127.0.0.1:5433/postgres", TEST_DATABASE_ENV)
+
+
+def test_the_cli_refuses_a_url_without_a_password(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "gateway.db"
+    connection = open_database(database)
+    MigrationRunner(connection, MIGRATIONS, SystemEpoch()).migrate()
+    connection.close()
+    env = {
+        "GATEWAY_DATABASE": str(database),
+        "GATEWAY_POSTGRES_URL": "postgresql://gateway@127.0.0.1:1/gateway",
+    }
+    assert manage(["migrate-to-postgres", "--dry-run"], env) == 1
+    assert manage(["migrate-to-sqlite", "--to", str(tmp_path / "back.db")], env) == 1
+    err = capsys.readouterr().err
+    assert err.count("has no password") == 2
+    assert "could not be reached" not in err
+    assert "127.0.0.1" not in err
+    assert not (tmp_path / "back.db").exists()
 
 
 # --- every endpoint while Postgres is down (no server) --------------------------------------------
@@ -1128,7 +1211,11 @@ def test_the_cli_migrates_both_ways(tmp_path: Path, capsys: pytest.CaptureFixtur
     name = asyncio.run(schema())
     try:
         url = f"{os.environ[POSTGRES_URL_ENV]}?search_path={name}"
-        env = {"GATEWAY_DATABASE": str(tmp_path / "gateway.db"), "GATEWAY_POSTGRES_URL": url}
+        env = {
+            "GATEWAY_DATABASE": str(tmp_path / "gateway.db"),
+            "GATEWAY_POSTGRES_URL": url,
+            **TEST_DATABASE_ENV,
+        }
         assert manage(["migrate-to-postgres", "--dry-run"], env) == 0
         assert "dry run" in capsys.readouterr().err
         assert manage(["migrate-to-postgres"], env) == 0
@@ -1160,7 +1247,7 @@ async def test_the_password_in_the_address_is_in_no_log_error_or_row(
     assert PLANTED in planted_url
     async with pg_world() as world:
         db = await PostgresDatabase.connect(
-            planted_url, WallClock(), schema=world.schema, lock_timeout_ms=100.0
+            planted_url, WallClock(), env={}, schema=world.schema, lock_timeout_ms=100.0
         )
         texts = [repr(db)]
         try:
@@ -1495,6 +1582,93 @@ async def test_a_connection_test_never_writes_back_a_switch_turned_off_meanwhile
         assert now is not None
         assert done
         assert not (done[0] and now.platform_enabled), (done, now.platform_enabled)
+
+
+# --- the two rules of section 3.6 not tested on two instances before ---------------------------
+
+
+def _modes(db: PostgresDatabase) -> ModeService:
+    return ModeService(PostgresModeStore(db), AuditLog(postgres_state(db).audit), SystemEpoch())
+
+
+@postgres
+async def test_no_application_mode_is_set_looser_than_an_organization_mode_set_meanwhile() -> None:
+    """The application-mode bound: the organization's mode is read in the transaction that
+    writes the application's. Another instance making the organization stricter in between
+    waits for the lock (here it is refused by the short timeout), so the audit trail, replayed
+    in order, never sets an application looser than its organization's mode at that point."""
+    async with pg_world(instances=2, lock_timeout_ms=300.0) as world:
+        first, second = (_modes(db) for db in world.instances)
+        hosted = Mode.HOSTED_PRIMARY_WITH_LOCAL_FALLBACK
+        await first.set_organization("default", hosted, actor=ACTOR, marker=_Marker())
+        done: list[bool] = []
+
+        async def stricter() -> None:
+            await second.set_organization("default", Mode.LOCAL_ONLY, actor=ACTOR, marker=_Marker())
+
+        _hook(first.store, "organization_mode", stricter, done)
+        with suppress(ManagementRefusal):
+            await first.set_application("default", "shop", hosted, actor=ACTOR, marker=_Marker())
+        assert done  # the other instance tried
+        organization = DEFAULT_MODE
+        replayed = 0
+        for target, details in await world.rows(
+            "SELECT target_type, details FROM audit_log WHERE action = $1 ORDER BY seq",
+            AuditAction.MODE_CHANGED.value,
+        ):
+            new = Mode(json.loads(details)["new_mode"])
+            if target == TargetType.ORGANIZATION.value:
+                organization = new
+            else:
+                assert not looser_than(new, organization), (new, organization)
+            replayed += 1
+        assert replayed == 2 + done.count(True)
+        # Every stored mode has its audit row: nothing changed without one.
+        stored = await world.rows("SELECT scope_type, mode FROM modes ORDER BY scope_type")
+        assert stored == [("application", hosted.value), ("organization", hosted.value)] or (
+            done == [True] and stored[1] == ("organization", Mode.LOCAL_ONLY.value)
+        )
+
+
+@postgres
+async def test_a_provider_change_and_its_audit_row_are_seen_together_or_not_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provider changes with their audit rows: between one instance's change and its audit
+    row, the other instance sees neither; when the audit row cannot be written, the change is
+    rolled back and the other instance never sees it."""
+    async with pg_world(instances=2) as world:
+        first, second = (_providers(db) for db in world.instances)
+        read = await _provider(first)
+        real_write = first.audit.write
+        seen: list[tuple[float | None, int]] = []
+        failing = [False]
+
+        async def write(event: AuditEvent, at_ms: float) -> bool:
+            # Between the change and its audit row: what the other instance sees.
+            other = await second.store.get(read.id)
+            assert other is not None
+            [(rows,)] = await world.rows(
+                "SELECT count(*) FROM audit_log WHERE action = $1",
+                AuditAction.PROVIDER_UPDATED.value,
+            )
+            seen.append((other.price_input_per_mtok, rows))
+            if failing[0]:
+                raise RuntimeError("the audit store failed")
+            return await real_write(event, at_ms)
+
+        monkeypatch.setattr(first.audit, "write", write)
+        await first.update(read, {"price_input_per_mtok": 1.0}, actor=ACTOR)
+        failing[0] = True
+        with pytest.raises(RuntimeError, match="audit store failed"):
+            await first.update(read, {"price_input_per_mtok": 2.0}, actor=ACTOR)
+        assert seen == [(None, 0), (1.0, 1)]  # the other instance never saw a change unaudited
+        now = await second.store.get(read.id)
+        assert now is not None
+        assert now.price_input_per_mtok == 1.0  # the unaudited change was rolled back
+        assert await world.rows(
+            "SELECT count(*) FROM audit_log WHERE action = $1", AuditAction.PROVIDER_UPDATED.value
+        ) == [(1,)]
 
 
 # --- the CLI's check-then-write paths, each in one transaction (no server) ------------------------

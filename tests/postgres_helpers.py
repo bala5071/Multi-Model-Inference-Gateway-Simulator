@@ -18,6 +18,7 @@ from gateway.auth import AccountService
 from gateway.clock import SystemEpoch, WallClock
 from gateway.passwords import CHEAP, InlineHashRunner, PasswordHasher, Passwords
 from gateway.postgres import (
+    NO_PASSWORD_FOR_TESTS_ENV,
     PostgresAccountStore,
     PostgresApplicationStore,
     PostgresAuditStore,
@@ -28,6 +29,9 @@ from gateway.postgres import (
 from helpers import TEST_PEPPER
 
 POSTGRES_URL_ENV = "GATEWAY_TEST_POSTGRES_URL"
+# The test database (docker-compose.postgres.yml) trusts local connections and has no password:
+# the tests say so explicitly, as an operator would have to.
+TEST_DATABASE_ENV = {NO_PASSWORD_FOR_TESTS_ENV: "1"}
 
 # The database's clock in a test schema: the row the test sets, else the real one.
 TEST_CLOCK = """
@@ -66,7 +70,11 @@ async def pg_world(instances: int = 1, **connect: Any) -> AsyncIterator[PgWorld]
     dbs: list[PostgresDatabase] = []
     try:
         for _ in range(instances):
-            dbs.append(await PostgresDatabase.connect(url, WallClock(), schema=schema, **connect))
+            dbs.append(
+                await PostgresDatabase.connect(
+                    url, WallClock(), env=TEST_DATABASE_ENV, schema=schema, **connect
+                )
+            )
         await apply_schema(dbs[0])
         await admin.execute(f"SET search_path TO {schema}")
         await admin.execute(TEST_CLOCK)
