@@ -961,6 +961,15 @@ path.
   requests near the edge are refused sooner.
   - The alternative: the tier's tokenizer on the request path. Only the stand-in exists today.
 
+**Answered 2026-10-29, as proposed:**
+
+- **B1:** verified TLS or `GATEWAY_STATE_PRIVATE_NETWORK=1` for any non-loopback host. This
+  applies to the Postgres a server connects to and to the Valkey of `GATEWAY_COUNTERS=valkey`.
+- **B2:** `shared` requires `GATEWAY_COUNTERS=valkey`.
+- **B3:** `Retry-After` is the earliest expiry of the in-flight reservations when they alone
+  fill the budget.
+- **B4:** the prompt is bounded by its UTF-8 bytes.
+
 ## 9. Threat-model additions
 
 - **Two new network peers** holding everything: Postgres holds key HMACs, password hashes,
