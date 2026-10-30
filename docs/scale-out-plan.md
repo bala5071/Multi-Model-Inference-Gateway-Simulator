@@ -549,10 +549,69 @@ order.
 | 3 | `scale-out/step-3` | Postgres: `asyncpg` (provenance check), `pg0001`, every durable store, the budget reservation and its two-instance edge test (Q1), the step-up claim, the lockout update, the write lock, `migrate-to-postgres` and back; the skew check moves to `gateway_now_ms()`; `GATEWAY_STATE=shared`; `/readyz` | Only with `shared` |
 | 3b | `scale-out/step-3b` | Budgets on Postgres: the reservation (3.1) and its two-instance edge test (Q1), the per-tier settings (Q2); `GATEWAY_STATE=shared` allowed; Valkey's skew check against `gateway_now_ms()` | Only with `shared` |
 | 3c | `scale-out/step-3c` | Each mode read once per chat request and passed on (note 36: 12 of the 20 store calls of a provider-served request) | Fewer store calls; a mode change applies from the next request, and the next attempt of one in flight, as before |
+| 2b | `scale-out/step-2b` | After PR 3, recorded 2026-10-29, not built: the breaker reports off the request path, and a per-request cap on hosted attempts (below) | Chat: fewer counter calls on the path; at most 3 hosted attempts a request by default |
 | 4 | `scale-out/step-4` | The two-instance tests in process and in two processes, the mutation table, the failure tests, `benchmarks/shared_state.py`, the note, the compose file for a two-instance demo on Postgres and Valkey | None |
 
 The questions PRs 2 and 3 depended on are answered (section 11). Each PR has the template,
 the definition of done, and its note (`docs/34-*` onward).
+
+### PR 2b: two follow-ups, recorded 2026-10-29 (not built; after PR 3)
+
+Proposed in #24 once the chat worst case was measured (note 35) and accepted as follow-ups,
+without changing #24. Neither is built before PR 3 is merged.
+
+**1. The breaker reports off the request path.**
+
+- **What moves:** `admit` stays on the path, because it decides whether a provider is tried. The
+  reports (`success`, `failure`, `release`) go through a per-instance queue that sends them in
+  order for each breaker. A chat request's worst case on the path goes from 1 + 4N counter
+  calls to 1 + 2N.
+- **A bound:** the queue holds a bounded number of reports. One that does not fit is dropped,
+  as a report that cannot be written is today. A dropped report never admits anything: it can
+  only leave a breaker closed a little longer, or a half-open probe slot held until its 120 s
+  expiry.
+- **A shutdown flush:** the lifespan drains the queue on shutdown, within a time limit, before
+  the counters' client closes. What is still queued at the limit is dropped and counted.
+- **A dropped-report metric:** a Prometheus counter of reports dropped, whether the queue was
+  full, the flush ran out of time, or Valkey could not answer. It is labelled by reason, and
+  its name follows docs/15. It is a count of what the instance did; nothing decides anything
+  from it.
+- **Unchanged:** failing closed. `admit` still refuses when Valkey cannot answer.
+- **Tests:**
+  - the reports of one breaker arrive in order;
+  - a full queue drops and counts;
+  - the shutdown flush writes what is queued, and counts what it cannot;
+  - a request no longer waits for its reports (counted as in
+    `test_the_most_counter_calls_one_chat_request_makes`: 1 + 2N on the path).
+- **Mutation checks:** reports sent out of order, the flush removed, the drop not counted, and
+  `admit` moved off the path, each failing a test.
+- **Timing:** measured before and after, three runs each, on this machine.
+
+**2. A per-request cap on hosted attempts.**
+
+- **The setting:** `GATEWAY_CHAT_MAX_HOSTED_ATTEMPTS`, set by the operator, default 3, range 1
+  to 5. A value outside the range, or not a whole number, refuses the start, naming the
+  variable.
+- **What counts as an attempt:** each call to an organization provider within one request,
+  including the one retry after invalid tool JSON. A provider skipped without a call (an open
+  breaker, an unreadable key) is not an attempt.
+- **At the cap:** the request's remaining hosted candidates are skipped with a fallback reason
+  of their own (`attempt_cap`), recorded like the others. The gateway's own tier is still tried
+  where the mode allows it, so the cap never sends a prompt anywhere the mode would not.
+- **Why:** it bounds how long one request can spend on providers (attempts times the
+  first-token budget, 10 s by default) and how many third parties one prompt reaches. Counter
+  time is the smaller part (note 35).
+- **Later, not in 2b:** the same cap as a per-application setting, which an application may set
+  lower than the operator's value but never higher (refused when it is written, like the mode
+  rule). The operator's value stays the ceiling.
+- **Tests:**
+  - the default, the range and refusal at startup;
+  - four primary providers that all fail, with only three tried and the fourth skipped as
+    `attempt_cap`;
+  - the gateway's tier still answering after the cap;
+  - the retry counting.
+- **Mutation checks:** the cap not enforced, the retry not counted, and the range check
+  removed, each failing a test.
 
 ### PR 2: Valkey counters, settled before building (2026-10-29)
 
