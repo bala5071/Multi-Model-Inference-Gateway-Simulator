@@ -141,9 +141,11 @@ docker compose -f docker-compose.postgres.yml down
 ```
 
 The image is pinned by digest (`docs/licenses.md`). It is published on 127.0.0.1 only and
-trusts every connection, so it is for tests and never exposed. Its data lives on a tmpfs at
-`/var/lib/postgresql`, the path the image declares as a volume, so no volume is created and
-`down` leaves nothing behind. Each test works in a schema of its own (`gwtest_<random>`),
+trusts every connection: it has no password, so there is no credential to keep or reuse, and it
+is for tests only, never exposed. Its data lives on a tmpfs at `/var/lib/postgresql`, the path
+the image declares as a volume, so no volume is created and `down` leaves nothing behind
+(checked on 2026-10-29 with `docker inspect`: no mounts, the tmpfs at that path, the port bound
+to 127.0.0.1:5433 only). Each test works in a schema of its own (`gwtest_<random>`),
 dropped afterwards; CI's `postgres` job runs them.
 
 ## Threat-model additions
@@ -158,6 +160,62 @@ dropped afterwards; CI's `postgres` job runs them.
 - **A wrong password costs a request-pool connection and a row lock**, not the global lock: a
   flood of wrong passwords for one account serializes on that account's row only.
 
+## Check, then write: every write path audited
+
+On SQLite most writes were safe because nothing awaited between a check and its write. On a
+shared store every await is a gap another instance can write into. Every service method, the CLI
+and the bootstrap admin were listed by their awaited store calls (an AST pass over `auth.py`,
+`management.py`, `providers.py`, `modes.py`, `apikeys.py`, `audit.py`, `ledger.py`,
+`applications.py`, `valkey.py`, `app.py` and `scripts/manage.py`), and each read followed by a
+write was looked at.
+
+| Path | Check, then write | Now | Shown by (mutation) |
+|---|---|---|---|
+| The seven rules of section 3.6 | last org_admin and platform_admin; an individual organization's one member; a new user's name and seat; the application-mode bound; provider changes with their audit rows; the active-key cap; key issuing | one write transaction (since PR 1) | the write lock skipped (M4) fails the two-instance rules test and the bootstrap test |
+| `create_user` (CLI, bootstrap admin) | the seat and the name, then the insert, with the hash between | checked again in one write transaction | two-instance seat test (M11, M25) |
+| `bootstrap_admin` | no platform_admin yet, then the creation | checked again in the creation's transaction | two instances bootstrapping at once (M12) |
+| A login with the bootstrap password | unused, then marked used, with the verify between | one statement (`use_bootstrap`) | two logins on two instances (M13; M23 for SQLite) |
+| The hash upgrade at login and step-up | the hash verified, then replaced | one statement, only if still that hash | the store parity test (M14; M24 for SQLite) |
+| `change_password` | the session, the account and the current password, then the new hash, with two hashes between | checked again in one write transaction | a reset made during the verify (M15) |
+| A password reset | none (several writes) | one transaction | as above |
+| `create_application` | the organization enabled and the name free, then the insert | one write transaction | the organization disabled from another instance (M16) |
+| `manage.py disable-organization` / `enable-organization` | it exists, then the switch | one write transaction | structural (M21) |
+| `rotate_key` | the key active, then the replacement | checked again in its transaction; `revoke_key` takes the lock | a revocation from another instance (M17) |
+| A provider update, a provider switch | the row the request read, written back whole | applied to the row as it is now, in one transaction | the platform switch turned off meanwhile (M18, M19) |
+| A connection test | the row, then the row with the capabilities | one transaction, recorded only on the destination probed | the platform switch turned off meanwhile (M20) |
+| `manage.py vault-drop-unreadable` | unreadable, then deleted | one write transaction | structural (M22) |
+
+Looked at and left as they are:
+
+- **A successful login resets the failure count** from the row read before the verify. The
+  password was right; a lock placed by wrong passwords in that moment is cleared, as it would
+  be by the same login a moment later.
+- **`step_up` opens a window on a session revoked meanwhile:** the session cannot be used, so the
+  window cannot be either.
+- **No mutable precondition:** `enable_user`, `unlock_user` (writes only), `grant_role` (the
+  user's organization and an application's roles never change), `ApiKeyService.issue` (the
+  application's existence is a foreign key), `seed_demo_applications`, `create-organization`
+  (unique keys), `touch_session` (`GREATEST`).
+- **The budget check, then the usage row:** PR 3b; shared mode is refused until then.
+
 ## Timing
 
-Not yet measured: see the PR.
+MEASURED on this machine (Intel Core Ultra 7 155H, 22 logical cores, 15.4 GB, Windows 11,
+Python 3.12.10), at commit `d757093`, with
+`GATEWAY_POSTGRES_URL=postgresql://postgres@127.0.0.1:5433/postgres uv run python -m benchmarks.durable_calls`,
+three runs of 2000 calls each after 20 warm-up calls. SQLite is a file in the temporary folder;
+Postgres is the compose file's container under Docker Desktop, reached through its port on
+127.0.0.1, so every round trip crosses into Docker's VM. Ranges are over the three runs.
+
+| What | SQLite p50 ms | Postgres p50 ms | Postgres p99 ms |
+|---|---|---|---|
+| One read (`lookup_key`) | 0.015 to 0.016 | 1.065 to 1.081 | 2.363 to 2.693 |
+| One write (`append`) | 0.353 to 0.361 | 1.087 to 1.092 | 2.427 to 2.574 |
+| Chat on the gateway's tier (6 calls) | 0.405 to 0.417 | 6.508 to 6.602 | 9.531 to 9.827 |
+| Chat on one organization provider (20 calls) | 0.499 to 0.524 | 21.924 to 22.315 | 27.924 to 29.183 |
+
+So on this machine one durable call on Postgres adds about 1.05 ms to a read and about 0.73 ms
+to a write at the median. The chat path adds about 6.1 ms at the median on the gateway's tier
+and about 21.4 ms on an organization provider, because its calls are made one after another.
+These are the store calls alone, not a whole request, and nothing on the default path uses
+Postgres.
