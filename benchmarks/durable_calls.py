@@ -29,7 +29,7 @@ import itertools
 import os
 import secrets
 import tempfile
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 
 import asyncpg
@@ -125,7 +125,7 @@ async def _measure(where: str, state: StateBackend, calls: int) -> list[WriteTim
     return [await _times(f"{name}, {where}", calls, call) for name, call in _calls(state).items()]
 
 
-async def run(calls: int, url: str) -> list[WriteTimes]:
+async def run(calls: int, url: str, env: Mapping[str, str]) -> list[WriteTimes]:
     results = []
     with tempfile.TemporaryDirectory() as folder:
         connection = open_database(Path(folder) / "bench.db")
@@ -138,7 +138,7 @@ async def run(calls: int, url: str) -> list[WriteTimes]:
     admin = await asyncpg.connect(url)
     await admin.execute(f"CREATE SCHEMA {schema}")
     try:
-        db = await PostgresDatabase.connect(url, WallClock(), env=os.environ, schema=schema)
+        db = await PostgresDatabase.connect(url, WallClock(), env=env, schema=schema)
         try:
             await apply_schema(db)
             results += await _measure("postgres", postgres_state(db), calls)
@@ -168,7 +168,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"warm-up per row: {WARMUP_CALLS}; percentiles: nearest rank")
     print()
     print(f"{'what':<30} {'n':>6} {'mean ms':>9} {'p50 ms':>9} {'p99 ms':>9} {'max ms':>9}")
-    for r in asyncio.run(run(args.calls, url)):
+    for r in asyncio.run(run(args.calls, url, os.environ)):
         print(
             f"{r.store:<30} {r.writes:>6} {r.mean_ms:>9.3f} {r.p50_ms:>9.3f} "
             f"{r.p99_ms:>9.3f} {r.max_ms:>9.3f}"

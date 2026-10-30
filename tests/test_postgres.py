@@ -1301,7 +1301,7 @@ def test_the_durable_call_benchmark_needs_a_postgres_to_measure_against(
 @postgres
 async def test_the_durable_call_benchmark_times_each_call_and_leaves_no_schema() -> None:
     url = os.environ[POSTGRES_URL_ENV]
-    rows = await durable_calls.run(1, url)
+    rows = await durable_calls.run(1, url, TEST_DATABASE_ENV)
     assert [r.store for r in rows] == [
         f"{what}, {where}"
         for where in ("sqlite", "postgres")
