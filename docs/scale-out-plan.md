@@ -547,6 +547,8 @@ order.
 | 1 | `scale-out/step-1` | Every store behind a protocol, async; `StateBackend` with `memory` and `sqlite`; `write_transaction()`; the window, budget, breaker and audit-cap protocols over today's in-memory classes; the lockout fix on SQLite (Q3) | One, named: concurrent wrong passwords each count (Q3). Otherwise the same tests, the perf gate and the protected outputs unchanged |
 | 2 | `scale-out/step-2` | Valkey counters (reordered on request, 2026-10-29): `redis` and the Valkey image (provenance check), the window scripts, the audit cap, the breakers, failing closed, restart detection, the skew check, the compose file and CI job, the two-instance test of a shared limit | Only with `GATEWAY_COUNTERS=valkey`; the default stays in memory |
 | 3 | `scale-out/step-3` | Postgres: `asyncpg` (provenance check), `pg0001`, every durable store, the budget reservation and its two-instance edge test (Q1), the step-up claim, the lockout update, the write lock, `migrate-to-postgres` and back; the skew check moves to `gateway_now_ms()`; `GATEWAY_STATE=shared`; `/readyz` | Only with `shared` |
+| 3b | `scale-out/step-3b` | Budgets on Postgres: the reservation (3.1) and its two-instance edge test (Q1), the per-tier settings (Q2); `GATEWAY_STATE=shared` allowed; Valkey's skew check against `gateway_now_ms()` | Only with `shared` |
+| 3c | `scale-out/step-3c` | Each mode read once per chat request and passed on (note 36: 12 of the 20 store calls of a provider-served request) | Fewer store calls; a mode change applies from the next request, and the next attempt of one in flight, as before |
 | 4 | `scale-out/step-4` | The two-instance tests in process and in two processes, the mutation table, the failure tests, `benchmarks/shared_state.py`, the note, the compose file for a two-instance demo on Postgres and Valkey | None |
 
 The questions PRs 2 and 3 depended on are answered (section 11). Each PR has the template,
@@ -660,7 +662,7 @@ Answers given before building (2026-10-29):
 - **Budgets move to PR 3b.** That covers the reservation (3.1), the per-tier settings of Q2 and
   the two-instance budget-edge test of Q1. Until PR 3b lands, `GATEWAY_STATE=shared` refuses to
   start, so two instances can never each spend one budget. Section 8's row for PR 3 is narrowed
-  accordingly; PR 3b follows PR 3 and comes before PR 2b.
+  accordingly; PR 3b follows PR 3 and comes before PR 2b. PR 3c follows PR 3b (below).
 
 Settled from the code:
 
@@ -690,6 +692,30 @@ Settled from the code:
 - **Tests and compose:** tests marked `postgres` run when `GATEWAY_TEST_POSTGRES_URL` is set,
   each in a schema of its own. `docker-compose.postgres.yml` (127.0.0.1 only, data on a tmpfs)
   and a CI job run them. The operator starts the compose file locally.
+
+### PR 3: approved with additions (2026-10-29)
+
+Approved on the condition of three additions, made in the same PR:
+
+- **Two-instance tests for the two rules of 3.6 that had none:** the application-mode bound, and
+  provider changes with their audit rows. Each has a mutation check.
+- **A limit per test across the suite**, so no test can hang on a lock or on another instance.
+  `gateway_test_timeout_s` in `pyproject.toml` (60): an async test past it is cancelled and
+  fails; any test still running at twice it ends the run with every thread's traceback. It is
+  built in `tests/conftest.py`, without a new dependency.
+- **A start-up guard on the Postgres URL:** a URL without a password is refused before any
+  connection is tried, unless `GATEWAY_POSTGRES_TEST_NO_PASSWORD=1` says it is a test database.
+
+Then, in order:
+
+- **PR 3b: budgets on Postgres.** The reservation (3.1) with the two-instance budget-edge test of
+  Q1, the per-tier settings of Q2, and `GATEWAY_STATE=shared` allowed to start. Also Valkey's
+  skew check against `gateway_now_ms()` when Postgres is configured: it needs a server running
+  on Postgres, which PR 3b is the first to have.
+- **PR 3c: each mode read once per request.** A chat request served by an organization provider
+  reads the two modes five times (12 of its 20 store calls, note 36). It reads them once and
+  passes the effective mode on. A mode change still applies from the next request (docs/33),
+  and from the next attempt of a request in flight.
 
 ## 9. Threat-model additions
 
