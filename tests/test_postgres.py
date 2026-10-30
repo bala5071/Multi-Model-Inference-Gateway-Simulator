@@ -17,8 +17,8 @@ import os
 import re
 import sqlite3
 import sys
-from collections.abc import AsyncIterator, Awaitable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -30,19 +30,34 @@ from benchmarks import durable_calls
 from accounts_helpers import PASSWORD, cookie, with_csrf
 from gateway.apikeys import ApiKeyService, ApplicationAccess, InvalidApiKeyError
 from gateway.app import create_app, create_default_app
-from gateway.applications import ApiKeyRecord, KeyLookup, application_from_template
+from gateway.applications import (
+    ApiKeyRecord,
+    KeyLookup,
+    SqliteApplicationStore,
+    application_from_template,
+)
 from gateway.audit import AuditAction, AuditEvent, AuditLog, Outcome, TargetType
-from gateway.auth import LOCK_MS, AccountAccess, AccountService, LoginFailedError
+from gateway.auth import (
+    ADMIN_PASSWORD_ENV,
+    ADMIN_USERNAME_ENV,
+    LOCK_MS,
+    AccountAccess,
+    AccountService,
+    BootstrapOutcome,
+    LoginFailedError,
+    SessionInvalidError,
+)
 from gateway.clock import ClockEpoch, SimClock, SystemEpoch, WallClock
 from gateway.continuous import build_continuous_registry
 from gateway.database import open_database
 from gateway.localonly import LocalOnlyPolicy
-from gateway.management import KeyLimits, ManagementService
+from gateway.management import KeyLimits, ManagementRefusal, ManagementService
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.modes import Mode
 from gateway.organizations import new_organization
-from gateway.permissions import Assignment, Role, ScopeType
+from gateway.permissions import Actor, Assignment, Role, ScopeType
 from gateway.pg_migrate import (
+    IN_ORDER,
     MigrationRefused,
     _postgres_rows,
     _sqlite_rows,
@@ -53,22 +68,31 @@ from gateway.pg_migrate import (
 from gateway.postgres import (
     PG_BASELINE,
     TABLES,
+    WRITE_LOCK,
     PostgresApplicationStore,
     PostgresDatabase,
+    PostgresProviderStore,
     postgres_state,
 )
-from gateway.providers import ProviderConfig
+from gateway.providers import (
+    ProviderConfig,
+    ProviderGoneError,
+    ProviderService,
+    SqliteProviderStore,
+)
+from gateway.redaction import Redactor
 from gateway.routing import load_plans
 from gateway.state import (
     STATE_ENV,
     SharedStateRefusedError,
     StateBackend,
     StateUnavailableError,
+    run_now,
     sqlite_state,
 )
 from gateway.usage import UsageEvent
 from gateway.users import Bootstrap, Session, User
-from gateway.vault import SealedKey
+from gateway.vault import VAULT_KEY_ENV, SealedKey, Vault
 from helpers import TEST_PEPPER, application_access, bearer
 from postgres_helpers import POSTGRES_URL_ENV, PgWorld, pg_accounts, pg_world
 
@@ -79,6 +103,7 @@ postgres = pytest.mark.postgres
 PLANS = load_plans()
 NOW = 1.8e12  # the database's time in these tests, far from the instance's own
 PROMPT = "one two three four five six seven eight nine ten"
+STATE_BOUND_S = 10.0  # how long a test waits for a state before it reports it never came
 # Nothing listens on port 1; the password is planted, to be looked for everywhere.
 PLANTED = "planted-pg-password-4f1c9a"
 NOWHERE = f"postgresql://gateway:{PLANTED}@127.0.0.1:1/gateway"
@@ -471,15 +496,20 @@ async def _scenario(s: StateBackend) -> list[Any]:
     ]
     await acc.set_login_state(users[0].id, 2, 50.0, None)
     for _ in range(3):
-        out.append(
-            await acc.count_login_failure(
-                users[1].id, NOW, window_ms=1000.0, lock_after=3, lock_ms=60_000.0
+        async with acc.request_transaction():
+            out.append(
+                await acc.count_login_failure(
+                    users[1].id, NOW, window_ms=1000.0, lock_after=3, lock_ms=60_000.0
+                )
             )
-        )
     await acc.set_password(users[2].id, "hash b", must_change=True, bootstrap=Bootstrap.UNUSED)
-    await acc.set_password_hash(users[2].id, "hash c")
+    out.append(await acc.set_password_hash(users[2].id, "hash c", replacing="hash b"))
+    out.append(await acc.set_password_hash(users[2].id, "hash d", replacing="hash b"))
+    out.append(await acc.use_bootstrap(users[2].id))
+    out.append(await acc.use_bootstrap(users[2].id))
     await acc.set_bootstrap(users[2].id, Bootstrap.USED)
-    await acc.set_disabled(users[0].id, True)
+    async with acc.write_transaction():
+        await acc.set_disabled(users[0].id, True)
     out.append([await acc.get_user(user.id) for user in users])
     for i in range(3):
         await acc.add_session(
@@ -567,7 +597,8 @@ async def _scenario(s: StateBackend) -> list[Any]:
     await p.put_key("prv_1", SealedKey("k2", b"\x03" * 12, b"again", "wxyz"), 98.0)
     out += [await p.get_key("prv_1"), await p.all_keys(), await p.delete_key("prv_2")]
     out += [await p.delete_key("prv_2")]
-    await p.delete("prv_2")
+    async with p.write_transaction():
+        await p.delete("prv_2")
     out += [await p.list_all()]
     # Modes.
     out += [await m.organization_mode("north"), await m.application_mode("app0")]
@@ -638,7 +669,10 @@ async def test_every_store_method_answers_as_sqlites_and_leaves_the_same_rows() 
             for table in TABLES:
                 columns = columns_of(connection, table)
                 rows = await _postgres_rows(pg, table, columns)
-                assert rows == _sqlite_rows(connection, table), table
+                want = _sqlite_rows(connection, table)
+                if table not in IN_ORDER:  # read only by key: the same rows, in any order
+                    rows, want = sorted(rows), sorted(want)
+                assert rows == want, table
     connection.close()
 
 
@@ -725,7 +759,12 @@ async def _row_held(world: PgWorld, table: str, key: str, value: str) -> AsyncIt
 
 
 async def _until_waiting(world: PgWorld, count: int) -> None:
-    """Until ``count`` other sessions are waiting for a lock (a state, polled)."""
+    """Until ``count`` other sessions are waiting for a lock (a state, polled). The bound only
+    reports a state that never came, rather than hanging."""
+    await asyncio.wait_for(_waiting(count), timeout=STATE_BOUND_S)
+
+
+async def _waiting(count: int) -> None:
     probe = await asyncpg.connect(os.environ[POSTGRES_URL_ENV])
     try:
         while (
@@ -780,11 +819,16 @@ async def test_a_step_up_window_is_claimed_once_across_instances() -> None:
                 for service in (first, second, first, second)
             ]
             await _until_waiting(world, 4)
-        assert sorted(await asyncio.gather(*claims), key=str) == [None, None, None, until]
+        claimed = await asyncio.gather(*claims)
+        assert claimed.count(until) == 1, claimed
+        assert claimed.count(None) == 3, claimed
 
 
-async def _management(db: PostgresDatabase) -> ManagementService:
-    keys = ApiKeyService(PostgresApplicationStore(db), TEST_PEPPER, SystemEpoch(), store_clock=db)
+async def _management(
+    db: PostgresDatabase, store: PostgresApplicationStore | None = None
+) -> ManagementService:
+    store = store if store is not None else PostgresApplicationStore(db)
+    keys = ApiKeyService(store, TEST_PEPPER, SystemEpoch(), store_clock=db)
     return ManagementService(
         keys,
         PLANS,
@@ -918,6 +962,28 @@ async def test_chat_on_two_instances_is_served_while_a_management_write_holds_th
 
 
 @postgres
+async def test_a_wrong_password_is_counted_while_a_management_write_holds_the_lock() -> None:
+    """The lockout count is a request's transaction (section 3.6): it does not wait for the
+    write lock, nor for a management connection."""
+    async with pg_world(instances=2, management_pool_size=1) as world:
+        first, second = world.instances
+        service = pg_accounts(second)
+        await service.create_user("alice", PASSWORD, "default")
+        async with _slow_management_write(first):
+            held = await second.management.acquire()
+            try:
+                attempt = asyncio.create_task(service.login("alice", "not the password at all"))
+                _, pending = await asyncio.wait([attempt], timeout=10.0)
+                assert not pending, "the wrong password was still waiting"
+                assert isinstance(attempt.exception(), LoginFailedError)
+                alice = await service.store.find_user("alice")
+                assert alice is not None
+                assert alice.failed_logins == 1
+            finally:
+                await second.management.release(held)
+
+
+@postgres
 async def test_a_closed_pool_is_answered_as_postgres_down() -> None:
     """The real driver's errors, not a stand-in's: a pool closed under the app."""
     clock = SimClock()
@@ -961,7 +1027,12 @@ async def _fill(connection: sqlite3.Connection) -> None:
 
 
 def _tables(connection: sqlite3.Connection) -> dict[str, list[tuple[Any, ...]]]:
-    return {t: _sqlite_rows(connection, t) for t in TABLES}
+    """Every table's rows: in their order where the stores keep one (``ord``, ``seq``), as a
+    sorted list where they are only read by key."""
+    return {
+        t: _sqlite_rows(connection, t) if t in IN_ORDER else sorted(_sqlite_rows(connection, t))
+        for t in TABLES
+    }
 
 
 @postgres
@@ -986,10 +1057,10 @@ async def test_sqlite_to_postgres_and_back_gives_every_row_back(tmp_path: Path) 
             row[0] for row in original["organizations"]
         ]
         seq = await state.usage.append(
-            UsageEvent("app0", "after", "economy", 1, 0, 1, 0.1, 0.1, 200.0)
+            UsageEvent("app0", "after", "economy", 1, 0, 1, 0.1, 0.1, 0.5)
         )
         assert seq > max(row[0] for row in original["usage_events"])
-        await state.usage.prune(seq + 1)  # back to what was copied
+        assert await state.usage.prune(1.0) == 1  # the copied rows are all later: back to them
         # Back: a dry run writes no file; then a new file with every row.
         back = tmp_path / "back.db"
         await migrate_to_sqlite(db, back, dry_run=True)
@@ -1155,3 +1226,340 @@ async def test_the_durable_call_benchmark_times_each_call_and_leaves_no_schema()
     finally:
         await admin.close()
     assert left == []
+
+
+# --- check, then write: the paths beyond section 3.6 (postgres) -----------------------------------
+#
+# Each test makes another instance write between the check and the write it guards, by a hook
+# on the first instance's store, a gate in its hash runner, or the write lock held. With the
+# check and the write in one transaction the other instance's write waits (and, with a short
+# lock timeout, is refused) or the check sees it; without, the rule is broken.
+
+ACTOR = Actor("usr_00000000000000aa", "default", ())
+MASTER = bytes(range(32))
+
+
+class _Marker:
+    def changed(self) -> None:
+        return None
+
+
+class _HookedRunner:
+    """Inline hashing that runs ``before`` once, ahead of the first hash or verify."""
+
+    def __init__(self, before: Callable[[], Awaitable[None]]) -> None:
+        self._before: Callable[[], Awaitable[None]] | None = before
+
+    async def run(self, work: Callable[[], Any]) -> Any:
+        if self._before is not None:
+            before, self._before = self._before, None
+            await before()
+        return work()
+
+
+class _AllStarted:
+    """Inline hashing held until ``parties`` hashes or verifies have started."""
+
+    def __init__(self, parties: int) -> None:
+        self._parties, self._started, self._all = parties, 0, asyncio.Event()
+
+    async def run(self, work: Callable[[], Any]) -> Any:
+        self._started += 1
+        if self._started == self._parties:
+            self._all.set()
+        await self._all.wait()
+        return work()
+
+
+async def _until_lock_tried(count: int) -> None:
+    """Until ``count`` sessions are inside a transaction, trying for the write lock (bounded,
+    to report a state that never came)."""
+    await asyncio.wait_for(_lock_tried(count), timeout=STATE_BOUND_S)
+
+
+async def _lock_tried(count: int) -> None:
+    probe = await asyncpg.connect(os.environ[POSTGRES_URL_ENV])
+    try:
+        while (
+            await probe.fetchval(
+                "SELECT count(DISTINCT pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid()"
+                " AND state = 'idle in transaction'"
+                " AND query LIKE 'SELECT pg_try_advisory_xact_lock%'"
+            )
+            < count
+        ):
+            await WallClock().sleep_ms(5.0)
+    finally:
+        await probe.close()
+
+
+async def _then(other: Callable[[], Awaitable[None]], done: list[bool]) -> None:
+    """Make the other instance's write; note whether it was made or refused (lock timeout)."""
+    try:
+        await other()
+        done.append(True)
+    except StateUnavailableError:
+        done.append(False)
+
+
+def _hook(target: Any, name: str, other: Callable[[], Awaitable[None]], done: list[bool]) -> None:
+    """After ``target.name``'s first call returns, the other instance writes."""
+    real = getattr(target, name)
+
+    async def hooked(*args: Any, **kwargs: Any) -> Any:
+        found = await real(*args, **kwargs)
+        if not done:
+            await _then(other, done)
+        return found
+
+    setattr(target, name, hooked)
+
+
+@postgres
+async def test_two_instances_bootstrapping_at_once_make_one_platform_admin() -> None:
+    async with pg_world(instances=2) as world:
+        first, second = (pg_accounts(db, seed=i + 1) for i, db in enumerate(world.instances))
+        await world.admin.execute("SELECT pg_advisory_lock($1)", WRITE_LOCK)
+        starting = [
+            asyncio.create_task(
+                service.bootstrap_admin(
+                    {ADMIN_USERNAME_ENV: f"root{i}", ADMIN_PASSWORD_ENV: PASSWORD}
+                )
+            )
+            for i, service in enumerate((first, second))
+        ]
+        await _until_lock_tried(2)  # both checked that none exists, and wait to create one
+        await world.admin.execute("SELECT pg_advisory_unlock($1)", WRITE_LOCK)
+        outcomes = await asyncio.gather(*starting)
+        assert sorted(o.value for o in outcomes) == sorted(
+            [BootstrapOutcome.CREATED.value, BootstrapOutcome.EXISTS_WITH_VARIABLES.value]
+        )
+        admins = await world.rows(
+            "SELECT count(*) FROM role_assignments WHERE role = 'platform_admin'"
+        )
+        assert admins == [(1,)]
+
+
+@postgres
+async def test_the_bootstrap_password_lets_in_one_login_across_instances() -> None:
+    async with pg_world(instances=2) as world:
+        first, second = (pg_accounts(db, seed=i + 1) for i, db in enumerate(world.instances))
+        env = {ADMIN_USERNAME_ENV: "root", ADMIN_PASSWORD_ENV: PASSWORD}
+        assert await first.bootstrap_admin(env) is BootstrapOutcome.CREATED
+        gate = _AllStarted(2)  # both logins have read the user before either verifies
+        for service in (first, second):
+            service._passwords._runner = gate
+        results = await asyncio.gather(
+            first.login("root", PASSWORD), second.login("root", PASSWORD), return_exceptions=True
+        )
+        assert sum(isinstance(r, LoginFailedError) for r in results) == 1, results
+        assert await world.rows("SELECT count(*) FROM sessions") == [(1,)]
+
+
+@postgres
+async def test_a_password_change_never_overwrites_a_reset_made_meanwhile() -> None:
+    async with pg_world(instances=2) as world:
+        first, second = (pg_accounts(db, seed=i + 1) for i, db in enumerate(world.instances))
+        await _ready_user(first, "alice")
+        context = await first.authenticate((await first.login("alice", PASSWORD)).session_id)
+        reset_to = "a reset password nobody guesses"
+
+        async def reset() -> None:
+            await second.reset_password("alice", reset_to)
+
+        first._passwords._runner = _HookedRunner(reset)  # during the verify of the current one
+        with pytest.raises(SessionInvalidError):
+            await first.change_password(context, PASSWORD, "seven copper kites at dawn")
+        alice = await second.store.find_user("alice")
+        assert alice is not None
+        assert alice.must_change_password  # the reset's, not overwritten
+        assert second._passwords.hasher.verify(alice.password_hash, reset_to)
+
+
+@postgres
+async def test_no_application_is_created_in_an_organization_disabled_meanwhile() -> None:
+    async with pg_world(instances=2, lock_timeout_ms=300.0) as world:
+        store_a, store_b = (PostgresApplicationStore(db) for db in world.instances)
+        manager = await _management(world.instances[0], store_a)
+        done: list[bool] = []
+
+        async def disable() -> None:  # as the CLI's disable-organization does it
+            async with store_b.write_transaction():
+                await store_b.set_organization_disabled("default", True)
+
+        _hook(store_a, "get_organization", disable, done)
+        with suppress(ManagementRefusal):
+            await manager.create_application("default", "Shop", "pro", application_id="shop")
+        organization = await store_b.get_organization("default")
+        created = await store_b.get_application("shop")
+        assert organization is not None
+        assert done  # the other instance tried
+        assert not (organization.disabled and created is not None)
+
+
+@postgres
+async def test_a_key_revoked_meanwhile_is_not_rotated() -> None:
+    async with pg_world(instances=2) as world:
+        store_a, store_b = (PostgresApplicationStore(db) for db in world.instances)
+        first = await _management(world.instances[0], store_a)
+        second = await _management(world.instances[1], store_b)
+        await first.create_application("default", "Shop", "pro", application_id="shop")
+        issued = await first.issue_key("shop", "main", expires_in_days=30)
+        key_id = issued.record.key_id
+        done: list[bool] = []
+
+        async def revoke() -> None:
+            await second.revoke_key(key_id)
+
+        _hook(store_a, "get_key", revoke, done)
+        with pytest.raises(ManagementRefusal, match="revoked or expired"):
+            await first.rotate_key(key_id, expires_in_days=30)
+        assert done == [True]
+        assert [(k.key_id, k.revoked) for k in await store_b.list_keys("shop")] == [(key_id, True)]
+
+
+def _providers(db: PostgresDatabase) -> ProviderService:
+    return ProviderService(
+        PostgresProviderStore(db),
+        Vault(MASTER),
+        AuditLog(postgres_state(db).audit),
+        WallClock(),
+        SystemEpoch(),
+        Redactor(),
+        httpx.AsyncClient,
+    )
+
+
+async def _provider(service: ProviderService) -> ProviderConfig:
+    return await service.create(
+        "default",
+        type="openai_compatible",
+        base_url="https://api.example.test/v1",
+        model="m1",
+        serves_tier="economy",
+        role="primary",
+        price_input_per_mtok=None,
+        price_output_per_mtok=None,
+        first_token_budget_ms=None,
+        actor=ACTOR,
+    )
+
+
+@postgres
+async def test_a_provider_change_never_writes_back_a_switch_turned_off_meanwhile() -> None:
+    """The request read the provider; the platform turned it off; the organization's edit,
+    and its own switch, are applied to the row as it is now."""
+    async with pg_world(instances=2) as world:
+        first, second = (_providers(db) for db in world.instances)
+        read = await _provider(first)
+        await second.set_switch(read, False, platform=True, actor=ACTOR)
+        await first.update(read, {"price_input_per_mtok": 1.0}, actor=ACTOR)
+        await first.set_switch(read, False, platform=False, actor=ACTOR)
+        now = await second.store.get(read.id)
+        assert now is not None
+        assert (now.platform_enabled, now.enabled, now.price_input_per_mtok) == (False, False, 1.0)
+        # And a switch never writes back an older destination.
+        moved, _ = await second.update(
+            read, {"base_url": "https://other.example.test/v1"}, actor=ACTOR
+        )
+        await first.set_switch(read, True, platform=False, actor=ACTOR)
+        after = await second.store.get(read.id)
+        assert after is not None
+        assert after.base_url == moved.base_url
+        await second.store.delete(read.id)
+        with pytest.raises(ProviderGoneError):
+            await first.set_switch(read, True, platform=False, actor=ACTOR)
+
+
+@postgres
+async def test_a_connection_test_never_writes_back_a_switch_turned_off_meanwhile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with pg_world(instances=2, lock_timeout_ms=300.0) as world:
+        first, second = (_providers(db) for db in world.instances)
+        read = await _provider(first)
+        await first.set_key(read, "sk-test-key-0123456789", actor=ACTOR, marker=_Marker())
+
+        async def probed(config: ProviderConfig, stored: Any) -> dict[str, Any]:
+            return {"supports_tools": {"value": True, "source": "probed"}}
+
+        monkeypatch.setattr(first, "_probe", probed)
+        done: list[bool] = []
+
+        async def switch_off() -> None:
+            await second.set_switch(read, False, platform=True, actor=ACTOR)
+
+        _hook(first.store, "get", switch_off, done)
+        await first.test(read, actor=ACTOR)
+        now = await second.store.get(read.id)
+        assert now is not None
+        assert done
+        assert not (done[0] and now.platform_enabled), (done, now.platform_enabled)
+
+
+# --- the CLI's check-then-write paths, each in one transaction (no server) ------------------------
+
+
+def _writes_inside_a_transaction(
+    monkeypatch: pytest.MonkeyPatch, store: Any, write: str
+) -> list[bool]:
+    """For each call of ``store.write``, whether it was made inside ``write_transaction``."""
+    seen: list[bool] = []
+    inside = [False]
+    real_transaction, real_write = store.write_transaction, getattr(store, write)
+
+    @asynccontextmanager
+    async def transaction(self: Any) -> AsyncIterator[None]:
+        async with real_transaction(self):
+            inside[0] = True
+            try:
+                yield
+            finally:
+                inside[0] = False
+
+    async def written(self: Any, *args: Any, **kwargs: Any) -> Any:
+        seen.append(inside[0])
+        return await real_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(store, "write_transaction", transaction)
+    monkeypatch.setattr(store, write, written)
+    return seen
+
+
+def test_the_cli_disables_an_organization_in_one_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check that it exists and the switch: ordered against an application being created
+    in it by a running server (docs/36)."""
+    env = {"GATEWAY_DATABASE": str(tmp_path / "gateway.db")}
+    assert manage(["create-organization", "--id", "north", "--name", "North", "--kind",
+                   "business"], env) == 0  # fmt: skip
+    seen = _writes_inside_a_transaction(
+        monkeypatch, SqliteApplicationStore, "set_organization_disabled"
+    )
+    assert manage(["disable-organization", "--organization", "north"], env) == 0
+    assert manage(["enable-organization", "--organization", "north"], env) == 0
+    assert seen == [True, True]
+
+
+def test_the_cli_drops_unreadable_keys_in_one_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read and dropped together: a key entered again meanwhile is readable and kept."""
+    from test_providers_api import seed_provider
+    from test_vault import KEY, OTHER, _key
+
+    path = tmp_path / "gateway.db"
+    connection = open_database(path)
+    MigrationRunner(connection, MIGRATIONS, SystemEpoch()).migrate()
+    config = seed_provider(connection)
+    run_now(
+        SqliteProviderStore(connection).put_key(
+            config.id, Vault(OTHER).seal(KEY, config.binding), 1.0
+        )
+    )
+    connection.close()
+    seen = _writes_inside_a_transaction(monkeypatch, SqliteProviderStore, "delete_key")
+    env = {"GATEWAY_DATABASE": str(path), VAULT_KEY_ENV: _key(MASTER)}
+    assert manage(["vault-drop-unreadable"], env) == 0
+    assert seen == [True]
