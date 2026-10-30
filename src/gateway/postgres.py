@@ -1569,12 +1569,14 @@ class PostgresBudgets:
             await self._usage.append(event)
             billed = event.prompt_tokens - event.cached_tokens + event.completion_tokens
             app = reservation.application_id
-            if await s._execute(_COMMIT, app, start, billed) == 0:
-                # No counter for this period yet: seeded from the events, this one included. If
-                # another instance seeded it meanwhile (without this event, not committed yet),
-                # nothing is inserted and this event is added to that counter.
-                if await s._execute(_SEED, app, start, end) == 0:
-                    await s._execute(_COMMIT, app, start, billed)
+            # No counter for this period yet: it is seeded from the events, this one included. If
+            # another instance seeded it meanwhile (without this event, not committed yet),
+            # nothing is inserted and this event is added to that counter.
+            if (
+                await s._execute(_COMMIT, app, start, billed) == 0
+                and await s._execute(_SEED, app, start, end) == 0
+            ):
+                await s._execute(_COMMIT, app, start, billed)
 
     async def _take_off(self, reservation_id: int) -> None:
         """Delete a reservation and take it off its counter, if it is still there (a sweep may
