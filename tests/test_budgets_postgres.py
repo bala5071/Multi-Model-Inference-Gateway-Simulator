@@ -117,8 +117,15 @@ def _app_on(
 
 
 @asynccontextmanager
-async def _clients(world: PgWorld, clock: SimClock) -> AsyncIterator[list[httpx.AsyncClient]]:
+async def _clients(
+    world: PgWorld, clock: SimClock, *, settle_after: int | None = None
+) -> AsyncIterator[list[httpx.AsyncClient]]:
+    """A client for each instance. With ``settle_after``, no settle is made until that many
+    reserves have been answered, on all instances together: the requests are then all at the
+    budget at once, as the edge test means, however fast the admitted one is served."""
     built = [_app_on(db, clock) for db in world.instances]
+    if settle_after is not None:
+        _settle_after_reserves([budgets for _, budgets, _ in built], settle_after)
     clients = [
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw")
         for app, _, _ in built
@@ -130,6 +137,29 @@ async def _clients(world: PgWorld, clock: SimClock) -> AsyncIterator[list[httpx.
             await client.aclose()
         for _, _, registry in built:
             await registry.aclose()
+
+
+def _settle_after_reserves(all_budgets: list[PostgresBudgets], count: int) -> None:
+    answered = 0
+    reserved = asyncio.Event()
+    for budgets in all_budgets:
+        reserve, settle = budgets.reserve, budgets.settle
+
+        async def counted(*args: Any, real: Any = reserve, **kwargs: Any) -> Any:
+            nonlocal answered
+            try:
+                return await real(*args, **kwargs)
+            finally:
+                answered += 1
+                if answered == count:
+                    reserved.set()
+
+        async def held(*args: Any, real: Any = settle, **kwargs: Any) -> Any:
+            await asyncio.wait_for(reserved.wait(), timeout=STATE_BOUND_S)
+            return await real(*args, **kwargs)
+
+        budgets.reserve = counted  # type: ignore[method-assign]
+        budgets.settle = held  # type: ignore[method-assign]
 
 
 async def _counter(world: PgWorld, app_id: str = "acme") -> tuple[int, int]:
@@ -180,7 +210,7 @@ async def _at_the_edge(already: int, budget: int) -> tuple[list[httpx.Response],
         seeding = PostgresBudgets(world.instances[0], WallClock())
         await seeding.release(await seeding.reserve("acme", budget, 0, hold_ms=HOLD_MS))
         body = {"model": "economy", "prompt": PROMPT, "max_tokens": 2}
-        async with _clients(world, clock) as clients:
+        async with _clients(world, clock, settle_after=20) as clients:
             answers = await asyncio.gather(
                 *(
                     clients[i % 2].post("/v1/generate", json=body, headers=bearer(key))
