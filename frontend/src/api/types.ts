@@ -155,6 +155,7 @@ export const EVENT_TYPES = [
   "budget_exhausted",
   "circuit_breaker",
   "state_store_restarted",
+  "reservation_expired",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];

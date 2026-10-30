@@ -235,13 +235,19 @@ jobs:
         run: uv sync --locked
       - name: Start Postgres (pinned by digest, published on 127.0.0.1 only)
         run: docker compose -f docker-compose.postgres.yml up --detach --wait
+      # The shared server's end-to-end test (docs/37) needs both stores.
+      - name: Start Valkey (pinned by digest, published on 127.0.0.1 only)
+        run: docker compose -f docker-compose.valkey.yml up --detach --wait
       - name: The tests marked postgres
         env:
           GATEWAY_TEST_POSTGRES_URL: postgresql://postgres@127.0.0.1:5433/postgres
+          GATEWAY_TEST_VALKEY_URL: redis://127.0.0.1:6380/0
         run: uv run pytest -m postgres -ra
       - name: Stop
         if: always()
-        run: docker compose -f docker-compose.postgres.yml down
+        run: |
+          docker compose -f docker-compose.postgres.yml down
+          docker compose -f docker-compose.valkey.yml down
 
   # Runs the README's quickstart exactly as written (the shell blocks marked
   # <!-- quickstart -->): a throwaway pepper, the demo applications, a key, the server, one

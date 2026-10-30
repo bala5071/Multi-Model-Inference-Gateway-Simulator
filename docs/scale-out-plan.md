@@ -970,6 +970,17 @@ path.
   fill the budget.
 - **B4:** the prompt is bounded by its UTF-8 bytes.
 
+**Settled while building (2026-10-30)**, details in note 37:
+
+- A settle seeds a missing counter with its own event already appended, and adds its tokens to
+  the counter if another instance seeded it first. The reserve and the settle each send one
+  statement per decision: the take-off is one `DELETE ... RETURNING` feeding an `UPDATE`.
+- The release on a hang-up is shielded. Starlette cancels the stream's task again at every
+  await in its `finally`, so without the shield the reservation stayed held until it expired.
+- The pool's reset of a connection given back to it is a round trip, and it is counted: 7 for
+  a reserve and 9 for a settle.
+- CI's `postgres` job also starts Valkey, for the shared server's end-to-end test.
+
 ## 9. Threat-model additions
 
 - **Two new network peers** holding everything: Postgres holds key HMACs, password hashes,

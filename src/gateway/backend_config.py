@@ -40,6 +40,22 @@ class LlamaServer:
 
 
 @dataclass(frozen=True, slots=True)
+class TierBudget:
+    """What a request on one tier reserves against its budget when budgets are shared
+    (docs/37): at most ``context_tokens`` in all, and ``reserve_completion_tokens`` for its
+    answer when neither it nor its plan names a ``max_tokens``. Operator-supplied: no number
+    ships with the gateway."""
+
+    context_tokens: int
+    reserve_completion_tokens: int
+
+    def bound(self, prompt_bytes: int, max_tokens: int | None) -> int:
+        """Q2: the prompt (as UTF-8 bytes, B4) and the completion, capped at the context."""
+        completion = max_tokens if max_tokens is not None else self.reserve_completion_tokens
+        return min(prompt_bytes + completion, self.context_tokens)
+
+
+@dataclass(frozen=True, slots=True)
 class BackendConfig:
     kind: BackendKind = "simulated"
     endpoint: Endpoint = "completions"
@@ -49,6 +65,43 @@ class BackendConfig:
     # A calibration file whose timing parameters replace the default (calibrated) ones in
     # the simulator. Only used by the simulated backend.
     profiles_path: Path | None = None
+    # Per tier, for shared budgets only (docs/37); empty unless the file sets them.
+    budgets: Mapping[Tier, TierBudget] = field(default_factory=dict)
+
+
+def _positive(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def _parse_budgets(raw: object) -> dict[Tier, TierBudget]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise BackendConfigError("budgets must map each tier to its settings")
+    budgets: dict[Tier, TierBudget] = {}
+    for name, settings in raw.items():
+        try:
+            tier = Tier(name)
+        except ValueError:
+            raise BackendConfigError(
+                f"budgets: {name!r} is not a tier; tiers are: {', '.join(t.value for t in Tier)}"
+            ) from None
+        if not isinstance(settings, dict):
+            raise BackendConfigError(f"budgets.{name} must be a mapping")
+        for key in ("context_tokens", "reserve_completion_tokens"):
+            if not _positive(settings.get(key)):
+                raise BackendConfigError(f"budgets.{name}.{key} must be a positive integer")
+        unknown = set(settings) - {"context_tokens", "reserve_completion_tokens"}
+        if unknown:
+            raise BackendConfigError(f"budgets.{name}: unknown settings {sorted(unknown)}")
+        if settings["reserve_completion_tokens"] > settings["context_tokens"]:
+            raise BackendConfigError(
+                f"budgets.{name}.reserve_completion_tokens must be at most its context_tokens"
+            )
+        budgets[tier] = TierBudget(
+            settings["context_tokens"], settings["reserve_completion_tokens"]
+        )
+    return budgets
 
 
 def parse_backend_config(data: object, *, kind_override: str | None = None) -> BackendConfig:
@@ -118,6 +171,7 @@ def parse_backend_config(data: object, *, kind_override: str | None = None) -> B
         servers=servers,
         chat_api=cast(ChatApi, chat_api),
         profiles_path=Path(profiles) if profiles else None,
+        budgets=_parse_budgets(data.get("budgets")),
     )
 
 

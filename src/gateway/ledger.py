@@ -6,23 +6,34 @@ period's totals in memory so that a budget check never has to read the store. Si
 docs/21-persistence.md periods are calendar months in UTC by default, and old events can be
 pruned after a retention period. Since docs/26-organizations.md it also rolls the usage of
 an organization's applications up, for reporting only: budgets are enforced per application.
+
+The request path asks ``Budgets`` to reserve before a request runs and to settle or release it
+when the request ends (docs/37-budgets-on-postgres.md). ``CostLedger`` is one process's: it
+reserves nothing, so its answers are exactly the check-then-record of before. The shared
+implementation is ``gateway.postgres.PostgresBudgets``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from gateway.clock import Clock, ClockEpoch, EpochSource
 from gateway.periods import BudgetPeriods, CalendarMonthsUTC
 from gateway.schema import RequestResult
+from gateway.state import StateUnavailableError
 from gateway.usage import ChatSource, InMemoryUsageStore, ModelUsage, UsageEvent, UsageStore
 
 # How often the retention loop prunes, and how many events it deletes in one go: a batch is
 # one short transaction, and the loop yields to the event loop between batches.
 PRUNE_EVERY_MS = 60 * 60 * 1000.0
 PRUNE_BATCH = 1000
+# How often each instance releases the shared reservations past their expiry (docs/37).
+SWEEP_EVERY_MS = 30_000.0
+
+LOG = logging.getLogger("gateway.ledger")
 
 __all__ = [
     "ApplicationShare",
@@ -30,8 +41,11 @@ __all__ = [
     "BudgetExceededError",
     "Budgets",
     "CostLedger",
+    "Expired",
     "ModelUsage",
     "OrganizationUsage",
+    "Reservation",
+    "SharedBudgets",
 ]
 
 
@@ -87,16 +101,38 @@ class BudgetExceededError(Exception):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class Reservation:
+    """What one admitted request holds against its application's budget until it ends.
+    ``tokens`` is its upper bound (docs/37); ``id`` is the stored reservation's, None where
+    nothing is stored (``CostLedger``)."""
+
+    application_id: str
+    tokens: int
+    id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Expired:
+    """A reservation released because it outlived its request's time: its instance died, or
+    could not settle it. Its application, and the tokens it held; nothing of the request."""
+
+    application_id: str
+    tokens: int
+
+
 class Budgets(Protocol):
-    """What the request path and monitoring ask of budgets (docs/34-state-interfaces.md):
-    ``CostLedger`` in one process. Scale-out PR 2 replaces check-then-record with reserve,
-    settle and release (docs/scale-out-plan.md, section 3.1)."""
+    """What the request path and monitoring ask of budgets (docs/34, docs/37): reserve before a
+    request runs (``BudgetExceededError`` if there is no room), then exactly one of settle (it
+    billed: charge what it used) or release (it billed nothing)."""
 
-    async def check_budget(self, application_id: str, budget_tokens: int) -> None: ...
+    async def reserve(
+        self, application_id: str, budget_tokens: int, tokens: int, *, hold_ms: float
+    ) -> Reservation: ...
 
-    async def record(
+    async def settle(
         self,
-        application_id: str,
+        reservation: Reservation,
         result: RequestResult,
         *,
         model: str,
@@ -104,7 +140,30 @@ class Budgets(Protocol):
         source: ChatSource | None = None,
     ) -> float: ...
 
+    async def release(self, reservation: Reservation) -> None: ...
+
     async def usage(self, application_id: str) -> ApplicationUsage: ...
+
+
+class SharedBudgets(Budgets, Protocol):
+    """Budgets every instance shares (``PostgresBudgets``): reservations that outlive a dead
+    instance until they expire, settles held back while the store is down, and retention."""
+
+    @property
+    def healthy(self) -> bool:
+        """False while a settle or release is waiting to be written: admit nothing new."""
+        ...
+
+    @property
+    def retention_ms(self) -> float | None: ...
+
+    async def prune(self, limit: int | None = None) -> int: ...
+
+    async def sweep(self) -> list[Expired]:
+        """Release every reservation past its expiry."""
+        ...
+
+    async def aclose(self) -> None: ...
 
 
 @dataclass(slots=True)
@@ -221,6 +280,34 @@ class CostLedger:
                 retry_after_ms=usage.period_end_ms - self._epoch.epoch_ms(),
             )
 
+    async def reserve(
+        self, application_id: str, budget_tokens: int, tokens: int, *, hold_ms: float
+    ) -> Reservation:
+        """``check_budget``: one process holds nothing for a request in flight."""
+        await self.check_budget(application_id, budget_tokens)
+        return Reservation(application_id, tokens)
+
+    async def settle(
+        self,
+        reservation: Reservation,
+        result: RequestResult,
+        *,
+        model: str,
+        price_multiplier: float,
+        source: ChatSource | None = None,
+    ) -> float:
+        """``record``."""
+        return await self.record(
+            reservation.application_id,
+            result,
+            model=model,
+            price_multiplier=price_multiplier,
+            source=source,
+        )
+
+    async def release(self, reservation: Reservation) -> None:
+        """Nothing was held."""
+
     async def record(
         self,
         application_id: str,
@@ -264,8 +351,15 @@ def _add(a: ModelUsage, b: ModelUsage) -> ModelUsage:
     )
 
 
+class Prunable(Protocol):
+    @property
+    def retention_ms(self) -> float | None: ...
+
+    async def prune(self, limit: int | None = None) -> int: ...
+
+
 async def run_retention(
-    ledger: CostLedger,
+    ledger: Prunable,
     clock: Clock,
     *,
     batch: int = PRUNE_BATCH,
@@ -283,3 +377,23 @@ async def run_retention(
         while await ledger.prune(batch) == batch:
             await clock.sleep_ms(0)
         await clock.sleep_ms(every_ms)
+
+
+async def run_sweep(
+    budgets: SharedBudgets,
+    clock: Clock,
+    on_expired: Callable[[Expired], None],
+    *,
+    every_ms: float = SWEEP_EVERY_MS,
+) -> None:
+    """Release expired reservations every ``every_ms``, beside the server, until cancelled; a
+    sweep the store cannot make is tried again at the next one."""
+    while True:
+        await clock.sleep_ms(every_ms)
+        try:
+            expired = await budgets.sweep()
+        except StateUnavailableError as exc:
+            LOG.warning("the reservation sweep could not run (%s); trying again later", exc)
+            continue
+        for each in expired:
+            on_expired(each)

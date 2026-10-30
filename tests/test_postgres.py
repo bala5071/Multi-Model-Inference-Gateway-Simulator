@@ -1302,10 +1302,17 @@ def test_the_durable_call_benchmark_needs_a_postgres_to_measure_against(
 async def test_the_durable_call_benchmark_times_each_call_and_leaves_no_schema() -> None:
     url = os.environ[POSTGRES_URL_ENV]
     rows = await durable_calls.run(1, url, TEST_DATABASE_ENV)
+    calls = (
+        "read",
+        "write",
+        "chat, gateway tier",
+        "chat, one provider",
+        "budget, admit and settle",
+    )
+    shared = ("budget, reserve", "budget, settle", "budget, release", "chat, gateway tier, shared")
     assert [r.store for r in rows] == [
-        f"{what}, {where}"
-        for where in ("sqlite", "postgres")
-        for what in ("read", "write", "chat, gateway tier", "chat, one provider")
+        *(f"{what}, sqlite" for what in calls),
+        *(f"{what}, postgres" for what in (*calls, *shared)),
     ]
     admin = await asyncpg.connect(url)
     try:

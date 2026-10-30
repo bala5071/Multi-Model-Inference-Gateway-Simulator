@@ -7,8 +7,9 @@ See docs/35-valkey-counters.md and docs/scale-out-plan.md, sections 3.4, 3.5, 3.
   window it is given and counts in all of them or none (the request rate limit, the
   user-creation cap, the test-connection counts), the audit cap, and the circuit breakers.
 - **Windows are timed on the instance's ``EpochSource``** (calendar time, comparable between
-  instances), never on ``Clock`` (per process) and never on Valkey's ``TIME``, which is read
-  only to measure how far apart the two are.
+  instances), never on ``Clock`` (per process) and never on Valkey's ``TIME``. The instance's
+  epoch is measured against the shared reference: Postgres's ``gateway_now_ms()`` when the
+  gateway runs on Postgres (docs/37), Valkey's ``TIME`` otherwise.
 - **Missing is forbidden.** Every call has a timeout on the injected clock. A call that fails,
   times out, or is made while the instance's clock is too far from Valkey's, refuses what it
   would have decided; the table in docs/35 says how for each counter. Never open.
@@ -60,12 +61,13 @@ from gateway.management import ManagementRefusal
 from gateway.overload import RequestTimeoutError, run_with_timeout
 from gateway.providers import HOUR_MS, TESTS_PER_HOUR, TESTS_PER_ORGANIZATION_HOUR
 from gateway.ratelimit import WINDOW_MS, RateLimitedError
-from gateway.state import StateUnavailableError
+from gateway.state import COUNTERS_ENV as STATE_COUNTERS_ENV
+from gateway.state import StateUnavailableError, check_store_address
 
 T = TypeVar("T")
 LOG = logging.getLogger("gateway.valkey")
 
-COUNTERS_ENV = "GATEWAY_COUNTERS"
+COUNTERS_ENV = STATE_COUNTERS_ENV
 URL_ENV = "GATEWAY_VALKEY_URL"
 MAX_SKEW_ENV = "GATEWAY_STATE_MAX_SKEW_MS"
 DEFAULT_TIMEOUT_MS = 200.0
@@ -209,6 +211,7 @@ class ValkeyCounters:
         check_every_ms: float = CHECK_EVERY_MS,
         audit: AuditLog | None = None,
         random_bytes: Callable[[int], bytes] = secrets.token_bytes,
+        reference: Callable[[], Awaitable[float]] | None = None,
     ) -> None:
         self.client = client
         self.clock = clock
@@ -225,7 +228,7 @@ class ValkeyCounters:
         self.audit_take = client.register_script(AUDIT_TAKE)
         self.audit_collect = client.register_script(AUDIT_COLLECT)
         self.breaker = client.register_script(BREAKER)
-        self._watch = ValkeyWatch(self, max_skew_ms, check_every_ms, audit)
+        self._watch = ValkeyWatch(self, max_skew_ms, check_every_ms, audit, reference)
 
     def __repr__(self) -> str:
         return f"ValkeyCounters(prefix={self.prefix!r}, <client and keys redacted>)"
@@ -555,8 +558,11 @@ class ValkeyWatch:
         max_skew_ms: float,
         check_every_ms: float,
         audit: AuditLog | None,
+        reference: Callable[[], Awaitable[float]] | None = None,
     ) -> None:
         self._counters = counters
+        # The clock the skew is measured against: Postgres's when there is one (section 3.8).
+        self._reference = reference
         self._max_skew_ms = max_skew_ms
         self._check_every_ms = check_every_ms
         # Where the restart row goes; set after construction when the audit log needs these
@@ -566,13 +572,22 @@ class ValkeyWatch:
         self.skew_ms: float | None = None
 
     async def skew(self) -> float:
-        """How far Valkey's clock is from the instance's epoch, from the midpoint of one round
-        trip. Valkey's time is read for this and nothing else."""
+        """How far the reference clock (Postgres's ``gateway_now_ms()``, else Valkey's ``TIME``)
+        is from the instance's epoch, from the midpoint of one round trip. That time is read for
+        this and nothing else."""
         c = self._counters
         before = c.epoch.epoch_ms()
-        seconds, micros = cast(tuple[int, int], await self._raw(lambda: c.client.time()))
+        if self._reference is not None:
+            reference_ms = await self._reference()
+        else:
+            seconds, micros = cast(tuple[int, int], await self._raw(lambda: c.client.time()))
+            reference_ms = seconds * 1000 + micros / 1000
         after = c.epoch.epoch_ms()
-        return seconds * 1000 + micros / 1000 - (before + after) / 2
+        return reference_ms - (before + after) / 2
+
+    @property
+    def reference_name(self) -> str:
+        return "Postgres's" if self._reference is not None else "Valkey's"
 
     async def _raw(self, work: Callable[[], Awaitable[T]]) -> T:
         # Not refused while unhealthy: this is what decides whether the instance is.
@@ -591,10 +606,11 @@ class ValkeyWatch:
         healthy = abs(self.skew_ms) <= self._max_skew_ms
         if healthy != c.healthy:
             LOG.warning(
-                "the shared counters are %s: this instance's clock is %.0f ms from Valkey's "
+                "the shared counters are %s: this instance's clock is %.0f ms from %s "
                 "(the bound is %.0f ms)",
                 "usable again" if healthy else "refused",
                 self.skew_ms,
+                self.reference_name,
                 self._max_skew_ms,
             )
         c.healthy = healthy
@@ -641,8 +657,8 @@ class ValkeyWatch:
         await self.check(on_restart)
         if not c.healthy:
             raise StateUnavailableError(
-                f"this instance's clock is {self.skew_ms:.0f} ms from Valkey's; the bound is "
-                f"{self._max_skew_ms:.0f} ms ({MAX_SKEW_ENV})"
+                f"this instance's clock is {self.skew_ms:.0f} ms from {self.reference_name}; "
+                f"the bound is {self._max_skew_ms:.0f} ms ({MAX_SKEW_ENV})"
             )
 
     async def run(self, on_restart: OnRestart) -> None:
@@ -655,11 +671,18 @@ class ValkeyWatch:
 
 
 def shared_counters_from(
-    environ: Mapping[str, str], clock: Clock, epoch: EpochSource, secret: bytes
+    environ: Mapping[str, str],
+    clock: Clock,
+    epoch: EpochSource,
+    secret: bytes,
+    *,
+    reference: Callable[[], Awaitable[float]] | None = None,
 ) -> ValkeyCounters | None:
     """``GATEWAY_COUNTERS``: ``memory`` (the default: each counter this process's own) or
     ``valkey``, which needs ``GATEWAY_VALKEY_URL`` and takes ``GATEWAY_STATE_MAX_SKEW_MS``.
-    Nothing connects until the server starts. Errors name the variable, never its value."""
+    A Valkey not on this machine needs a verified TLS address (``check_store_address``).
+    ``reference`` is the clock the skew is measured against (Postgres's, docs/37). Nothing
+    connects until the server starts. Errors name the variable, never its value."""
     kind = environ.get(COUNTERS_ENV, "memory")
     if kind == "memory":
         return None
@@ -674,8 +697,11 @@ def shared_counters_from(
         raise ValueError(f"{MAX_SKEW_ENV} must be a number of milliseconds") from None
     if not max_skew_ms > 0:
         raise ValueError(f"{MAX_SKEW_ENV} must be positive")
+    check_store_address("valkey", url, URL_ENV, environ)
     client = Redis.from_url(url, decode_responses=True)
-    return ValkeyCounters(client, clock, epoch, secret, max_skew_ms=max_skew_ms)
+    return ValkeyCounters(
+        client, clock, epoch, secret, max_skew_ms=max_skew_ms, reference=reference
+    )
 
 
 def account_windows(

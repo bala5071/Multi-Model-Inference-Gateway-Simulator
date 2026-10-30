@@ -30,3 +30,12 @@ llamacpp:
       url: http://127.0.0.1:8082
     premium:
       url: http://127.0.0.1:8083
+
+# Shared budgets only (GATEWAY_STATE=shared, docs/37): each tier's context limit, and the
+# completion tokens a request reserves when neither it nor its plan names a max_tokens. A
+# request reserves its prompt (as UTF-8 bytes) plus that, capped at the context limit, until it
+# ends. Operator-supplied: no number ships, and shared mode refuses to start without them.
+# budgets:
+#   economy:
+#     context_tokens: <the model's context limit>
+#     reserve_completion_tokens: <your default>

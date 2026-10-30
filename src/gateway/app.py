@@ -20,7 +20,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, Protocol, TypeVar
 
 from fastapi import Depends, FastAPI, Header, Query, Request, Response
 from fastapi import Path as Path_
@@ -76,6 +76,8 @@ from gateway.auth import (
     user_create_attempts,
 )
 from gateway.backend_config import (
+    BackendConfig,
+    TierBudget,
     build_chat_adapters,
     build_llamacpp_registry,
     load_backend_config,
@@ -110,7 +112,17 @@ from gateway.egress import (
     system_resolver,
 )
 from gateway.events import EventBus
-from gateway.ledger import BudgetExceededError, CostLedger, ModelUsage, run_retention
+from gateway.ledger import (
+    BudgetExceededError,
+    Budgets,
+    CostLedger,
+    Expired,
+    ModelUsage,
+    Reservation,
+    SharedBudgets,
+    run_retention,
+    run_sweep,
+)
 from gateway.loadcontrol import PRESETS, LoadController, UnknownPresetError
 from gateway.localonly import (
     STATE_CHANGING,
@@ -168,6 +180,13 @@ from gateway.passwords import (
     parameters_from,
 )
 from gateway.permissions import PERMISSIONS, Actor, Resource
+from gateway.postgres import (
+    PostgresBudgets,
+    PostgresDatabase,
+    apply_schema,
+    lock_timeout_from,
+    postgres_state,
+)
 from gateway.profiles import PROFILES, Tier, load_calibrated_profiles
 from gateway.providers import (
     ProviderConfig,
@@ -183,9 +202,13 @@ from gateway.registry import ModelRegistry, UnknownModelError
 from gateway.routing import ModelNotAllowedError, Quality, Router, load_plans, pick_by_quality
 from gateway.schema import GenerateRequest, RequestResult
 from gateway.state import (
+    POSTGRES_URL_ENV,
+    STATE_ENV,
+    SharedStateRefusedError,
     StateBackend,
     StateUnavailableError,
     check_state_setting,
+    check_store_address,
     run_now,
     sqlite_state,
 )
@@ -793,6 +816,57 @@ class PasswordChangeRequiredError(Exception):
 _NO_STORE = {"Cache-Control": "no-store"}
 # The durable store's readiness check: whether it answers now (docs/36).
 Readiness = Callable[[], Awaitable[bool]]
+# A shared reservation outlives its request's own time by this much before the sweep releases
+# it (docs/37).
+RESERVATION_MARGIN_MS = 60_000.0
+
+
+class Durable(Protocol):
+    """A durable store that waits on a network (Postgres): opened by the server's lifespan
+    before anything is served, closed after everything else."""
+
+    async def open(self) -> None: ...
+
+    async def aclose(self) -> None: ...
+
+
+class _Hold:
+    """One admitted request's reservation (docs/37), ended exactly once: settled when the
+    request bills, released by whatever ends it otherwise."""
+
+    def __init__(self, budgets: Budgets, reservation: Reservation) -> None:
+        self._budgets = budgets
+        self._reservation = reservation
+        self._ended = False
+        # Set when a stream takes the request over: the stream ends the hold, not the handler.
+        self.streaming = False
+
+    async def settle(
+        self,
+        result: RequestResult,
+        *,
+        model: str,
+        price_multiplier: float,
+        source: ChatSource | None = None,
+    ) -> float:
+        self._ended = True
+        return await self._budgets.settle(
+            self._reservation,
+            result,
+            model=model,
+            price_multiplier=price_multiplier,
+            source=source,
+        )
+
+    async def release(self) -> None:
+        if self._ended:
+            return
+        self._ended = True
+        if self._reservation.id is None:
+            return  # nothing is held (one process's ledger)
+        # Shielded: a stream the client left is cancelled, and every await in it is cancelled
+        # again; the release still runs to its end (else the sweep would release it later).
+        await asyncio.shield(self._budgets.release(self._reservation))
 
 
 def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
@@ -1590,6 +1664,10 @@ def create_app(
     counters: SharedCounters | None = None,
     startup_applications: Sequence[Application] | None = None,
     readiness: Readiness | None = None,
+    budgets: SharedBudgets | None = None,
+    reservation_bounds: Mapping[str, TierBudget] | None = None,
+    durable: Durable | None = None,
+    on_start: Sequence[Callable[[], Awaitable[None]]] = (),
 ) -> FastAPI:
     """Build the API around an already wired registry.
 
@@ -1652,6 +1730,16 @@ def create_app(
 
     ``/readyz`` answers ready while the shared counters are healthy and ``readiness`` (the
     durable store's own check, if any) says yes; not ready otherwise, nothing more.
+
+    ``budgets`` are budgets shared between instances (``PostgresBudgets``, docs/37); without
+    them the ledger is this process's own (``CostLedger``), as before. With them, each admitted
+    request reserves its bound, from ``reservation_bounds`` (each model's settings) and its
+    prompt, for the request timeout of ``overload`` plus ``RESERVATION_MARGIN_MS``; every
+    instance releases expired reservations every 30 s.
+
+    ``durable`` is a store that must be opened on the server's event loop (Postgres): the
+    lifespan opens it first, then checks the stored applications' plans and runs ``on_start``
+    (the bootstrap admin), before anything else; it is closed last.
     """
     if metrics is None:
         metrics = MetricsStore(clock)
@@ -1662,11 +1750,11 @@ def create_app(
     if applications is not None:
         # Before any event loop runs the app: a store call that cannot suspend (docs/34), or
         # what the caller read from one that can.
-        known_applications = (
-            list(startup_applications)
-            if startup_applications is not None
-            else run_now(applications.store.list_applications())
-        )
+        if startup_applications is not None:
+            known_applications = list(startup_applications)
+        elif durable is None:
+            known_applications = run_now(applications.store.list_applications())
+        # With a durable store to open, the lifespan reads and checks them.
         for application in known_applications:
             Router.check_plan(application.plan, registry)
     rate_limiter: RateLimiter | None = None
@@ -1676,6 +1764,28 @@ def create_app(
         )
     ledger = CostLedger(clock, store=usage_store, epoch=epoch, retention_ms=usage_retention_ms)
     timeout_ms = overload.request_timeout_ms if overload is not None else None
+    # What the request path reserves against: the shared budgets, or this process's ledger.
+    book: Budgets = budgets if budgets is not None else ledger
+    if budgets is not None:
+        if timeout_ms is None:
+            raise ValueError(
+                "shared budgets need a request timeout: a reservation expires that long after "
+                "it is made, plus a margin (docs/37)"
+            )
+        missing = [n for n in registry.names if n not in (reservation_bounds or {})]
+        if missing:
+            raise ValueError(
+                "shared budgets need context_tokens and reserve_completion_tokens for every "
+                f"tier (budgets in the backends file, docs/37); missing: {', '.join(missing)}"
+            )
+    hold_ms = (timeout_ms or 0.0) + RESERVATION_MARGIN_MS
+
+    def reservation_tokens(model: str, prompt: str, max_tokens: int | None) -> int:
+        """A request's bound (Q2, B4); nothing is held without shared budgets."""
+        if budgets is None or reservation_bounds is None:
+            return 0
+        return reservation_bounds[model].bound(len(prompt.encode("utf-8")), max_tokens)
+
     slo_policy = overload.slo if overload is not None else None
     bus = events if events is not None else EventBus(clock)
     # Monitoring only watches: it is told what happened and decides nothing.
@@ -1685,7 +1795,7 @@ def create_app(
         metrics,
         series=series if series is not None else TimeSeriesStore(clock),
         events=bus,
-        ledger=ledger if applications is not None else None,
+        ledger=book if applications is not None else None,
         applications=applications.store if applications is not None else None,
         slo_models=tuple(slo_policy.p99_ms) if slo_policy is not None else (),
     )
@@ -1724,6 +1834,14 @@ def create_app(
         # Shared counters are checked before anything is served: a store that could lose a
         # count, or a clock too far from it, refuses the start (docs/35).
         watching = None
+        if durable is not None:
+            # First: every other start-up step reads it.
+            await durable.open()
+            if applications is not None:
+                for application in await applications.store.list_applications():
+                    Router.check_plan(application.plan, registry)
+            for start in on_start:
+                await start()
         if counters is not None:
 
             async def restarted(_: str) -> None:
@@ -1734,10 +1852,19 @@ def create_app(
         if load is not None and autostart_load is not None:
             await load.start(autostart_load, seed)
         # Retention runs beside the server, never on a request (docs/21).
+        retainer = budgets if budgets is not None else ledger
         retention = (
-            asyncio.create_task(run_retention(ledger, clock))
-            if ledger.retention_ms is not None
+            asyncio.create_task(run_retention(retainer, clock))
+            if retainer.retention_ms is not None
             else None
+        )
+
+        def expired(each: Expired) -> None:
+            monitoring.reservation_expired(each.application_id, each.tokens)
+
+        # Reservations whose instance died are released by every instance's sweep (docs/37).
+        sweeping = (
+            asyncio.create_task(run_sweep(budgets, clock, expired)) if budgets is not None else None
         )
         account_retention = (
             asyncio.create_task(run_account_retention(accounts.service, clock))
@@ -1754,6 +1881,8 @@ def create_app(
             remove_redaction()
         if retention is not None:
             retention.cancel()
+        if sweeping is not None:
+            sweeping.cancel()
         if account_retention is not None:
             account_retention.cancel()
         if load is not None:
@@ -1765,6 +1894,10 @@ def create_app(
             watching.cancel()
         if counters is not None:
             await counters.aclose()
+        if budgets is not None:
+            await budgets.aclose()
+        if durable is not None:
+            await durable.aclose()
 
     app = FastAPI(title="Cost-aware multi-model inference gateway", lifespan=lifespan)
     if local_only is not None:
@@ -1949,16 +2082,15 @@ def create_app(
         application_id: str | None,
         price_multiplier: float,
         live_tokens: int,
+        hold: _Hold | None,
     ) -> GenerateResponse:
         """Record a finished request everywhere it counts and build its response body."""
         metrics.record(model, result)
         if monitor is not None:
             monitor.record(model, result.latency_ms)
         cost_usd = result.cost_usd
-        if application_id is not None:
-            cost_usd = await ledger.record(
-                application_id, result, model=model, price_multiplier=price_multiplier
-            )
+        if hold is not None:
+            cost_usd = await hold.settle(result, model=model, price_multiplier=price_multiplier)
         monitoring.completed(
             model, application_id, result, billed_cost_usd=cost_usd, live_tokens=live_tokens
         )
@@ -1994,7 +2126,19 @@ def create_app(
         body: GenerateBody, response: Response, caller: Application | None
     ) -> GenerateResponse | JSONResponse | StreamingResponse:
         """Serve one generate request; ``caller`` is None exactly when there are no
-        applications."""
+        applications. However it ends, a reservation it made and did not settle is released
+        here, or by its stream once one has taken it over (docs/37)."""
+        held: list[_Hold] = []
+        try:
+            return await serve_held(body, response, caller, held)
+        finally:
+            if held and not held[0].streaming:
+                await held[0].release()
+
+    async def serve_held(
+        body: GenerateBody, response: Response, caller: Application | None, held: list[_Hold]
+    ) -> GenerateResponse | JSONResponse | StreamingResponse:
+        hold: _Hold | None = None
         if body.model is None and body.quality is None:
             return choice_error("Give either a model or a quality.", "model")
         if body.model is not None and body.quality is not None:
@@ -2025,10 +2169,17 @@ def create_app(
                 raise
             route = router.route(caller, model=body.model, quality=body.quality)
             try:
-                await ledger.check_budget(caller.id, route.plan.monthly_token_budget)
+                reservation = await book.reserve(
+                    caller.id,
+                    route.plan.monthly_token_budget,
+                    reservation_tokens(route.model, body.prompt, max_tokens),
+                    hold_ms=hold_ms,
+                )
             except BudgetExceededError as exc:
                 monitoring.budget_exhausted(route.model, exc)
                 raise
+            hold = _Hold(book, reservation)
+            held.append(hold)
             model = route.model
             price_multiplier = route.plan.price_multiplier
             allowed_models = route.plan.models
@@ -2085,6 +2236,7 @@ def create_app(
                 application_id=application_id,
                 price_multiplier=price_multiplier,
                 live_tokens=live_tokens,
+                hold=hold,
             )
             response.headers.update(headers)
             response.headers["X-Cost-USD"] = f"{payload.cost.usd:.10f}"
@@ -2125,6 +2277,7 @@ def create_app(
                         application_id=application_id,
                         price_multiplier=price_multiplier,
                         live_tokens=live_tokens,
+                        hold=hold,
                     )
                     yield _sse("done", payload.model_dump())
                 elif isinstance(failed, RequestTimeoutError):
@@ -2137,10 +2290,14 @@ def create_app(
                     )
             finally:
                 # The client went away, or the stream ended early: stop the work so it
-                # gives its batch slot and KV tokens back.
+                # gives its batch slot and KV tokens back, and its reservation.
                 if not task.done():
                     task.cancel()
+                if hold is not None:
+                    await hold.release()
 
+        if hold is not None:
+            hold.streaming = True
         return StreamingResponse(
             events(first),
             media_type="text/event-stream",
@@ -2149,7 +2306,7 @@ def create_app(
 
     async def usage_body(caller: Application) -> ApplicationUsageResponse:
         plan = caller.plan
-        usage = await ledger.usage(caller.id)
+        usage = await book.usage(caller.id)
         return ApplicationUsageResponse(
             application_id=caller.id,
             name=caller.name,
@@ -2228,6 +2385,7 @@ def create_app(
 
         async def account_chat(
             outcome: ChatOutcome,
+            hold: _Hold,
             caller: Application,
             multiplier: float,
             model: str,
@@ -2242,8 +2400,8 @@ def create_app(
             metrics.record(model, timing)
             if monitor is not None:
                 monitor.record(model, timing.latency_ms)
-            billed = await ledger.record(
-                caller.id, timing, model=model, price_multiplier=multiplier, source=source
+            billed = await hold.settle(
+                timing, model=model, price_multiplier=multiplier, source=source
             )
             monitoring.completed(
                 model,
@@ -2295,13 +2453,9 @@ def create_app(
             }
             return {"index": index, **view} if index is not None else view
 
-        @app.post("/v1/chat/completions", response_model=None)
-        @public_route("an application API key, checked by the route")
-        async def chat_completions(
-            request: Request, authorization: str | None = Header(default=None)
+        async def answer_chat(
+            request: Request, authorization: str | None, held: list[_Hold]
         ) -> Response:
-            """The OpenAI-compatible chat endpoint (docs/31). Every refusal is in the OpenAI
-            error format."""
             scheme, _, credentials = (authorization or "").strip().partition(" ")
             if scheme.lower() != "bearer" or not credentials.strip():
                 return _openai_error(
@@ -2374,7 +2528,17 @@ def create_app(
                     403, "model_not_in_plan", str(exc), kind="permission_error", param="model"
                 )
             try:
-                await ledger.check_budget(caller.id, route.plan.monthly_token_budget)
+                reservation = await book.reserve(
+                    caller.id,
+                    route.plan.monthly_token_budget,
+                    reservation_tokens(
+                        route.model,
+                        # Q2, B4: the messages and tools as sent, in bytes.
+                        json.dumps([raw.get("messages"), raw.get("tools")]),
+                        body.max_tokens or caller.max_tokens,
+                    ),
+                    hold_ms=hold_ms,
+                )
             except BudgetExceededError as exc:
                 monitoring.budget_exhausted(route.model, exc)
                 seconds = max(1, math.ceil(exc.retry_after_ms / 1000))
@@ -2385,6 +2549,8 @@ def create_app(
                     kind="rate_limit_error",
                     headers={"Retry-After": str(seconds)},
                 )
+            hold = _Hold(book, reservation)
+            held.append(hold)
             request_id = f"req-{next(request_numbers)}"
             try:
                 chat_req = chat_request(body, request_id, route.model)
@@ -2470,7 +2636,7 @@ def create_app(
                 except CHAT_FAILURES as exc:
                     return failure(exc)
                 outcome = routed.outcome
-                await account_chat(outcome, caller, multiplier, route.model, routed.source)
+                await account_chat(outcome, hold, caller, multiplier, route.model, routed.source)
                 result = outcome.result
                 message: dict[str, object] = {
                     "role": "assistant",
@@ -2513,7 +2679,9 @@ def create_app(
                 if isinstance(failed, CHAT_FAILURES):
                     return failure(failed)
                 routed = task.result()  # an answer with no delta at all
-                await account_chat(routed.outcome, caller, multiplier, route.model, routed.source)
+                await account_chat(
+                    routed.outcome, hold, caller, multiplier, route.model, routed.source
+                )
             include_usage = body.stream_options is not None and body.stream_options.include_usage
 
             async def events(item: ChatDelta | None) -> AsyncIterator[str]:
@@ -2552,7 +2720,9 @@ def create_app(
                     routed = task.result()
                     outcome = routed.outcome
                     if first is not None:
-                        await account_chat(outcome, caller, multiplier, route.model, routed.source)
+                        await account_chat(
+                            outcome, hold, caller, multiplier, route.model, routed.source
+                        )
                     yield chunk(
                         {"index": 0, "delta": {}, "finish_reason": outcome.result.finish_reason}
                     )
@@ -2560,9 +2730,11 @@ def create_app(
                         yield chunk({}, usage=usage_view(outcome))
                     yield "data: [DONE]\n\n"
                 finally:
-                    # The client went away or the stream ended early: stop the upstream work.
+                    # The client went away or the stream ended early: stop the upstream work,
+                    # and give back what it held if it did not bill.
                     if not task.done():
                         task.cancel()
+                    await hold.release()
 
             headers = {"Cache-Control": "no-cache"}
             if task.done() and not task.cancelled() and task.exception() is None:
@@ -2570,7 +2742,23 @@ def create_app(
             else:
                 # Output has started, so the router knows who is answering (docs/33).
                 headers.update({"X-Model-Used": route.model, **source_headers(trace)})
+            hold.streaming = True
             return StreamingResponse(events(first), media_type="text/event-stream", headers=headers)
+
+        @app.post("/v1/chat/completions", response_model=None)
+        @public_route("an application API key, checked by the route")
+        async def chat_completions(
+            request: Request, authorization: str | None = Header(default=None)
+        ) -> Response:
+            """The OpenAI-compatible chat endpoint (docs/31). Every refusal is in the OpenAI
+            error format. A reservation it made and did not settle is released however it
+            ends, here or by its stream (docs/37)."""
+            held: list[_Hold] = []
+            try:
+                return await answer_chat(request, authorization, held)
+            finally:
+                if held and not held[0].streaming:
+                    await held[0].release()
 
     # Throwaway keys for the Playground: in memory, never printed, logged or returned.
     playground: dict[str, str] = {}
@@ -2668,7 +2856,8 @@ def create_app(
     @app.get("/readyz")
     @public_route("readiness: ready or not, nothing more (docs/36)")
     async def readyz() -> JSONResponse:
-        ready = counters is None or counters.healthy
+        # A budget write kept for later (the database did not take it) admits nothing new.
+        ready = (counters is None or counters.healthy) and (budgets is None or budgets.healthy)
         if ready and readiness is not None:
             try:
                 ready = await readiness()
@@ -3020,13 +3209,16 @@ def build_accounts(
     environ: Mapping[str, str],
     *,
     shared: ValkeyCounters | None = None,
+    bootstrap_now: bool = True,
 ) -> AccountAccess:
     """Console accounts for the default server (docs/27): argon2id at the configured
     parameters on a 2-thread runner, the audit log and its retention, the bootstrap admin
     from the environment (or ``BootstrapError`` if there is no admin and no way to make one),
     and the cookie's ``Secure`` flag from ``GATEWAY_COOKIE_SECURE``. With ``shared`` counters
     the login limiter, the step-up and user-creation caps and the audit cap are shared, and
-    the watch writes its restart row to this audit log (docs/35)."""
+    the watch writes its restart row to this audit log (docs/35). Windows are decided on the
+    state's clock (Postgres's in shared mode, section 3.8). Without ``bootstrap_now`` the
+    caller runs ``bootstrap_admin`` once the store is open (shared mode, in the lifespan)."""
     passwords = Passwords(
         PasswordHasher(parameters_from(environ, PRODUCTION)), ThreadHashRunner(max_workers=2)
     )
@@ -3060,9 +3252,16 @@ def build_accounts(
         step_up_session_failures=step_up_session_failures,
         user_create_attempts=creation_attempts,
         windows=windows,
+        store_clock=state.clock,
     )
-    # Before any event loop runs the app: store calls that cannot suspend (docs/34).
-    if run_now(service.bootstrap_admin(environ)) is BootstrapOutcome.EXISTS_WITH_VARIABLES:
+    if bootstrap_now:
+        # Before any event loop runs the app: store calls that cannot suspend (docs/34).
+        warn_about_bootstrap(run_now(service.bootstrap_admin(environ)), environ)
+    return AccountAccess(service, cookie_secure=environ.get(COOKIE_SECURE_ENV) == "1")
+
+
+def warn_about_bootstrap(outcome: BootstrapOutcome, environ: Mapping[str, str]) -> None:
+    if outcome is BootstrapOutcome.EXISTS_WITH_VARIABLES:
         still_set = [name for name in (ADMIN_USERNAME_ENV, ADMIN_PASSWORD_ENV) if name in environ]
         logging.getLogger("gateway").warning(
             "A platform_admin exists, so %s %s ignored; remove %s from the environment.",
@@ -3070,7 +3269,6 @@ def build_accounts(
             "is" if len(still_set) == 1 else "are",
             "it" if len(still_set) == 1 else "them",
         )
-    return AccountAccess(service, cookie_secure=environ.get(COOKIE_SECURE_ENV) == "1")
 
 
 def create_default_app() -> FastAPI:
@@ -3106,11 +3304,13 @@ def create_default_app() -> FastAPI:
     ``GATEWAY_SIM_PRESET`` (default ``steady``) set its speed and load, ``GATEWAY_SEED``
     its seed. It cannot be combined with real models.
 
-    ``GATEWAY_STATE`` is ``sqlite`` (the default, all of the above); ``shared`` refuses to start
-    until budgets are shared between instances (docs/36-postgres.md).
+    ``GATEWAY_STATE`` is ``sqlite`` (the default, all of the above), or ``shared``: several
+    instances on one Postgres and one Valkey (``create_shared_app``, docs/37).
     """
-    # Before anything else, simulated live mode included: shared state is refused for now.
+    # Before anything else, simulated live mode included.
     check_state_setting(os.environ)
+    if os.environ.get(STATE_ENV) == "shared":
+        return create_shared_app(os.environ)
     seed = int(os.environ.get("GATEWAY_SEED", "0"))
     if os.environ.get("GATEWAY_SIMULATED_LIVE") == "1":
         if os.environ.get("GATEWAY_BACKEND", "simulated") != "simulated":
@@ -3153,7 +3353,9 @@ def create_default_app() -> FastAPI:
         )
     runner.migrate()
     state = sqlite_state(database, epoch)
-    access = ApplicationAccess(ApiKeyService(state.applications, pepper, epoch), templates)
+    access = ApplicationAccess(
+        ApiKeyService(state.applications, pepper, epoch, store_clock=state.clock), templates
+    )
     try:
         # Counters shared with other instances, or this process's own (docs/35).
         shared = shared_counters_from(os.environ, clock, epoch, pepper)
@@ -3163,33 +3365,10 @@ def create_default_app() -> FastAPI:
         lock.release()
         raise
     retention_ms = usage_retention_ms(os.environ)
-    backends_path = os.environ.get("GATEWAY_BACKENDS")
-    backends = load_backend_config(
-        Path(backends_path) if backends_path else None,
-        kind_override=os.environ.get("GATEWAY_BACKEND"),
-    )
-    chat_adapters = None
-    # The operator's local destinations: its list, and the loopback servers in its backends
-    # file (docs/33). Never consulted for an organization's provider.
-    local = LocalDestinations.parse(os.environ.get(LOCAL_ALLOW_ENV, "")) | (
-        LocalDestinations.loopback_of(s.url for s in backends.servers.values())
-    )
+    backends = _backends(os.environ)
+    registry, chat_adapters, local = _models(backends, clock, seed, os.environ)
     # One TLS context for every organization client (one is made per call, docs/33).
     tls = provider_tls_context()
-    if backends.kind == "llamacpp":
-        registry = build_llamacpp_registry(backends, clock)
-        chat_adapters = build_chat_adapters(
-            backends, client=operator_client(system_resolver, local)
-        )
-    else:
-        profiles_path = os.environ.get("GATEWAY_PROFILES") or backends.profiles_path
-        registry = build_continuous_registry(
-            clock,
-            seed=seed,
-            max_queue_len=DEFAULT_MAX_QUEUE_LEN,
-            prefill_chunk_tokens=DEFAULT_PREFILL_CHUNK_TOKENS,
-            profiles=load_calibrated_profiles(Path(profiles_path)) if profiles_path else PROFILES,
-        )
     app = create_app(
         registry,
         clock,
@@ -3221,3 +3400,139 @@ def create_default_app() -> FastAPI:
     # Held for the life of the process; released when it exits, however it exits.
     app.state.database_lock = lock
     return app
+
+
+def _backends(environ: Mapping[str, str]) -> BackendConfig:
+    backends_path = environ.get("GATEWAY_BACKENDS")
+    return load_backend_config(
+        Path(backends_path) if backends_path else None,
+        kind_override=environ.get("GATEWAY_BACKEND"),
+    )
+
+
+def _models(
+    backends: BackendConfig, clock: Clock, seed: int, environ: Mapping[str, str]
+) -> tuple[ModelRegistry, dict[str, Backend] | None, LocalDestinations]:
+    """The registry the backends file asks for, the operator's chat adapters, and the
+    operator's local destinations: its list, and the loopback servers in its backends file
+    (docs/33), never consulted for an organization's provider."""
+    local = LocalDestinations.parse(environ.get(LOCAL_ALLOW_ENV, "")) | (
+        LocalDestinations.loopback_of(s.url for s in backends.servers.values())
+    )
+    if backends.kind == "llamacpp":
+        registry = build_llamacpp_registry(backends, clock)
+        return (
+            registry,
+            build_chat_adapters(backends, client=operator_client(system_resolver, local)),
+            local,
+        )
+    profiles_path = environ.get("GATEWAY_PROFILES") or backends.profiles_path
+    registry = build_continuous_registry(
+        clock,
+        seed=seed,
+        max_queue_len=DEFAULT_MAX_QUEUE_LEN,
+        prefill_chunk_tokens=DEFAULT_PREFILL_CHUNK_TOKENS,
+        profiles=load_calibrated_profiles(Path(profiles_path)) if profiles_path else PROFILES,
+    )
+    return registry, None, local
+
+
+class _PostgresLifecycle:
+    """``Durable`` for Postgres: the pools and the schema at start, the pools at stop."""
+
+    def __init__(self, db: PostgresDatabase) -> None:
+        self._db = db
+
+    async def open(self) -> None:
+        await self._db.open()
+        await apply_schema(self._db)
+
+    async def aclose(self) -> None:
+        await self._db.aclose()
+
+
+def create_shared_app(environ: Mapping[str, str]) -> FastAPI:
+    """``GATEWAY_STATE=shared`` (docs/37): one of several instances behind a load balancer,
+    every durable store and the budgets on the Postgres of ``GATEWAY_POSTGRES_URL``, every
+    counter in the Valkey of ``GATEWAY_VALKEY_URL`` (``GATEWAY_COUNTERS=valkey``), Valkey's skew
+    measured against Postgres's ``gateway_now_ms()``. ``check_state_setting`` has made sure both
+    are named. A store off this machine needs a verified TLS address (``check_store_address``);
+    each tier needs its ``budgets`` settings in the backends file.
+
+    Nothing connects here: the lifespan opens Postgres, applies the schema, checks the stored
+    applications and creates the bootstrap admin, then checks Valkey, before serving. No
+    ``ProcessLock``: several processes on one database are the point. Real time, the simulated
+    or real models of the backends file, and overload protection, as ``create_default_app``.
+    """
+    if environ.get("GATEWAY_SIMULATED_LIVE") == "1":
+        raise SharedStateRefusedError(
+            f"{STATE_ENV}=shared cannot be combined with GATEWAY_SIMULATED_LIVE=1: simulated "
+            "live mode keeps everything in memory"
+        )
+    clock = WallClock()
+    epoch = SystemEpoch()
+    seed = int(environ.get("GATEWAY_SEED", "0"))
+    pepper = load_pepper(environ)
+    master, previous_master = load_master_keys(environ)
+    plans_path = environ.get("GATEWAY_PLANS")
+    templates = load_plans(Path(plans_path) if plans_path else None)
+    backends = _backends(environ)
+    missing = [t.value for t in Tier if t not in backends.budgets]
+    if missing:
+        raise SharedStateRefusedError(
+            f"{STATE_ENV}=shared needs budgets.<tier>.context_tokens and "
+            f"reserve_completion_tokens in the backends file for every tier (docs/37); "
+            f"missing: {', '.join(missing)}"
+        )
+    url = environ[POSTGRES_URL_ENV]
+    check_store_address("postgres", url, POSTGRES_URL_ENV, environ)
+    db = PostgresDatabase.unopened(
+        url, clock, env=environ, lock_timeout_ms=lock_timeout_from(environ)
+    )
+    state = postgres_state(db)
+    access = ApplicationAccess(
+        ApiKeyService(state.applications, pepper, epoch, store_clock=state.clock), templates
+    )
+    shared = shared_counters_from(environ, clock, epoch, pepper, reference=db.now_ms)
+    assert shared is not None  # check_state_setting asked for GATEWAY_COUNTERS=valkey
+    accounts = build_accounts(
+        state, clock, epoch, pepper, environ, shared=shared, bootstrap_now=False
+    )
+
+    async def bootstrap() -> None:
+        warn_about_bootstrap(await accounts.service.bootstrap_admin(environ), environ)
+
+    registry, chat_adapters, local = _models(backends, clock, seed, environ)
+    tls = provider_tls_context()
+    return create_app(
+        registry,
+        clock,
+        applications=access,
+        accounts=accounts,
+        usage_store=state.usage,
+        epoch=epoch,
+        overload=DEFAULT_OVERLOAD,
+        dashboard_dir=DASHBOARD_DIR,
+        load_control=environ.get("GATEWAY_LOAD_CONTROL") == "1",
+        seed=seed,
+        local_only=policy_from(environ),
+        chat_adapters=chat_adapters,
+        providers=ProviderService(
+            state.providers,
+            Vault(master, previous_master),
+            accounts.service.audit,
+            clock,
+            epoch,
+            Redactor(),
+            lambda: organization_client(system_resolver, ssl_context=tls),
+            test_counter=shared.connection_tests(),
+        ),
+        modes=state.modes,
+        local_destinations=local,
+        counters=shared,
+        readiness=db.ready,
+        budgets=PostgresBudgets(db, clock, retention_ms=usage_retention_ms(environ)),
+        reservation_bounds={tier.value: b for tier, b in backends.budgets.items()},
+        durable=_PostgresLifecycle(db),
+        on_start=[bootstrap],
+    )
