@@ -776,6 +776,191 @@ Then, in order:
   passes the effective mode on. A mode change still applies from the next request (docs/33),
   and from the next attempt of a request in flight.
 
+### PR 3b: budgets on Postgres, proposed before building (2026-10-29)
+
+Branch `scale-out/step-3b`, from `main` at `816ccbd` (#26 merged). **It needs approval before
+it is built:** it is the first PR in which a server runs on Postgres. That is a new network
+surface in production (the gateway's connection to Postgres, section 9) and a new path for a
+secret (`GATEWAY_POSTGRES_URL` read by a server). Sessions, logins and keys then live in
+Postgres. Questions B1 to B4 at the end need an answer first.
+
+**Storage (Postgres only).** Schema version 2 adds two tables:
+
+- `budget_counters (application_id, period_start_ms, committed_tokens, reserved_tokens)`;
+- `budget_reservations (id, application_id, period_start_ms, tokens, expires_at_ms)`.
+
+SQLite gets no migration, because the SQLite ledger does not change (section 6). The
+schema-equivalence test lists these two tables as the only ones Postgres has and SQLite does
+not. `migrate-to-postgres` seeds nothing: a counter is seeded from the period's usage events
+the first time it is reserved against (3.1).
+
+**One interface, two implementations.** The request path calls `reserve(application, budget,
+tokens)` before it runs and gets back a `Reservation`. When the request ends it calls
+`settle(reservation, result, ...)` or `release(reservation)`.
+
+- `CostLedger` implements these as today's `check_budget` and `record`, and `release` does
+  nothing. No new await suspends on SQLite or in memory, so the default path, the perf gate and
+  the protected outputs do not change.
+- `PostgresBudgets` runs the statements of 3.1:
+  - **reserve:** seed the counter, then the conditional `UPDATE`, then the reservation row,
+    in one transaction on the request pool (never the write lock, 3.6);
+  - **settle:** delete the reservation, subtract it if it was there, add the billed tokens,
+    and append the usage event, in one transaction;
+  - **release:** delete the reservation and subtract it.
+
+  The period and every expiry are computed from `gateway_now_ms()` inside the statement
+  (3.8).
+
+**The bound (Q2).** `tokens = min(prompt_bound + completion_bound, context_tokens)`.
+
+- `completion_bound` is the first of: the request's `max_tokens`; the plan's `max_tokens`
+  (which `/v1/generate` already applies when a request names none); the tier's
+  `reserve_completion_tokens`.
+- `prompt_bound` is the prompt's length in UTF-8 bytes. For chat it is the length of the
+  messages as JSON. A byte-level tokenizer never produces more tokens than bytes, and neither
+  does the `WordTokenizer` stand-in, so this is a bound without a tokenizer on the request
+  path.
+- `context_tokens` and `reserve_completion_tokens` are per-tier settings under a new `budgets:`
+  key in `backends.yaml`. No numbers are shipped for them: the operator supplies them, like the
+  placeholder prices. `shared` refuses to start while any tier lacks either setting, and names
+  the tier.
+
+The bound only decides admission. Settle charges the billed tokens actually used, as today.
+
+**Which requests are settled and which released.** Anything that bills today is settled with
+the same billed tokens it records today. Anything that bills nothing today is released: a queue
+refusal, a timeout, a cancelled or disconnected request, and a provider error before any
+output. Every exit from the handler goes through one `finally` that releases a reservation
+neither settled nor released. A test covers each exit.
+
+**Expiry and the crash case.**
+
+- `expires_at_ms` is `gateway_now_ms()` at reserve plus the request's own total timeout plus
+  60 s. That is 120 s for `/v1/generate` (`DEFAULT_OVERLOAD`) and the chat service's total
+  timeout for chat.
+- Every instance runs a sweep every 30 s, beside the server (never on a request path). It
+  deletes expired reservations, subtracts them, and publishes a `reservation_expired` event.
+  That event is counted in `gateway_events_total`, and it carries the application id, never
+  anything of the request.
+
+When an instance dies holding a reservation, that reservation keeps counting as in flight
+until it expires, at most the timeout plus 60 s. Other requests from that application are
+refused only if the leaked reservation is what fills the budget. The dead request's usage is
+lost (decision 8), and the expiry event records it. A settle that arrives after the sweep
+subtracts nothing a second time (5.3).
+
+What the customer sees during that time: `429 budget_exhausted`, the same body as any budget
+refusal. B3 asks about its `Retry-After`.
+
+**Settle while Postgres is down** follows decision 8. The settle is retried with backoff on
+the injected clock. While any settle is pending, `/readyz` answers not ready and every new
+reserve is refused with 503 `state_unavailable`. If the instance stops with a settle still
+pending, it logs the reservation id and nothing else, and the sweep releases the reservation.
+
+**Shared mode allowed.** `check_state_setting` keeps refusing `shared` unless budgets are on
+Postgres, which in practice means unless `GATEWAY_POSTGRES_URL` is set. The message says
+exactly that. With `shared`, `create_default_app`:
+
+- connects in the lifespan and applies the schema, under its advisory lock;
+- reads the stored applications and creates the bootstrap admin there (`startup_applications`,
+  never `run_now`);
+- uses `postgres_state` and `PostgresBudgets`;
+- takes no `ProcessLock`, since several processes are the point;
+- answers `/readyz` from `PostgresDatabase.ready()`, the counters' health, and the
+  pending-settle rule.
+
+**The Valkey clock check against `gateway_now_ms()` (3.8).** With Postgres configured,
+`ValkeyWatch` measures the instance's `EpochSource` against `SELECT gateway_now_ms()`, taking
+the midpoint of the round trip. Without Postgres it measures against Valkey's `TIME`, as in
+PR 2.
+
+- The bound is `GATEWAY_STATE_MAX_SKEW_MS`, default 1000 ms.
+- At startup, an instance past the bound refuses to start.
+- Every 30 s after that it checks again. Past the bound, every Valkey-window call is refused
+  with 503 `state_unavailable` and `/readyz` answers not ready, until a check passes again.
+  Postgres-held windows are not affected.
+
+The test controls both clocks: Postgres's through the test `gateway_now_ms()`, the instance's
+through a `ClockEpoch` over a `SimClock`.
+
+**Postgres down, per endpoint.** Note 36's table gains the budget rows:
+
+| Postgres down at | Effect |
+|---|---|
+| reserve | 503 `state_unavailable`; no model sees the request |
+| settle | retried, not ready |
+| release | retried like a settle; the sweep covers it if the instance stops |
+| sweep | skipped, tried again in 30 s |
+
+Missing equals forbidden: an answer the store cannot give is a refusal.
+
+**Tests.** The suite-wide limit from PR 3 (`gateway_test_timeout_s`, 60 s) covers everything
+new. Postgres's time is set by the test throughout.
+
+- **The edge:** a budget with room for exactly one request's bound, and 20 requests split
+  across two instances at once. Exactly one is admitted and 19 get `budget_exhausted`;
+  committed equals that one request's billed tokens. A second case starts one token short of
+  the budget and checks that committed never passes `budget - 1 + bound`.
+- **Release:** after a timeout, a queue refusal, a provider error and a cancelled stream,
+  `reserved_tokens` is back to 0 on both instances.
+- **The crash case:** instance A reserves and is dropped without settling. B is refused while
+  the reservation counts. Postgres's time is moved past the expiry, B's sweep releases the
+  reservation and B is admitted. A settle from A afterwards changes committed by its billed
+  tokens only.
+- **No `max_tokens`:** the tier default is reserved, capped at `context_tokens`.
+- **The skew:** the start is refused past the bound; drift while running gives not ready and
+  503 on the Valkey windows; back inside the bound, ready again.
+- **Shared mode:** the refusal without Postgres, and a start with it (Postgres and Valkey,
+  both marked).
+- **Failure:** each table row with the pool closed under the app.
+
+**Mutation checks** (5.3), one per rule, each restored byte for byte:
+
+| # | Mutation |
+|---|---|
+| a | the admission condition checked in Python after a `SELECT` |
+| b | settle without deleting the reservation first |
+| c | release skipped on failure |
+| d | release skipped on cancellation |
+| e | the sweep ignores `expires_at_ms` |
+| f | expiry from the instance's epoch |
+| g | the period from the instance's epoch |
+| h | the bound not capped at `context_tokens` |
+| i | the skew measured against Valkey with Postgres configured |
+| j | the periodic skew check disabled |
+| k | a reserve that cannot be made admits |
+| l | a pending settle does not stop admission |
+| m | `shared` starts without Postgres budgets |
+
+**Measured.** `benchmarks/durable_calls.py` gains reserve, settle and release, each timed on
+this machine three times. The note records how many store calls one chat request makes now,
+counted by a test, beside note 36's figure.
+
+**Unchanged:** the perf gate and the protected outputs (`--include-images`), on the default
+path.
+
+**Questions before building:**
+
+- **B1. TLS off loopback** (decision 2) is not built for Postgres or for Valkey.
+  - Proposed: in `shared`, a non-loopback host is refused unless its URL asks for a verified
+    TLS connection (`sslmode=verify-full` for Postgres, `rediss://` for Valkey, with the
+    certificate checked) or `GATEWAY_STATE_PRIVATE_NETWORK=1`.
+  - The alternative: `shared` refuses every non-loopback host until a separate TLS PR.
+- **B2. Counters in shared mode.**
+  - Proposed: `shared` requires `GATEWAY_COUNTERS=valkey`. With counters held per instance,
+    each instance would grant its own rate limit and login attempts.
+- **B3. `Retry-After` on a refusal caused only by in-flight reservations** (committed below the
+  budget).
+  - Proposed: the time until the earliest of those reservations expires, which is when room is
+    certain to return. The body and code are unchanged.
+  - Today it is always the end of the period, which would tell the client to wait until next
+    month for room that may come back in seconds.
+- **B4. The prompt bound in bytes.** It overestimates the prompt by roughly 4 times for English
+  text. A request with nothing else in flight is admitted exactly as it would be with a true
+  token count (Q1 compares what is in flight, not the request's own bound). Only concurrent
+  requests near the edge are refused sooner.
+  - The alternative: the tier's tokenizer on the request path. Only the stand-in exists today.
+
 ## 9. Threat-model additions
 
 - **Two new network peers** holding everything: Postgres holds key HMACs, password hashes,
