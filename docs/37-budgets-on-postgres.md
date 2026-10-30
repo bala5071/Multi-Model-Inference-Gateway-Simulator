@@ -221,3 +221,34 @@ ledger. The timing is below.
   near the edge sooner, never admit more.
 
 ## Timing
+
+MEASURED on this machine (Intel Core Ultra 7 155H, 22 logical cores, 15.4 GB, Windows 11,
+Python 3.12.10), at commit `d133466`, with
+`GATEWAY_POSTGRES_URL=postgresql://postgres@127.0.0.1:5433/postgres GATEWAY_POSTGRES_TEST_NO_PASSWORD=1 uv run python -m benchmarks.durable_calls`,
+three runs of 2000 calls per row after 20 warm-up calls. SQLite is a file in the temporary
+folder. Postgres is the compose file's container under Docker Desktop, reached on 127.0.0.1,
+so every round trip crosses into Docker's VM. Ranges are over the three runs.
+
+| What | SQLite p50 ms | Postgres p50 ms | Postgres p99 ms |
+|---|---|---|---|
+| Budget, admit and settle (one charged request) | 0.364 to 0.401 | 8.292 to 8.427 | 11.961 to 13.214 |
+| Reserve alone | - | 3.432 to 3.449 | 5.942 to 6.101 |
+| Settle alone (its usage row included) | - | 4.582 to 4.598 | 7.539 to 8.010 |
+| Release, with the reserve it gives back | - | 6.059 to 6.216 | 9.320 to 9.830 |
+| Chat on the gateway's tier, note 36's calls (6, `append`) | 0.401 to 0.449 | 6.621 to 6.998 | 10.069 to 13.284 |
+| Chat on the gateway's tier, shared budgets (7 calls) | - | 13.949 to 14.018 | 18.992 to 20.099 |
+
+On SQLite the admit and settle is the ledger's check (in memory after the period's first
+request) and the usage row: about 0.4 ms. On Postgres a charged request's budget costs about
+8.3 ms at the median. That is about 7.2 ms more than the single `append` it replaces (1.080 to
+1.195 ms in the same runs), and about 7.3 ms more for a chat request on the gateway's tier.
+
+Where it goes: the reserve is 7 round trips and the settle 9 (above), about 0.5 ms each into
+Docker's VM here. Half of each call is the transaction's own overhead (`BEGIN`,
+`SET LOCAL statement_timeout`, `COMMIT`, the pool's reset) rather than the decisions. Not
+changed in this PR: fewer round trips would mean dropping the per-transaction statement
+timeout or the pool's reset, both safety settings. That is a separate decision, with a
+measurement.
+
+Store calls only, not whole requests. Nothing on the default path uses Postgres; on it the
+budget calls are the ledger's, as before.
