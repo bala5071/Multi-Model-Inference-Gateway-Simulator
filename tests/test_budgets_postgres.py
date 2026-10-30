@@ -812,8 +812,8 @@ async def test_the_store_calls_of_a_chat_request_an_organization_provider_serves
 ) -> None:
     """The organization-provider path in shared mode, counted on the Postgres stores: every
     public store call and every budget call, one after another, for one chat request that the
-    organization's primary provider answers: the modes read once (docs/38). Before PR 3c, 21:
-    the modes were read six times."""
+    organization's primary provider answers: the modes read once, and again just before the
+    hosted attempt (docs/38). Before PR 3c, 21: the modes were read six times."""
     clock = WallClock()  # the modes are read inside the timed work: see the test above
     calls: list[str] = []
     async with pg_world() as world:
@@ -896,15 +896,17 @@ async def test_the_store_calls_of_a_chat_request_an_organization_provider_serves
         "lookup_key",
         "reserve",
         "organization_mode",
-        "application_mode",  # once: the router and the egress scope use them
+        "application_mode",  # the request's: the candidates and the egress scope use them
         *candidates,  # the handler's, before admission to one
         *candidates,  # the router's
         "get_key",  # skipped if unreadable
+        "organization_mode",
+        "application_mode",  # again, just before the hosted attempt (docs/33)
         "get_key",  # leased
         "settle",
         "append",  # inside the settle's transaction
     ]
-    assert len(calls) - 1 == 11  # store calls; the append is a statement of the settle
+    assert len(calls) - 1 == 13  # store calls; the append is a statement of the settle
 
 
 @postgres
@@ -919,8 +921,8 @@ async def test_the_request_benchmark_counts_each_round_trip_and_leaves_no_schema
     modes = ["organization_mode", "application_mode"]
     providers = ["list_for", "get_key"]
     gateway = ["lookup_key", "reserve", *modes, "settle"]
-    provider = ["lookup_key", "reserve", *modes, *providers, *providers, "get_key", "get_key"]
-    provider.append("settle")
+    provider = ["lookup_key", "reserve", *modes, *providers, *providers, "get_key", *modes]
+    provider += ["get_key", "settle"]  # the modes again before the hosted attempt
     assert [(c.name, c.store, c.calls()) for c in cases] == [
         ("gateway tier", "sqlite", gateway),
         ("gateway tier", "postgres", gateway),
@@ -931,7 +933,7 @@ async def test_the_request_benchmark_counts_each_round_trip_and_leaves_no_schema
     transactions = {"BEGIN": 2, "SET": 2, "COMMIT": 2}
     assert trips == {
         "gateway tier": {**transactions, "statement": 11, "RESET": 5},
-        "org provider": {**transactions, "statement": 17, "RESET": 11},
+        "org provider": {**transactions, "statement": 19, "RESET": 13},
     }
     admin = await asyncpg.connect(url)
     try:

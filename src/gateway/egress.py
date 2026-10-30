@@ -27,8 +27,9 @@ list (``LocalDestinations``); everything else is *hosted*, every organization pr
 included. The same transport and backend refuse a hosted destination unless the current
 request's scope allows it (``egress_scope``): the router opens a scope for each chat request
 whose answer is asked at every request sent and every connection opened. A chat request's scope
-answers from the mode the request read once (``gateway.modes.effective_mode``), so a mode change
-applies from the next request (docs/38). With no scope the guard refuses every hosted
+answers from the mode the request read once (``gateway.modes.effective_mode``); the router
+reads the mode again before each hosted attempt and refuses it if the mode was made stricter
+(docs/33, docs/38). With no scope the guard refuses every hosted
 destination (fail closed). The operator's own adapters go
 through ``operator_client``: local destinations as configured (any scheme, no address check:
 they are the operator's own), hosted ones under every rule above.

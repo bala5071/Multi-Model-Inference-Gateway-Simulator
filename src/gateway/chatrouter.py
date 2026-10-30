@@ -19,10 +19,12 @@ failure. **Never another tier, never outside the plan**: only providers serving 
 tier are candidates, and the request is passed on unchanged.
 
 **The mode is read once per request** (``mode``, by the chat handler) and passed in: the
-candidates, the check before each hosted candidate and the egress scope's answer at every
-request and connection (``gateway.egress``) all use that one value, and read no store for it. A
-mode change applies from the next request; a request in flight finishes under the mode it read
-(docs/38). ``gateway.modes.effective_mode`` is the only place it is decided.
+candidates and the egress scope's answer at every request and connection (``gateway.egress``)
+use that one value. **One exception: before every hosted attempt** (a primary, a fallback, a
+retry) the router reads both modes again, just before the attempt leaves the machine, and skips
+it if the current mode is stricter than the request's. So a mode made stricter stops the next
+hosted attempt of a request in flight; a looser one applies from the next request only
+(docs/33, docs/38). ``gateway.modes.effective_mode`` is the only place it is decided.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ from gateway.chat import (
 )
 from gateway.chatservice import GATEWAY_PROVIDER, ChatOutcome, ChatService
 from gateway.egress import LocalDestinations, egress_scope
-from gateway.modes import Mode, ModeStore, effective_mode, may_reach_hosted
+from gateway.modes import Mode, ModeStore, effective_mode, looser_than, may_reach_hosted
 from gateway.providers import ProviderConfig, ProviderService
 from gateway.usage import ChatSource
 
@@ -234,11 +236,13 @@ class ChatRouter:
         self,
         request: ChatRequest,
         organization_id: str,
+        application_id: str,
         mode: Mode,
         on_delta: ChatDeltaCallback | None = None,
         trace: RouteTrace | None = None,
     ) -> RoutedOutcome:
-        """Serve ``request`` under ``mode``, the request's mode read once by its handler."""
+        """Serve ``request`` under ``mode``, the request's mode read once by its handler;
+        the modes are read again only before a hosted attempt (``_made_stricter``)."""
         trace = trace if trace is not None else RouteTrace()
         order = await self.candidates(
             organization_id, request.model, mode, wants_tools=bool(request.tools)
@@ -282,6 +286,12 @@ class ChatRouter:
                 tries = 2  # invalid tool JSON: one retry on the same candidate
                 while True:
                     tries -= 1
+                    if candidate.provider_class == HOSTED and await self._made_stricter(
+                        organization_id, application_id, mode
+                    ):
+                        # No hosted attempt: a half-open breaker's probe is free again.
+                        await self._account(organization_id, candidate, None)
+                        break
                     try:
                         outcome = await self._attempt(candidate, request, relay)
                     except asyncio.CancelledError:
@@ -310,8 +320,13 @@ class ChatRouter:
                         return RoutedOutcome(outcome, source)
         if failure is not None:
             raise failure
-        # Every candidate was skipped (open breakers, unreadable keys).
+        # Every candidate was skipped (open breakers, unreadable keys, a stricter mode).
         raise ProviderError(ProviderErrorCode.UPSTREAM_UNAVAILABLE, detail="no_candidate")
+
+    async def _made_stricter(self, organization_id: str, application_id: str, mode: Mode) -> bool:
+        """Read both modes now, just before a hosted attempt leaves the machine: whether the
+        current mode is stricter than the request's (``mode``). A looser one is not used."""
+        return looser_than(mode, await self.mode(organization_id, application_id))
 
     async def _skip(self, organization_id: str, config: ProviderConfig) -> FallbackReason | None:
         assert self._providers is not None

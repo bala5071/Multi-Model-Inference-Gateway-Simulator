@@ -2559,7 +2559,8 @@ def create_app(
             except ChatInputError as exc:
                 return _openai_error(422, "invalid_request", str(exc), param=exc.param)
             # The request's mode, read once: the router and the egress guard use this value for
-            # the rest of the request, and a change applies from the next one (docs/38).
+            # the rest of the request; the router reads it again only before a hosted attempt,
+            # to refuse one a stricter mode no longer allows (docs/33, docs/38).
             mode = await chat_router.mode(caller.organization_id, caller.id)
             try:
                 # Only to answer at once when no candidate may serve it; the router asks again.
@@ -2621,7 +2622,9 @@ def create_app(
             async def tracked(on_delta: Callable[[ChatDelta], None] | None) -> RoutedOutcome:
                 monitoring.request_started(route.model)
                 try:
-                    work = chat_router.run(chat_req, caller.organization_id, mode, on_delta, trace)
+                    work = chat_router.run(
+                        chat_req, caller.organization_id, caller.id, mode, on_delta, trace
+                    )
                     if timeout_ms is not None:
                         return await run_with_timeout(clock, work, timeout_ms)
                     return await work
