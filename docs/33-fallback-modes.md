@@ -105,21 +105,23 @@ in those two columns as the same thing, the gateway's own tier, and take local o
 `provider_class`, which is unchanged. An organization provider's id is always `prv_` and 16 hex
 digits, so neither word can be one.
 
-## Local-only, enforced twice, asked live
+## Local-only, enforced twice
 
-1. **The router** keeps hosted candidates out of a `local_only` request, and asks the mode again
-   before every candidate.
+1. **The router** keeps hosted candidates out of a `local_only` request.
 2. **The egress guard** (note 32) refuses a hosted destination unless the request's scope allows
-   it: the router opens a scope whose answer is asked again, through `effective_mode`, at every
-   request the transport sends, every connection it opens, and again after the name is resolved.
-   With no scope, every hosted destination is refused (fail closed). Test-connection opens an
-   explicit probe scope: an org_admin's request to send fixed probe prompts, audited.
+   it: the router opens a scope whose answer is asked at every request the transport sends,
+   every connection it opens, and again after the name is resolved. With no scope, every hosted
+   destination is refused (fail closed). Test-connection opens an explicit probe scope: an
+   org_admin's request to send fixed probe prompts, audited.
 
-So a mode made stricter while a request is in flight stops its next attempt (tested both at the
-router and at the guard, where the mode changes while the name is being resolved; the second
-test found the guard asked only before resolving, fixed). **An answer already streaming from a
-hosted provider is not cut when the mode becomes stricter: its prompt has already been sent.**
-Every mode change's answer says so (`in_flight`, below). Tested over HTTP: a hosted answer is
+**Changed in PR 3c (note 38): each mode is read once per request.** Until then both layers asked
+the store again, so a mode made stricter while a request was in flight stopped its next attempt
+(tested at the router and at the guard; the guard test found the guard asked only before
+resolving, fixed then). Now the chat handler reads the two modes once and both layers answer
+from that value: a request finishes under the mode it started with, fallback attempts included,
+and a change applies from the next request. A request lives at most its tier's total timeout.
+**An answer already streaming from a hosted provider is not cut when the mode becomes stricter:
+its prompt has already been sent.** Every mode change's answer says so (`in_flight`, below). Tested over HTTP: a hosted answer is
 streaming when an org_admin makes the organization `local_only` through the endpoint; that
 answer ends normally, with `[DONE]`. The next request is served locally without contacting the
 provider. With the router's own checks bypassed (the provider handed over as a candidate
@@ -163,10 +165,10 @@ needs its own password; a change refused before it is made (409) gives the windo
 audited (`mode_changed`, with `old_mode`, `new_mode` and `step_up_consumed`) in the same
 transaction as the change. A missing organization or application and a forbidden one get the same
 answer, byte for byte. The application answer includes its `effective_mode`. Both answers always
-include `in_flight`, the same fixed sentence whether the change is stricter or not: "A mode
-change applies to the next request, and to the next attempt of a request in flight. An answer
-already streaming from a hosted provider is not cut when the mode becomes stricter: its prompt
-has already been sent."
+include `in_flight`, the same fixed sentence whether the change is stricter or not. Since PR 3c:
+"A mode change applies from the next request. A request already in flight finishes under the
+mode it started with, its fallback attempts included: a stricter mode does not stop it, and an
+answer already streaming from a hosted provider is not cut."
 
 ## Measured
 
