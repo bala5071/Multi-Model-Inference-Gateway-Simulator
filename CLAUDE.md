@@ -158,7 +158,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `usage.py` — `UsageEvent`, the `UsageStore` protocol, `InMemoryUsageStore` (bounded ring)
   and `SqliteUsageStore`; store calls are coroutines that never suspend (docs/34) (exists)
 - `state.py` — `StateBackend` (the stores of one database, built by `sqlite_state` for the
-  default server and the CLI) and `run_now` (completes a store call outside an event loop,
+  default server and the CLI), `check_state_setting` (`GATEWAY_STATE`: `sqlite`, or `shared`,
+  refused until budgets are shared) and `run_now` (completes a store call outside an event loop,
   raising if it suspends); every store is a protocol with coroutine methods and
   `write_transaction()`; counters are behind `RateLimiter`, `FailureWindow`,
   `ConnectionTestCounter`, `BreakerStore`, `AuditCap` and `Budgets` (docs/34) (exists)
@@ -169,6 +170,14 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   each atomic rule one Lua script, every key an HMAC; missing is forbidden; `ValkeyWatch`
   (the settings and the skew at startup, the skew and the run id every 30 s);
   `GATEWAY_COUNTERS=valkey` and `GATEWAY_VALKEY_URL`. Budgets are not in it (exists)
+- `postgres.py` — every durable store on Postgres (asyncpg): `PG_BASELINE` (SQLite migrations
+  1 to 13, plus `ord` where SQLite orders by rowid), `PostgresDatabase` with two pools (request,
+  management), `write_transaction()` taking the global advisory `WRITE_LOCK` with a timeout that
+  fails closed (`GATEWAY_STATE_LOCK_TIMEOUT_MS`), `request_transaction()` without it, the SQL
+  clock `gateway_now_ms()` (its `StoreClock`), `ready()` for `/readyz`, and `postgres_state`;
+  `GATEWAY_POSTGRES_URL` is a secret. Not used by a server until PR 3b (docs/36) (exists)
+- `pg_migrate.py` — `migrate_to_postgres` and `migrate_to_sqlite`: every table copied and
+  compared before anything is kept, dry runs that write and roll back (exists)
 - `database.py` + `migrations/` — `open_database` (WAL, busy timeout, autocommit) and the
   versioned `MigrationRunner`; migration 1 is `usage_events`, 2 `applications` and
   `api_keys`, 3 an index for retention, 4 `organizations` and a required
@@ -261,6 +270,8 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   `docs/33` (exists)
 - `benchmarks/counter_calls.py` — one counter call in memory and against Valkey (needs
   `GATEWAY_VALKEY_URL`); the numbers in `docs/35` (exists)
+- `benchmarks/durable_calls.py` — one durable read and write, and the chat path's store calls,
+  on SQLite and Postgres (needs `GATEWAY_POSTGRES_URL`); the numbers in `docs/36` (exists)
 - `benchmarks/management_requests.py` — management reads and key writes on the running
   server, beside `/healthz` and `/v1/auth/me`; the numbers in `docs/30` (exists)
 
@@ -347,7 +358,9 @@ databases in `tmp_path` at run time instead.
 Tests that need a real model server are marked `real_models` and skipped unless
 `GATEWAY_REAL_MODELS=1`; CI never runs them. Tests marked `valkey` need the Valkey of
 `docker-compose.valkey.yml` (the operator starts it) and run when `GATEWAY_TEST_VALKEY_URL` is
-set; CI's `valkey` job runs them.
+set; CI's `valkey` job runs them. Tests marked `postgres` need the Postgres of
+`docker-compose.postgres.yml` and run when `GATEWAY_TEST_POSTGRES_URL` is set, each in a schema
+of its own; CI's `postgres` job runs them.
 
 ## Hard rules
 

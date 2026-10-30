@@ -450,14 +450,15 @@ async def test_unlocking_needs_step_up_because_it_lifts_a_lockout(world: World) 
         admin.client.cookies.clear()
         bob = await accounts.store.find_user("bob")
         assert bob is not None
-        assert accounts.service.is_locked(bob)
+        now = accounts.epoch.epoch_ms()
+        assert accounts.service.is_locked(bob, now)
         alice = await admin.login("alice")
         refused = await admin.post(alice, "/north/users/bob/unlock")
         assert refused.json()["error"]["code"] == STEP_UP_REQUIRED_CODE
-        assert accounts.service.is_locked(await accounts.store.find_user("bob"))  # type: ignore[arg-type]
+        assert accounts.service.is_locked(await accounts.store.find_user("bob"), now)  # type: ignore[arg-type]
         await admin.step_up(alice)
         assert (await admin.post(alice, "/north/users/bob/unlock")).json() == {"unlocked": True}
-        assert not accounts.service.is_locked(await accounts.store.find_user("bob"))  # type: ignore[arg-type]
+        assert not accounts.service.is_locked(await accounts.store.find_user("bob"), now)  # type: ignore[arg-type]
 
 
 # --- users ---------------------------------------------------------------------------------------

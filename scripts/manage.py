@@ -35,6 +35,9 @@ docs/26-organizations.md and docs/30-management-endpoints.md.
     uv run python scripts/manage.py restore --from /backups/gateway-2025-06-01.db
     uv run python scripts/manage.py rotate-vault-key
     uv run python scripts/manage.py vault-drop-unreadable
+    uv run python scripts/manage.py migrate-to-postgres --dry-run
+    uv run python scripts/manage.py migrate-to-postgres
+    uv run python scripts/manage.py migrate-to-sqlite --to /backups/gateway-from-postgres.db
 
 The database is GATEWAY_DATABASE (default: the user's local data folder, outside the working
 tree), the one the server reads; it is created owner-only and migrated if needed. Before a
@@ -44,6 +47,12 @@ A user's password is read from a prompt, twice, never from the command line, and
 printed. Issuing or rotating a key needs GATEWAY_KEY_PEPPER, the same value the server has.
 A new key is printed once, alone, on standard output; it is not stored, logged or shown
 again. Everything else goes to standard error.
+
+``migrate-to-postgres`` copies the database into the Postgres at GATEWAY_POSTGRES_URL, which
+must be new, and ``migrate-to-sqlite`` copies Postgres back into a new file, the rollback
+(docs/36-postgres.md). Both compare every table before keeping anything; ``--dry-run`` makes
+every write and every check and keeps nothing. Each prints row counts and digests, never a
+value.
 """
 
 from __future__ import annotations
@@ -57,7 +66,7 @@ import os
 import secrets
 import sqlite3
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from gateway.apikeys import ApiKeyService, load_pepper
@@ -96,8 +105,16 @@ from gateway.passwords import (
     parameters_from,
 )
 from gateway.permissions import PLATFORM_SCOPE_ID, ScopeType
+from gateway.pg_migrate import (
+    MigrationRefused,
+    MigrationReport,
+    migrate_to_postgres,
+    migrate_to_sqlite,
+)
+from gateway.postgres import URL_ENV as POSTGRES_URL_ENV
+from gateway.postgres import PostgresDatabase, PostgresPasswordMissingError
 from gateway.routing import PlansConfig, load_plans
-from gateway.state import StateBackend, sqlite_state
+from gateway.state import StateBackend, StateUnavailableError, sqlite_state
 from gateway.vault import (
     VAULT_KEY_ENV,
     VAULT_KEY_PREVIOUS_ENV,
@@ -200,7 +217,7 @@ def _open(environ: dict[str, str]) -> tuple[sqlite3.Connection, StateBackend]:
     except BaseException:
         connection.close()
         raise
-    return connection, sqlite_state(connection)
+    return connection, sqlite_state(connection, SystemEpoch())
 
 
 def _describe(key: ApiKeyRecord) -> str:
@@ -421,9 +438,11 @@ async def _store_command(
             )
     elif args.command in ("disable-organization", "enable-organization"):
         disabled = args.command == "disable-organization"
-        if await store.get_organization(args.organization) is None:
-            raise ValueError(f"no organization {args.organization!r}")
-        await store.set_organization_disabled(args.organization, disabled)
+        # One transaction, ordered against an application being created in it (docs/36).
+        async with store.write_transaction():
+            if await store.get_organization(args.organization) is None:
+                raise ValueError(f"no organization {args.organization!r}")
+            await store.set_organization_disabled(args.organization, disabled)
         _note(f"organization {args.organization!r} {'disabled' if disabled else 'enabled'}")
     elif args.command in ACCOUNT_COMMANDS:
         await _account_command(args, _accounts(state, env), read_password)
@@ -450,11 +469,13 @@ async def _store_command(
         vault = Vault(*load_master_keys(env))
         providers = state.providers
         dropped = 0
-        for stored in await providers.all_keys():
-            if not vault.readable(stored.sealed):
-                await providers.delete_key(stored.provider_id)
-                dropped += 1
-                _note(f"dropped the unreadable key of provider {stored.provider_id}")
+        # One transaction: a key entered again meanwhile is readable and must not be dropped.
+        async with providers.write_transaction():
+            for stored in await providers.all_keys():
+                if not vault.readable(stored.sealed):
+                    await providers.delete_key(stored.provider_id)
+                    dropped += 1
+                    _note(f"dropped the unreadable key of provider {stored.provider_id}")
         _note(f"{dropped} unreadable key(s) dropped")
     elif args.command == "list-keys":
         for key in await store.list_keys(args.application):
@@ -480,6 +501,78 @@ async def _store_command(
         if isinstance(sys.stdout, io.TextIOWrapper):
             sys.stdout.reconfigure(newline="\n")
         print(issued.key)
+
+
+async def _to_postgres(
+    connection: sqlite3.Connection, url: str, dry_run: bool, env: Mapping[str, str]
+) -> MigrationReport:
+    db = await PostgresDatabase.connect(
+        url, WallClock(), env=env, request_pool_size=1, management_pool_size=1
+    )
+    try:
+        return await migrate_to_postgres(connection, db, dry_run=dry_run)
+    finally:
+        await db.aclose()
+
+
+async def _to_sqlite(
+    url: str, target: Path, dry_run: bool, env: Mapping[str, str]
+) -> MigrationReport:
+    db = await PostgresDatabase.connect(
+        url, WallClock(), env=env, request_pool_size=1, management_pool_size=1
+    )
+    try:
+        return await migrate_to_sqlite(db, target, dry_run=dry_run)
+    finally:
+        await db.aclose()
+
+
+def postgres_migration(args: argparse.Namespace, env: dict[str, str]) -> int:
+    """``migrate-to-postgres`` and ``migrate-to-sqlite`` (docs/36-postgres.md). The address is
+    never printed: it may hold a password."""
+    url = env.get(POSTGRES_URL_ENV)
+    if not url:
+        _note(f"error: set {POSTGRES_URL_ENV} to the Postgres database")
+        return 1
+    try:
+        if args.command == "migrate-to-sqlite":
+            report = asyncio.run(_to_sqlite(url, args.to, args.dry_run, env))
+        else:
+            path = database_path(env)
+            if not path.exists():
+                _note(f"error: no database at {path}")
+                return 1
+            # No gateway process may write to the SQLite database while it is copied.
+            lock = ProcessLock(path)
+            try:
+                connection = open_database(path)
+                try:
+                    report = asyncio.run(_to_postgres(connection, url, args.dry_run, env))
+                finally:
+                    connection.close()
+            finally:
+                lock.release()
+    except (
+        MigrationRefused,
+        DatabaseInUseError,
+        PostgresPasswordMissingError,
+        RuntimeError,
+    ) as exc:
+        _note(f"error: {exc}")
+        return 1
+    except StateUnavailableError:
+        _note(f"error: Postgres could not be reached at {POSTGRES_URL_ENV}; nothing was written")
+        return 1
+    for line in report.lines():
+        _note(line)
+    if not args.dry_run:
+        _note(
+            "copied and compared. The SQLite database is unchanged; it stays the rollback until "
+            "the gateway has written to Postgres, and after that `migrate-to-sqlite` is."
+            if args.command == "migrate-to-postgres"
+            else f"written to {args.to} and compared. Point GATEWAY_DATABASE at it to use it."
+        )
+    return 0
 
 
 def main(
@@ -581,7 +674,22 @@ def main(
         "restore", help="replace the database with a backup; the server must be stopped"
     )
     restore.add_argument("--from", dest="source", type=Path, required=True)
+    to_postgres = commands.add_parser(
+        "migrate-to-postgres",
+        help=f"copy the database into a new Postgres ({POSTGRES_URL_ENV}); the server stopped",
+    )
+    to_sqlite = commands.add_parser(
+        "migrate-to-sqlite", help="copy Postgres back into a new SQLite file (the rollback)"
+    )
+    to_sqlite.add_argument("--to", type=Path, required=True, help="a new file; never overwritten")
+    for command in (to_postgres, to_sqlite):
+        command.add_argument(
+            "--dry-run", action="store_true", help="every write and check, then keep nothing"
+        )
     args = parser.parse_args(argv)
+
+    if args.command in ("migrate-to-postgres", "migrate-to-sqlite"):
+        return postgres_migration(args, env)
 
     if args.command == "restore":
         # Before opening the database: restore takes the server's lock, so it refuses while

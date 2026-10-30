@@ -257,3 +257,21 @@ def _ready_queue(loop: asyncio.AbstractEventLoop) -> Sized:
             f"SimClock needs a standard asyncio event loop, got {type(loop).__name__}"
         )
     return ready
+
+
+class StoreClock(Protocol):
+    """The time the stores' windows are decided on (docs/scale-out-plan.md, section 3.8): a
+    session's idle and absolute expiry, a step-up window, the lockout, a key's expiry. The
+    database's own clock where the database is shared; the injected epoch otherwise."""
+
+    async def now_ms(self) -> float: ...
+
+
+class EpochStoreClock:
+    """The injected epoch, for SQLite and memory: one process, one clock."""
+
+    def __init__(self, epoch: EpochSource) -> None:
+        self._epoch = epoch
+
+    async def now_ms(self) -> float:
+        return self._epoch.epoch_ms()

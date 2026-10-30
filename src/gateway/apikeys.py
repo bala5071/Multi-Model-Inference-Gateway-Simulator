@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from gateway.applications import ApiKeyRecord, Application, ApplicationStore
-from gateway.clock import EpochSource
+from gateway.clock import EpochSource, EpochStoreClock, StoreClock
 from gateway.routing import PlansConfig
 
 PEPPER_ENV = "GATEWAY_KEY_PEPPER"
@@ -94,12 +94,17 @@ class ApiKeyService:
         *,
         random_bytes: Callable[[int], bytes] = secrets.token_bytes,
         last_used_flush_ms: float = DEFAULT_LAST_USED_FLUSH_MS,
+        store_clock: StoreClock | None = None,
     ) -> None:
         if len(pepper) < MIN_PEPPER_LENGTH:
             raise PepperError(f"the pepper must be at least {MIN_PEPPER_LENGTH} bytes")
         self._store = store
         self._pepper = pepper
         self._epoch = epoch
+        # What keys' expiry and the rotation grace are decided on (section 3.8).
+        self.store_clock: StoreClock = (
+            store_clock if store_clock is not None else EpochStoreClock(epoch)
+        )
         self._random_bytes = random_bytes
         self._flush_ms = last_used_flush_ms
         self._pending: dict[str, float] = {}
@@ -128,7 +133,7 @@ class ApiKeyService:
             application_id=application_id,
             label=label,
             key_hmac=self._hmac(key),
-            created_at_ms=self._epoch.epoch_ms(),
+            created_at_ms=await self.store_clock.now_ms(),
             expires_at_ms=expires_at_ms,
         )
         await self._store.add_key(record)
@@ -145,7 +150,12 @@ class ApiKeyService:
         found = await self._store.lookup_key(match.group("id") if match else _NO_SUCH_ID)
         expected = found.record.key_hmac if found is not None else _NO_RECORD
         valid = hmac.compare_digest(self._hmac(presented), expected)
-        now_ms = self._epoch.epoch_ms()
+        # Expiry is decided on the store's time: read with the key where the store has a clock of
+        # its own, so a key check costs no extra round trip (section 3.8).
+        if found is not None and found.now_ms is not None:
+            now_ms = found.now_ms
+        else:
+            now_ms = await self.store_clock.now_ms()
         if (
             not valid
             or found is None
@@ -157,7 +167,7 @@ class ApiKeyService:
             raise InvalidApiKeyError()
         record, application = found.record, found.application
         self._pending[record.key_id] = now_ms
-        if now_ms - self._last_flush_ms >= self._flush_ms:
+        if self._epoch.epoch_ms() - self._last_flush_ms >= self._flush_ms:
             await self.flush_last_used()
         return application
 
@@ -190,7 +200,7 @@ class ApiKeyService:
             label if label is not None else old.label,
             expires_at_ms=expires_at_ms,
         )
-        ends_ms = self._epoch.epoch_ms() + grace_ms
+        ends_ms = await self.store_clock.now_ms() + grace_ms
         if old.expires_at_ms is None or ends_ms < old.expires_at_ms:
             await self._store.set_key_expiry(key_id, ends_ms)
         return new

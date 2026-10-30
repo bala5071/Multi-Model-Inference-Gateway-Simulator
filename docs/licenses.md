@@ -46,11 +46,32 @@ dependencies as the metadata. Added with the operator's agreement given that evi
 Its one dependency, `async-timeout` 5.0.1 (Apache-2.0, `aio-libs/async-timeout`, 2024-11-06), is
 needed only on Python before 3.11.3; neither CI version installs it.
 
+## Added for scale-out PR 3 (Postgres), pinned exactly
+
+| Package | Version | License | Why it is needed | Alternative considered |
+|---|---|---|---|---|
+| asyncpg | 0.32.0 | Apache-2.0 | The Postgres client for the durable stores (docs/scale-out-plan.md, PR 3) | `psycopg` 3: LGPL-3.0, not on the allowed list. `pg8000`: synchronous; every store call would block the event loop or go to a thread |
+
+Provenance, checked 2026-10-29: author MagicStack Inc; project `github.com/MagicStack/asyncpg`
+(since 2016, not a fork); uploaded 2026-10-06 (23 days old). **PyPI provenance attestation on
+every file installed here**: published by GitHub `MagicStack/asyncpg`, workflow `release.yml`,
+environment `pypi`. sha256: Windows CPython 3.12 wheel
+`cd7157a86817730c3239bc687abf8186a471525d695e225c187b9a523a808a98`, Windows 3.11
+`6a1e671e67f4b0bef3c03f37a896d61706f769a83922c119070f1f04e415dc17`, manylinux 3.12
+`54851411bee2aa51a30d0911524201fbb05f82cc0f7c248b140203db637c723d`, manylinux 3.11
+`968c570c5913b7ce0995953d7239bd2367142d1af4359f87699f7a6ca75c4382`, sdist
+`45e64e56714d888330b884aad1dfb363d0bf43fb343e3d1a8968525f3bade478` (the same in `uv.lock`).
+The annotated tag `v0.32.0` points at commit `d701e11a392b`, the commit the attested release run
+built. In the Windows 3.12 wheel all 22 Python files equal the tag's (line endings aside) or the
+`pgproto` submodule's at its pinned commit `a29a6f6`; the other 60 are compiled or stubs. Its one
+dependency, `async_timeout`, applies only before Python 3.11.
+
 ## Services used in tests, CI and compose (not shipped)
 
 | Service | Version | License | Where | Provenance |
 |---|---|---|---|---|
 | Valkey | `valkey/valkey:9.0.7@sha256:7e1deda01b64ece3167d370ab5be3452d29734feec22cbcbc69b3a64f6859d6d` | BSD-3-Clause | `docker-compose.valkey.yml`, the CI `valkey` job | Built and pushed by `valkey-io/valkey-container`'s CI from its `mainline` branch (the push run of 2026-10-27 00:13Z matches the tag dates); tags are rebuilt daily, so it is pinned by digest. **An exception to the two-week rule, agreed 2026-10-29:** every current tag was two days old, a security release on all lines (GHSA-f4q9-j22m-xqq9), and the newest older tag, 9.0.6, lacks the fix |
+| PostgreSQL | `postgres:18.6-trixie@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336` | PostgreSQL License | `docker-compose.postgres.yml`, the CI `postgres` job | The Docker Official Image, built from `docker-library/postgres`; this digest is the build of 2026-10-07 recorded in `docker-library/repo-info` (22 days old when pinned, PostgreSQL package `18.6-1.pgdg13+2`). The current tags were rebuilt 2026-10-28 for Debian base layers with the same PostgreSQL; the older digest was chosen to meet the two-week rule (agreed 2026-10-29) |
 
 ## Every runtime dependency
 
@@ -62,6 +83,7 @@ As resolved in `uv.lock` for Python 3.11 and 3.12 (`async-timeout`, Apache-2.0, 
 | annotated-types | MIT |
 | anyio | MIT |
 | argon2-cffi | MIT |
+| asyncpg | Apache-2.0 |
 | argon2-cffi-bindings | MIT |
 | certifi | MPL-2.0 |
 | cffi | MIT-0 |

@@ -20,7 +20,7 @@ from packaging.requirements import Requirement
 
 REPO = Path(__file__).resolve().parent.parent
 LICENSES_DOC = REPO / "docs" / "licenses.md"
-PINNED = ("argon2-cffi", "cryptography", "pyjwt", "redis")
+PINNED = ("argon2-cffi", "asyncpg", "cryptography", "pyjwt", "redis")
 
 
 def _normal(name: str) -> str:
