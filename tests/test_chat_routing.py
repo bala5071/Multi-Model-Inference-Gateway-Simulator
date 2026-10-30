@@ -349,60 +349,126 @@ async def test_local_only_never_reaches_hosted_on_any_path() -> None:
     assert r.hosted_contacted() == []
 
 
-async def test_a_mode_made_stricter_mid_request_stops_the_fallback() -> None:
-    """The request starts under local_with_hosted_fallback; while the local server is being
-    connected to, the organization becomes local_only; the local failure then leads nowhere.
-    The control, without the change, falls back to the hosted provider."""
-    for change in (False, True):
-        async with routing() as r:
-            await r.mode(FALLBACK)
-            await r.provider(B, "b.provider.test", role="fallback")
-            r.org_net.responses = [TEXT]
-            gate = Gate(refused())
-            r.op_net.responses = [gate]
-            request = asyncio.ensure_future(r.chat())
-            await gate.reached.wait()
-            if change:
-                await r.modes.set_organization_mode("north", LOCAL_ONLY, 1.0)
-            gate.opened.set()
-            response = await request
-        if change:
-            assert (response.status_code, _code(response)) == (502, "upstream_unavailable")
-            assert r.hosted_contacted() == []
-        else:
-            assert response.status_code == 200, response.text
-            assert _source(response) == (B, "hosted", "gateway", "connect_error")
+async def _set_scope_mode(r: Routing, scope: str, mode: Mode) -> None:
+    if scope == "organization":
+        await r.modes.set_organization_mode("north", mode, 1.0)
+    else:
+        await r.modes.set_application_mode("north-shop", mode, 1.0)
 
 
-async def test_a_mode_made_stricter_mid_request_is_refused_by_the_guard_too() -> None:
-    """The second layer: even with the router's own check passed, the guard asks the mode
-    again when the hosted connection is opened."""
+# (the scope changed, the modes before as organization and application, the mode it changes to)
+_CHANGES = [
+    ("organization", (FALLBACK, FALLBACK), LOCAL_ONLY),  # stricter
+    ("application", (FALLBACK, FALLBACK), LOCAL_ONLY),
+    ("organization", (LOCAL_ONLY, FALLBACK), FALLBACK),  # looser
+    ("application", (FALLBACK, LOCAL_ONLY), FALLBACK),
+]
+
+
+@pytest.mark.parametrize(("scope", "before", "after"), _CHANGES)
+async def test_a_mode_changed_mid_request_is_not_seen_by_it_and_applies_from_the_next(
+    scope: str, before: tuple[Mode, Mode], after: Mode
+) -> None:
+    """Each mode is read once per request (docs/38). While the local server is being connected
+    to, the organization's or the application's mode is made stricter or looser; the local
+    attempt then fails. The request finishes under the mode it read: made stricter, it still
+    falls back to the hosted provider; made looser, it still does not. The next request is
+    served under the new mode."""
+    async with routing() as r:
+        await r.mode(*before)
+        await r.provider(B, "b.provider.test", role="fallback")
+        r.org_net.responses = [TEXT, TEXT]
+        gate = Gate(refused())
+        r.op_net.responses = [gate, refused()]
+        request = asyncio.ensure_future(r.chat())
+        await gate.reached.wait()
+        await _set_scope_mode(r, scope, after)
+        gate.opened.set()
+        during = await request
+        next_ = await r.chat()
+    falls_back = (200, None)
+    refused_502 = (502, "upstream_unavailable")
+
+    def outcome(response: httpx.Response) -> tuple[int, str | None]:
+        return (response.status_code, None if response.status_code == 200 else _code(response))
+
+    if after is LOCAL_ONLY:  # made stricter
+        assert outcome(during) == falls_back, during.text
+        assert _source(during) == (B, "hosted", "gateway", "connect_error")
+        assert outcome(next_) == refused_502
+    else:  # made looser
+        assert outcome(during) == refused_502
+        assert outcome(next_) == falls_back, next_.text
+        assert _source(next_) == (B, "hosted", "gateway", "connect_error")
+    assert len(r.org_net.connections) == 1  # the one request whose mode allowed it
+
+
+async def test_the_guard_answers_from_the_requests_mode_not_the_store() -> None:
+    """The second layer asks the request's scope at every request and connection, and the
+    scope answers from the mode the request read: the organization made local_only while A's
+    name is being resolved does not stop the connection to A. The next request is served
+    locally without contacting A."""
     async with routing() as r:
         await r.mode(PRIMARY)
         await r.provider(A, "a.provider.test", role="primary")
-        gate = Gate(TEXT)
-        r.org_net.responses = [gate]
+        r.org_net.responses = [TEXT]
         r.op_net.responses = [TEXT]
 
         async def resolve_then_tighten(host: str, port: int) -> list[str]:
             await r.modes.set_organization_mode("north", LOCAL_ONLY, 1.0)
             return list(HOSTS[host])
 
-        r.resolver.table.clear()
-        guarded = r.service.client_factory
+        guarded = r.router._client_factory
 
         def tightening_client() -> httpx.AsyncClient:
-            return organization_client(resolve_then_tighten, inner=r.org_net)
+            return organization_client(resolve_then_tighten, inner=r.org_net, ssl_context=TLS)
 
         r.router._client_factory = tightening_client
-        response = await r.chat()
+        during = await r.chat()
         r.router._client_factory = guarded
-    # The resolver ran (the router allowed it), the mode changed, the connect was refused,
-    # and the request fell back to local: reason connect_error, nothing sent to A.
-    assert response.status_code == 200, response.text
-    assert _source(response) == ("gateway", "local", A, "connect_error")
-    assert r.org_net.connections == []
-    assert not gate.reached.is_set()
+        next_ = await r.chat()
+    assert during.status_code == 200, during.text
+    assert _source(during) == (A, "hosted", None, None)
+    assert next_.status_code == 200, next_.text
+    assert _source(next_) == ("gateway", "local", None, None)
+    assert len(r.org_net.connections) == 1
+
+
+async def test_each_mode_is_read_once_per_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Counted on the store: the organization's and the application's mode, once each per chat
+    request, on the request that reads most (the primary refused, then the fallback to the
+    tier, streaming and not) and on one the tier answers at once. Before PR 3c the first read
+    them six times each, the second twice."""
+    reads: list[str] = []
+    async with routing() as r:
+        await r.mode(PRIMARY)
+        await r.provider(A, "a.provider.test", role="primary")
+        for name in ("organization_mode", "application_mode"):
+            read = getattr(r.modes, name)
+
+            def counted(name: str = name, read: Any = read) -> Any:
+                async def call(scope_id: str) -> Mode:
+                    reads.append(name)
+                    return await read(scope_id)  # type: ignore[no-any-return]
+
+                return call
+
+            monkeypatch.setattr(r.modes, name, counted())
+        counts = []
+        for stream in (False, True):
+            r.org_net.responses = [refused()]
+            r.op_net.responses = [TEXT]
+            reads.clear()
+            response = await r.chat(stream=stream)
+            assert _source(response) == ("gateway", "local", A, "connect_error")
+            counts.append(sorted(reads))
+        await r.mode(LOCAL_ONLY)
+        r.op_net.responses = [TEXT]
+        reads.clear()
+        response = await r.chat()
+        assert _source(response) == ("gateway", "local", None, None)
+        counts.append(sorted(reads))
+    assert counts == [["application_mode", "organization_mode"]] * 3
 
 
 async def test_a_stricter_mode_does_not_cut_a_streaming_answer_and_the_guard_refuses_the_next(
@@ -742,9 +808,9 @@ async def test_each_mode_change_needs_its_own_password_and_is_audited() -> None:
         "in_flight": IN_FLIGHT,
     }
     assert IN_FLIGHT == (
-        "A mode change applies to the next request, and to the next attempt of a request in"
-        " flight. An answer already streaming from a hosted provider is not cut when the mode"
-        " becomes stricter: its prompt has already been sent."
+        "A mode change applies from the next request. A request already in flight finishes"
+        " under the mode it started with, its fallback attempts included: a stricter mode does"
+        " not stop it, and an answer already streaming from a hosted provider is not cut."
     )
     assert (again.status_code, _code(again)) == (403, "step_up_required")
     [entry] = entries
@@ -825,7 +891,9 @@ async def test_the_candidates_in_each_mode() -> None:
 
         async def names(mode: Mode, *, tools: bool = False) -> list[tuple[str, str]]:
             await r.mode(mode)
-            found = await r.router.candidates("north", "north-shop", "economy", wants_tools=tools)
+            found = await r.router.candidates(
+                "north", "economy", await r.router.mode("north", "north-shop"), wants_tools=tools
+            )
             return [(c.provider, c.provider_class) for c in found]
 
         assert await names(LOCAL_ONLY) == [("gateway", "local")]
@@ -1012,24 +1080,21 @@ async def test_the_durable_store_calls_one_chat_request_makes(
         with_provider = list(calls)
     modes = ["organization_mode", "application_mode"]
     # The gateway's own tier (local_only): the key, the period's usage on the first request
-    # only, the modes at the decision and again in flight (docs/33), and the usage row.
-    assert first == ["lookup_key", "usage_by_model", *modes, *modes, "append"]
-    assert again == ["lookup_key", *modes, *modes, "append"]
-    # An organization's provider: the candidates (the modes, the providers, each one's key)
-    # worked out by the handler before admission and again by the router; the modes before the
-    # attempt; the key read to skip an unreadable one and again to lease it; then the modes
-    # three times more, asked by the egress scope (docs/33: at every request and connection).
-    candidates = [*modes, "list_for", "get_key"]
+    # only, the modes once (docs/38), and the usage row.
+    assert first == ["lookup_key", "usage_by_model", *modes, "append"]
+    assert again == ["lookup_key", *modes, "append"]
+    # An organization's provider: the modes once; the providers and each one's key worked out
+    # by the handler before admission and again by the router; the key read to skip an
+    # unreadable one and again to lease it. The router and the egress scope use the modes read
+    # once (before PR 3c: five more times, 20 calls in all).
+    providers = ["list_for", "get_key"]
     assert with_provider == [
         "lookup_key",
-        *candidates,
-        *candidates,
         *modes,
+        *providers,
+        *providers,
         "get_key",
         "get_key",
-        *modes,
-        *modes,
-        *modes,
         "append",
     ]
-    assert (len(first), len(again), len(with_provider)) == (7, 6, 20)
+    assert (len(first), len(again), len(with_provider)) == (5, 4, 10)

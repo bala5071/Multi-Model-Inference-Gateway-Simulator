@@ -18,9 +18,11 @@ closes fallback for the request, streaming or not, and a failure after it is the
 failure. **Never another tier, never outside the plan**: only providers serving the routed
 tier are candidates, and the request is passed on unchanged.
 
-The mode is asked again before every candidate and, through the egress scope, at every request
-and connection (``gateway.egress``): a mode made stricter mid-request stops the next attempt.
-``gateway.modes.effective_mode`` is the only place it is decided.
+**The mode is read once per request** (``mode``, by the chat handler) and passed in: the
+candidates, the check before each hosted candidate and the egress scope's answer at every
+request and connection (``gateway.egress``) all use that one value, and read no store for it. A
+mode change applies from the next request; a request in flight finishes under the mode it read
+(docs/38). ``gateway.modes.effective_mode`` is the only place it is decided.
 """
 
 from __future__ import annotations
@@ -169,6 +171,7 @@ class ChatRouter:
     # --- the mode, and who may serve ------------------------------------------------------
 
     async def mode(self, organization_id: str, application_id: str) -> Mode:
+        """The request's mode, read from the store: once per request, by its handler."""
         return effective_mode(
             await self._modes.organization_mode(organization_id),
             await self._modes.application_mode(application_id),
@@ -203,11 +206,10 @@ class ChatRouter:
         return flag.get("value") is not False
 
     async def candidates(
-        self, organization_id: str, application_id: str, tier: str, *, wants_tools: bool
+        self, organization_id: str, tier: str, mode: Mode, *, wants_tools: bool
     ) -> list[Candidate]:
-        """The candidates for a request routed to ``tier``, in the order its mode gives.
+        """The candidates for a request routed to ``tier``, in the order its ``mode`` gives.
         Raises ``NoCandidateError`` when none may serve it."""
-        mode = await self.mode(organization_id, application_id)
         local = Candidate(GATEWAY_PROVIDER, self.tier_class(tier))
         if mode is Mode.LOCAL_ONLY:
             order = [local]
@@ -232,17 +234,19 @@ class ChatRouter:
         self,
         request: ChatRequest,
         organization_id: str,
-        application_id: str,
+        mode: Mode,
         on_delta: ChatDeltaCallback | None = None,
         trace: RouteTrace | None = None,
     ) -> RoutedOutcome:
+        """Serve ``request`` under ``mode``, the request's mode read once by its handler."""
         trace = trace if trace is not None else RouteTrace()
         order = await self.candidates(
-            organization_id, application_id, request.model, wants_tools=bool(request.tools)
+            organization_id, request.model, mode, wants_tools=bool(request.tools)
         )
+        hosted = may_reach_hosted(mode)
 
-        async def hosted_now() -> bool:
-            return may_reach_hosted(await self.mode(organization_id, application_id))
+        async def its_mode_allows_hosted() -> bool:
+            return hosted
 
         first = order[0].provider
         # Why the first candidate was left, then why each later one was: the first is reported.
@@ -267,10 +271,8 @@ class ChatRouter:
                 on_delta(delta)
 
         failure: BaseException | None = None
-        with egress_scope(hosted_now):
+        with egress_scope(its_mode_allows_hosted):
             for candidate in order:
-                if candidate.provider_class == HOSTED and not await hosted_now():
-                    continue  # the mode was made stricter while this request was in flight
                 if candidate.config is not None:
                     skipped = await self._skip(organization_id, candidate.config)
                     if skipped is not None:
@@ -308,7 +310,7 @@ class ChatRouter:
                         return RoutedOutcome(outcome, source)
         if failure is not None:
             raise failure
-        # Every candidate was skipped (open breakers, unreadable keys, a mode change).
+        # Every candidate was skipped (open breakers, unreadable keys).
         raise ProviderError(ProviderErrorCode.UPSTREAM_UNAVAILABLE, detail="no_candidate")
 
     async def _skip(self, organization_id: str, config: ProviderConfig) -> FallbackReason | None:

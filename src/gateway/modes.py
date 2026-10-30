@@ -44,11 +44,12 @@ class Mode(StrEnum):
 
 
 DEFAULT_MODE = Mode.LOCAL_ONLY
-# Said in every mode change's answer (docs/33), stricter or not.
+# Said in every mode change's answer (docs/33), stricter or not. Each request reads its mode
+# once (docs/38).
 IN_FLIGHT = (
-    "A mode change applies to the next request, and to the next attempt of a request in flight."
-    " An answer already streaming from a hosted provider is not cut when the mode becomes"
-    " stricter: its prompt has already been sent."
+    "A mode change applies from the next request. A request already in flight finishes under"
+    " the mode it started with, its fallback attempts included: a stricter mode does not stop"
+    " it, and an answer already streaming from a hosted provider is not cut."
 )
 # Strictest first.
 _STRICTNESS = (

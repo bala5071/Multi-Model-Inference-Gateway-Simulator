@@ -26,6 +26,7 @@ from urllib.parse import urlsplit, urlunsplit
 import asyncpg
 import httpx
 import pytest
+from benchmarks import request_store_calls
 from fastapi import FastAPI
 from redis.asyncio import Redis
 
@@ -64,7 +65,7 @@ from gateway.valkey import ValkeyCounters
 from gateway.vault import Vault
 from helpers import TEST_PEPPER, TEST_PROFILES, bearer
 from mock_network import FakeResolver, ScriptedNetwork
-from postgres_helpers import POSTGRES_URL_ENV, PgWorld, pg_world
+from postgres_helpers import POSTGRES_URL_ENV, TEST_DATABASE_ENV, PgWorld, pg_world
 from test_chat_routing import HOSTS, MASTER, TEXT, TLS, P
 from valkey_helpers import VALKEY_URL_ENV, ManualEpoch, ScriptedClient
 
@@ -745,7 +746,7 @@ async def test_the_store_calls_of_a_chat_request_and_a_generate_request_in_share
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Which calls a request makes on the shared stores, one after another: the key, the two
-    modes twice (chat, docs/33), a reserve and a settle. Note 36's ``append`` (and the period's
+    modes once (chat, docs/38), a reserve and a settle. Note 36's ``append`` (and the period's
     totals once a period) are replaced by the reserve and the settle. On real time: the chat
     request reads the modes inside its timed work, where simulated time would jump to the
     timeout while the loop waits on the network."""
@@ -799,7 +800,7 @@ async def test_the_store_calls_of_a_chat_request_and_a_generate_request_in_share
                     generate = list(calls)
                     modes = ["organization_mode", "application_mode"]
                     # The settle's usage row is appended inside it.
-                    assert chatted == ["lookup_key", "reserve", *modes, *modes, "settle", "append"]
+                    assert chatted == ["lookup_key", "reserve", *modes, "settle", "append"]
                     assert generate == ["lookup_key", "reserve", "settle", "append"]
         finally:
             await registry.aclose()
@@ -811,8 +812,8 @@ async def test_the_store_calls_of_a_chat_request_an_organization_provider_serves
 ) -> None:
     """The organization-provider path in shared mode, counted on the Postgres stores: every
     public store call and every budget call, one after another, for one chat request that the
-    organization's primary provider answers. Note 36's 20 calls with its ``append`` replaced by
-    a reserve and a settle (the usage row appended inside the settle)."""
+    organization's primary provider answers: the modes read once (docs/38). Before PR 3c, 21:
+    the modes were read six times."""
     clock = WallClock()  # the modes are read inside the timed work: see the test above
     calls: list[str] = []
     async with pg_world() as world:
@@ -890,20 +891,51 @@ async def test_the_store_calls_of_a_chat_request_an_organization_provider_serves
             await registry.aclose()
         assert answer.status_code == 200, answer.text
         assert answer.headers["x-provider"] == P
-    modes = ["organization_mode", "application_mode"]
-    candidates = [*modes, "list_for", "get_key"]
+    candidates = ["list_for", "get_key"]
     assert calls == [
         "lookup_key",
         "reserve",
-        *candidates,  # the handler's, before admission to a candidate
+        "organization_mode",
+        "application_mode",  # once: the router and the egress scope use them
+        *candidates,  # the handler's, before admission to one
         *candidates,  # the router's
-        *modes,  # before the attempt
         "get_key",  # skipped if unreadable
         "get_key",  # leased
-        *modes,
-        *modes,
-        *modes,  # the egress scope, at the request and its connection
         "settle",
         "append",  # inside the settle's transaction
     ]
-    assert len(calls) - 1 == 21  # store calls; the append is a statement of the settle
+    assert len(calls) - 1 == 11  # store calls; the append is a statement of the settle
+
+
+@postgres
+async def test_the_request_benchmark_counts_each_round_trip_and_leaves_no_schema() -> None:
+    """``benchmarks.request_store_calls`` on one request of each case: the same store calls on
+    SQLite and on Postgres, and on Postgres every round trip by kind. Per request: the reserve
+    and the settle each one transaction (BEGIN, its statement timeout, COMMIT), and every
+    connection given back to the pool one reset, the lookup's, each mode's and each provider
+    read's included (docs/38)."""
+    url = os.environ[POSTGRES_URL_ENV]
+    cases = await request_store_calls.run(1, url, TEST_DATABASE_ENV)
+    modes = ["organization_mode", "application_mode"]
+    providers = ["list_for", "get_key"]
+    gateway = ["lookup_key", "reserve", *modes, "settle"]
+    provider = ["lookup_key", "reserve", *modes, *providers, *providers, "get_key", "get_key"]
+    provider.append("settle")
+    assert [(c.name, c.store, c.calls()) for c in cases] == [
+        ("gateway tier", "sqlite", gateway),
+        ("gateway tier", "postgres", gateway),
+        ("org provider", "sqlite", provider),
+        ("org provider", "postgres", provider),
+    ]
+    trips = {c.name: dict(c.requests[0].trips) for c in cases if c.store == "postgres"}
+    transactions = {"BEGIN": 2, "SET": 2, "COMMIT": 2}
+    assert trips == {
+        "gateway tier": {**transactions, "statement": 11, "RESET": 5},
+        "org provider": {**transactions, "statement": 17, "RESET": 11},
+    }
+    admin = await asyncpg.connect(url)
+    try:
+        left = await admin.fetch("SELECT nspname FROM pg_namespace WHERE nspname LIKE 'gwbench_%'")
+    finally:
+        await admin.close()
+    assert left == []
