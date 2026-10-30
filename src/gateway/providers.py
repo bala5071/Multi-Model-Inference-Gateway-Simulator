@@ -62,6 +62,11 @@ from gateway.permissions import Actor, Resource
 from gateway.redaction import Redactor
 from gateway.vault import Binding, KeyUnreadableError, SealedKey, Vault, VaultIntegrityError
 
+
+class ProviderGoneError(Exception):
+    """The provider was deleted after the request found it: answered as a missing one."""
+
+
 PROVIDER_TYPES = ("openai_compatible", "anthropic")
 TIERS = ("economy", "standard", "premium")
 ROLES = ("primary", "fallback")
@@ -286,7 +291,12 @@ class SqliteProviderStore:
         return cursor.rowcount == 1
 
     async def all_keys(self) -> list[StoredKey]:
-        ids = [r[0] for r in self._connection.execute("SELECT provider_id FROM provider_keys")]
+        ids = [
+            r[0]
+            for r in self._connection.execute(
+                "SELECT provider_id FROM provider_keys ORDER BY provider_id"
+            )
+        ]
         return [k for k in [await self.get_key(i) for i in ids] if k is not None]
 
 
@@ -502,11 +512,14 @@ class ProviderService:
             raise ValueError(f"type must be one of {', '.join(PROVIDER_TYPES)}")
         if "base_url" in changes:
             changes = {**changes, "base_url": check_base_url(changes["base_url"])}
-        updated = replace(config, **changes)
-        rebound = (updated.type, updated.base_url) != (config.type, config.base_url)
-        if updated.model != config.model or rebound:
-            updated = replace(updated, capabilities={})  # probed with another model: unknown
         async with self.store.write_transaction():
+            # The changes applied to the row as it is now, never to the one the request read:
+            # a switch turned off meanwhile stays off (docs/36).
+            current = await self._current(config.id)
+            updated = replace(current, **changes)
+            rebound = (updated.type, updated.base_url) != (current.type, current.base_url)
+            if updated.model != current.model or rebound:
+                updated = replace(updated, capabilities={})  # probed with another model: unknown
             await self.store.replace(updated)
             key_deleted = await self.store.delete_key(config.id) if rebound else False
             await self._record(
@@ -517,15 +530,26 @@ class ProviderService:
     async def set_switch(
         self, config: ProviderConfig, on: bool, *, platform: bool, actor: Actor
     ) -> ProviderConfig:
-        updated = replace(config, platform_enabled=on) if platform else replace(config, enabled=on)
-        await self.store.replace(updated)
-        await self._record(
-            AuditAction.PROVIDER_ENABLED if on else AuditAction.PROVIDER_DISABLED,
-            updated,
-            actor,
-            switch="platform" if platform else "organization",
-        )
+        async with self.store.write_transaction():
+            # One switch, on the row as it is now: nothing else the request read is written back.
+            current = await self._current(config.id)
+            updated = (
+                replace(current, platform_enabled=on) if platform else replace(current, enabled=on)
+            )
+            await self.store.replace(updated)
+            await self._record(
+                AuditAction.PROVIDER_ENABLED if on else AuditAction.PROVIDER_DISABLED,
+                updated,
+                actor,
+                switch="platform" if platform else "organization",
+            )
         return updated
+
+    async def _current(self, provider_id: str) -> ProviderConfig:
+        current = await self.store.get(provider_id)
+        if current is None:
+            raise ProviderGoneError()
+        return current
 
     async def delete(self, config: ProviderConfig, *, actor: Actor, marker: ChangeMarker) -> None:
         async with self.store.write_transaction():
@@ -627,9 +651,14 @@ class ProviderService:
             if unreached(exc):
                 raise ProviderUnreachedError from None
             raise
-        current = await self.store.get(config.id)
-        if current is not None and current.model == config.model:
-            await self.store.replace(replace(current, capabilities=capabilities))
+        # Read and written in one transaction: a change made meanwhile (either switch, a new
+        # destination) is kept, and the capabilities are recorded only on the destination that
+        # was probed (docs/36).
+        async with self.store.write_transaction():
+            current = await self.store.get(config.id)
+            probed = (config.type, config.base_url, config.model)
+            if current is not None and (current.type, current.base_url, current.model) == probed:
+                await self.store.replace(replace(current, capabilities=capabilities))
         await self._record(AuditAction.PROVIDER_TESTED, config, actor, outcome_code="ok")
         return capabilities
 

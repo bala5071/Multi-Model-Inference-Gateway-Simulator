@@ -171,6 +171,7 @@ from gateway.permissions import PERMISSIONS, Actor, Resource
 from gateway.profiles import PROFILES, Tier, load_calibrated_profiles
 from gateway.providers import (
     ProviderConfig,
+    ProviderGoneError,
     ProviderService,
     ProviderUnreachedError,
     resolve_provider,
@@ -1468,6 +1469,8 @@ def _provider_routes(
             updated, key_deleted = await providers.update(
                 await found(provider_id), changes, actor=auth.actor
             )
+        except ProviderGoneError:
+            raise ForbiddenError() from None
         except ManagementRefusal:
             raise
         except ValueError as exc:
@@ -1478,9 +1481,12 @@ def _provider_routes(
         # Whose switch: the platform's for platform_admin, the organization's for its
         # org_admin, as authorize allowed it.
         platform = auth.via.startswith("platform_admin")
-        updated = await providers.set_switch(
-            await found(provider_id), on, platform=platform, actor=auth.actor
-        )
+        try:
+            updated = await providers.set_switch(
+                await found(provider_id), on, platform=platform, actor=auth.actor
+            )
+        except ProviderGoneError:
+            raise ForbiddenError() from None
         if platform:  # platform_admin sees no more than the status
             return JSONResponse({"provider_id": updated.id, "enabled": updated.is_enabled})
         return JSONResponse(await view(updated))

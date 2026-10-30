@@ -247,51 +247,63 @@ class ManagementService:
         """Create an application on a plan template, in an enabled organization, with a name
         not used there yet. Its id is generated unless one is given (the CLI)."""
         _require(actor, "applications.create", Resource.organization(organization_id))
-        organization = await self.store.get_organization(organization_id)
-        if organization is None:
-            raise ValueError(f"no organization {organization_id!r}")
-        if plan not in self.templates.plans:
-            plans = ", ".join(self.templates.plans)
-            raise UnknownPlanError(f"unknown plan {plan!r}; plans are: {plans}")
-        if organization.disabled:
-            raise ManagementRefusal(
-                Reason.ORGANIZATION_DISABLED,
-                f"organization {organization_id!r} is disabled; no application can be created",
+        # The checks and the insert in one transaction: the organization cannot be disabled,
+        # nor the name taken, between them (docs/36).
+        async with self.store.write_transaction():
+            organization = await self.store.get_organization(organization_id)
+            if organization is None:
+                raise ValueError(f"no organization {organization_id!r}")
+            if plan not in self.templates.plans:
+                plans = ", ".join(self.templates.plans)
+                raise UnknownPlanError(f"unknown plan {plan!r}; plans are: {plans}")
+            if organization.disabled:
+                raise ManagementRefusal(
+                    Reason.ORGANIZATION_DISABLED,
+                    f"organization {organization_id!r} is disabled; no application can be created",
+                )
+            normalized = normalize_name(name)
+            if any(
+                a.name == normalized for a in await self.store.list_applications(organization_id)
+            ):
+                raise ManagementRefusal(
+                    Reason.APPLICATION_NAME_TAKEN,
+                    f"organization {organization_id!r} already has an application named "
+                    f"{normalized!r}",
+                )
+            if application_id is None:
+                application_id = (
+                    APPLICATION_ID_PREFIX + self._random_bytes(APPLICATION_ID_BYTES).hex()
+                )
+            application = _from_template(
+                application_id,
+                normalized,
+                self.templates,
+                plan,
+                organization_id=organization_id,
+                created_at_ms=await self._now(),
             )
-        normalized = normalize_name(name)
-        if any(a.name == normalized for a in await self.store.list_applications(organization_id)):
-            raise ManagementRefusal(
-                Reason.APPLICATION_NAME_TAKEN,
-                f"organization {organization_id!r} already has an application named {normalized!r}",
+            await self.store.add_application(application)
+            who, acting = _who(actor)
+            details: dict[str, object] = {
+                **acting,
+                "organization_id": organization_id,
+                "plan": plan,
+            }
+            if _id_form(plan) is None:
+                del details["plan"]
+            if _id_form(organization_id) is None:
+                del details["organization_id"]
+            await self._record(
+                AuditEvent(
+                    AuditAction.APPLICATION_CREATED,
+                    Outcome.SUCCESS,
+                    TargetType.APPLICATION,
+                    _id_form(application.id),
+                    who,
+                    details,
+                )
             )
-        if application_id is None:
-            application_id = APPLICATION_ID_PREFIX + self._random_bytes(APPLICATION_ID_BYTES).hex()
-        application = _from_template(
-            application_id,
-            normalized,
-            self.templates,
-            plan,
-            organization_id=organization_id,
-            created_at_ms=await self._now(),
-        )
-        await self.store.add_application(application)
-        who, acting = _who(actor)
-        details: dict[str, object] = {**acting, "organization_id": organization_id, "plan": plan}
-        if _id_form(plan) is None:
-            del details["plan"]
-        if _id_form(organization_id) is None:
-            del details["organization_id"]
-        await self._record(
-            AuditEvent(
-                AuditAction.APPLICATION_CREATED,
-                Outcome.SUCCESS,
-                TargetType.APPLICATION,
-                _id_form(application.id),
-                who,
-                details,
-            )
-        )
-        return application
+            return application
 
     async def page_applications(
         self, organization_id: str, after: str | None, limit: int, *, actor: Actor | None = None
@@ -407,6 +419,12 @@ class ManagementService:
         expires = self._expiry(expires_in_days, now)
         grace_ms = grace_hours * HOUR_MS
         async with self.store.write_transaction():  # the count and the new key together
+            # The key checked again: a revocation since the check above wins (docs/36).
+            current = await self.store.get_key(key_id)
+            if current is None or not self._active(current, now):
+                raise ManagementRefusal(
+                    Reason.KEY_NOT_ACTIVE, f"key {key_id} is revoked or expired: issue a new one"
+                )
             await self._check_room(application, now, replacing=old.key_id)
             issued = await self.keys.rotate(key_id, grace_ms=grace_ms, expires_at_ms=expires)
             extra: dict[str, object] = {"key_id": issued.record.key_id, "grace_ms": grace_ms}
@@ -421,8 +439,9 @@ class ManagementService:
         record, application = await self._key(key_id)
         resource = Resource.application(application.organization_id, application.id)
         _require(actor, "application_keys.revoke", resource)
-        await self.keys.revoke(key_id)
-        await self._record(self._key_event(AuditAction.KEY_REVOKED, record, application, actor))
+        async with self.store.write_transaction():  # ordered against a rotation of the key
+            await self.keys.revoke(key_id)
+            await self._record(self._key_event(AuditAction.KEY_REVOKED, record, application, actor))
 
     async def page_keys(
         self, application_id: str, after: str | None, limit: int, *, actor: Actor | None = None

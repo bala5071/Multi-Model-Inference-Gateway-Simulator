@@ -438,9 +438,11 @@ async def _store_command(
             )
     elif args.command in ("disable-organization", "enable-organization"):
         disabled = args.command == "disable-organization"
-        if await store.get_organization(args.organization) is None:
-            raise ValueError(f"no organization {args.organization!r}")
-        await store.set_organization_disabled(args.organization, disabled)
+        # One transaction, ordered against an application being created in it (docs/36).
+        async with store.write_transaction():
+            if await store.get_organization(args.organization) is None:
+                raise ValueError(f"no organization {args.organization!r}")
+            await store.set_organization_disabled(args.organization, disabled)
         _note(f"organization {args.organization!r} {'disabled' if disabled else 'enabled'}")
     elif args.command in ACCOUNT_COMMANDS:
         await _account_command(args, _accounts(state, env), read_password)
@@ -467,11 +469,13 @@ async def _store_command(
         vault = Vault(*load_master_keys(env))
         providers = state.providers
         dropped = 0
-        for stored in await providers.all_keys():
-            if not vault.readable(stored.sealed):
-                await providers.delete_key(stored.provider_id)
-                dropped += 1
-                _note(f"dropped the unreadable key of provider {stored.provider_id}")
+        # One transaction: a key entered again meanwhile is readable and must not be dropped.
+        async with providers.write_transaction():
+            for stored in await providers.all_keys():
+                if not vault.readable(stored.sealed):
+                    await providers.delete_key(stored.provider_id)
+                    dropped += 1
+                    _note(f"dropped the unreadable key of provider {stored.provider_id}")
         _note(f"{dropped} unreadable key(s) dropped")
     elif args.command == "list-keys":
         for key in await store.list_keys(args.application):
