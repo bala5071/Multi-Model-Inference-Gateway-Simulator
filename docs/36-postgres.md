@@ -6,11 +6,10 @@ settled before building"). Every durable store protocol of note 34, implemented 
 migration from SQLite and back. SQLite stays the default, and nothing on the default path
 changes: without Postgres configured, nothing connects to it.
 
-**Shared mode is refused until PR 3b.** `GATEWAY_STATE=shared` stops the server at start (both
-factories, simulated live mode included): until the budgets are shared, each instance would
-enforce them on its own totals, and two instances could each spend one budget. So in this PR
-Postgres is used by the tests, by `scripts/manage.py migrate-to-postgres` and
-`migrate-to-sqlite`, and by `benchmarks/durable_calls.py`, never by a running server.
+**Shared mode was refused until PR 3b.** In this PR `GATEWAY_STATE=shared` stopped the server
+at start: until the budgets were shared, each instance would have enforced them on its own
+totals. Since PR 3b (note 37) the budgets are on Postgres too, and shared mode starts with
+Postgres and Valkey configured; note 37 says what it needs and how it starts.
 
 ## What is in Postgres
 
@@ -31,8 +30,8 @@ compares the two schemas column by column. The schema is applied under an adviso
 (`SCHEMA_LOCK`), so instances that start together apply it once, and a database whose schema
 version is newer than the code is refused.
 
-Not in Postgres: the counters (note 35: Valkey, or each process's memory) and the budget
-totals, which the ledger keeps in memory per process until PR 3b.
+Not in Postgres: the counters (note 35: Valkey, or each process's memory). The budgets are,
+since PR 3b (note 37, schema version 2).
 
 ## Two pools and one write lock (section 3.6)
 
@@ -224,7 +223,8 @@ Looked at and left as they are:
   user's organization and an application's roles never change), `ApiKeyService.issue` (the
   application's existence is a foreign key), `seed_demo_applications`, `create-organization`
   (unique keys), `touch_session` (`GREATEST`).
-- **The budget check, then the usage row:** PR 3b; shared mode is refused until then.
+- **The budget check, then the usage row:** since PR 3b, one conditional `UPDATE` reserves and
+  the settle charges (note 37), shown by the two-instance edge test (mutations B1, B2).
 
 ## Timing
 

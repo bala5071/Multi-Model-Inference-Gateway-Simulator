@@ -318,6 +318,11 @@ class Monitor:
         in ``gateway_events_total{type="state_store_restarted"}`` like every event."""
         self._events.publish("state_store_restarted", store=store)
 
+    def reservation_expired(self, application_id: str, tokens: int) -> None:
+        """A shared budget reservation was released by the sweep: its instance died or could
+        not settle it, and that request's usage was not charged (docs/37)."""
+        self._events.publish("reservation_expired", application_id=application_id, tokens=tokens)
+
     def slo_transition(self, transition: Transition) -> None:
         """For ``SloMonitor(on_transition=...)``."""
         self._series.set_degraded(transition.model, transition.degraded)

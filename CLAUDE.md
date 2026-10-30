@@ -84,7 +84,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `passthrough.py` — `PassthroughWorker`: forwards to a backend that does its own
   batching and only times the result; the pair for `LlamaCppBackend` (exists)
 - `backend_config.py` + `backends.yaml` — which backend to use and where each tier's
-  model server is (exists)
+  model server is; `TierBudget`, each tier's `context_tokens` and `reserve_completion_tokens`
+  for shared budgets (operator-supplied, none shipped) (exists)
 - `baseline.py` — `BaselineWorker`, the one-at-a-time FIFO reference that later steps must
   beat (exists)
 - `continuous.py` — `ContinuousBatchingWorker`, the per-model iteration-level batcher;
@@ -152,15 +153,17 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   window on the injected clock (exists)
 - `ledger.py` — `CostLedger`: per-application tokens and spend per budget period (calendar
   months in UTC by default), the budget check, and retention pruning; a facade over a
-  `UsageStore` (exists)
+  `UsageStore`. `Budgets` (reserve, then settle or release; `CostLedger` reserves nothing),
+  `SharedBudgets`, `Reservation`, `run_sweep` (docs/37) (exists)
 - `periods.py` — `BudgetPeriods`, `CalendarMonthsUTC` (from whole days since the epoch),
   `FixedPeriods` for tests (exists)
 - `usage.py` — `UsageEvent`, the `UsageStore` protocol, `InMemoryUsageStore` (bounded ring)
   and `SqliteUsageStore`; store calls are coroutines that never suspend (docs/34) (exists)
 - `state.py` — `StateBackend` (the stores of one database, built by `sqlite_state` for the
   default server and the CLI), `check_state_setting` (`GATEWAY_STATE`: `sqlite`, or `shared`,
-  refused until budgets are shared) and `run_now` (completes a store call outside an event loop,
-  raising if it suspends); every store is a protocol with coroutine methods and
+  which needs `GATEWAY_POSTGRES_URL` and `GATEWAY_COUNTERS=valkey`), `check_store_address` (a
+  store off this machine needs verified TLS or `GATEWAY_STATE_PRIVATE_NETWORK=1`, docs/37) and
+  `run_now` (completes a store call outside an event loop, raising if it suspends); every store is a protocol with coroutine methods and
   `write_transaction()`; counters are behind `RateLimiter`, `FailureWindow`,
   `ConnectionTestCounter`, `BreakerStore`, `AuditCap` and `Budgets` (docs/34) (exists)
 - `counters.py` — `SharedCounters` and `CounterWatch`: what `create_app` takes when the
@@ -168,14 +171,17 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `valkey.py` — `ValkeyCounters`: the rate limit, the login limiter, the step-up and
   user-creation caps, the test-connection counts, the breakers and the audit cap in Valkey,
   each atomic rule one Lua script, every key an HMAC; missing is forbidden; `ValkeyWatch`
-  (the settings and the skew at startup, the skew and the run id every 30 s);
+  (the settings and the skew at startup, the skew and the run id every 30 s; the skew against
+  Postgres's `gateway_now_ms()` when there is one, docs/37);
   `GATEWAY_COUNTERS=valkey` and `GATEWAY_VALKEY_URL`. Budgets are not in it (exists)
 - `postgres.py` — every durable store on Postgres (asyncpg): `PG_BASELINE` (SQLite migrations
   1 to 13, plus `ord` where SQLite orders by rowid), `PostgresDatabase` with two pools (request,
   management), `write_transaction()` taking the global advisory `WRITE_LOCK` with a timeout that
   fails closed (`GATEWAY_STATE_LOCK_TIMEOUT_MS`), `request_transaction()` without it, the SQL
   clock `gateway_now_ms()` (its `StoreClock`), `ready()` for `/readyz`, and `postgres_state`;
-  `GATEWAY_POSTGRES_URL` is a secret. Not used by a server until PR 3b (docs/36) (exists)
+  `PostgresBudgets` (schema version 2: the reservation, Q1, the sweep, settles kept while the
+  database is down, docs/37); `unopened` and `open` for a server's lifespan;
+  `GATEWAY_POSTGRES_URL` is a secret (docs/36) (exists)
 - `pg_migrate.py` — `migrate_to_postgres` and `migrate_to_sqlite`: every table copied and
   compared before anything is kept, dry runs that write and roll back (exists)
 - `database.py` + `migrations/` — `open_database` (WAL, busy timeout, autocommit) and the
@@ -211,7 +217,9 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   API keys, usage store, epoch and retention), `create_default_app()` for the server (needs
   `GATEWAY_KEY_PEPPER`; SQLite at `GATEWAY_DATABASE`; one process per database), and
   `create_simulated_live_app()` for simulated live mode (`GATEWAY_SIMULATED_LIVE=1`,
-  everything in memory, Playground with throwaway keys); JSON or server-sent-event
+  everything in memory, Playground with throwaway keys), and `create_shared_app()` for
+  `GATEWAY_STATE=shared` (Postgres and Valkey, opened in the lifespan, no process lock,
+  docs/37); JSON or server-sent-event
   responses; serves the built dashboard at `/dashboard`; with accounts, the management
   endpoints under `/v1/admin/orgs/{org}` (docs/30) and the provider endpoints (docs/32), each
   through `requires` (which claims the step-up window for consume-on-use actions), every answer
@@ -270,8 +278,9 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   `docs/33` (exists)
 - `benchmarks/counter_calls.py` — one counter call in memory and against Valkey (needs
   `GATEWAY_VALKEY_URL`); the numbers in `docs/35` (exists)
-- `benchmarks/durable_calls.py` — one durable read and write, and the chat path's store calls,
-  on SQLite and Postgres (needs `GATEWAY_POSTGRES_URL`); the numbers in `docs/36` (exists)
+- `benchmarks/durable_calls.py` — one durable read and write, the chat path's store calls,
+  and the budget's admit and settle, on SQLite and Postgres (needs `GATEWAY_POSTGRES_URL`); the
+  numbers in `docs/36` and `docs/37` (exists)
 - `benchmarks/management_requests.py` — management reads and key writes on the running
   server, beside `/healthz` and `/v1/auth/me`; the numbers in `docs/30` (exists)
 

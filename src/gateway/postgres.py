@@ -17,15 +17,19 @@ migrations 1 to 13, plus an ``ord`` column where the SQLite stores order by ``ro
   the services read it through this database as their ``StoreClock``; a key's lookup returns it.
 - **Missing is forbidden.** A connection that cannot be had or is lost, a query out of time, a
   pool exhausted past its timeout: ``StateUnavailableError`` (answered 503), never a default.
+- **Budgets** (``PostgresBudgets``, docs/37): reserve, settle and release in one statement each
+  that decides, on the counter row of the application's period (section 3.1).
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import json
-from collections.abc import AsyncIterator, Collection, Mapping
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
 import asyncpg
@@ -46,16 +50,26 @@ from gateway.applications import (
 )
 from gateway.audit import AuditEntry, AuditEvent, Reason, _entry
 from gateway.clock import Clock
+from gateway.ledger import ApplicationUsage, BudgetExceededError, Expired, Reservation
 from gateway.management import ManagementRefusal
 from gateway.modes import DEFAULT_MODE, Mode
 from gateway.organizations import Organization, normalize_name
+from gateway.periods import BudgetPeriods, CalendarMonthsUTC
 from gateway.permissions import Assignment, Role, ScopeType
 from gateway.providers import _COLUMNS as _PROVIDER_COLUMNS
 from gateway.providers import ProviderConfig, StoredKey, _config
 from gateway.roles import check_app_role_name
-from gateway.state import StateBackend, StateUnavailableError
+from gateway.schema import RequestResult
+from gateway.state import POSTGRES_URL_ENV, StateBackend, StateUnavailableError
 from gateway.usage import _COLUMNS as _USAGE_COLUMNS
-from gateway.usage import ModelUsage, StoredUsageEvent, UsageEvent, _event, _totals
+from gateway.usage import (
+    ChatSource,
+    ModelUsage,
+    StoredUsageEvent,
+    UsageEvent,
+    _event,
+    _totals,
+)
 from gateway.users import (
     _SESSION_COLUMNS,
     _USER_COLUMNS,
@@ -68,7 +82,7 @@ from gateway.users import (
 )
 from gateway.vault import SealedKey
 
-URL_ENV = "GATEWAY_POSTGRES_URL"
+URL_ENV = POSTGRES_URL_ENV
 # A Postgres URL without a password is refused unless this is "1": only the test database of
 # docker-compose.postgres.yml, which trusts every local connection, goes without one.
 NO_PASSWORD_FOR_TESTS_ENV = "GATEWAY_POSTGRES_TEST_NO_PASSWORD"
@@ -84,7 +98,16 @@ LOCK_POLL_MS = 20.0
 # The advisory lock keys: management writes, and applying the schema. Fixed, distinct.
 WRITE_LOCK = 0x6777_5752_4954_4531  # "gwWRITE1"
 SCHEMA_LOCK = 0x6777_5343_4845_4D31  # "gwSCHEM1"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# How long a settled reservation's id is kept, so that a settle tried again is not charged twice
+# (docs/37).
+SETTLED_KEEP_MS = 24 * 60 * 60 * 1000.0
+# A settle or release that could not be written is tried again, waiting this long at first,
+# doubling up to the most.
+RETRY_FIRST_MS = 100.0
+RETRY_MOST_MS = 5_000.0
+
+LOG = logging.getLogger("gateway.postgres")
 
 # The failures that mean the database could not answer: refused, never a default answer.
 _UNAVAILABLE: tuple[type[BaseException], ...] = (
@@ -216,6 +239,35 @@ CREATE TABLE modes (
   updated_at_ms double precision NOT NULL, PRIMARY KEY (scope_type, scope_id));
 """
 
+# Version 2 (docs/37): budgets, Postgres only (the SQLite ledger keeps its totals in memory).
+# A counter per application and period; a reservation per request in flight; the ids of the
+# reservations settled lately.
+PG_BUDGETS = """
+CREATE TABLE budget_counters (
+  application_id text NOT NULL, period_start_ms double precision NOT NULL,
+  committed_tokens bigint NOT NULL CHECK (committed_tokens >= 0),
+  reserved_tokens bigint NOT NULL CHECK (reserved_tokens >= 0),
+  PRIMARY KEY (application_id, period_start_ms));
+
+CREATE TABLE budget_reservations (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  application_id text NOT NULL, period_start_ms double precision NOT NULL,
+  tokens bigint NOT NULL CHECK (tokens >= 0),
+  expires_at_ms double precision NOT NULL);
+CREATE INDEX budget_reservations_by_expiry ON budget_reservations (expires_at_ms);
+CREATE INDEX budget_reservations_by_period
+  ON budget_reservations (application_id, period_start_ms, expires_at_ms);
+
+CREATE TABLE budget_settlements (
+  reservation_id bigint PRIMARY KEY, settled_at_ms double precision NOT NULL);
+"""
+
+# Each version and what it adds, applied in order to a database that has an earlier one.
+SCHEMA = ((1, PG_BASELINE), (2, PG_BUDGETS))
+
+# The tables of PG_BUDGETS: Postgres only, never copied to or from SQLite.
+BUDGET_TABLES = ("budget_counters", "budget_reservations", "budget_settlements")
+
 # Every table of the baseline, in an order foreign keys allow to fill (and the reverse to empty).
 TABLES = (
     "organizations",
@@ -231,6 +283,21 @@ TABLES = (
     "provider_keys",
     "modes",
 )
+
+
+def lock_timeout_from(environ: Mapping[str, str]) -> float:
+    """``GATEWAY_STATE_LOCK_TIMEOUT_MS``: how long a management write waits for the write lock
+    (default 2000). The error names the variable."""
+    raw = environ.get(LOCK_TIMEOUT_ENV)
+    if raw is None:
+        return DEFAULT_LOCK_TIMEOUT_MS
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{LOCK_TIMEOUT_ENV} must be a number of milliseconds") from None
+    if not value > 0:
+        raise ValueError(f"{LOCK_TIMEOUT_ENV} must be positive")
+    return value
 
 
 class PostgresPasswordMissingError(Exception):
@@ -264,6 +331,22 @@ def check_postgres_url(url: str, env: Mapping[str, str]) -> None:
         raise PostgresPasswordMissingError()
 
 
+class _NotOpen:
+    """The pools of a database not opened yet: every connection is refused."""
+
+    def acquire(self, *, timeout: float | None = None) -> _NotOpen:
+        return self
+
+    async def __aenter__(self) -> None:
+        raise ConnectionRefusedError("not open yet")
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
 class PostgresDatabase:
     """One gateway instance's Postgres: two pools, the write lock, and the clock of the
     database's windows (it is a ``StoreClock``)."""
@@ -284,8 +367,65 @@ class PostgresDatabase:
             contextvars.ContextVar("gateway_pg_transaction", default=None)
         )
 
+        self._opener: Callable[[], Awaitable[tuple[asyncpg.Pool, asyncpg.Pool]]] | None = None
+
     def __repr__(self) -> str:
         return "PostgresDatabase(<pools and address redacted>)"
+
+    @classmethod
+    def unopened(
+        cls,
+        url: str,
+        clock: Clock,
+        *,
+        env: Mapping[str, str],
+        schema: str | None = None,
+        request_pool_size: int = 10,
+        management_pool_size: int = 2,
+        lock_timeout_ms: float = DEFAULT_LOCK_TIMEOUT_MS,
+    ) -> PostgresDatabase:
+        """A database whose pools are made by ``open`` (in the server's lifespan, on its event
+        loop); until then every call is refused as unavailable. ``env`` is the process's
+        environment: a URL without a password is refused here, before anything else
+        (``check_postgres_url``)."""
+        check_postgres_url(url, env)
+        settings = {"search_path": schema} if schema is not None else None
+
+        # A closure, so the address is in no attribute and in no repr.
+        async def pools() -> tuple[asyncpg.Pool, asyncpg.Pool]:
+            requests = await asyncpg.create_pool(
+                url,
+                min_size=1,
+                max_size=request_pool_size,
+                command_timeout=COMMAND_TIMEOUT_S,
+                server_settings=settings,
+            )
+            try:
+                management = await asyncpg.create_pool(
+                    url,
+                    min_size=1,
+                    max_size=management_pool_size,
+                    command_timeout=COMMAND_TIMEOUT_S,
+                    server_settings=settings,
+                )
+            except BaseException:
+                await requests.close()
+                raise
+            return requests, management
+
+        closed = cast(asyncpg.Pool, _NotOpen())
+        db = cls(closed, closed, clock, lock_timeout_ms=lock_timeout_ms)
+        db._opener = pools
+        return db
+
+    async def open(self) -> None:
+        """Both pools, or ``StateUnavailableError`` (never the address or the password)."""
+        if self._opener is None:
+            raise RuntimeError("this database was built on its pools: there is nothing to open")
+        try:
+            self.requests, self.management = await self._opener()
+        except _UNAVAILABLE as exc:
+            raise StateUnavailableError(type(exc).__name__) from None
 
     @classmethod
     async def connect(
@@ -299,29 +439,18 @@ class PostgresDatabase:
         management_pool_size: int = 2,
         lock_timeout_ms: float = DEFAULT_LOCK_TIMEOUT_MS,
     ) -> PostgresDatabase:
-        """Both pools, or ``StateUnavailableError`` (never the address or the password).
-        ``env`` is the process's environment: a URL without a password is refused first
-        (``check_postgres_url``)."""
-        check_postgres_url(url, env)
-        settings = {"search_path": schema} if schema is not None else None
-        try:
-            requests = await asyncpg.create_pool(
-                url,
-                min_size=1,
-                max_size=request_pool_size,
-                command_timeout=COMMAND_TIMEOUT_S,
-                server_settings=settings,
-            )
-            management = await asyncpg.create_pool(
-                url,
-                min_size=1,
-                max_size=management_pool_size,
-                command_timeout=COMMAND_TIMEOUT_S,
-                server_settings=settings,
-            )
-        except _UNAVAILABLE as exc:
-            raise StateUnavailableError(type(exc).__name__) from None
-        return cls(requests, management, clock, lock_timeout_ms=lock_timeout_ms)
+        """``unopened`` and ``open``: both pools now."""
+        db = cls.unopened(
+            url,
+            clock,
+            env=env,
+            schema=schema,
+            request_pool_size=request_pool_size,
+            management_pool_size=management_pool_size,
+            lock_timeout_ms=lock_timeout_ms,
+        )
+        await db.open()
+        return db
 
     async def aclose(self) -> None:
         await self.requests.close()
@@ -405,9 +534,9 @@ class PostgresDatabase:
 
 async def ensure_schema(connection: asyncpg.Connection) -> bool:
     """In the caller's transaction: take the schema lock, so that instances starting together
-    apply the schema once, and create it if this database has none. Returns whether it was
-    created. Refuses a database whose version is newer than this code knows (its rules would
-    be unknown)."""
+    apply the schema once, and apply each version this database does not have yet, in order.
+    Returns whether anything was applied. Refuses a database whose version is newer than this
+    code knows (its rules would be unknown)."""
     await connection.execute("SELECT pg_advisory_xact_lock($1)", SCHEMA_LOCK)
     await connection.execute(
         "CREATE TABLE IF NOT EXISTS gateway_schema (version integer PRIMARY KEY,"
@@ -419,17 +548,20 @@ async def ensure_schema(connection: asyncpg.Connection) -> bool:
             f"the database's schema is version {found}; this gateway knows up to "
             f"{SCHEMA_VERSION}: upgrade the gateway first"
         )
-    if found is not None:
-        return False
-    await connection.execute(PG_BASELINE)
-    await connection.execute(
-        "INSERT INTO gateway_schema VALUES ($1, gateway_now_ms())", SCHEMA_VERSION
-    )
-    return True
+    applied = False
+    for version, sql in SCHEMA:
+        if found is not None and version <= found:
+            continue
+        await connection.execute(sql)
+        await connection.execute(
+            "INSERT INTO gateway_schema VALUES ($1, gateway_now_ms())", version
+        )
+        applied = True
+    return applied
 
 
 async def apply_schema(db: PostgresDatabase) -> int:
-    """Create the schema if this database has none (``ensure_schema``), in one transaction.
+    """Bring the schema to this code's version (``ensure_schema``), in one transaction.
     Returns the schema version."""
     try:
         async with (
@@ -1249,6 +1381,304 @@ class PostgresModeStore(_Store):
 
     async def set_application_mode(self, application_id: str, mode: Mode, at_ms: float) -> None:
         await self._set("application", application_id, mode, at_ms)
+
+
+# --- budgets (docs/37) ---------------------------------------------------------------------
+
+# The tokens of the period's usage events, for a counter seen for the first time: billed tokens,
+# as ``ModelUsage.billed_tokens`` counts them.
+_SEED = (
+    "INSERT INTO budget_counters"
+    " (application_id, period_start_ms, committed_tokens, reserved_tokens)"
+    " SELECT $1, $2, COALESCE(sum(prompt_tokens - cached_tokens + completion_tokens), 0), 0"
+    " FROM usage_events WHERE application_id = $1 AND occurred_at_ms >= $2"
+    " AND occurred_at_ms < $3 ON CONFLICT DO NOTHING"
+)
+# Q1: admitted while what is committed and what is in flight are below the budget. The row lock
+# of this UPDATE is what orders two instances: the second sees the first's reservation.
+_ADMIT = (
+    "UPDATE budget_counters SET reserved_tokens = reserved_tokens + $3"
+    " WHERE application_id = $1 AND period_start_ms = $2"
+    " AND committed_tokens + reserved_tokens < $4 RETURNING committed_tokens"
+)
+_UNRESERVE = (
+    "UPDATE budget_counters SET reserved_tokens = reserved_tokens - $3"
+    " WHERE application_id = $1 AND period_start_ms = $2"
+)
+# A reservation deleted and taken off its counter in one statement; nothing if it is gone.
+_TAKE_OFF = (
+    "WITH held AS (DELETE FROM budget_reservations WHERE id = $1"
+    " RETURNING application_id, period_start_ms, tokens)"
+    " UPDATE budget_counters c SET reserved_tokens = c.reserved_tokens - held.tokens FROM held"
+    " WHERE c.application_id = held.application_id AND c.period_start_ms = held.period_start_ms"
+)
+_COMMIT = (
+    "UPDATE budget_counters SET committed_tokens = committed_tokens + $3"
+    " WHERE application_id = $1 AND period_start_ms = $2"
+)
+
+
+class PostgresBudgets:
+    """Budgets every instance shares (``SharedBudgets``), on the database's clock: the period
+    and every expiry are decided on ``gateway_now_ms()``, read once per call (section 3.8).
+
+    - ``reserve``: the request's bound is added to the counter's reserved tokens if committed
+      and reserved are below the budget (Q1), and a reservation row is kept until
+      ``hold_ms`` past now. Otherwise ``BudgetExceededError``.
+    - ``settle``: the reservation is deleted and, if it was still there, taken off the
+      counter; the usage event is appended and its billed tokens committed. Once per
+      reservation: a settle tried again after an answer that was lost is not charged twice.
+    - ``release``: the reservation is deleted and taken off the counter.
+    - ``sweep``: every reservation past its expiry is released (an instance that died holding
+      one); it returns each one's application and tokens.
+
+    A settle or release the database does not take is kept and tried again on ``clock``; while
+    any is kept, ``healthy`` is False and ``reserve`` refuses (decision 8 of the plan).
+    """
+
+    def __init__(
+        self,
+        db: PostgresDatabase,
+        clock: Clock,
+        *,
+        periods: BudgetPeriods | None = None,
+        retention_ms: float | None = None,
+    ) -> None:
+        if retention_ms is not None and retention_ms <= 0:
+            raise ValueError("retention_ms must be positive")
+        self._db = db
+        self._clock = clock
+        self._usage = PostgresUsageStore(db)
+        self._store = _Store(db)
+        self._periods = periods if periods is not None else CalendarMonthsUTC()
+        self._retention_ms = retention_ms
+        # Settles and releases not written yet, oldest first, by reservation id.
+        self._waiting: list[tuple[int, Callable[[], Awaitable[None]]]] = []
+        self._retrying: asyncio.Task[None] | None = None
+
+    def __repr__(self) -> str:
+        return "PostgresBudgets(<database redacted>)"
+
+    @property
+    def healthy(self) -> bool:
+        return not self._waiting
+
+    @property
+    def retention_ms(self) -> float | None:
+        return self._retention_ms
+
+    async def _now(self) -> float:
+        return float(await self._store._value("SELECT gateway_now_ms()"))
+
+    async def reserve(
+        self, application_id: str, budget_tokens: int, tokens: int, *, hold_ms: float
+    ) -> Reservation:
+        if self._waiting:
+            raise StateUnavailableError("settle_waiting")
+        s = self._store
+        async with self._db.request_transaction():
+            now = await self._now()
+            start, end = self._periods.bounds(now)
+            admitted = await s._row(_ADMIT, application_id, start, tokens, budget_tokens)
+            if admitted is None:
+                # The first request of the period here: its counter, from the period's events.
+                await s._execute(_SEED, application_id, start, end)
+                admitted = await s._row(_ADMIT, application_id, start, tokens, budget_tokens)
+            if admitted is None:
+                raise await self._refusal(application_id, budget_tokens, start, end, now)
+            reservation_id = await s._value(
+                "INSERT INTO budget_reservations"
+                " (application_id, period_start_ms, tokens, expires_at_ms)"
+                " VALUES ($1, $2, $3, $4) RETURNING id",
+                application_id,
+                start,
+                tokens,
+                now + hold_ms,
+            )
+        return Reservation(application_id, tokens, int(reservation_id))
+
+    async def _refusal(
+        self, application_id: str, budget_tokens: int, start: float, end: float, now: float
+    ) -> BudgetExceededError:
+        row = await self._store._row(
+            "SELECT committed_tokens, reserved_tokens,"
+            " (SELECT min(expires_at_ms) FROM budget_reservations"
+            " WHERE application_id = $1 AND period_start_ms = $2)"
+            " FROM budget_counters WHERE application_id = $1 AND period_start_ms = $2",
+            application_id,
+            start,
+        )
+        committed, reserved, earliest = _tuple(row)
+        # B3: refused only because of what is in flight, room comes back when the earliest
+        # reservation ends, at the latest at its expiry; otherwise at the end of the period.
+        if committed < budget_tokens and earliest is not None:
+            retry_after_ms = max(0.0, float(earliest) - now)
+        else:
+            retry_after_ms = end - now
+        return BudgetExceededError(
+            application_id,
+            int(committed),
+            budget_tokens,
+            retry_after_ms=retry_after_ms,
+            held_tokens=int(reserved),
+        )
+
+    async def settle(
+        self,
+        reservation: Reservation,
+        result: RequestResult,
+        *,
+        model: str,
+        price_multiplier: float,
+        source: ChatSource | None = None,
+    ) -> float:
+        billed_cost_usd = result.cost_usd * price_multiplier
+
+        async def write() -> None:
+            await self._settle(reservation, result, model, billed_cost_usd, source)
+
+        await self._write_or_keep(reservation, write)
+        return billed_cost_usd
+
+    async def _settle(
+        self,
+        reservation: Reservation,
+        result: RequestResult,
+        model: str,
+        billed_cost_usd: float,
+        source: ChatSource | None,
+    ) -> None:
+        s = self._store
+        async with self._db.request_transaction():
+            now = await self._now()
+            if reservation.id is not None:
+                first = await s._value(
+                    "INSERT INTO budget_settlements VALUES ($1, $2)"
+                    " ON CONFLICT DO NOTHING RETURNING reservation_id",
+                    reservation.id,
+                    now,
+                )
+                if first is None:
+                    return  # written by an earlier try whose answer was lost
+                await self._take_off(reservation.id)
+            # Charged to the period it finished in.
+            start, end = self._periods.bounds(now)
+            event = UsageEvent.of(
+                reservation.application_id,
+                result,
+                model=model,
+                billed_cost_usd=billed_cost_usd,
+                occurred_at_ms=now,
+                source=source,
+            )
+            await self._usage.append(event)
+            billed = event.prompt_tokens - event.cached_tokens + event.completion_tokens
+            app = reservation.application_id
+            # No counter for this period yet: it is seeded from the events, this one included. If
+            # another instance seeded it meanwhile (without this event, not committed yet),
+            # nothing is inserted and this event is added to that counter.
+            if (
+                await s._execute(_COMMIT, app, start, billed) == 0
+                and await s._execute(_SEED, app, start, end) == 0
+            ):
+                await s._execute(_COMMIT, app, start, billed)
+
+    async def _take_off(self, reservation_id: int) -> None:
+        """Delete a reservation and take it off its counter, if it is still there (a sweep may
+        have released it already)."""
+        await self._store._execute(_TAKE_OFF, reservation_id)
+
+    async def release(self, reservation: Reservation) -> None:
+        if reservation.id is None:
+            return
+        reservation_id = reservation.id
+
+        async def write() -> None:
+            async with self._db.request_transaction():
+                await self._take_off(reservation_id)
+
+        await self._write_or_keep(reservation, write)
+
+    async def _write_or_keep(
+        self, reservation: Reservation, write: Callable[[], Awaitable[None]]
+    ) -> None:
+        try:
+            await write()
+        except StateUnavailableError as exc:
+            assert reservation.id is not None
+            LOG.warning(
+                "a budget write could not be made (%s); kept and tried again (reservation %d)",
+                exc,
+                reservation.id,
+            )
+            self._waiting.append((reservation.id, write))
+            if self._retrying is None or self._retrying.done():
+                self._retrying = asyncio.ensure_future(self._retry())
+
+    async def _retry(self) -> None:
+        wait_ms = RETRY_FIRST_MS
+        while self._waiting:
+            await self._clock.sleep_ms(wait_ms)
+            _, write = self._waiting[0]
+            try:
+                await write()
+            except StateUnavailableError:
+                wait_ms = min(2 * wait_ms, RETRY_MOST_MS)
+                continue
+            self._waiting.pop(0)
+            wait_ms = RETRY_FIRST_MS
+
+    async def sweep(self) -> list[Expired]:
+        s = self._store
+        async with self._db.request_transaction():
+            now = await self._now()
+            expired = await s._fetch(
+                "DELETE FROM budget_reservations WHERE expires_at_ms <= $1"
+                " RETURNING application_id, period_start_ms, tokens",
+                now,
+            )
+            for row in expired:
+                await s._execute(_UNRESERVE, *_tuple(row))
+            await s._execute(
+                "DELETE FROM budget_settlements WHERE settled_at_ms < $1", now - SETTLED_KEEP_MS
+            )
+        return [Expired(str(row[0]), int(row[2])) for row in expired]
+
+    async def usage(self, application_id: str) -> ApplicationUsage:
+        """The period's usage, from its events: what every instance has charged."""
+        start, end = self._periods.bounds(await self._now())
+        by_model = await self._usage.usage_by_model(application_id, start, end)
+        total = ModelUsage()
+        for usage in by_model.values():
+            total = ModelUsage(
+                requests=total.requests + usage.requests,
+                prompt_tokens=total.prompt_tokens + usage.prompt_tokens,
+                cached_tokens=total.cached_tokens + usage.cached_tokens,
+                completion_tokens=total.completion_tokens + usage.completion_tokens,
+                base_cost_usd=total.base_cost_usd + usage.base_cost_usd,
+                billed_cost_usd=total.billed_cost_usd + usage.billed_cost_usd,
+            )
+        return ApplicationUsage(application_id, start, end, total, by_model)
+
+    async def prune(self, limit: int | None = None) -> int:
+        """Usage events older than the retention, never the current period's (``CostLedger``)."""
+        if self._retention_ms is None:
+            return 0
+        now = await self._now()
+        period_start, _ = self._periods.bounds(now)
+        return await self._usage.prune(min(now - self._retention_ms, period_start), limit)
+
+    async def aclose(self) -> None:
+        """Stop trying. Each write still kept is logged by its reservation id alone; the sweep
+        of another instance releases the reservation, and the request's usage is lost."""
+        if self._retrying is not None:
+            self._retrying.cancel()
+        for reservation_id, _ in self._waiting:
+            LOG.error(
+                "stopping with a budget write not made (reservation %d): the sweep releases it, "
+                "and that request's usage is not charged",
+                reservation_id,
+            )
 
 
 def postgres_state(db: PostgresDatabase) -> StateBackend:

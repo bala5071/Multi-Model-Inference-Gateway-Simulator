@@ -22,6 +22,8 @@ EVENT_TYPES = (
     "circuit_breaker",
     # The shared counter store came back empty after a restart (docs/35).
     "state_store_restarted",
+    # A shared budget reservation outlived its request and was released (docs/37).
+    "reservation_expired",
 )
 
 
