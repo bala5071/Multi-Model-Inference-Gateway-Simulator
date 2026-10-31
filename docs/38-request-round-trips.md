@@ -1,34 +1,46 @@
 # 38. Store round trips on the request path
 
 PR 3c of `docs/scale-out-plan.md`. Two things: each mode is read once per chat request, and
-where a Postgres transaction's round trips go, measured, with a proposal for cutting them that
-is not built.
+again just before each hosted attempt; and where a Postgres transaction's round trips go,
+measured, with a proposal for cutting them that is not built.
 
-## Each mode read once per request
+## The modes: once per request, and again before each hosted attempt
 
 The chat handler reads the organization's and the application's mode once, through
 `ChatRouter.mode` (so `effective_mode` stays the only place the mode is decided), right after
-the budget's reserve, where it first asked for candidates before. `ChatRouter.candidates` and
-`ChatRouter.run` take that mode and read no store for it. The egress scope the router opens
-answers "may it go hosted?" from the same value, at every request, connection and resolved name.
+the budget's reserve, where it first asked for candidates before. `ChatRouter.candidates` takes
+that mode and reads no store for it, and the egress scope the router opens answers "may it go
+hosted?" from the same value, at every request, connection and resolved name.
 
-**What this changes, on request.** Until PR 3c a mode made stricter mid-request stopped that
-request's next attempt, at the router and at the egress guard (note 33). Now a request finishes
-under the mode it started with, its fallback attempts included, and a mode change applies from
-the next request. How long a stricter mode can take to reach every request: one request's
-lifetime, at most its tier's total timeout. What stays: the guard fails closed without a scope,
-refuses every hosted destination under a `local_only` request, and an answer already streaming
-is not cut. The mode endpoints' `in_flight` sentence says the new rule; their codes and fields
-are unchanged.
+**One exception, added on approval of #28: before every hosted attempt** (a primary, a fallback,
+the retry after invalid tool JSON), the router reads both modes again, just before the attempt
+leaves the machine (after the breaker and key check, before the key is leased and the guarded
+client opened). If the current mode is stricter than the request's, that attempt is not made: the
+candidate is skipped and a breaker slot it claimed is given back. The rule, as the mode
+endpoints' `in_flight` sentence now says:
+
+- **a stricter mode** stops every hosted attempt a request in flight has not yet made;
+- **a looser mode** never opens one for it: it applies from the next request;
+- **an answer already streaming** from a hosted provider is not cut: its prompt has been sent.
+
+So a request the gateway's tier answers reads the modes once; one with a hosted attempt reads
+them once more per hosted attempt. The egress guard still fails closed without a scope and
+refuses every hosted destination under a `local_only` request. The window left for a stricter
+mode: between that read and the first byte sent, the key is read for the lease, the provider's
+name resolved and the connection opened; a change in that window applies to the next attempt.
 
 **Tested** (`tests/test_chat_routing.py`):
 
-- a mode changed mid-request, the organization's or the application's, stricter or looser, is
-  not seen by that request and is seen by the next (four cases);
-- the guard answers from the request's mode: the organization made `local_only` while the
-  provider's name is resolved does not stop that connection, and the next request is local;
-- each mode read once per request, counted on the store, on the request that read them most
-  (the primary refused, then the tier, streaming and not) and on one the tier answers at once;
+- the organization's or the application's mode made stricter mid-request stops the request's
+  hosted fallback, and the next request's; made looser, the request does not fall back and the
+  next one does (four cases);
+- made stricter while the first primary is tried (hosted primary to hosted fallback, organization
+  and application), the next primary is not tried and the gateway's tier answers;
+- an answer already streaming is not cut, and the next request does not reach the provider;
+- the guard answers from the request's mode: a change while the provider's name is resolved,
+  after the router's read, does not stop that connection, and the next request is local;
+- counted on the store: a request the tier answers reads each mode once (`local_only` and
+  `local_with_hosted_fallback`); with one hosted attempt, twice;
 - the store calls of a chat request, on SQLite and on Postgres
   (`tests/test_budgets_postgres.py`), and the benchmark's round trips by kind.
 
@@ -37,9 +49,9 @@ are unchanged.
 | Chat request, shared mode | Before | After |
 |---|---|---|
 | Gateway tier | 7: `lookup_key`, reserve, the two modes twice, settle | 5: `lookup_key`, reserve, the two modes, settle |
-| One organization provider | 21: `lookup_key`, reserve, the candidates twice (the modes, `list_for`, `get_key`), the modes, `get_key` twice, the modes three times (the egress scope), settle | 11: `lookup_key`, reserve, the two modes, `list_for` and `get_key` twice (the handler's and the router's candidates), `get_key` twice (skip, lease), settle |
+| One organization provider | 21: `lookup_key`, reserve, the candidates twice (the modes, `list_for`, `get_key`), the modes, `get_key` twice, the modes three times (the egress scope), settle | 13: `lookup_key`, reserve, the two modes, `list_for` and `get_key` twice (the handler's and the router's candidates), `get_key` (skip), the two modes again (before the hosted attempt), `get_key` (lease), settle |
 
-On SQLite, without the shared budgets: 6 to 4 and 20 to 10 (the usage row's `append` in place
+On SQLite, without the shared budgets: 6 to 4 and 20 to 12 (the usage row's `append` in place
 of the reserve and the settle).
 
 ## Where a request's round trips go

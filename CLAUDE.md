@@ -78,7 +78,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `chatrouter.py` — `ChatRouter`: a chat request's candidates (the tier, the organization's
   providers for that tier) in the mode's order, the five fallback triggers, never after output,
   never another tier; the mode read once per request by the handler and passed in, the egress
-  scope answering from it (docs/38); `X-Provider` (`gateway` for the gateway's own tier, `local` before PR 20),
+  scope answering from it, and read again just before each hosted attempt, which a stricter mode
+  refuses (docs/33, docs/38); `X-Provider` (`gateway` for the gateway's own tier, `local` before PR 20),
   `X-Provider-Class` and the usage record's source (exists)
 - `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
   warning, on the injected clock, `circuit_breaker` events (exists)

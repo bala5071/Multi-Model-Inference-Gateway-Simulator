@@ -124,8 +124,9 @@ None of them takes the write lock or a management connection. The batched `last_
 write (note 20) is one more statement per flush, not per request. PR 3c reads each mode
 once per request: 12 of the 20 calls of a provider-served request are mode reads.
 
-**Changed in PR 3c (note 38):** the two modes are read once per chat request. The calls are
-then 5, 4 and 10 (on SQLite), counted by the same test.
+**Changed in PR 3c (note 38):** the two modes are read once per chat request, and again
+just before each hosted attempt. The calls are then 5, 4 and 12 (on SQLite), counted by the same
+test.
 
 ## Migration and rollback
 

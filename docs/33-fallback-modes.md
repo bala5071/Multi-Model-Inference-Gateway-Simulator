@@ -114,14 +114,24 @@ digits, so neither word can be one.
    destination is refused (fail closed). Test-connection opens an explicit probe scope: an
    org_admin's request to send fixed probe prompts, audited.
 
-**Changed in PR 3c (note 38): each mode is read once per request.** Until then both layers asked
-the store again, so a mode made stricter while a request was in flight stopped its next attempt
-(tested at the router and at the guard; the guard test found the guard asked only before
-resolving, fixed then). Now the chat handler reads the two modes once and both layers answer
-from that value: a request finishes under the mode it started with, fallback attempts included,
-and a change applies from the next request. A request lives at most its tier's total timeout.
-**An answer already streaming from a hosted provider is not cut when the mode becomes stricter:
-its prompt has already been sent.** Every mode change's answer says so (`in_flight`, below). Tested over HTTP: a hosted answer is
+**Changed in PR 3c (note 38): each mode is read once per request, and again just before each
+hosted attempt.** Until then both layers asked the store again at every step. Now the chat
+handler reads the two modes once, and the candidates and the egress scope answer from that
+value. Before every hosted attempt (a primary, a fallback, a retry) the router reads both modes
+again, just before the attempt leaves the machine, and does not make it if the current mode is
+stricter than the request's. So:
+
+- **a mode made stricter stops every hosted attempt a request in flight has not yet made**
+  (tested for the organization and the application, before a fallback and before the next
+  primary);
+- **a mode made looser never opens one for a request in flight:** it applies from the next
+  request;
+- **an answer already streaming from a hosted provider is not cut when the mode becomes
+  stricter: its prompt has already been sent.**
+
+The guard still asks the request's scope at every request, connection and resolved name; the
+scope answers from the request's mode. Every mode change's answer states the rule (`in_flight`,
+below). Tested over HTTP: a hosted answer is
 streaming when an org_admin makes the organization `local_only` through the endpoint; that
 answer ends normally, with `[DONE]`. The next request is served locally without contacting the
 provider. With the router's own checks bypassed (the provider handed over as a candidate
@@ -166,9 +176,9 @@ audited (`mode_changed`, with `old_mode`, `new_mode` and `step_up_consumed`) in 
 transaction as the change. A missing organization or application and a forbidden one get the same
 answer, byte for byte. The application answer includes its `effective_mode`. Both answers always
 include `in_flight`, the same fixed sentence whether the change is stricter or not. Since PR 3c:
-"A mode change applies from the next request. A request already in flight finishes under the
-mode it started with, its fallback attempts included: a stricter mode does not stop it, and an
-answer already streaming from a hosted provider is not cut."
+"A mode change applies to the next request. A stricter mode also stops every hosted attempt a
+request in flight has not yet made; a looser mode does not open one for it. An answer already
+streaming from a hosted provider is not cut: its prompt has already been sent."
 
 ## Measured
 

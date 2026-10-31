@@ -548,7 +548,7 @@ order.
 | 2 | `scale-out/step-2` | Valkey counters (reordered on request, 2026-10-29): `redis` and the Valkey image (provenance check), the window scripts, the audit cap, the breakers, failing closed, restart detection, the skew check, the compose file and CI job, the two-instance test of a shared limit | Only with `GATEWAY_COUNTERS=valkey`; the default stays in memory |
 | 3 | `scale-out/step-3` | Postgres: `asyncpg` (provenance check), `pg0001`, every durable store, the budget reservation and its two-instance edge test (Q1), the step-up claim, the lockout update, the write lock, `migrate-to-postgres` and back; the skew check moves to `gateway_now_ms()`; `GATEWAY_STATE=shared`; `/readyz` | Only with `shared` |
 | 3b | `scale-out/step-3b` | Budgets on Postgres: the reservation (3.1) and its two-instance edge test (Q1), the per-tier settings (Q2); `GATEWAY_STATE=shared` allowed; Valkey's skew check against `gateway_now_ms()` | Only with `shared` |
-| 3c | `scale-out/step-3c` | Each mode read once per chat request and passed on (note 36: 12 of the 20 store calls of a provider-served request) | Fewer store calls; a mode change applies from the next request only (changed on request, 2026-10-30: a request keeps the mode it read) |
+| 3c | `scale-out/step-3c` | Each mode read once per chat request and passed on (note 36: 12 of the 20 store calls of a provider-served request) | Fewer store calls; the modes read again just before each hosted attempt: a stricter mode stops the next hosted attempt of a request in flight, a looser one applies from the next request (on approval of #28, 2026-10-30) |
 | 2b | `scale-out/step-2b` | After PR 3, recorded 2026-10-29, not built: the breaker reports off the request path, and a per-request cap on hosted attempts (below) | Chat: fewer counter calls on the path; at most 3 hosted attempts a request by default |
 | 4 | `scale-out/step-4` | The two-instance tests in process and in two processes, the mutation table, the failure tests, `benchmarks/shared_state.py`, the note, the compose file for a two-instance demo on Postgres and Valkey | None |
 
@@ -773,8 +773,8 @@ Then, in order:
   on Postgres, which PR 3b is the first to have.
 - **PR 3c: each mode read once per request.** A chat request served by an organization provider
   reads the two modes six times (12 of its 21 store calls, note 37). It reads them once and
-  passes the effective mode on. Changed on request (2026-10-30, section below): a mode change
-  applies from the next request only.
+  passes the effective mode on, and reads them again just before each hosted attempt (on
+  approval of #28, section below).
 
 ### PR 3b: budgets on Postgres, proposed before building (2026-10-29)
 
@@ -1008,12 +1008,17 @@ store for it. The router's check before each hosted candidate and the egress sco
 (at every request, connection and resolved name) answer from it.
 
 **What this changes (docs/33).** Today a mode made stricter mid-request stops that request's next
-attempt, at the router and again at the egress guard; two tests hold it. After this PR, the
-request finishes under the mode it read, and the change applies from the next request. A request
-lives at most its tier's total timeout, so that is how long a stricter mode can take to reach
-every request. The guard still fails closed without a scope, and still refuses every hosted
-destination under a `local_only` request. The `in_flight` sentence of the mode endpoints
-changes to say this. Its error codes and fields stay the same.
+attempt, at the router and again at the egress guard; two tests hold it. As first built, the
+request finished under the mode it read, and every change applied from the next request.
+
+**On approval of #28 (2026-10-30), the rule is:** before every hosted attempt (a primary, a
+fallback, a retry) the router reads both modes again, just before the attempt leaves the
+machine, and refuses the attempt if the current mode is stricter than the request's. A stricter
+mode therefore stops the next hosted attempt of a request in flight; a looser mode never opens
+one for it and applies from the next request; an answer already streaming is not cut.
+Everything else uses the mode read once. The guard still fails closed without a scope, and
+still refuses every hosted destination under a `local_only` request. The `in_flight` sentence
+of the mode endpoints says this. Its error codes and fields stay the same.
 
 **How it is measured.** `benchmarks/request_store_calls.py`, committed before the change and run
 three times there, then three times after it. Each chat request goes through the whole app on the
