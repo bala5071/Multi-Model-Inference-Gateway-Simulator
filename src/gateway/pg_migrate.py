@@ -97,6 +97,8 @@ ORDER_BY = {
     "provider_configs": "id",
     "provider_keys": "provider_id",
     "modes": "scope_type, scope_id",
+    "settings_current": "scope_type, scope_id",
+    "settings_versions": "scope_type, scope_id, version",
 }
 IN_ORDER = frozenset(t for t, order in ORDER_BY.items() if order in ("ord", "seq"))
 

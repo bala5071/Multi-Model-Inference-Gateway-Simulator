@@ -227,19 +227,28 @@ class Router:
         *,
         model: str | None = None,
         quality: Quality | None = None,
+        aliases: Mapping[str, str] | None = None,
     ) -> Route:
         """Pick the model for a request that names either a model or a quality.
 
-        Raises ``UnknownModelError`` (the model does not exist at all) or
-        ``ModelNotAllowedError`` (it exists but the plan does not include it).
+        ``aliases`` are the application's own names for its tiers (docs/39), tried before the
+        registry's names. Raises ``UnknownModelError`` (the model does not exist at all) or
+        ``ModelNotAllowedError`` (it exists but the plan does not include it, or the
+        application's settings leave no model at all).
         """
         if (model is None) == (quality is None):
             raise ValueError("give exactly one of model and quality")
         plan = application.plan
         if quality is not None:
+            if not plan.models:
+                # Its settings allow no tier: what the quality would pick is not allowed.
+                wanted = pick_by_quality(self._registry.names, quality)
+                raise ModelNotAllowedError(application.id, plan, wanted, ())
             return Route(application.id, plan, pick_by_quality(plan.models, quality))
 
         assert model is not None
+        if aliases and model in aliases:
+            model = aliases[model]
         resolved = self._registry.resolve(model)
         if resolved not in plan.models:
             plans_with_model = [p.name for p in self._config.plans.values() if resolved in p.models]

@@ -165,6 +165,8 @@ class ApiKeyService:
             or (found.record.expires_at_ms is not None and now_ms >= found.record.expires_at_ms)
         ):
             raise InvalidApiKeyError()
+        # The application carries the settings rows read with the key: the request is decided
+        # on them, with no read of its own (docs/39).
         record, application = found.record, found.application
         self._pending[record.key_id] = now_ms
         if self._epoch.epoch_ms() - self._last_flush_ms >= self._flush_ms:

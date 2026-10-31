@@ -98,7 +98,14 @@ from gateway.chat import (
     json_object,
 )
 from gateway.chatrouter import ChatRouter, NoCandidateError, RoutedOutcome, RouteTrace
-from gateway.chatservice import GATEWAY_PROVIDER, ChatOutcome, ChatService
+from gateway.chatservice import (
+    DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
+    DEFAULT_TOTAL_TIMEOUT_MS,
+    GATEWAY_PROVIDER,
+    ChatOutcome,
+    ChatService,
+    ChatTimeouts,
+)
 from gateway.clock import Clock, ClockEpoch, EpochSource, PacedSimClock, SystemEpoch, WallClock
 from gateway.continuous import RequestTooLargeError, build_continuous_registry
 from gateway.counters import SharedCounters
@@ -201,6 +208,18 @@ from gateway.redaction import install as install_redaction
 from gateway.registry import ModelRegistry, UnknownModelError
 from gateway.routing import ModelNotAllowedError, Quality, Router, load_plans, pick_by_quality
 from gateway.schema import GenerateRequest, RequestResult
+from gateway.settings import (
+    DocumentCache,
+    EffectiveSettings,
+    PlatformSettings,
+    Scope,
+    SettingsStore,
+    SettingsUnreadableError,
+    StoredSettings,
+    effective_application,
+    reserved_names,
+    resolve,
+)
 from gateway.state import (
     POSTGRES_URL_ENV,
     STATE_ENV,
@@ -828,6 +847,15 @@ class Durable(Protocol):
     async def open(self) -> None: ...
 
     async def aclose(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class Keyed:
+    """A keyed request's caller: the application as the request sees it (its effective
+    settings applied) and those settings, decided once from the rows read with the key."""
+
+    application: Application
+    settings: EffectiveSettings
 
 
 class _Hold:
@@ -1638,6 +1666,44 @@ def _invalid(field: str, message: str) -> JSONResponse:
     )
 
 
+# The max_tokens a request was served with (docs/39): its own, or the application's
+# default_max_tokens; "none" when no limit applies at all.
+MAX_TOKENS_HEADER = "X-Max-Tokens-Applied"
+
+
+def applied_header(max_tokens: int | None) -> dict[str, str]:
+    return {MAX_TOKENS_HEADER: str(max_tokens) if max_tokens is not None else "none"}
+
+
+def platform_settings(
+    registry: ModelRegistry, generate_timeout_ms: float | None, chat: ChatService | None = None
+) -> PlatformSettings:
+    """This instance's values at the top of the settings' levels (docs/39)."""
+    first = chat.first_token_timeout_ms if chat is not None else DEFAULT_FIRST_TOKEN_TIMEOUT_MS
+    total = chat.total_timeout_ms if chat is not None else DEFAULT_TOTAL_TIMEOUT_MS
+    return PlatformSettings(
+        tiers=registry.names,
+        reserved_model_names=reserved_names(registry.names, registry.valid_names),
+        generate_timeout_ms=generate_timeout_ms,
+        chat_first_token_ms=first,
+        chat_total_timeout_ms=total,
+    )
+
+
+def default_platform_settings() -> PlatformSettings:
+    """The platform values the server factories run with (``DEFAULT_OVERLOAD``'s timeout, the
+    chat service's defaults, the profiles' tiers and aliases), for the operator's CLI, which
+    has no registry. A test keeps it equal to the default server's."""
+    tiers = tuple(tier.value for tier in Tier)
+    return PlatformSettings(
+        tiers=tiers,
+        reserved_model_names=reserved_names(tiers, (PROFILES[tier].name for tier in Tier)),
+        generate_timeout_ms=DEFAULT_OVERLOAD.request_timeout_ms,
+        chat_first_token_ms=DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
+        chat_total_timeout_ms=DEFAULT_TOTAL_TIMEOUT_MS,
+    )
+
+
 def create_app(
     registry: ModelRegistry,
     clock: Clock,
@@ -1660,6 +1726,7 @@ def create_app(
     chat_adapters: Mapping[str, Backend] | None = None,
     providers: ProviderService | None = None,
     modes: ModeStore | None = None,
+    settings: SettingsStore | None = None,
     local_destinations: LocalDestinations | None = None,
     counters: SharedCounters | None = None,
     startup_applications: Sequence[Application] | None = None,
@@ -1804,6 +1871,15 @@ def create_app(
         if slo_policy is not None
         else None
     )
+
+    # Where load control reads an application's settings (docs/39): the given store, or the
+    # in-memory application store's own. The request path reads them with the key instead.
+    settings_store = settings
+    if settings_store is None and applications is not None:
+        if isinstance(applications.store, InMemoryApplicationStore):
+            settings_store = applications.store.settings
+        elif load_control or autostart_load is not None:
+            raise ValueError("load control with a database needs its settings store (settings=)")
 
     # Fallback modes and the providers' circuit breakers (docs/33). The router owns the
     # breakers and publishes their transitions; nothing reads them back from the bus.
@@ -1999,6 +2075,20 @@ def create_app(
             headers=_NO_STORE,
         )
 
+    @app.exception_handler(SettingsUnreadableError)
+    async def settings_unreadable(request: Request, exc: SettingsUnreadableError) -> JSONResponse:
+        # A row that cannot be judged: refused as a store that cannot answer is, never served
+        # with a looser value. The log names the scope, its version and the check, never the
+        # document (docs/39).
+        logging.getLogger("gateway.settings").warning(
+            "settings unreadable: %s %s version %d, check %s",
+            exc.scope.value,
+            exc.scope_id,
+            exc.version,
+            exc.check,
+        )
+        return await state_unavailable(request, StateUnavailableError("settings"))
+
     @app.exception_handler(RateLimitedError)
     async def rate_limited(_: Request, exc: RateLimitedError) -> JSONResponse:
         retry_after_s = max(1, math.ceil(exc.retry_after_ms / 1000))
@@ -2123,51 +2213,75 @@ def create_app(
         )
 
     async def serve(
-        body: GenerateBody, response: Response, caller: Application | None
+        body: GenerateBody,
+        response: Response,
+        caller: Application | None,
+        settings: EffectiveSettings | None = None,
     ) -> GenerateResponse | JSONResponse | StreamingResponse:
         """Serve one generate request; ``caller`` is None exactly when there are no
-        applications. However it ends, a reservation it made and did not settle is released
-        here, or by its stream once one has taken it over (docs/37)."""
+        applications, and ``settings`` are then None too. However it ends, a reservation it
+        made and did not settle is released here, or by its stream once one has taken it over
+        (docs/37)."""
         held: list[_Hold] = []
         try:
-            return await serve_held(body, response, caller, held)
+            return await serve_held(body, response, caller, settings, held)
         finally:
             if held and not held[0].streaming:
                 await held[0].release()
 
     async def serve_held(
-        body: GenerateBody, response: Response, caller: Application | None, held: list[_Hold]
+        body: GenerateBody,
+        response: Response,
+        caller: Application | None,
+        settings: EffectiveSettings | None,
+        held: list[_Hold],
     ) -> GenerateResponse | JSONResponse | StreamingResponse:
         hold: _Hold | None = None
-        if body.model is None and body.quality is None:
+        quality = body.quality
+        if body.model is None and quality is None and settings is not None:
+            quality = settings.default_quality
+        if body.model is None and quality is None:
             return choice_error("Give either a model or a quality.", "model")
-        if body.model is not None and body.quality is not None:
+        if body.model is not None and quality is not None:
             return choice_error("Give a model or a quality, not both.", "quality")
 
         price_multiplier = 1.0
         allowed_models: tuple[str, ...] = registry.names
         max_tokens = body.max_tokens
+        allow_downgrade = body.allow_downgrade
+        request_timeout_ms = timeout_ms
         if caller is None:
             if body.model is not None:
                 model = registry.resolve(body.model)
             else:
-                assert body.quality is not None
-                model = pick_by_quality(registry.names, body.quality)
+                assert quality is not None
+                model = pick_by_quality(registry.names, quality)
         else:
             assert router is not None
             assert rate_limiter is not None
-            if caller.max_tokens is not None:
-                if max_tokens is not None and max_tokens > caller.max_tokens:
-                    return choice_error(
-                        f"At most {caller.max_tokens} on this application's plan.", "max_tokens"
-                    )
-                max_tokens = max_tokens or caller.max_tokens
+            assert settings is not None
+            if (
+                caller.max_tokens is not None
+                and max_tokens is not None
+                and max_tokens > caller.max_tokens
+            ):
+                return choice_error(
+                    f"At most {caller.max_tokens} on this application's plan.", "max_tokens"
+                )
+            if max_tokens is None:
+                # Applied and enforced as the request's own (docs/39, Q4).
+                max_tokens = settings.default_max_tokens
+            if "allow_downgrade" not in body.model_fields_set:
+                allow_downgrade = settings.allow_downgrade_default
+            request_timeout_ms = settings.generate_timeout_ms
             try:
                 await rate_limiter.admit(caller.id, caller.requests_per_minute)
             except RateLimitedError:
                 monitoring.rate_limited(caller.id)
                 raise
-            route = router.route(caller, model=body.model, quality=body.quality)
+            route = router.route(
+                caller, model=body.model, quality=quality, aliases=settings.model_aliases
+            )
             try:
                 reservation = await book.reserve(
                     caller.id,
@@ -2185,7 +2299,7 @@ def create_app(
             allowed_models = route.plan.models
 
         downgraded_from: str | None = None
-        if monitor is not None and body.allow_downgrade:
+        if monitor is not None and allow_downgrade:
             # Only ever to a cheaper model the caller is already entitled to.
             healthier = pick_downgrade(allowed_models, model, monitor.is_degraded)
             if healthier != model:
@@ -2193,7 +2307,7 @@ def create_app(
 
         request_id = f"req-{next(request_numbers)}"
         application_id = caller.id if caller is not None else None
-        headers = {"X-Model-Used": model}
+        headers = {"X-Model-Used": model, **applied_header(max_tokens)}
         if downgraded_from is not None:
             headers["X-Downgraded-From"] = downgraded_from
             monitoring.downgraded(application_id, downgraded_from, model)
@@ -2221,14 +2335,22 @@ def create_app(
                 monitoring.request_ended(model)
 
         work = tracked()
-        guarded = run_with_timeout(clock, work, timeout_ms) if timeout_ms is not None else work
+        guarded = (
+            run_with_timeout(clock, work, request_timeout_ms)
+            if request_timeout_ms is not None
+            else work
+        )
 
         if not body.stream:
             try:
                 result = await guarded
             except (QueueFullError, RequestTimeoutError) as exc:
                 status, error, error_headers = failure(exc, model, application_id)
-                return JSONResponse({"error": error}, status_code=status, headers=error_headers)
+                return JSONResponse(
+                    {"error": error},
+                    status_code=status,
+                    headers={**(error_headers or {}), **applied_header(max_tokens)},
+                )
             payload = await settle(
                 result,
                 request_id=request_id,
@@ -2255,7 +2377,11 @@ def create_app(
             failed = task.exception()
             if isinstance(failed, QueueFullError | RequestTimeoutError):
                 status, error, error_headers = failure(failed, model, application_id)
-                return JSONResponse({"error": error}, status_code=status, headers=error_headers)
+                return JSONResponse(
+                    {"error": error},
+                    status_code=status,
+                    headers={**(error_headers or {}), **applied_header(max_tokens)},
+                )
             task.result()
             raise AssertionError("a request finished without producing a token")
 
@@ -2342,31 +2468,42 @@ def create_app(
     else:
         keys = applications.keys
 
+        chat = ChatService(registry, clock, chat_adapters)
+        platform = platform_settings(registry, timeout_ms, chat)
+        app.state.settings_platform = platform
+        documents = DocumentCache()
+
+        def keyed(application: Application) -> Keyed:
+            """A request's settings, decided once from the rows its key lookup read (docs/39):
+            a missing row is the defaults; a row that cannot be judged raises
+            ``SettingsUnreadableError`` (503). The application as the request sees it."""
+            effective = resolve(platform, application, application.stored_settings, documents)
+            return Keyed(effective_application(application, effective), effective)
+
         # async, so it runs on the event loop: a dependency run on a thread would let a
         # SimClock's time jump, and the SQLite connection belongs to the loop's thread.
-        async def authenticate(authorization: str | None = Header(default=None)) -> Application:
+        async def authenticate(authorization: str | None = Header(default=None)) -> Keyed:
             scheme, _, credentials = (authorization or "").strip().partition(" ")
             if scheme.lower() != "bearer" or not credentials.strip():
                 raise ApiKeyRequiredError()
-            return await keys.authenticate(credentials.strip())
+            return keyed(await keys.authenticate(credentials.strip()))
 
         @app.post("/v1/generate", response_model=GenerateResponse)
         @public_route("an application API key, checked by the route")
         async def generate_for_application(
             body: GenerateBody,
             response: Response,
-            caller: Application = Depends(authenticate),
+            caller: Keyed = Depends(authenticate),
         ) -> GenerateResponse | JSONResponse | StreamingResponse:
-            return await serve(body, response, caller)
+            return await serve(body, response, caller.application, caller.settings)
 
         @app.get("/v1/applications/me/usage", response_model=ApplicationUsageResponse)
         @public_route("an application API key, checked by the route")
         async def application_usage(
-            caller: Application = Depends(authenticate),
+            caller: Keyed = Depends(authenticate),
         ) -> ApplicationUsageResponse:
-            return await usage_body(caller)
+            return await usage_body(caller.application)
 
-        chat = ChatService(registry, clock, chat_adapters)
         if local_destinations is None:
             local_destinations = LocalDestinations.loopback_of(
                 a.base_url for a in (chat_adapters or {}).values() if isinstance(a, HttpAdapter)
@@ -2390,10 +2527,21 @@ def create_app(
             multiplier: float,
             model: str,
             source: ChatSource,
+            applied: int | None = None,
         ) -> None:
             """What ``settle`` records for a generate request, for a chat one: metrics, the
             SLO monitor, the ledger and monitoring. No cost is computed for chat: only prices
             an organization enters will be (docs/31), so the ledger records 0."""
+            produced = outcome.result.usage.output_tokens
+            if applied is not None and produced > applied:
+                # Sent as the provider's limit, but its tokens cannot be counted as they stream:
+                # what it reports is settled, and said here (docs/39). Ids and counts only.
+                logging.getLogger("gateway.settings").warning(
+                    "provider %s answered %d completion tokens over the applied max_tokens %d",
+                    outcome.provider,
+                    produced - applied,
+                    applied,
+                )
             # Keyed by the routed tier, as for /v1/generate (a worker's result names its
             # profile instead).
             timing = outcome.timing
@@ -2466,7 +2614,7 @@ def create_app(
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             try:
-                caller = await keys.authenticate(credentials.strip())
+                found = keyed(await keys.authenticate(credentials.strip()))
             except InvalidApiKeyError:
                 return _openai_error(
                     401,
@@ -2492,12 +2640,18 @@ def create_app(
                         param=param,
                     )
                 return _openai_error(422, "invalid_request", problem["msg"], param=param)
-            if (body.model is None) == (body.quality is None):
+            caller, settings = found.application, found.settings
+            quality = body.quality
+            if body.model is None and quality is None:
+                quality = settings.default_quality
+            if (body.model is None) == (quality is None):
                 return _openai_error(
                     422, "invalid_request", "Give either a model or a quality.", param="model"
                 )
             assert router is not None
             assert rate_limiter is not None
+            # Applied and enforced as the request's own when it names none (docs/39, Q4).
+            max_tokens = body.max_tokens if body.max_tokens is not None else None
             if caller.max_tokens is not None and (body.max_tokens or 0) > caller.max_tokens:
                 return _openai_error(
                     422,
@@ -2517,8 +2671,12 @@ def create_app(
                     kind="rate_limit_error",
                     headers={"Retry-After": str(seconds)},
                 )
+            if max_tokens is None:
+                max_tokens = settings.default_max_tokens
             try:
-                route = router.route(caller, model=body.model, quality=body.quality)
+                route = router.route(
+                    caller, model=body.model, quality=quality, aliases=settings.model_aliases
+                )
             except UnknownModelError as exc:
                 return _openai_error(
                     404, "unknown_model", f"Unknown model {exc.model!r}.", param="model"
@@ -2535,7 +2693,7 @@ def create_app(
                         route.model,
                         # Q2, B4: the messages and tools as sent, in bytes.
                         json.dumps([raw.get("messages"), raw.get("tools")]),
-                        body.max_tokens or caller.max_tokens,
+                        max_tokens,
                     ),
                     hold_ms=hold_ms,
                 )
@@ -2554,8 +2712,8 @@ def create_app(
             request_id = f"req-{next(request_numbers)}"
             try:
                 chat_req = chat_request(body, request_id, route.model)
-                if chat_req.max_tokens is None and caller.max_tokens is not None:
-                    chat_req = dataclasses.replace(chat_req, max_tokens=caller.max_tokens)
+                if chat_req.max_tokens is None and max_tokens is not None:
+                    chat_req = dataclasses.replace(chat_req, max_tokens=max_tokens)
             except ChatInputError as exc:
                 return _openai_error(422, "invalid_request", str(exc), param=exc.param)
             # The request's mode, read once: the router and the egress guard use this value for
@@ -2600,6 +2758,11 @@ def create_app(
                 return f"data: {json.dumps(body_)}\n\n"
 
             def failure(exc: Exception) -> JSONResponse:
+                answer = refusal(exc)
+                answer.headers.update(applied_header(max_tokens))
+                return answer
+
+            def refusal(exc: Exception) -> JSONResponse:
                 if isinstance(exc, ProviderError):
                     return _provider_error(exc)
                 if isinstance(exc, ChatInputError):
@@ -2623,7 +2786,15 @@ def create_app(
                 monitoring.request_started(route.model)
                 try:
                     work = chat_router.run(
-                        chat_req, caller.organization_id, caller.id, mode, on_delta, trace
+                        chat_req,
+                        caller.organization_id,
+                        caller.id,
+                        mode,
+                        on_delta,
+                        trace,
+                        timeouts=ChatTimeouts(
+                            settings.chat_first_token_ms, settings.chat_total_timeout_ms
+                        ),
                     )
                     if timeout_ms is not None:
                         return await run_with_timeout(clock, work, timeout_ms)
@@ -2637,7 +2808,9 @@ def create_app(
                 except CHAT_FAILURES as exc:
                     return failure(exc)
                 outcome = routed.outcome
-                await account_chat(outcome, hold, caller, multiplier, route.model, routed.source)
+                await account_chat(
+                    outcome, hold, caller, multiplier, route.model, routed.source, max_tokens
+                )
                 result = outcome.result
                 message: dict[str, object] = {
                     "role": "assistant",
@@ -2662,7 +2835,7 @@ def create_app(
                         ],
                         "usage": usage_view(outcome),
                     },
-                    headers=chat_headers(routed, route.model),
+                    headers={**chat_headers(routed, route.model), **applied_header(max_tokens)},
                 )
 
             # Streaming. Deltas go to a queue; None marks the end of the work.
@@ -2681,7 +2854,13 @@ def create_app(
                     return failure(failed)
                 routed = task.result()  # an answer with no delta at all
                 await account_chat(
-                    routed.outcome, hold, caller, multiplier, route.model, routed.source
+                    routed.outcome,
+                    hold,
+                    caller,
+                    multiplier,
+                    route.model,
+                    routed.source,
+                    max_tokens,
                 )
             include_usage = body.stream_options is not None and body.stream_options.include_usage
 
@@ -2722,7 +2901,13 @@ def create_app(
                     outcome = routed.outcome
                     if first is not None:
                         await account_chat(
-                            outcome, hold, caller, multiplier, route.model, routed.source
+                            outcome,
+                            hold,
+                            caller,
+                            multiplier,
+                            route.model,
+                            routed.source,
+                            max_tokens,
                         )
                     yield chunk(
                         {"index": 0, "delta": {}, "finish_reason": outcome.result.finish_reason}
@@ -2737,7 +2922,7 @@ def create_app(
                         task.cancel()
                     await hold.release()
 
-            headers = {"Cache-Control": "no-cache"}
+            headers = {"Cache-Control": "no-cache", **applied_header(max_tokens)}
             if task.done() and not task.cancelled() and task.exception() is None:
                 headers.update(chat_headers(task.result(), route.model))
             else:
@@ -2785,9 +2970,11 @@ def create_app(
         key = playground.get(body.application_id)
         if key is None:
             raise InvalidApiKeyError()
-        caller = await applications.keys.authenticate(key)
-        request = GenerateBody.model_validate(body.model_dump(exclude={"application_id"}))
-        return await serve(request, response, caller)
+        found = keyed(await applications.keys.authenticate(key))
+        request = GenerateBody.model_validate(
+            body.model_dump(exclude={"application_id"}, exclude_unset=True)
+        )
+        return await serve(request, response, found.application, found.settings)
 
     @app.get("/")
     @public_route("an index of the API")
@@ -2951,8 +3138,23 @@ def create_app(
             max_tokens=planned.max_tokens,
             allow_downgrade=allow_downgrade,
         )
+        effective: EffectiveSettings | None = None
+        if caller is not None:
+            # No key, so no key lookup: the two rows are read here, and decided on as a keyed
+            # request's are (docs/39). Load control is not the request path.
+            assert settings_store is not None
+            found = keyed(
+                dataclasses.replace(
+                    caller,
+                    stored_settings=StoredSettings(
+                        await settings_store.current(Scope.ORGANIZATION, caller.organization_id),
+                        await settings_store.current(Scope.APPLICATION, caller.id),
+                    ),
+                )
+            )
+            caller, effective = found.application, found.settings
         try:
-            answer = await serve(body, Response(), caller)
+            answer = await serve(body, Response(), caller, effective)
         except (
             BackendError,
             BudgetExceededError,
@@ -3395,6 +3597,7 @@ def create_default_app() -> FastAPI:
             test_counter=shared.connection_tests() if shared is not None else None,
         ),
         modes=state.modes,
+        settings=state.settings,
         local_destinations=local,
         counters=shared,
     )
@@ -3529,6 +3732,7 @@ def create_shared_app(environ: Mapping[str, str]) -> FastAPI:
             test_counter=shared.connection_tests(),
         ),
         modes=state.modes,
+        settings=state.settings,
         local_destinations=local,
         counters=shared,
         readiness=db.ready,
