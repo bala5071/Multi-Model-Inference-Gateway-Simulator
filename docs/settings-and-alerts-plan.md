@@ -1271,6 +1271,13 @@ must be merged before S3.
 
 S1 to S3 and A1 can go in either order after S0; A2 needs S2's permission work; A4 needs A3.
 
+**S1, as agreed when it started (2026-10-31).** Exactly the row above. `hosted_policy` and
+the in-flight rule stay in S3, after scale-out PR 2b. The mutations S1 makes are M1 to M5,
+M7, M37, M39 and M40; M6 (validate writes nothing) goes to S2 with the validate endpoint.
+The four levels of section 2. Every new test runs under the suite's existing
+`gateway_test_timeout_s`. Where S1 departs from a detail of this plan, note 39 says so and
+the PR lists it as a numbered decision.
+
 **Dependencies.** None planned. Webhooks use `httpx` (already a dependency, through the egress
 guard); signatures `hmac` and `hashlib`; email `smtplib`; the test SMTP server is written in the
 suite. Quiet hours use fixed offsets so that `tzdata` is not needed on Windows (decision 12). If
