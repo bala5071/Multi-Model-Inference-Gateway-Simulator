@@ -22,7 +22,7 @@ or Python and Node, start from [note 18](18-demo.md).
 | [identity-plan.md](identity-plan.md) | A2: users, organizations, roles, sessions, signed access tokens, step-up, the audit log, and what stays local until A8. A plan, not a record of what was built |
 | [provider-plan.md](provider-plan.md) | A5: provider adapters, the chat endpoint, the key vault, provider settings and fallback modes. Approved; a plan, not a record of what was built |
 | [scale-out-plan.md](scale-out-plan.md) | Several gateway instances on Postgres and Redis: every piece of state, the atomic operations, failing closed, the migration from SQLite and back. Approved; a plan, not a record of what was built |
-| [settings-and-alerts-plan.md](settings-and-alerts-plan.md) | Per-application settings under platform and organization caps, with versions, revert and presets; alert rules, incidents, webhook and email channels, and their permissions, on one instance or several. Proposed, not approved; a plan, not a record of what was built |
+| [settings-and-alerts-plan.md](settings-and-alerts-plan.md) | Per-application settings under platform and organization caps, with versions, revert and presets; alert rules, incidents, webhook and email channels, and their permissions, on one instance or several. Approved after changes; a plan, not a record of what was built |
 
 ## Design notes, in the order things were built
 
