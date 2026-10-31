@@ -1,10 +1,12 @@
 # Settings and alerts plan: per-application settings, alert rules and their delivery
 
-Status: **proposed 2026-10-31, not approved.** It needs approval before anything is built: it
-adds rows to the permission table and step-up rules (authentication), two new kinds of stored
-secret (webhook URLs and signing keys, the SMTP password, all through the vault), and two new
-outbound network surfaces (webhook deliveries and the operator's SMTP server). Branch
-`settings-alerts/plan`, from `main` at `41f19f6` (#28 merged). No code in this PR.
+Status: **approved 2026-10-31 after changes.** The answers to Q1 to Q5 and four additions
+are folded in; "Answers and changes on approval" at the end lists each one and where it went.
+It needed approval because it adds rows to the permission table and step-up rules
+(authentication), new kinds of stored secret (webhook URLs and signing keys, the SMTP
+password, all through the vault), and two new outbound network surfaces (webhook deliveries
+and the operator's SMTP server). Branch `settings-alerts/plan`, from `main` at `41f19f6` (#28
+merged). No code in this PR.
 
 **Goal.** Customers choose, per application, which gateway-level settings apply, and which
 alerts they get, at what threshold, and how they are delivered. No AI agent is involved
@@ -51,8 +53,10 @@ Read from the code at `41f19f6`. Three classes:
 
 Where it is today, and what it becomes. "Ceiling" is the value the operator sets for the
 platform or the application's plan; the customer can only go stricter. "Org cap" says whether
-an organization can cap it for all its applications. "Who" is the role allowed to change it
-(section 12); every write needs step-up, consume-on-use (decision 4). "In flight" says when a
+an organization can cap it for all its applications. Who may change it is in section 12. A
+write needs step-up, consume-on-use, **only when it loosens a setting that decides where
+prompts go** (S13 to S16, and an organization cap on them that raises an effective value);
+tightening, and every other setting, needs none (Q2, decision 4). "In flight" says when a
 change reaches a request already running (section 5).
 
 | # | Setting | Today | Type and range | Default | Stricter is | Ceiling | Org cap | In flight |
@@ -64,7 +68,7 @@ change reaches a request already running (section 5).
 | S5 | `requests_per_minute` | `Application.requests_per_minute`, from the plan template | integer 1 to 1,000,000, or null (no limit) | the plan copy's value | lower | the plan copy's value (none: the range only) | yes | next request (the window script already trims to a lowered limit, note 35) |
 | S6 | `monthly_token_budget` | `Plan.monthly_token_budget` | integer 0 to the plan's | the plan's | lower | the plan's | yes | next reserve; a request already admitted keeps its reservation |
 | S7 | `max_tokens` (largest a request may ask) | `Application.max_tokens` | integer 1 to the ceiling, or null | the plan copy's | lower | the plan copy's; with none, the tier's `context_tokens` when set (docs/37), else the range only | yes | next request |
-| S8 | `default_max_tokens` (used when a request names none; also the reservation's completion bound, Q2) | the same field as S7 does both today | integer 1 to the effective S7 | the effective S7; with no S7, today's chain (the tier's `reserve_completion_tokens`) | lower | the effective S7 | no (follows S7) | next request |
+| S8 | `default_max_tokens` (when a request names none, applied and enforced as the request's `max_tokens`, so also the reservation's completion bound; the value applied is returned in `X-Max-Tokens-Applied`, Q4 and section 5.1) | the same field as S7 does both today | integer 1 to the effective S7 | the effective S7; with no S7, today's chain (the tier's `reserve_completion_tokens`) | lower | the effective S7 | no (follows S7) | next request |
 | S9 | `generate_timeout_ms` | `DEFAULT_OVERLOAD.request_timeout_ms` = 120,000, operator | integer 1,000 to the operator's | the operator's | lower | the operator's | yes | next request |
 | S10 | `chat_first_token_ms` (the gateway's tier) | `DEFAULT_FIRST_TOKEN_TIMEOUT_MS` = 30,000 | integer 1,000 to the operator's, at most S11 | the operator's | lower | the operator's | yes | next request |
 | S11 | `chat_total_timeout_ms` | `DEFAULT_TOTAL_TIMEOUT_MS` = 120,000 | integer 1,000 to the operator's | the operator's | lower | the operator's | yes | next request |
@@ -73,9 +77,11 @@ change reaches a request already running (section 5).
 | S14 | `max_hosted_attempts` | planned in PR 2b, not built: `GATEWAY_CHAT_MAX_HOSTED_ATTEMPTS`, default 3, range 1 to 5, operator | integer 1 to the effective ceiling | the operator's | lower | the operator's (1 to 5) | yes | before the next hosted attempt if lower; next request if higher |
 | S15 | `retry_invalid_tool_json` | always one retry after invalid tool JSON (docs/33) | boolean | true | false | - | yes (an organization can force false) | before the next hosted attempt if turned off; next request if on |
 | S16 | `hosted_first_token_ms` | per provider, `ProviderConfig.first_token_budget_ms`, else 10,000 | integer 1,000 to the provider's budget | the provider's | lower | each provider's own budget | yes | before the next hosted attempt if lower; next request if higher |
-| S17 | `key_max_lifetime_days` | `MAX_KEY_DAYS` = 365 on the HTTP path | integer 1 to 365 | 365 | lower | 365 | yes | next key issued or rotated; existing keys keep their expiry |
-| S18 | `key_default_lifetime_days` | `DEFAULT_KEY_DAYS` = 90 | integer 1 to the effective S17 | 90 | - | S17 | no (follows S17) | next key issued |
-| S19 | `max_active_keys` | 10 on the HTTP path (`KeyLimits`) | integer 1 to 10 | 10 | lower | 10 | yes | next key issued; never revokes a key |
+
+**Key policy is out of scope** (Q5). The key lifetime (`MAX_KEY_DAYS` 365, `DEFAULT_KEY_DAYS`
+90) and the active-key cap (`KeyLimits`, 10) stay as they are. They belong with identity
+steps 8 and 9 (access tokens, and the threat model and leak scan across everything), where key
+issuing is reviewed as a whole. The numbers S17 to S19 are not reused.
 
 Natural fits recorded and **not** planned for the first PRs, each with why:
 
@@ -154,9 +160,21 @@ The document is canonical JSON in a text column on both databases (decision 6): 
 settings that are set, sorted keys, no whitespace, validated against the catalogue before it is
 written. `schema_version` lets old code refuse a document it does not know: an instance whose
 code is older than the newest stored `schema_version` refuses to start, as with migrations.
-A stored document that fails validation at read (which should be impossible) refuses that
-application's requests with 503 `state_unavailable`, logged by scope and version only: missing
-is forbidden.
+
+**Missing, unreadable, invalid** (Q3). Three cases, on every request path (`/v1/generate`
+and chat alike), decided in one function, `settings_from_rows`, that the handler calls on
+what `lookup_key` returned:
+
+| What `lookup_key` returns for a scope | What the request gets |
+|---|---|
+| No `settings_current` row (never set) | The platform defaults and the plan copy: today's values. Not an error |
+| A row whose document fails to parse, fails validation, has a `schema_version` this instance does not know (a newer instance wrote it during a rolling deploy), or names a setting this code does not have | 503 `state_unavailable` for that application's requests. Never a looser value, never the defaults in its place: a corrupt organization cap must not lift the cap. Logged by scope, version and the failing check's name only (never the document) |
+| The query fails or times out | 503 `state_unavailable`, as for a key lookup that fails today |
+
+The organization's row and the application's row are judged separately, and either one
+unreadable refuses the request. A test runs each row of this table on memory, SQLite and
+Postgres, on both endpoints, and checks the answer bytes. A mutation (M37) that falls back
+to the defaults on an invalid document must fail it.
 
 **Every change is a new version** with who, when, the old and the new document, and the names
 of the fields changed. `changed_at_ms` is the store clock (`gateway_now_ms()` on Postgres).
@@ -178,15 +196,17 @@ whether it is capped, and the current version. The mode is shown from its own ta
 
 **Dry run** (`POST .../settings/validate`): the same body as a write; runs every check
 (catalogue, ranges, caps, references to providers and tiers) and returns the effective view as
-it would be, the fields that would change, and every refusal, writing nothing and needing no
-step-up. It uses the same code as the write, up to the point of writing (a test runs both on
-the same inputs and compares).
+it would be, the fields that would change, whether the write would need step-up (section 12),
+and every refusal, writing nothing and needing no step-up. It uses the same code as the
+write, up to the point of writing (a test runs both on the same inputs and compares).
 
 **What is not cached** (decision 3). Settings are read from the database on every request, in
 the same query as the key (section 5), so there is no settings cache to keep in step across
 instances, and a change is seen by the next request on every instance. The only memoisation is
 of parsed documents keyed by (scope, version): a version never changes once written, so this
-cannot be stale. It is per instance, bounded (an LRU of 4,096 entries), and holds no secret.
+cannot be stale. It is keyed by (scope, version, sha256 of the document text), so a row
+rewritten in place by hand is parsed again and judged; only documents that passed validation
+are kept. It is per instance, bounded (an LRU of 4,096 entries), and holds no secret.
 
 **The CLI** gets `settings show|set|revert` for the operator (audited, like every CLI command),
 for use when the console cannot be reached (the Valkey outage runbook of note 35).
@@ -195,7 +215,9 @@ for use when the console cannot be reached (the Valkey outage runbook of note 35
 
 Named bundles applied as one versioned change (`via: preset:<name>`), checked like any write:
 a preset value outside a cap in force is refused, never silently clamped. A preset sets only
-the fields it names; every other field keeps its value. Defined in code
+the fields it names; every other field keeps its value. Whether it needs step-up is decided
+from the change it makes, not from its name: `fast` raising `max_hosted_attempts` from 1 to 2
+loosens, so it needs step-up; applied over a value of 3 it tightens and needs none. Defined in code
 (`gateway/settings.py`), listed with their exact values by `GET .../settings/presets`.
 
 | Preset | Exact values | What it does |
@@ -210,11 +232,42 @@ on a plan without `economy` (409 `setting_looser_than_cap`, naming `allowed_tier
 
 ### 5. How a change reaches running instances, and what a request in flight sees
 
-**Reading.** `lookup_key` already returns the key, its application and its organization's
-state in one query (`KeyLookup`). It also returns the organization's and the application's
-`settings_current` rows (two left joins, same statement, same round trip). The handler builds
-`EffectiveSettings` once from them and the instance's platform values, and passes it on, as it
-passes the mode. No other code on the request path reads settings.
+**Reading** (Q3: yes, on every request path, `/v1/generate` included). `lookup_key` already
+returns the key, its application and its organization's state in one query (`KeyLookup`). It
+also returns the organization's and the application's `settings_current` rows (two left
+joins, same statement, same round trip). The handler builds `EffectiveSettings` once from
+them and the instance's platform values (`settings_from_rows`, section 3: a missing row is the
+defaults, an unreadable or invalid one a 503), and passes it on, as it passes the mode. No
+other code on the request path reads settings. The key lookup's own time is measured before
+and after the join, with `benchmarks/key_checks.py` (section 20).
+
+#### 5.1 `default_max_tokens`, applied and enforced (Q4)
+
+When a request names no `max_tokens` (`max_output_tokens` on `/v1/generate`), the effective
+S8 is **applied as the request's limit**: it is the value the reservation bounds, the value
+sent to the backend or to a hosted provider, and the value generation is stopped at. A request
+that names one is checked against the effective S7 as today (422 above it), and its own value
+is applied.
+
+- **Enforced, on the gateway's tiers:** the request is built with the applied value, so the
+  simulator clamps its output to it (`SimulatedBackend` already takes `min` of the drawn
+  length and the request's limit) and `LlamaCppBackend` sends it to the model server as
+  `max_tokens`, as for a request's own value today. A test checks that no answer on these
+  tiers has more completion tokens than the applied value.
+- **On a hosted provider:** it is sent as the provider's limit (`max_tokens`). The gateway
+  cannot count a hosted provider's tokens as they stream, so if the provider's reported usage
+  exceeds it, the settle records the reported number (what was spent), the answer is not
+  altered after the fact, and `gateway_max_tokens_exceeded_total{provider_type}` counts it.
+  The note says so.
+- **`X-Max-Tokens-Applied: <n>`** is on every answer of `/v1/generate` and
+  `/v1/chat/completions`, JSON and server-sent events (a header, so before the first event),
+  whether the value came from the request, from S8, or from today's chain when S8 is unset. It
+  carries the application's own number and nothing else. Refusals made before a value is
+  chosen (401, 403, 422, 429) do not carry it.
+- **Documented** in note 39, in note 06's and note 31's endpoint descriptions (a pointer, since
+  notes are snapshots), and in the README's API section. The protected outputs are bodies, not
+  headers; S1 checks they stay byte-identical, and if one does not, it stops and asks.
+- With S8 unset the applied value is today's, so behaviour is unchanged except for the header.
 
 **Before each hosted attempt** the router reads both modes again today (two store calls, note
 38). PR S3 replaces those two calls by one statement, `hosted_policy(organization,
@@ -231,8 +284,8 @@ for a stricter mode (the candidate is skipped, a breaker slot it claimed is give
   made; an attempt already waiting keeps the budget it started with).
 - **Looser applies from the next request** for those same settings: it never opens an attempt
   for a request already running.
-- **Every other setting applies from the next request** whichever way it moves (S1 to S11, S17
-  to S19). The request in flight was admitted, budgeted and timed under the values it read.
+- **Every other setting applies from the next request** whichever way it moves (S1 to S11).
+  The request in flight was admitted, budgeted and timed under the values it read.
   A lowered timeout does not cut a request already running.
 - **An answer already streaming is not cut**, as for modes: its prompt has been sent.
 
@@ -425,25 +478,46 @@ targets (section 12).
 
 **Webhook** (no third-party service needed).
 
-- **The URL is a secret** (decision 14): many receivers put a token in the path. It is sealed
-  in the vault, bound to (organization, `webhook`, channel id, URL origin), and only its origin
-  is ever shown (`https://hooks.example.com/...`). No answer, log, audit entry or notification
-  carries the full URL.
-- **The signing key** is 32 random bytes generated by the gateway, sealed in the vault with the
-  same binding, and returned **once**, when the channel is created or the key rotated, with
-  `Cache-Control: no-store`. It never travels to the gateway, and is never returned again.
-  Rotation keeps the previous key for 24 hours and signs with both meanwhile.
+- **The URL is a secret** (decision 14): many receivers put a token in the path. It is sealed in the
+  vault in the **channel scope** (section 9.1), bound to (organization, channel id, `webhook_url`,
+  URL origin), and only its origin is ever shown (`https://hooks.example.com/...`). No answer, log,
+  audit entry or notification carries the full URL.
+- **The signing key** is 32 random bytes generated by the gateway, sealed in the channel scope bound
+  to (organization, channel id, `webhook_signing_key`, URL origin), and returned **once**, when the
+  channel is created or the key rotated, with `Cache-Control: no-store`. It is never sent to the
+  receiver, and never returned again. Rotation keeps the previous key for 24 hours and signs with
+  both meanwhile.
 - **The request:** `POST` with `Content-Type: application/json`, body `json-v1` (section 10),
   and headers `X-Gateway-Delivery` (the notification's id: receivers deduplicate on it, since
   delivery is at least once), `X-Gateway-Timestamp` (Unix seconds), and
   `X-Gateway-Signature: v1=<hex HMAC-SHA256(key, timestamp + "." + body)>` (one `v1=` per key
   during a rotation). Receivers should refuse a timestamp more than five minutes old.
-- **The egress guard** (`gateway/egress.py`, as for provider URLs): https only; every resolved
-  address public; the socket connects to the address that was checked (no DNS rebinding); no
-  redirects (a 3xx is a failure); no proxy; the pinned TLS context. **No local destinations:**
-  `GATEWAY_PROVIDER_LOCAL_ALLOW` does not apply to webhooks, so a webhook can never reach this
-  machine or a private network (tests inject the resolver and transport). Checked when the
-  channel is created or changed, at every test send, and at every delivery.
+- **The egress guard** (`gateway/egress.py`, as for provider URLs), in two places:
+  - **When the URL is stored** (create, change): `check_base_url` (https only, no user info,
+    no literal private address), so an obviously bad URL is refused with a field error. This
+    check alone is never relied on: a name can resolve differently later.
+  - **At connect time, on every connection** (test send, every delivery, every retry): the
+    channel's client uses `GuardedBackend`, whose `connect_tcp` resolves the name itself,
+    checks **every** resolved address with `refusal` (loopback, private, link-local, the
+    metadata addresses, multicast, unspecified, reserved, and IPv4 embedded in IPv6), refuses
+    if any is refused, and opens the socket **to the checked address**, never to the name
+    again. So a name that resolved public when the channel was created and resolves private at
+    delivery (DNS rebinding, or a record changed later) is refused at delivery with
+    `egress_refused`. The client keeps no connection between deliveries (a fresh connection,
+    so a fresh check, every time), and TLS is verified against the URL's host name, not the
+    address, with the pinned context.
+  - **No redirects followed:** the client is built with `follow_redirects=False`; any 3xx is a
+    permanent failure (`http_3xx`), its `Location` is neither fetched nor stored nor logged.
+  - **No proxy:** `trust_env=False`, so `HTTPS_PROXY` and the rest are ignored.
+  - **No local destinations:** `GATEWAY_PROVIDER_LOCAL_ALLOW` does not apply to webhooks
+    (`NO_LOCAL_DESTINATIONS` is passed, not the operator's set), so a webhook can never reach
+    this machine or a private network. Tests inject the resolver and the transport.
+  - **One client builder,** `webhook_client()` in `egress.py`, built like
+    `organization_client` (`OrganizationTransport`, a new client per delivery, `trust_env` and
+    `follow_redirects` off), is the only way a webhook is sent; an AST test fails on any other
+    `httpx` client construction in the alert modules. A delivery runs under
+    `egress_scope(always_hosted)`: a notification carries no prompt, so the mode's locality
+    rule does not apply, and the public-address rule still does.
 - **Timeouts and size:** 5 s to connect, 10 s in all; at most 4 KiB of the answer read, then
   discarded and never logged.
 - **Retries:** after a connection failure, a timeout, a 5xx, a 408 or a 429 (with its
@@ -457,13 +531,50 @@ targets (section 12).
 - **Operator settings:** `GATEWAY_SMTP_HOST`, `GATEWAY_SMTP_PORT`, `GATEWAY_SMTP_TLS`
   (`starttls` or `implicit`; there is no plain option), `GATEWAY_SMTP_USERNAME`,
   `GATEWAY_SMTP_FROM`, and `GATEWAY_ALERT_EMAIL_DOMAINS` (the recipient domains allowed; empty
-  means email channels cannot be created). The **SMTP password goes through the vault**: the
-  operator sets it with `scripts/manage.py set-smtp-password` (typed at a prompt, or read from an
-  environment variable for automation), sealed under a platform binding that no organization id
-  can take. The server checks the certificate with the pinned TLS context. The SMTP server is
-  the operator's, so the public-address rule does not apply to it; the TLS rule does.
+  means email channels cannot be created). The **SMTP password goes through the vault**, in the
+  **platform scope** (section 9.1), which no organization or provider binding can open: the
+  operator sets it with `scripts/manage.py set-smtp-password` (typed at a prompt, or read from
+  an environment variable for automation). The server checks the certificate with the pinned
+  TLS context. The SMTP server is the operator's, so the public-address rule does not apply to
+  it; the TLS rule does.
 - **Recipients:** 1 to 10 addresses per channel, each in an allowed domain (decision 15: without
-  it, anyone with channel write access could make the gateway mail anyone).
+  it, anyone with channel write access could make the gateway mail anyone), and each
+  **verified** before it receives anything but its confirmation (below).
+- **Verified recipients.** An address added to a channel is `unverified`. The gateway sends it
+  one confirmation email: plain text, saying which organization asked to send it alerts (its
+  name in quotes and its id; names already refuse control and zero-width characters, note 26,
+  and the text is fixed apart from them), that nothing else will be sent unless the code is
+  entered, and a 10-character code
+  (base32, 50 bits, from `secrets`). The org_admin enters the code in the console
+  (`POST .../alert-channels/{channel}/recipients/{recipient}/confirm`); the recipient must
+  therefore have read the mail and chosen to pass the code on. Until then the address gets no
+  notification, no test send, no summary. The rules:
+  - the code is stored only as an HMAC under a new derived key
+    (`KeyPurpose.EMAIL_CONFIRMATION`), compared in constant time, valid for 24 hours, single
+    use, and void after 5 wrong entries (the recipient must be re-sent);
+  - a confirmation is bound to (channel, address): the same address on another channel is
+    verified again; changing an address is removing one and adding another;
+  - wrong, expired, used and unknown codes, and a recipient of another organization, all get
+    one answer (409 `confirmation_invalid`), byte for byte, after the same steps (one lookup,
+    one HMAC, one compare against the stored or a dummy digest);
+  - the code is never logged, audited, returned, or put in any event; the audit row says
+    `alert_recipient_verified` with the channel and recipient ids;
+  - no link is sent: the console is local only until A8, so a public confirmation endpoint
+    would be a new unauthenticated surface. A link can follow with A8 (decision 26).
+- **The confirmation emails are capped**, so the gateway cannot be used to mail a stranger
+  repeatedly, even inside an allowed domain:
+
+  | Cap | Default | Held in |
+  |---|---|---|
+  | Per address | 3 in 24 hours, across every channel and organization | a durable row keyed by an HMAC of the normalised address (its own purpose, `KeyPurpose.EMAIL_ADDRESS`), a conditional `UPDATE ... WHERE sent < cap` on the store clock, so a Valkey restart cannot release it |
+  | Per channel | 10 an hour | the window counters (Valkey or memory), like test sends |
+  | Per organization | 20 an hour | the window counters |
+  | Per instance, all organizations | 200 an hour | memory: a backstop against a bug |
+
+  A send over a cap answers 429 `confirmation_limited` and sends nothing; missing is
+  forbidden (a counter that cannot answer refuses). The per-address digest lets the cap
+  hold across organizations without storing the address twice in clear; the recipient row
+  itself holds the address, which the org_admin entered and sees.
 - **Client:** the standard library's `smtplib` on a thread (as passwords use `ThreadHashRunner`),
   so no dependency is added. Timeouts 10 s. A 4xx answer is retried on the webhook schedule; a
   5xx is permanent.
@@ -472,8 +583,10 @@ targets (section 12).
 
 **Test send** per channel (`POST .../channels/{id}/test`): one `test` notification through the
 same path, with the same guard and signature, answered with the outcome (`delivered`, or the
-failure's code: `egress_refused`, `timeout`, `http_4xx`, `http_5xx`, `tls`, `smtp_4xx`,
-`smtp_5xx`), never the receiver's answer. Capped (section 8).
+failure's code: `egress_refused`, `timeout`, `http_3xx`, `http_4xx`, `http_5xx`, `tls`,
+`smtp_4xx`, `smtp_5xx`, `smtp_credential_unreadable`, `no_verified_recipient`), never the
+receiver's answer. An email test goes to the channel's verified recipients only. Capped
+(section 8).
 
 **A failed delivery is visible:**
 
@@ -495,6 +608,52 @@ and the SMTP login. `Secret.reveal()` is allowed today only in `adapters/http.py
 `credential_headers` (an AST test); that test's allowlist gains exactly these two call sites,
 and nothing else (decision 16). Leased values go to the `Redactor` like provider keys.
 
+#### 9.1 Vault scopes
+
+Today every sealed value is an organization's provider key, with associated data
+`vault-v1|organization|provider|type|origin|key_id` under the master key itself. The vault
+gains a **scope**, so that a value sealed for one purpose cannot be opened as another, by
+binding or by key:
+
+| Scope | Holds | Associated data (fields joined by a bar) | Encryption key |
+|---|---|---|---|
+| `provider` (today's, unchanged) | organization provider keys | `vault-v1`, organization, provider, type, origin, key id | the master key, as today (no reseal of existing rows) |
+| `channel` | webhook URLs, webhook signing keys | `vault-channel-v1`, organization, channel, kind (`webhook_url`, `webhook_signing_key`), origin, key id | the master key |
+| `platform` | the SMTP password (and the operator alert webhook's secrets, A6) | `vault-platform-v1`, `smtp`, host and port, username, key id | a **subkey**, `HMAC-SHA256(master, "gateway vault scope platform")`, never used for anything else |
+
+- `Binding` becomes three frozen dataclasses (`ProviderBinding`, today's `Binding` renamed
+  with an alias; `ChannelBinding`; `PlatformBinding`), and `seal`, `open` and `lease` take
+  their union. The associated data's first field names the scope, and the `platform` scope's
+  values are fields no organization can name (`smtp`, not an organization id), so no binding
+  of one scope equals one of another.
+- The platform scope also uses its own key, so even a bug that built the right associated
+  data under the wrong scope could not open it. Its label differs from the key id label
+  (`gateway vault key id`), and a test checks the two derived values differ.
+- **Stored apart:** platform secrets in a `platform_secrets` table (migration and Postgres
+  schema in A5), with no organization column, read only by `SmtpSender`; no provider or channel
+  store query reads that table (a test greps the SQL of every store).
+- **Rotation:** `rotate-vault-key` reseals all three scopes, the platform subkey derived from
+  the new master. A platform secret whose master is not loaded is `key_unreadable`: email
+  deliveries fail with `smtp_credential_unreadable`, shown as any failed delivery is
+  (section 9) and as an operator signal.
+- **The test that no organization or provider key can decrypt it** (A5): seal an SMTP
+  password; then try to open its ciphertext with every `ProviderBinding` and `ChannelBinding`
+  of two test organizations (including one whose provider id, type and origin are set to
+  `smtp`, the SMTP host and its port, and one whose organization id is `smtp`), under the
+  master key and under the platform subkey; copy a provider key's ciphertext and a channel
+  secret's into the `platform_secrets` row and open them as the SMTP password; and copy the
+  SMTP ciphertext into a provider key row and run test-connection. Every attempt must fail
+  with `VaultIntegrityError` (or `key_unreadable` for the row copied to a provider), and the
+  provider path must never send it. The control: the same calls with the right
+  `PlatformBinding` open it.
+- The two protections are each tested on their own, since either alone still makes the test
+  above pass: **associated data apart** (the bytes of every scope's associated data differ
+  from every other scope's, for the crafted field values above) and **key apart** (the
+  platform ciphertext, opened directly with `AESGCM(master)` and the right associated data,
+  bypassing `Vault`, gives `InvalidTag`). Mutations: M41 (the platform scope's prefix dropped
+  and its fields laid out like a provider binding) fails the first; M42 (the subkey replaced
+  by the master) fails the second; M43 (both at once) fails the end-to-end test.
+
 ### 10. What an alert contains, and must not
 
 **`json-v1`** (the email carries the same fields as text):
@@ -510,7 +669,8 @@ and nothing else (decision 16). Leased values go to the `Redactor` like provider
 ```
 
 `kind` is `firing`, `firing_again`, `reminder`, `resolved`, `quiet_hours_summary`,
-`rule_weakened`, `suppressed_summary` or `test`. `series` is a provider id or a key id where the
+`rule_weakened`, `channel_removed`, `suppressed_summary` or `test`. (The recipient
+confirmation is not a notification: it has its own fixed text and carries no incident.) `series` is a provider id or a key id where the
 signal has series.
 
 **Built from an allowlist** at the moment the notification is queued (`AlertPayload`, a frozen
@@ -530,8 +690,10 @@ the customer's own labels (the application and rule names); the gateway adds no 
 | Settings and their versions | memory | SQLite | SQLite | Postgres |
 | Rules, channels, incidents, outbox, cap counters, lease | memory | SQLite | SQLite | Postgres |
 | Per-minute rollups (section 6) | the recorder itself | the recorder itself | Valkey | Valkey |
-| Test-send caps | memory | memory | Valkey | Valkey |
-| Channel secrets | vault, in memory | vault rows in SQLite | vault rows in SQLite | vault rows in Postgres |
+| Test-send and per-channel, per-organization confirmation caps | memory | memory | Valkey | Valkey |
+| Per-address confirmation cap, recipients and their code digests | memory | SQLite | SQLite | Postgres |
+| Evaluator heartbeat (in the lease row), and each instance's last read of it | memory | SQLite; memory | SQLite; memory | Postgres; memory |
+| Channel secrets (channel scope) and the SMTP password (platform scope, `platform_secrets`) | vault, in memory | vault rows in SQLite | vault rows in SQLite | vault rows in Postgres |
 
 **Rollups in Valkey** (`AlertRollups`, a new counter protocol with a memory and a Valkey
 implementation): every 10 s each instance adds its closed deltas with one pipelined
@@ -586,8 +748,8 @@ therefore read low by up to that, and the note will say so.
 
 | What fails | What happens | How it is seen |
 |---|---|---|
-| The evaluator's instance dies | the lease expires within 30 s and another instance takes it; `for` continues from the stored pending time | `alert_evaluator.last_cycle_at` in the console ("evaluated 40 s ago") |
-| The durable store is down | no cycle runs (it cannot read rules or write transitions); nothing fires, nothing resolves; queued notifications wait | the console cannot load either; the operator's signal (11.5) |
+| The evaluator's instance dies | the lease expires within 30 s and another instance takes it; `for` continues from the stored pending time | the heartbeat (11.6) goes `stale` on every instance after 90 s if no instance takes over; the console shows "evaluated 40 s ago" |
+| The durable store is down | no cycle runs (it cannot read rules or write transitions); nothing fires, nothing resolves; queued notifications wait | the console cannot load either; the heartbeat is `unknown` on every instance (11.6) |
 | Valkey is down | rollups are kept up to 10 min, then dropped; those minutes are incomplete; durable signals are still evaluated | "too few to judge" on the affected rules; `gateway_alert_rollups_dropped_total`; the operator's signal |
 | A delivery fails | retried (section 9), then `failed` | the notification's state, the channel's health, `channel_delivery_failing`, a metric, an event |
 | Every channel of an organization fails | `channel_delivery_failing` cannot be delivered either | it stays in the incident list; the console shows a banner on every page of the organization |
@@ -602,7 +764,8 @@ only alerts.
 Signals about the platform itself go to the **operator**, not to customers, and must work when
 the stores do not: Postgres or Valkey unavailable, a Valkey restart, clock skew past the bound,
 a settle kept waiting, write-lock timeouts, audit rows dropped, a model degraded (the SLO
-monitor), a model's queue full or deep, KV use, the evaluator's lag, the delivery failure rate
+monitor), a model's queue full or deep, KV use, the evaluator heartbeat (11.6, in health and
+metrics from A3; a notification from A6), the delivery failure rate
 across organizations, and a stored settings document that fails validation. Each instance
 evaluates them on its **own** state, with no shared store, and sends to channels given in the
 environment (`GATEWAY_OPERATOR_ALERT_WEBHOOK_URL` and `GATEWAY_OPERATOR_ALERT_WEBHOOK_KEY`,
@@ -610,6 +773,47 @@ both secrets; or `GATEWAY_OPERATOR_ALERT_EMAIL` through the same SMTP), from a b
 in-memory queue. With N instances an outage can give N notices, one per instance, each naming
 its instance; that is stated, and capped per instance. The Prometheus endpoint already exposes
 most of these for an operator who runs Prometheus.
+
+#### 11.6 The evaluator heartbeat (an operator signal, in A3)
+
+Alerts that silently stop being evaluated are worse than no alerts: nothing fires and
+nothing says so. So the evaluator's liveness is an operator signal of its own, built with the
+evaluator in A3 rather than with the other operator signals in A6.
+
+- **The heartbeat** is written in the lease row (section 11.2): `last_cycle_completed_at_ms`
+  (the store clock) and `last_cycle_epoch`, set in the same conditional statement that renews
+  the lease at the end of each completed cycle, so a fenced evaluator cannot write it either.
+- **Every instance reads it** with the lease attempt it already makes every 10 s (the same
+  statement returns the row), and keeps the last answer in memory. Health and metrics read
+  that memory: they make no store call.
+- **States**, judged against the store clock read with the row:
+
+  | State | When |
+  |---|---|
+  | `ok` | a cycle completed within the last 90 s (three cycles) |
+  | `stale` | the last completed cycle is older than 90 s, or none has ever completed 120 s after an instance started (no evaluator is running, or every cycle fails) |
+  | `unknown` | this instance could not read the lease row for 30 s (the durable store is down): never `ok` |
+  | `disabled` | no evaluator is configured on this deployment (simulated live mode, decision 18) |
+
+- **In health:** `/healthz` gains one field, `alert_evaluator: "ok" | "stale" | "unknown" |
+  "disabled"`, and nothing else (no times, no instance names, no epoch: `/healthz` is public).
+  `/readyz` does **not** depend on it: a stale evaluator does not stop an instance from
+  serving requests, and taking every instance out of the load balancer for it would turn an
+  alerting fault into an outage (decision 27).
+- **In metrics** (Prometheus `/metrics`, local only, each instance reporting itself):
+  `gateway_alert_evaluator_state{state}` (1 for the current state),
+  `gateway_alert_evaluator_last_cycle_age_seconds` (from the row; absent while `unknown`, never
+  0), `gateway_alert_evaluator_holder` (1 on the instance holding the lease),
+  `gateway_alert_evaluation_ms` and `gateway_alert_evaluation_failures_total`. The monitoring
+  snapshot (`/v1/monitor/snapshot`, docs/15) carries the same with `available: false` when
+  `unknown`.
+- **An event** `alert_evaluator_stale` (and `alert_evaluator_recovered`) on the instance's
+  `EventBus` and a log line at each change of state, so an operator without Prometheus sees it.
+  In A6 it also becomes an operator notification, sent by each instance on its own state.
+- **The console** shows "alerts not evaluated since 10:14 UTC" as a banner on every alert
+  page while the state is `stale` or `unknown`.
+- Monitoring decides nothing: the heartbeat is read, never used to choose which instance
+  evaluates (the lease does that).
 
 ## Part C. Security and permissions
 
@@ -622,26 +826,57 @@ application, as today.
 | Action | Level | Allowed | Step-up |
 |---|---|---|---|
 | `settings.read` | application | org_admin, app_admin, viewer (own application, or application in own organization) | no |
-| `settings.write` (set, revert, preset) | application | org_admin, app_admin | consume |
+| `settings.write` (set, revert, preset, when the change loosens nothing of S13 to S16) | application | org_admin, app_admin | no |
+| `settings.loosen_egress` (the same writes, when the change loosens S13, S14, S15 or S16) | application | org_admin, app_admin | consume |
 | `org_settings.read` | organization | org_admin, viewer of the organization | no |
-| `org_settings.write` (set, revert) | organization | org_admin | consume |
+| `org_settings.write` (set, revert, when no application's effective S13 to S16 becomes looser) | organization | org_admin | no |
+| `org_settings.loosen_egress` (a cap raised so that some application's effective S14, S15 or S16 becomes looser) | organization | org_admin | consume |
 | `alert_rules.read` (rules, the application's view of channel ids, names and types) | application | org_admin, app_admin, viewer | no |
-| `alert_rules.write` (create, edit, enable, disable, delete, restore defaults) | application | org_admin, app_admin | yes |
+| `alert_rules.write` (create, edit, enable, disable, delete, restore defaults) | application | org_admin, app_admin | no (audited; weakening sends a notice, section 14) |
 | `alert_channels.read` (targets shown as origins and domains) | organization | org_admin | no |
-| `alert_channels.write` (create, edit, delete, rotate the signing key) | organization | org_admin | consume |
+| `alert_channels.write` (create, change its target, recipients, type or `default`, rotate the signing key) | organization | org_admin | consume |
+| `alert_channels.disable` (disable, delete, remove a recipient) | organization | org_admin | no (audited; sends a notice, section 14) |
+| `alert_channels.confirm_recipient` (enter a code, re-send a confirmation) | organization | org_admin | no (capped, one answer for every refusal) |
 | `alert_channels.test` | organization | org_admin | no (capped) |
 | `incidents.read` (application) | application | org_admin, app_admin, viewer | no |
 | `incidents.read_organization` | organization | org_admin, viewer of the organization | no |
 | `incidents.acknowledge` | application | org_admin, app_admin | no |
 
-Why these choices: a settings write can widen where prompts go or how much an application may
-spend, so every write is consume-on-use, like the mode it sits beside (decision 4). Weakening an
-alert rule weakens a defense, like `users.unlock`, so it needs step-up; not consume, because
-editing several rules in one sitting is normal. A channel decides where the gateway sends data,
-like a provider key, so it is consume-on-use and org_admin only. Acknowledging only stops
-reminders and is easy to undo by the condition itself; viewers do not get it (decision 17).
-`settings.validate` is not a separate action: the dry run is declared with `settings.write`
-but claims no step-up, because it writes nothing.
+**Step-up, as answered (Q2):** only for loosening a setting that decides where prompts go,
+and for creating or changing an alert channel; tightening needs none; consume-on-use is kept
+for both. Key policy is out of scope (section 1.1), so it adds no row.
+
+- **Loosening is decided from the change, not the endpoint.** One pure function,
+  `loosens_egress(before, after)`, compares the effective S13 to S16 of every application the
+  write affects, before and after, using the same "stricter" directions as
+  `effective_settings`. For an application write that is one application; for an
+  organization cap, every application of the organization (one query in the same
+  transaction). Any field looser on any application means the write is
+  `*.loosen_egress`.
+- **How `requires` takes it:** the handler first runs the write as a dry run (the validate
+  path, no write), which returns `loosens_egress` for the version named by
+  `expected_version`; then it declares `settings.write` or `settings.loosen_egress` and
+  `requires` claims the step-up window for the second. The write itself runs with the same
+  `expected_version` in `write_transaction()` and recomputes `loosens_egress` inside it; if
+  the answer differs from the dry run's (a cap moved between the two), the write is refused
+  with 409 `settings_version_conflict` and the claimed window is given back. So a loosening
+  write can never commit without a consumed step-up, on any number of instances.
+- **The route walk** declares both actions on each settings write route; the synthetic-route
+  AST check of note 29 is extended so a route that can reach `loosen_egress` must declare it.
+- **Alert rules need no step-up.** Weakening a rule is the threat of section 14; it is
+  mitigated by the `rule_weakened` notice to the rule's channels as they were, the audit, and
+  `restore-defaults`, not by a password prompt.
+- **Disabling or deleting a channel** narrows where data goes, so it is not "creating or
+  changing" and needs no step-up; it is audited, and the organization's other default
+  channels get a `channel_removed` notice (decision 25).
+- **The modes are unchanged:** `mode.set_application` and `mode.set_organization` keep their
+  merged rule (consume-on-use for every change, tightening included). Bringing them in line
+  with this answer would change the merged security path of notes 33 and 38, so it is left for
+  its own PR if wanted (decision 5).
+
+Acknowledging only stops reminders and is easy to undo by the condition itself; viewers do not
+get it (decision 17). `settings.validate` is not a separate action: the dry run is declared
+with `settings.write` and claims no step-up, because it writes nothing.
 
 **Every endpoint goes through `requires(action, resolver)`.** Resolvers answer a rule, incident,
 channel, notification or settings version outside the path's organization or application as
@@ -656,39 +891,80 @@ Through `AuditEvent`'s allowlist, new actions: `settings_changed`, `settings_rev
 version table, not the audit row), `alert_rule_created`, `alert_rule_changed`,
 `alert_rule_enabled`, `alert_rule_disabled`, `alert_rule_deleted`, `alert_rules_restored`,
 `alert_channel_created`, `alert_channel_changed`, `alert_channel_deleted`,
-`alert_channel_key_rotated`, `alert_channel_tested` (the outcome code), `incident_acknowledged`,
-`smtp_password_set` (CLI). Every refusal (409, 429) is `management_refused` with its reason, as
-today. Never in an audit row: a URL, an address, a signing key, a threshold's history (the rule
-row has it), or what was typed.
+`alert_channel_key_rotated`, `alert_channel_disabled`, `alert_channel_tested` (the outcome
+code), `alert_recipient_added`, `alert_recipient_confirmation_sent`, `alert_recipient_verified`,
+`alert_recipient_removed` (channel and recipient ids only, never the address or the code),
+`incident_acknowledged`, `smtp_password_set` (CLI). A settings write records whether it was a
+`loosen_egress` write and that the step-up was consumed. Every refusal (409, 429) is
+`management_refused` with its reason, as today. Never in an audit row: a URL, an address, a signing
+key, a threshold's history (the rule row has it), or what was typed.
 
 ### 14. Threat-model additions
 
 - **Someone with write access silences an alert** by raising its threshold, lengthening its
   window or `for`, adding quiet hours, removing its channels, lowering its severity, or
-  disabling or deleting it. Mitigations: it needs step-up; it is audited with who and when; any
+  disabling or deleting it. Mitigations (no step-up, as answered for Q2): it is audited with
+  who and when; any
   change that makes an enabled rule fire less (each field has a direction, like settings) sends
   a `rule_weakened` notice to the rule's channels **as they were before the change**, naming the
   rule and the fields, never the user; a firing incident resolves as `rule_changed` with a
   notice; the effective view of rules marks default rules that were changed; `restore-defaults`
   undoes it in one step. Not prevented: an org_admin who deletes every channel, then weakens
   rules. The audit log records it.
-- **A webhook pointed at an internal address** (cloud metadata, a database, this machine): the
-  egress guard at create, at test and at every delivery; the socket connects to the checked
-  address; no redirects, no proxy, no local allow. A receiver that turns hostile later can only
-  fail deliveries.
+- **A webhook pointed at an internal address** (cloud metadata, a database, this machine):
+  refused at create by the URL check, and, the check that matters, at connect time on every
+  connection: every resolved address checked, the socket opened to the checked address, a
+  fresh connection per delivery. Covered variants: a name that resolves public at create and
+  private later (rebinding, or a changed record); a name with several addresses of which one is
+  private (refused, not "pick the public one"); IPv4 embedded in IPv6; a literal address; a
+  trailing dot.
+- **A redirect to an internal address**, from a public receiver that answers 3xx: not
+  followed (`follow_redirects=False`); the 3xx is a permanent failure and `Location` is never
+  fetched or logged. A receiver that turns hostile later can only fail deliveries.
+- **A proxy in the environment** that would carry the request past the guard: ignored
+  (`trust_env=False`).
 - **The gateway used to send mail to anyone:** recipients only in the operator's allowed
-  domains, 10 per channel, test sends and notifications capped.
+  domains, 10 per channel, and only **verified** recipients get notifications or test sends.
+- **The confirmation email itself as the spam vector** (an org_admin adds a stranger's address
+  in an allowed domain and has it re-sent): the confirmation is plain, says who asked and that
+  nothing follows without the code; it is capped per address (3 a day across every
+  organization, in a durable row), per channel, per organization and per instance.
+- **Guessing a confirmation code** instead of receiving it: 50 bits, 24 hours, void after 5
+  wrong entries, the confirm endpoint capped; every refusal gives one answer after the same
+  steps. Proving control of a mailbox by guessing is not feasible inside those limits.
+- **A confirmation code leaked** through logs, audit or answers: it is stored only as an HMAC
+  and is in the channel-secrets leak scan as a planted value.
+- **The SMTP password opened by an organization's path**: it lives in the vault's platform
+  scope (its own associated data and its own subkey) and its own table; no organization or
+  provider binding can open it, and no organization store reads its table (section 9.1, with
+  the test).
+- **A channel secret opened as a provider key, or the reverse** (a ciphertext copied between
+  rows): the channel scope's associated data differs from the provider scope's.
+- **Alerts silently not evaluated** (the evaluator dead, fenced forever, or failing every
+  cycle): the heartbeat goes `stale` within 90 s on every instance, in `/healthz`, in metrics,
+  as an event and a log line, and on the console's alert pages (section 11.6).
+- **The heartbeat as an oracle** on the public `/healthz`: it gives one word, no times, no
+  instance, no organization.
+- **A loosening disguised as a tightening** (a preset, a revert, or an organization cap raised
+  so applications' stored values come back into force): decided from the effective values
+  before and after, inside the write transaction, not from the endpoint or the field named.
 - **The webhook as an amplifier** against a third party: capped per rule and organization; at
   most six tries per notification; one connection at a time per notification.
 - **Forged notifications to a customer's receiver:** signed with a key only the gateway and the
   customer hold, with a timestamp against replay, and a delivery id for duplicates.
 - **A webhook URL with a token in it** is a secret: sealed, never shown in full, never logged.
 - **Settings as a denial of service:** someone with `settings.write` can set
-  `requests_per_minute` to 1 or `monthly_token_budget` to 0. It needs a fresh password each time,
-  is audited and versioned, and one revert undoes it.
+  `requests_per_minute` to 1 or `monthly_token_budget` to 0. Tightening needs no step-up (Q2),
+  so a stolen session can do this without the password; it is audited and versioned, and one
+  revert undoes it (the revert loosens rate and budget, which are not egress settings, so it
+  needs no step-up either).
 - **Settings as a privacy downgrade:** widening `allowed_providers` or raising
-  `max_hosted_attempts` sends prompts further. Consume-on-use step-up, the caps, and the rule
-  that a looser value never reaches a request in flight.
+  `max_hosted_attempts` sends prompts further. Consume-on-use step-up for any loosening of S13
+  to S16, the caps, and the rule that a looser value never reaches a request in flight.
+- **A corrupt or newer settings row read as "no settings"**: refused with 503, never the
+  defaults (section 3), since the defaults may be looser than a corrupt cap.
+- **`X-Max-Tokens-Applied` as a leak:** it carries only the application's own applied value,
+  which the caller could compute from its own settings.
 - **Cross-tenant leakage through signals:** customers see only their own application's
   numbers; model-wide numbers are the operator's (section 6).
 - **Alert content as a leak:** built from an allowlist; the leak scan (section 19).
@@ -714,28 +990,28 @@ has one.
 | Method and path | Action | Step-up | Success |
 |---|---|---|---|
 | `GET /settings` (the organization's caps, effective) | `org_settings.read` | | 200 |
-| `PUT /settings` (`expected_version`, `set`, `unset`) | `org_settings.write` | consume | 200 |
+| `PUT /settings` (`expected_version`, `set`, `unset`) | `org_settings.write`, or `org_settings.loosen_egress` | consume, only if it loosens | 200 |
 | `POST /settings/validate` | `org_settings.write` | | 200 |
-| `POST /settings/revert` (`expected_version`) | `org_settings.write` | consume | 200 |
+| `POST /settings/revert` (`expected_version`) | `org_settings.write`, or `org_settings.loosen_egress` | consume, only if it loosens | 200 |
 | `GET /settings/versions` | `org_settings.read` | | 200 |
 | `GET /settings/versions/{n}` | `org_settings.read` | | 200 |
 | `GET /settings/presets` | `org_settings.read` | | 200 |
 | `GET /applications/{app}/settings` (the effective view) | `settings.read` | | 200 |
-| `PUT /applications/{app}/settings` (`expected_version`, `set`, `unset`) | `settings.write` | consume | 200 |
+| `PUT /applications/{app}/settings` (`expected_version`, `set`, `unset`) | `settings.write`, or `settings.loosen_egress` | consume, only if it loosens | 200 |
 | `POST /applications/{app}/settings/validate` | `settings.write` | | 200 |
-| `POST /applications/{app}/settings/revert` (`expected_version`) | `settings.write` | consume | 200 |
-| `POST /applications/{app}/settings/presets/{name}` (`expected_version`) | `settings.write` | consume | 200 |
+| `POST /applications/{app}/settings/revert` (`expected_version`) | `settings.write`, or `settings.loosen_egress` | consume, only if it loosens | 200 |
+| `POST /applications/{app}/settings/presets/{name}` (`expected_version`) | `settings.write`, or `settings.loosen_egress` | consume, only if it loosens | 200 |
 | `GET /applications/{app}/settings/versions` | `settings.read` | | 200 |
 | `GET /applications/{app}/settings/versions/{n}` | `settings.read` | | 200 |
 | `GET /applications/{app}/alert-rules` | `alert_rules.read` | | 200 |
-| `POST /applications/{app}/alert-rules` | `alert_rules.write` | yes | 201 |
+| `POST /applications/{app}/alert-rules` | `alert_rules.write` | | 201 |
 | `GET /applications/{app}/alert-rules/{rule}` | `alert_rules.read` | | 200 |
-| `PUT /applications/{app}/alert-rules/{rule}` (`expected_version`) | `alert_rules.write` | yes | 200 |
-| `POST /applications/{app}/alert-rules/{rule}/enable` | `alert_rules.write` | yes | 200 |
-| `POST /applications/{app}/alert-rules/{rule}/disable` | `alert_rules.write` | yes | 200 |
-| `DELETE /applications/{app}/alert-rules/{rule}` | `alert_rules.write` | yes | 200 |
+| `PUT /applications/{app}/alert-rules/{rule}` (`expected_version`) | `alert_rules.write` | | 200 |
+| `POST /applications/{app}/alert-rules/{rule}/enable` | `alert_rules.write` | | 200 |
+| `POST /applications/{app}/alert-rules/{rule}/disable` | `alert_rules.write` | | 200 |
+| `DELETE /applications/{app}/alert-rules/{rule}` | `alert_rules.write` | | 200 |
 | `POST /applications/{app}/alert-rules/validate` (a rule body; also what it would have been over the last hour, from the rollups) | `alert_rules.read` | | 200 |
-| `POST /applications/{app}/alert-rules/restore-defaults` | `alert_rules.write` | yes | 200 |
+| `POST /applications/{app}/alert-rules/restore-defaults` | `alert_rules.write` | | 200 |
 | `GET /applications/{app}/alert-channels` (ids, names, types) | `alert_rules.read` | | 200 |
 | `GET /applications/{app}/incidents` (`state`) | `incidents.read` | | 200 |
 | `GET /applications/{app}/incidents/{incident}` (with its notifications) | `incidents.read` | | 200 |
@@ -745,7 +1021,12 @@ has one.
 | `POST /alert-channels` (`type`, `name`, `url` or `recipients`, `default`) | `alert_channels.write` | consume | 201, with the signing key once for a webhook |
 | `GET /alert-channels/{channel}` (health included) | `alert_channels.read` | | 200 |
 | `PATCH /alert-channels/{channel}` | `alert_channels.write` | consume | 200 |
-| `DELETE /alert-channels/{channel}` | `alert_channels.write` | consume | 200 |
+| `POST /alert-channels/{channel}/disable` | `alert_channels.disable` | | 200 |
+| `DELETE /alert-channels/{channel}` | `alert_channels.disable` | | 200 |
+| `POST /alert-channels/{channel}/recipients` (an address) | `alert_channels.write` | consume | 201, the recipient `unverified`; the confirmation sent (capped) |
+| `POST /alert-channels/{channel}/recipients/{recipient}/resend` | `alert_channels.confirm_recipient` | | 200 (capped: 429 `confirmation_limited`) |
+| `POST /alert-channels/{channel}/recipients/{recipient}/confirm` (the code) | `alert_channels.confirm_recipient` | | 200; any refusal 409 `confirmation_invalid` |
+| `DELETE /alert-channels/{channel}/recipients/{recipient}` | `alert_channels.disable` | | 200 |
 | `POST /alert-channels/{channel}/rotate-key` | `alert_channels.write` | consume | 200, the new key once |
 | `POST /alert-channels/{channel}/test` | `alert_channels.test` | | 200, the outcome code |
 | `GET /alert-channels/{channel}/deliveries` | `alert_channels.read` | | 200 |
@@ -753,8 +1034,9 @@ has one.
 The mode endpoints (`PUT /mode`, `PUT /applications/{app}/mode`) stay as they are; the effective
 settings view shows the mode from them. Status codes: those of note 30, plus 409
 `settings_version_conflict`, `setting_looser_than_cap`, `no_previous_version`,
-`rule_version_conflict`, `rule_limit`, `channel_limit`, `incident_not_open`; 422
-`invalid_request` (with the field); 429 `test_send_limited`; 503 `state_unavailable`.
+`rule_version_conflict`, `rule_limit`, `channel_limit`, `incident_not_open`,
+`confirmation_invalid`; 422 `invalid_request` (with the field); 429 `test_send_limited`,
+`confirmation_limited`; 503 `state_unavailable`. A step-up refusal is note 29's, unchanged.
 
 ### 16. Console screens (a later PR; frontend only)
 
@@ -771,7 +1053,10 @@ not compute still holds, and its data transforms are pure functions with tests.
   few to judge"); the editor, with the validate preview "over the last hour this would have
   fired at 10:14 and resolved at 10:31"; defaults marked, changed defaults marked.
 - **Channels** (organization): the list with health; create (the signing key shown once, with
-  a copy button and a warning); test send and its outcome; deliveries.
+  a copy button and a warning); email recipients with their state (`unverified`, `verified`),
+  the code entry and re-send; test send and its outcome; deliveries.
+- **Evaluator state:** the banner of section 11.6 on every alert page while the heartbeat is
+  `stale` or `unknown`.
 - **Incidents:** open and recent, per application and for the organization; each with its
   timeline, its notifications and their states, and Acknowledge.
 
@@ -789,7 +1074,23 @@ Valkey tests are marked `valkey`, Postgres ones `postgres`.
   revert refused by a cap, version 1; `expected_version` conflict, and the same on two instances
   at once (one success); validate equals write, field for field, without writing; presets with
   their exact values, refused by a cap; a document with an unknown `schema_version` refuses the
-  start; a corrupt document refuses that application's requests with 503.
+  start; every row of section 3's missing, unreadable and invalid table on both endpoints,
+  on memory, SQLite and Postgres (a missing row gives today's values; each unreadable or
+  invalid case 503 with the same bytes, and never a looser value: a test sets an organization
+  cap, corrupts the organization's row, and checks that no request is served at all, rather
+  than served without the cap).
+- **`default_max_tokens`:** applied as the request's limit when none is named, on
+  `/v1/generate` and chat, JSON and SSE; the reservation bound equals it; no answer on the
+  gateway's tiers exceeds it; a hosted provider over it is counted, not altered;
+  `X-Max-Tokens-Applied` on every answer that chose a value (from the request, from S8, from
+  today's chain), absent on early refusals.
+- **Step-up only when loosening:** for each of S13 to S16, a loosening write without step-up
+  refused, the same with step-up accepted and the window consumed (a second loosening
+  refused); a tightening write accepted with no step-up and the window untouched; a preset and
+  a revert judged by their effect (both ways); an organization cap raised so an application's
+  stored value comes back into force needs step-up, one that affects no application does not;
+  a cap moved between the dry run and the write (two instances) refused with the window given
+  back; a write to S1 to S11 never asks for step-up.
 - **Propagation:** a change on instance A seen by B's next request; each setting of section 5 in
   flight (stricter before the next hosted attempt, looser from the next request), with the same
   scripted providers as note 38's tests; an answer already streaming not cut.
@@ -812,12 +1113,34 @@ Valkey tests are marked `valkey`, Postgres ones `postgres`.
 - **Delivery:** at least once with the claim expired; retries on the schedule, on the injected
   clock; no retry on a permanent failure; signature verified by an independent implementation
   in the test; rotation signing with both; the answer never logged.
-- **SSRF:** every private, loopback, link-local and metadata address refused at create, test and
-  delivery; a name that resolves public at create and private at delivery refused at delivery; a
-  redirect not followed; a proxy setting ignored; http refused.
+- **SSRF, at connect time:** every private, loopback, link-local, metadata, multicast,
+  reserved and embedded-IPv4 address refused at create (literal) and at connect (resolved), on
+  test send, first delivery and each retry; a name that resolves public at create and private
+  at delivery refused at delivery, with the socket never opened (the injected backend records
+  every `connect_tcp`); a name resolving to one public and one private address refused; the
+  socket opened to the checked address, not the name (the injected backend sees an address);
+  a second delivery to the same channel resolves again (no pooled connection); a 301, 302,
+  307 and 308 to a private address and to a public one each a permanent `http_3xx` with no
+  second request made; `HTTPS_PROXY` set in the environment and ignored; http refused.
 - **Email:** an in-process SMTP test server written in the test suite on asyncio streams (no
   dependency): STARTTLS required, plain refused; a domain outside the allowlist refused; 4xx
   retried, 5xx not.
+- **Verified recipients:** an unverified address gets only its confirmation (no notification,
+  no test send, no summary: the test server's mailbox is checked); the right code verifies;
+  wrong, expired, used, voided and another organization's codes give one answer, byte for
+  byte, after the same steps (the structural test of note 27's refusals, applied here, and the
+  early-return mutation M47); five wrong entries void it; the per-address cap holds across two
+  organizations and two instances and survives a Valkey restart; the per-channel and
+  per-organization caps; a counter that cannot answer refuses the send.
+- **Vault scopes:** the test of section 9.1 that no organization or provider binding opens
+  the SMTP password, the associated-data-apart and key-apart tests, the channel scope against
+  the provider scope both ways, and rotation resealing all three scopes.
+- **Heartbeat:** `ok`, `stale` (the evaluator killed with no taker; every cycle failing; a
+  fenced evaluator renewing nothing), `unknown` (the durable store down) and `disabled`, on
+  three instances, each reporting the same state from its own read; `/healthz` carries the one
+  word and nothing else; `/readyz` unaffected; the metrics and the snapshot (`available:
+  false` when `unknown`, the age absent, never 0); the events at each change; health and
+  metrics make no store call (counted).
 - **Permissions:** the generated matrix covers every new action; **every new endpoint** gets the
   cross-organization test (a resource of `south` through `/orgs/north/...`: 403, the same bytes
   as a missing one) and the cross-application test inside one organization for app_admin;
@@ -842,9 +1165,9 @@ is a stop-and-ask.
 | M7 | Read once | read settings again inside the handler | the store-call count tests |
 | M8 | Stricter before the next hosted attempt | drop the settings check in `hosted_policy` | the in-flight tests for S13 to S16 |
 | M9 | Looser never opens an attempt | apply looser values at the re-read | the looser-in-flight tests |
-| M10 | Step-up on settings | `settings.write` without step-up | the step-up tests |
-| M11 | Consume-on-use on settings and channels | `consume` off for each | the second-write-refused tests |
-| M12 | Step-up on rules | `alert_rules.write` without step-up | the rule step-up tests |
+| M10 | Step-up when loosening | `loosens_egress` returns false for one of S13 to S16 (one mutation per setting) | that setting's loosening-without-step-up test |
+| M11 | Consume-on-use on loosening writes and channel writes | `consume` off for `settings.loosen_egress`, `org_settings.loosen_egress` and `alert_channels.write`, each | the second-write-refused tests |
+| M12 | An organization cap raised is a loosening | `loosens_egress` compares the caps only, not the applications' effective values | the cap-raised-brings-back-a-stored-value test |
 | M13 | Cross-organization, per resolver | each resolver returns a resource of another organization (one mutation per resolver) | that resolver's endpoints' cross-organization tests |
 | M14 | Missing equals forbidden | a missing rule answers 404 | the byte-identical tests |
 | M15 | Channel of another organization in a rule | skip the check | the rule-channel test |
@@ -869,17 +1192,36 @@ is a stop-and-ask.
 | M34 | Recorder never awaits | an `await` in the recorder | the structural test |
 | M35 | No model-wide number in application signals | feed the model's histogram to an application signal | the tenant-isolation test |
 | M36 | Reveal only at the two new sites | a third `reveal()` | the AST test |
+| M37 | Unreadable settings never loosen | `settings_from_rows` returns the defaults for an invalid document | the corrupt-organization-cap test and the 503 table tests |
+| M38 | Loosening decided inside the write | skip the recomputation of `loosens_egress` in `write_transaction()` | the cap-moved-between-dry-run-and-write test |
+| M39 | `default_max_tokens` applied | the reservation and the backend use today's chain when S8 is set | the reservation-bound and no-answer-exceeds tests |
+| M40 | `X-Max-Tokens-Applied` | omit it on SSE answers | the header test |
+| M41 | Vault scopes: associated data apart | the platform prefix dropped, fields laid out like a provider binding | the associated-data-apart test |
+| M42 | Vault scopes: key apart | the platform subkey replaced by the master key | the key-apart test |
+| M43 | No organization or provider key opens the SMTP password | M41 and M42 together | the end-to-end test of section 9.1 |
+| M44 | Every resolved address checked | check only the first address | the mixed-address test |
+| M45 | A fresh check per delivery | reuse one pooled client across deliveries | the second-delivery-resolves-again test |
+| M46 | No proxy | `trust_env=True` on the webhook client | the proxy test |
+| M47 | One answer for every confirmation refusal | return early for an unknown recipient, before the HMAC | the structural same-steps test |
+| M48 | Only verified recipients | skip the verified filter on notifications (and, separately, on test sends) | the mailbox tests |
+| M49 | Per-address confirmation cap, durable and atomic | the cap in a Valkey window instead (and, separately, checked in Python after a `SELECT`) | the Valkey-restart test; the two-instance cap test |
+| M50 | The code never stored or logged in clear | store the code instead of its HMAC; log it on send | the channel-secrets leak scan |
+| M51 | The heartbeat is fenced | write `last_cycle_completed_at_ms` in its own statement, without the epoch | the fenced-evaluator-goes-stale test |
+| M52 | No heartbeat is `ok` without a fresh read | keep the last `ok` while the lease row cannot be read | the `unknown` test |
+| M53 | `/healthz` says one word | add the age to `/healthz` | the health-body test |
 
 ### 19. Leak scans
 
 Two scans, each with a planted control that must be found:
 
-- **Channel secrets:** plant a webhook URL with a token in its path, a signing key and an SMTP
-  password; create, test, deliver (succeeding and failing), rotate, delete; then scan every
-  stored row (SQLite, Postgres), every Valkey key and value, every log record, every audit row,
-  every event, the Prometheus output, every admin answer (except the one that returns the new
-  signing key), and every outgoing payload. The scan must find the planted values in a
-  deliberately unredacted copy, and nowhere else.
+- **Channel secrets:** plant a webhook URL with a token in its path, a signing key, an SMTP password
+  and an email confirmation code (the code generator injected so the planted value is the one sent);
+  create, test, deliver (succeeding, failing, redirected), rotate, add a recipient, re-send, confirm
+  (wrong, then right), delete; then scan every stored row (SQLite, Postgres), every Valkey key and
+  value, every log record, every audit row, every event, the Prometheus output, `/healthz`, every
+  admin answer (except the one that returns the new signing key), every outgoing payload, and every
+  mail the test SMTP server received (except the confirmation itself, which must carry the code).
+  The scan must find the planted values in a deliberately unredacted copy, and nowhere else.
 - **Alert contents:** run requests with a planted prompt, response, API key, provider key and
   username through to a firing and a resolved notification; scan every payload in the outbox,
   every delivered body (webhook and email) and the rollups. Nothing planted may appear; the
@@ -915,14 +1257,14 @@ must be merged before S3.
 | PR | Branch | What | Behaviour change |
 |---|---|---|---|
 | S0 | `settings-alerts/plan` | This plan | None |
-| S1 | `settings-alerts/s1` | Migration 14 and Postgres schema 3 (settings tables); `SettingsStore` on memory, SQLite and Postgres; `effective_settings`; the join into `lookup_key`; settings S1 to S11 and S17 to S19 applied on the request path; the CLI; tests; note 39 | None until a setting is set: defaults are today's values |
-| S2 | `settings-alerts/s2` | The settings endpoints (application and organization), the permission rows, step-up, versions, revert, validate, presets, audit, the cross-organization tests | New endpoints |
-| S3 | `settings-alerts/s3` | S12 shown, S13 to S16 added; `hosted_policy` (one statement for both modes and both settings rows); the in-flight rule for each; measured before and after | One store call fewer per hosted attempt; the in-flight rule for the new settings |
+| S1 | `settings-alerts/s1` | Migration 14 and Postgres schema 3 (settings tables); `SettingsStore` on memory, SQLite and Postgres; `effective_settings`; the join into `lookup_key` on every request path, `/v1/generate` included; `settings_from_rows` (a missing row the defaults, unreadable or invalid a 503, with its table of tests); settings S1 to S11 applied on the request path; S8 applied and enforced as the request's limit, with `X-Max-Tokens-Applied` and its documentation; the CLI; the key lookup and `request_store_calls` measured before and after; tests; note 39 | The `X-Max-Tokens-Applied` header on every answer; otherwise none until a setting is set: defaults are today's values |
+| S2 | `settings-alerts/s2` | The settings endpoints (application and organization), the permission rows (with `*.loosen_egress` declared; no setting of S1 to S11 reaches it, so no write needs step-up yet), versions, revert, validate, presets, audit, the cross-organization tests | New endpoints |
+| S3 | `settings-alerts/s3` | S12 shown, S13 to S16 added; `loosens_egress` and step-up on loosening (M10 to M12, M38); `hosted_policy` (one statement for both modes and both settings rows); the in-flight rule for each; measured before and after | One store call fewer per hosted attempt; the in-flight rule for the new settings; loosening S13 to S16 asks for the password |
 | A1 | `settings-alerts/a1` | `AlertRecorder`, `AlertRollups` (memory, Valkey), the histogram, the signals and their minimums; no rules; the recorder measured | None (nothing reads it but tests) |
 | A2 | `settings-alerts/a2` | Rules: tables, endpoints, permissions, defaults (with the data step for existing applications), validate with the last-hour preview | New endpoints; nothing fires yet |
-| A3 | `settings-alerts/a3` | The evaluator: the lease and its epoch, the states, incidents, dedupe, cooldown, quiet hours, acknowledge, the incident endpoints; no channels (the incident list only) | Incidents appear |
-| A4 | `settings-alerts/a4` | Webhook channels: the vault binding, the signing key, the egress guard, the outbox, retries, the caps and the summary, test send, delivery visibility, `channel_delivery_failing`, both leak scans | Notifications leave the machine |
-| A5 | `settings-alerts/a5` | Email through SMTP: the operator settings, the vault for the password, STARTTLS, the domain allowlist, the in-process test server | Email |
+| A3 | `settings-alerts/a3` | The evaluator: the lease and its epoch, the heartbeat in `/healthz`, metrics, the snapshot and events (section 11.6), the states, incidents, dedupe, cooldown, quiet hours, acknowledge, the incident endpoints; no channels (the incident list only) | Incidents appear; `/healthz` gains `alert_evaluator` |
+| A4 | `settings-alerts/a4` | Webhook channels: the vault's channel scope, the signing key, `webhook_client` with the connect-time check and no redirects, the outbox, retries, the caps and the summary, test send, delivery visibility, `channel_delivery_failing`, both leak scans | Notifications leave the machine |
+| A5 | `settings-alerts/a5` | Email through SMTP: the operator settings, the vault's platform scope and `platform_secrets` for the password (with the test that no organization or provider key opens it), STARTTLS, the domain allowlist, verified recipients and the confirmation caps, the in-process test server; the leak scan extended to the code | Email, to verified recipients only |
 | A6 | `settings-alerts/a6` | Operator signals and channels (section 11.5) | Operator notices |
 | C1 | `settings-alerts/c1` | Console: settings and organization settings | Frontend |
 | C2 | `settings-alerts/c2` | Console: alert rules, channels, incidents | Frontend |
@@ -942,14 +1284,18 @@ Numbered so they can be objected to.
    not read as "customer-controllable" for the pepper, the vault, retention or the breaker.
 2. **The application's plan copy counts as the platform ceiling** for the customer: the
    customer can lower `requests_per_minute`, the budget and `max_tokens`, never raise them; the
-   operator raises them through the CLI.
+   operator raises them through the CLI. (Approved, Q1.)
 3. **No settings cache.** Settings are read in the key's own query on every request; the only
    memoisation is of immutable versions. Nothing is shared to invalidate, and a change reaches
-   every instance's next request.
-4. **Every settings write is consume-on-use**, not only the ones that loosen egress: one rule
-   instead of a per-field split that a later field could get wrong.
-5. **Modes stay in their own table and endpoints.** The effective view shows them; folding them
-   into the settings documents would rewrite the merged security path of notes 33 and 38.
+   every instance's next request. (Approved, Q3, with the missing, unreadable and invalid rule.)
+4. **Step-up, consume-on-use, only for loosening S13 to S16 and for creating or changing a
+   channel** (answered, Q2; it replaces "every settings write"). Loosening is judged from the
+   effective values of every affected application, recomputed inside the write transaction,
+   so a per-field split cannot be bypassed by a preset, a revert or an organization cap.
+5. **Modes stay in their own table and endpoints**, and keep their merged rule (consume-on-use
+   for every change, tightening included), although Q2's answer would let tightening go
+   without. The effective view shows them; changing them would rewrite the merged security
+   path of notes 33 and 38. A separate PR can align them if wanted.
 6. **Settings documents are canonical JSON in a text column** on both databases, so
    `migrate-to-postgres` and back compare them byte for byte, with a `schema_version` so older
    code refuses newer documents.
@@ -968,6 +1314,8 @@ Numbered so they can be objected to.
 14. **The whole webhook URL is a secret,** sealed and shown only as its origin.
 15. **Email recipients only in operator-allowed domains.**
 16. **`reveal()` allowed at exactly two new call sites,** the webhook signer and the SMTP login.
+    The confirmation code is not a vault secret: it is generated, mailed once and kept only as
+    an HMAC.
 17. **Viewers can read settings, rules and incidents but not acknowledge.**
 18. **No evaluator in simulated live mode** in these PRs: it stays deterministic and sends
     nothing.
@@ -979,26 +1327,50 @@ Numbered so they can be objected to.
 23. **Default rules are real rows** created with each application, not virtual, so they can be
     edited and their changes audited like any rule.
 
-## Questions that block PR S1
+Added on approval (2026-10-31), with the four additions and the answers:
 
-- **Q1. The plan copy as ceiling** (decision 2): may a customer only lower
-  `requests_per_minute`, `monthly_token_budget` and `max_tokens`, with raising left to the
-  operator's CLI? Proposed: yes.
-- **Q2. Consume-on-use for every settings write** (decision 4), or step-up without consume for
-  settings that cannot widen egress (S1 to S11, S17 to S19) and consume only for S13 to S16?
-  Proposed: every write.
-- **Q3. The settings read inside `lookup_key`** (decision 3): it changes the key lookup's
-  statement on every request, `/v1/generate` included, in exchange for no added store call and
-  no cache. Proposed: yes, measured in S1 with `key_checks` and `request_store_calls`.
-- **Q4. `default_max_tokens` as the reservation's completion bound** (S8): when a request names
-  no `max_tokens`, S8 is applied as its `max_tokens`, so what is reserved is what may be
-  generated. Proposed: yes; with S8 unset nothing changes.
-- **Q5. The key settings S17 to S19** touch key issuing (authentication-adjacent). In S1 as
-  proposed, or left out of this plan?
+24. **Webhook deliveries are outside the mode's locality rule** (`egress_scope(always_hosted)`):
+    a notification carries no prompt, and an organization under `local_only` still wants its
+    alerts. The public-address rule, the connect-time check and no redirects all still apply.
+25. **Disabling or deleting a channel, or removing a recipient, needs no step-up:** it narrows
+    where data goes. It is audited and sends a `channel_removed` notice to the organization's
+    other default channels.
+26. **Recipients are verified by a code entered in the console, not a link:** the console is
+    local only until A8, and a public confirmation endpoint would be a new unauthenticated
+    surface. A link can be added with A8.
+27. **`/readyz` does not depend on the heartbeat,** and `/healthz` carries one word: a stale
+    evaluator should not take instances out of the load balancer, and `/healthz` is public.
+28. **The platform scope has its own subkey as well as its own associated data;** the
+    provider scope keeps the master key, so no existing row is resealed.
+29. **The per-address confirmation cap is durable and spans organizations,** keyed by an HMAC
+    of the normalised address, so two organizations cannot each send a stranger three a day,
+    and a Valkey restart releases nothing.
+30. **A hosted provider that exceeds the applied `max_tokens` is counted, not cut:** the
+    gateway cannot count a hosted provider's tokens as they stream.
+31. **The heartbeat is built with the evaluator (A3),** not with the other operator signals
+    (A6), so alerts never run without it.
+
+## Answers and changes on approval (2026-10-31)
+
+| Item | Answer | Where it went |
+|---|---|---|
+| Q1, the plan copy as ceiling | Yes | Section 1.1 (ceilings), decision 2 |
+| Q2, step-up | Only for loosening where-prompts-go settings and for creating or changing alert channels (and key policy, which is out of scope); tightening needs none; consume-on-use kept | Section 1.1, section 4 (presets by effect), section 12 (`*.loosen_egress`, `loosens_egress`), section 14, M10 to M12 and M38, decisions 4, 5 and 25 |
+| Q3, settings in `lookup_key` | Yes, on every request path including `/v1/generate`; a missing row is the platform defaults, unreadable or invalid a 503, never a looser value, with a test; the key lookup measured | Section 3 (the table), section 5, section 17, section 20, M37, PR S1 |
+| Q4, `default_max_tokens` | Applied and enforced as the request's `max_tokens`, with `X-Max-Tokens-Applied`, documented | Section 5.1, section 17, M39 and M40, PR S1, decision 30 |
+| Q5, key policy | Out of scope; with identity steps 8 and 9 | Section 1.1 (S17 to S19 removed) |
+| Addition 1, verified recipients with a cap on confirmations | Added | Section 9 (email), section 12, section 13, section 14, section 15, section 17, section 19, M47 to M50, PR A5, decisions 26 and 29 |
+| Addition 2, the resolved-address check at connect time, no redirects | Added | Section 9 (webhook), section 14, section 17, M16 to M19 and M44 to M46, PR A4, decision 24 |
+| Addition 3, the evaluator heartbeat in health and metrics | Added | Section 11.6, section 11.4, section 14, section 17, M51 to M53, PR A3, decisions 27 and 31 |
+| Addition 4, a distinct vault scope for the SMTP password, with the test | Added | Section 9.1, section 14, section 17, M41 to M43, PR A5, decision 28 |
+
+Nothing blocks S1.
 
 Questions for later PRs, not blocking S1: whether `incidents.acknowledge` should go to viewers
 (decision 17); the default rules' thresholds; the caps' numbers (6 and 60 an hour); whether to
-add `tzdata` for daylight saving.
+add `tzdata` for daylight saving; the confirmation caps' numbers (3 a day per address, 10
+and 20 an hour); whether the mode endpoints should also drop step-up for tightening (decision
+5).
 
 ## Not built
 
