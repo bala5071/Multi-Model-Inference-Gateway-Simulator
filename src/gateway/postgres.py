@@ -71,7 +71,6 @@ from gateway.settings import (
     SettingsRow,
     SettingsVersion,
     SettingsVersionConflictError,
-    StoredSettings,
     joined_settings,
     settings_row,
     settings_version,
@@ -907,13 +906,12 @@ class PostgresApplicationStore(_Store):
         width = len(_KEY_COLUMNS.split(","))
         app_width = len(_APP_COLUMNS.split(","))
         application_row = values[width : width + app_width]
-        application = _application(application_row) if application_row[0] is not None else None
         disabled, now_ms = values[width + app_width], values[width + app_width + 1]
-        settings = (
-            joined_settings(values[-8:], application.organization_id, application.id)
-            if application is not None
-            else StoredSettings(None, None)
-        )
+        if application_row[0] is None:
+            return KeyLookup(_key(values[:width]), None, disabled == 0, float(now_ms))
+        # The application carries the rows read with it: built once, never copied (docs/39).
+        settings = joined_settings(values[-8:], application_row[-1], application_row[0])
+        application = _application(application_row, settings)
         return KeyLookup(
             _key(values[:width]), application, disabled == 0, float(now_ms), settings=settings
         )

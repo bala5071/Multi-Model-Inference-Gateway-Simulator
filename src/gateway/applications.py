@@ -287,11 +287,10 @@ class InMemoryApplicationStore:
         application = self._applications.get(record.application_id)
         organization = self._organizations.get(application.organization_id) if application else None
         enabled = organization is not None and not organization.disabled
-        settings = (
-            self.settings.stored(application.organization_id, application.id)
-            if application is not None
-            else StoredSettings(None, None)
-        )
+        if application is None:
+            return KeyLookup(record, None, enabled)
+        settings = self.settings.stored(application.organization_id, application.id)
+        application = replace(application, stored_settings=settings)
         return KeyLookup(record, application, enabled, settings=settings)
 
     async def list_keys(self, application_id: str) -> list[ApiKeyRecord]:
@@ -352,7 +351,9 @@ _KEY_COLUMNS = (
 _ORG_COLUMNS = "id, name, kind, created_at_ms, disabled"
 
 
-def _application(row: tuple[Any, ...]) -> Application:
+def _application(
+    row: tuple[Any, ...], stored_settings: StoredSettings | None = None
+) -> Application:
     app_id, name, plan_name, models, multiplier, budget, max_tokens, rpm, created, org = row
     return Application(
         id=app_id,
@@ -362,6 +363,7 @@ def _application(row: tuple[Any, ...]) -> Application:
         requests_per_minute=rpm,
         created_at_ms=created,
         organization_id=org,
+        stored_settings=stored_settings,
     )
 
 
@@ -526,13 +528,12 @@ class SqliteApplicationStore:
         key_width = len(_KEY_COLUMNS.split(","))
         app_width = len(_APP_COLUMNS.split(","))
         application_row = row[key_width : key_width + app_width]
-        application = _application(application_row) if application_row[0] is not None else None
         disabled = row[key_width + app_width]
-        settings = (
-            joined_settings(row[-8:], application.organization_id, application.id)
-            if application is not None
-            else StoredSettings(None, None)
-        )
+        if application_row[0] is None:
+            return KeyLookup(_key(row[:key_width]), None, disabled == 0)
+        # The application carries the rows read with it: built once, never copied (docs/39).
+        settings = joined_settings(row[-8:], application_row[-1], application_row[0])
+        application = _application(application_row, settings)
         return KeyLookup(_key(row[:key_width]), application, disabled == 0, settings=settings)
 
     async def list_keys(self, application_id: str) -> list[ApiKeyRecord]:
