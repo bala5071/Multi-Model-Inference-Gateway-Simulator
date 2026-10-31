@@ -77,7 +77,9 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   (consume-on-use, audited) (exists)
 - `chatrouter.py` — `ChatRouter`: a chat request's candidates (the tier, the organization's
   providers for that tier) in the mode's order, the five fallback triggers, never after output,
-  never another tier; `X-Provider` (`gateway` for the gateway's own tier, `local` before PR 20),
+  never another tier; the mode read once per request by the handler and passed in, the egress
+  scope answering from it, and read again just before each hosted attempt, which a stricter mode
+  refuses (docs/33, docs/38); `X-Provider` (`gateway` for the gateway's own tier, `local` before PR 20),
   `X-Provider-Class` and the usage record's source (exists)
 - `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
   warning, on the injected clock, `circuit_breaker` events (exists)
@@ -281,6 +283,10 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
 - `benchmarks/durable_calls.py` — one durable read and write, the chat path's store calls,
   and the budget's admit and settle, on SQLite and Postgres (needs `GATEWAY_POSTGRES_URL`); the
   numbers in `docs/36` and `docs/37` (exists)
+- `benchmarks/request_store_calls.py` — one chat request through the whole app on SQLite and
+  on Postgres with the shared budgets, its store calls and Postgres round trips (BEGIN, the
+  statement timeout, COMMIT, the pool's reset) counted and timed as made (needs
+  `GATEWAY_POSTGRES_URL`); the numbers in `docs/38` (exists)
 - `benchmarks/management_requests.py` — management reads and key writes on the running
   server, beside `/healthz` and `/v1/auth/me`; the numbers in `docs/30` (exists)
 

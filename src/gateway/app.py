@@ -2558,13 +2558,14 @@ def create_app(
                     chat_req = dataclasses.replace(chat_req, max_tokens=caller.max_tokens)
             except ChatInputError as exc:
                 return _openai_error(422, "invalid_request", str(exc), param=exc.param)
+            # The request's mode, read once: the router and the egress guard use this value for
+            # the rest of the request; the router reads it again only before a hosted attempt,
+            # to refuse one a stricter mode no longer allows (docs/33, docs/38).
+            mode = await chat_router.mode(caller.organization_id, caller.id)
             try:
                 # Only to answer at once when no candidate may serve it; the router asks again.
                 await chat_router.candidates(
-                    caller.organization_id,
-                    caller.id,
-                    route.model,
-                    wants_tools=bool(chat_req.tools),
+                    caller.organization_id, route.model, mode, wants_tools=bool(chat_req.tools)
                 )
             except NoCandidateError as exc:
                 if exc.code == "tools_not_supported":
@@ -2622,7 +2623,7 @@ def create_app(
                 monitoring.request_started(route.model)
                 try:
                     work = chat_router.run(
-                        chat_req, caller.organization_id, caller.id, on_delta, trace
+                        chat_req, caller.organization_id, caller.id, mode, on_delta, trace
                     )
                     if timeout_ms is not None:
                         return await run_with_timeout(clock, work, timeout_ms)

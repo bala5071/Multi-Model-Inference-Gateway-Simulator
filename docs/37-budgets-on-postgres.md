@@ -214,6 +214,10 @@ reserve and the settle replace `append` and that read, every time: one call more
 6 and 20. PR 3c's single read of the modes would take 10 of the provider path's 21 away. The
 timing is below.
 
+**Changed in PR 3c (note 38):** 5 calls on the gateway's tier and 13 through an organization
+provider: the modes read once, and again just before the hosted attempt; counted by the same
+tests.
+
 ## Threat-model additions
 
 - **The gateway now runs on Postgres in production** (shared mode): every durable secret it

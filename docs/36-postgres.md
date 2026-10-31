@@ -122,7 +122,11 @@ SQLite and Postgres; on Postgres each is one statement and one round trip, one a
 `/v1/generate` makes `lookup_key`, the period's totals on the first request, and `append`.
 None of them takes the write lock or a management connection. The batched `last_used_at`
 write (note 20) is one more statement per flush, not per request. PR 3c reads each mode
-once per request: 12 of the 20 calls of a provider-served request are those re-reads.
+once per request: 12 of the 20 calls of a provider-served request are mode reads.
+
+**Changed in PR 3c (note 38):** the two modes are read once per chat request, and again
+just before each hosted attempt. The calls are then 5, 4 and 12 (on SQLite), counted by the same
+test.
 
 ## Migration and rollback
 

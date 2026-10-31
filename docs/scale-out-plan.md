@@ -548,7 +548,7 @@ order.
 | 2 | `scale-out/step-2` | Valkey counters (reordered on request, 2026-10-29): `redis` and the Valkey image (provenance check), the window scripts, the audit cap, the breakers, failing closed, restart detection, the skew check, the compose file and CI job, the two-instance test of a shared limit | Only with `GATEWAY_COUNTERS=valkey`; the default stays in memory |
 | 3 | `scale-out/step-3` | Postgres: `asyncpg` (provenance check), `pg0001`, every durable store, the budget reservation and its two-instance edge test (Q1), the step-up claim, the lockout update, the write lock, `migrate-to-postgres` and back; the skew check moves to `gateway_now_ms()`; `GATEWAY_STATE=shared`; `/readyz` | Only with `shared` |
 | 3b | `scale-out/step-3b` | Budgets on Postgres: the reservation (3.1) and its two-instance edge test (Q1), the per-tier settings (Q2); `GATEWAY_STATE=shared` allowed; Valkey's skew check against `gateway_now_ms()` | Only with `shared` |
-| 3c | `scale-out/step-3c` | Each mode read once per chat request and passed on (note 36: 12 of the 20 store calls of a provider-served request) | Fewer store calls; a mode change applies from the next request, and the next attempt of one in flight, as before |
+| 3c | `scale-out/step-3c` | Each mode read once per chat request and passed on (note 36: 12 of the 20 store calls of a provider-served request) | Fewer store calls; the modes read again just before each hosted attempt: a stricter mode stops the next hosted attempt of a request in flight, a looser one applies from the next request (on approval of #28, 2026-10-30) |
 | 2b | `scale-out/step-2b` | After PR 3, recorded 2026-10-29, not built: the breaker reports off the request path, and a per-request cap on hosted attempts (below) | Chat: fewer counter calls on the path; at most 3 hosted attempts a request by default |
 | 4 | `scale-out/step-4` | The two-instance tests in process and in two processes, the mutation table, the failure tests, `benchmarks/shared_state.py`, the note, the compose file for a two-instance demo on Postgres and Valkey | None |
 
@@ -772,9 +772,9 @@ Then, in order:
   skew check against `gateway_now_ms()` when Postgres is configured: it needs a server running
   on Postgres, which PR 3b is the first to have.
 - **PR 3c: each mode read once per request.** A chat request served by an organization provider
-  reads the two modes five times (12 of its 20 store calls, note 36). It reads them once and
-  passes the effective mode on. A mode change still applies from the next request (docs/33),
-  and from the next attempt of a request in flight.
+  reads the two modes six times (12 of its 21 store calls, note 37). It reads them once and
+  passes the effective mode on, and reads them again just before each hosted attempt (on
+  approval of #28, section below).
 
 ### PR 3b: budgets on Postgres, proposed before building (2026-10-29)
 
@@ -980,6 +980,52 @@ path.
 - The pool's reset of a connection given back to it is a round trip, and it is counted: 7 for
   a reserve and 9 for a settle.
 - CI's `postgres` job also starts Valkey, for the shared server's end-to-end test.
+
+### PR 3c: store round trips on the request path (2026-10-30)
+
+Branch `scale-out/step-3c`, from `main` at `c3e916c` (#27 merged). No plan approval needed: it
+touches no authentication, secret, provider key, table rebuild or network surface. It does
+change when a mode change reaches a request in flight, which the request asks for and decision 1
+of the PR names.
+
+**What the request asks:**
+
+1. Each mode (the organization's and the application's) read once per chat request, and that
+   value used for the rest of the request. A mode change takes effect on the next request, and
+   a mode changed mid-request is not seen by that request. Both tested.
+2. Where Postgres's per-transaction overhead goes (BEGIN, the statement timeout, COMMIT, the
+   pool's reset), measured; how to cut it, proposed and not built, except what keeps behaviour
+   identical and the existing tests already cover.
+3. One chat request's store calls and added latency, on the gateway tier and on one
+   organization provider, three runs, before and after.
+4. Mutation checks for the read-once rule, restored byte for byte.
+5. The perf gate and the protected outputs unchanged.
+
+**The design.** The chat handler reads the pair once, through `ChatRouter.mode` (which keeps
+`effective_mode` the only place the mode is decided), right where it first asks for candidates
+today. `ChatRouter.candidates` and `ChatRouter.run` take that mode as an argument and read no
+store for it. The router's check before each hosted candidate and the egress scope's answer
+(at every request, connection and resolved name) answer from it.
+
+**What this changes (docs/33).** Today a mode made stricter mid-request stops that request's next
+attempt, at the router and again at the egress guard; two tests hold it. As first built, the
+request finished under the mode it read, and every change applied from the next request.
+
+**On approval of #28 (2026-10-30), the rule is:** before every hosted attempt (a primary, a
+fallback, a retry) the router reads both modes again, just before the attempt leaves the
+machine, and refuses the attempt if the current mode is stricter than the request's. A stricter
+mode therefore stops the next hosted attempt of a request in flight; a looser mode never opens
+one for it and applies from the next request; an answer already streaming is not cut.
+Everything else uses the mode read once. The guard still fails closed without a scope, and
+still refuses every hosted destination under a `local_only` request. The `in_flight` sentence
+of the mode endpoints says this. Its error codes and fields stay the same.
+
+**How it is measured.** `benchmarks/request_store_calls.py`, committed before the change and run
+three times there, then three times after it. Each chat request goes through the whole app on the
+Postgres stores with the shared budgets. The gateway tier is an OpenAI-compatible adapter at a
+local destination, and the organization provider sits on a scripted network, so no model or
+provider time is in it. It counts each store call as made and each Postgres round trip by kind,
+times them, and times the same requests on SQLite.
 
 ## 9. Threat-model additions
 
