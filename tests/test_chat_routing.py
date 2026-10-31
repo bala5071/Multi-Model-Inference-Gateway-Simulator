@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import inspect
 import json
+import logging
 import ssl
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -47,6 +48,7 @@ from gateway.providers import ProviderConfig, ProviderService, SqliteProviderSto
 from gateway.ratelimit import RequestRateLimiter
 from gateway.redaction import Redactor
 from gateway.roles import SqliteRoleStore
+from gateway.settings import Scope, SqliteSettingsStore, canonical
 from gateway.usage import ChatSource, SqliteUsageStore
 from gateway.users import SqliteAccountStore
 from gateway.vault import Vault
@@ -1065,6 +1067,8 @@ DURABLE_STORES = (
     SqliteAccountStore,
     SqliteAuditStore,
     SqliteRoleStore,
+    # Read with the key, never on its own (docs/39): any call here would be counted.
+    SqliteSettingsStore,
 )
 
 
@@ -1130,3 +1134,60 @@ async def test_the_durable_store_calls_one_chat_request_makes(
         "append",
     ]
     assert (len(first), len(again), len(with_provider)) == (5, 4, 12)
+
+
+# --- per-application settings on chat (docs/39) -------------------------------------------------
+
+
+async def _settings(r: Routing, **values: Any) -> None:
+    """The application's settings, written as the CLI writes them."""
+    store = SqliteSettingsStore(r.world.accounts.connection)
+    row = await store.current(Scope.APPLICATION, "north-shop")
+    async with store.write_transaction():
+        await store.write(
+            Scope.APPLICATION,
+            "north-shop",
+            expected_version=row.version if row is not None else 0,
+            document=canonical(values),
+            changed=tuple(values),
+            changed_by_user_id=None,
+            via="cli",
+            at_ms=0.0,
+        )
+
+
+async def test_the_first_token_timeout_of_the_gateways_tier_is_the_applications() -> None:
+    """The operator's adapter hangs: the request gives up at the application's
+    chat_first_token_ms, not at the platform's 30 s."""
+    async with routing() as r:
+        r.op_net.responses = [HANG]
+        started = r.clock.now_ms()
+        default = await r.chat()
+        assert _code(default) == "upstream_timeout"
+        assert r.clock.now_ms() - started == 30_000.0
+        await _settings(r, chat_first_token_ms=2_000)
+        r.op_net.responses = [HANG]
+        started = r.clock.now_ms()
+        quick = await r.chat()
+        assert _code(quick) == "upstream_timeout"
+        assert r.clock.now_ms() - started == 2_000.0
+
+
+async def test_a_hosted_answer_over_the_applied_max_tokens_is_settled_and_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async with routing() as r:
+        await r.mode(PRIMARY)
+        await r.provider(P, "p.provider.test", role="primary")
+        await _settings(r, default_max_tokens=1)
+        r.org_net.responses = [sse(openai_text("a", "b", "c").chunks)]
+        with caplog.at_level(logging.WARNING, logger="gateway.settings"):
+            answer = await r.chat()
+        assert answer.status_code == 200, answer.text
+        assert answer.headers["x-max-tokens-applied"] == "1"
+        assert answer.json()["usage"]["completion_tokens"] == 3
+        # The limit went to the provider.
+        written = bytes(r.org_net.connections[-1].written)
+        assert json.loads(written.split(b"\r\n\r\n", 1)[1])["max_tokens"] == 1
+    logged = [rec.getMessage() for rec in caplog.records if rec.name == "gateway.settings"]
+    assert logged == [f"provider {P} answered 2 completion tokens over the applied max_tokens 1"]

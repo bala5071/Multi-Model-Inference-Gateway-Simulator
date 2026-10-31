@@ -28,6 +28,7 @@ from gateway.clock import EpochSource, EpochStoreClock, StoreClock
 from gateway.modes import ModeStore, SqliteModeStore
 from gateway.providers import ProviderStore, SqliteProviderStore
 from gateway.roles import RoleStore, SqliteRoleStore
+from gateway.settings import SettingsStore, SqliteSettingsStore
 from gateway.usage import SqliteUsageStore, UsageStore
 from gateway.users import AccountStore, SqliteAccountStore
 
@@ -158,6 +159,7 @@ class StateBackend:
     audit: AuditStore
     providers: ProviderStore
     modes: ModeStore
+    settings: SettingsStore
     clock: StoreClock
 
 
@@ -171,5 +173,6 @@ def sqlite_state(connection: sqlite3.Connection, epoch: EpochSource) -> StateBac
         audit=SqliteAuditStore(connection),
         providers=SqliteProviderStore(connection),
         modes=SqliteModeStore(connection),
+        settings=SqliteSettingsStore(connection),
         clock=EpochStoreClock(epoch),
     )

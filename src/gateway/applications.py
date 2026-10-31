@@ -18,7 +18,7 @@ import json
 import sqlite3
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from gateway.database import write_transaction
@@ -30,6 +30,14 @@ from gateway.organizations import (
     normalize_name,
 )
 from gateway.routing import Plan, PlansConfig
+from gateway.settings import (
+    JOIN,
+    JOIN_COLUMNS,
+    NO_SETTINGS,
+    InMemorySettingsStore,
+    StoredSettings,
+    joined_settings,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +53,9 @@ class Application:
     created_at_ms: float
     # The organization it belongs to; fixed when it is created.
     organization_id: str
+    # Its organization's and its own settings rows, as the key lookup read them (docs/39); None
+    # when it was read any other way. Never compared: it is how the request found it.
+    stored_settings: StoredSettings | None = field(default=None, compare=False)
 
 
 def application_from_template(
@@ -99,6 +110,8 @@ class KeyLookup:
     # The store's time, read in the same query, where the store has its own clock
     # (docs/scale-out-plan.md, section 3.8); None where the injected epoch decides.
     now_ms: float | None = None
+    # The organization's and the application's settings rows, in the same lookup (docs/39).
+    settings: StoredSettings = NO_SETTINGS
 
 
 class ApplicationStore(Protocol):
@@ -151,7 +164,8 @@ class ApplicationStore(Protocol):
     async def get_key(self, key_id: str) -> ApiKeyRecord | None: ...
 
     async def lookup_key(self, key_id: str) -> KeyLookup | None:
-        """The key's record with its application and organization state, in one lookup."""
+        """The key's record with its application and organization state, and both settings rows,
+        in one lookup."""
         ...
 
     async def list_keys(self, application_id: str) -> list[ApiKeyRecord]: ...
@@ -193,6 +207,8 @@ class InMemoryApplicationStore:
         self._organizations: dict[str, Organization] = {default.id: default}
         self._applications: dict[str, Application] = {}
         self._keys: dict[str, ApiKeyRecord] = {}
+        # Its settings, so that the key lookup returns their rows as the databases' join does.
+        self.settings = InMemorySettingsStore()
 
     @asynccontextmanager
     async def write_transaction(self) -> AsyncIterator[None]:
@@ -271,7 +287,12 @@ class InMemoryApplicationStore:
         application = self._applications.get(record.application_id)
         organization = self._organizations.get(application.organization_id) if application else None
         enabled = organization is not None and not organization.disabled
-        return KeyLookup(record, application, enabled)
+        settings = (
+            self.settings.stored(application.organization_id, application.id)
+            if application is not None
+            else StoredSettings(None, None)
+        )
+        return KeyLookup(record, application, enabled, settings=settings)
 
     async def list_keys(self, application_id: str) -> list[ApiKeyRecord]:
         return [k for k in self._keys.values() if k.application_id == application_id]
@@ -492,19 +513,27 @@ class SqliteApplicationStore:
     async def lookup_key(self, key_id: str) -> KeyLookup | None:
         key_columns = ", ".join(f"k.{c.strip()}" for c in _KEY_COLUMNS.split(","))
         app_columns = ", ".join(f"a.{c.strip()}" for c in _APP_COLUMNS.split(","))
+        # The settings rows ride in the same statement: no second round trip (docs/39).
         row = self._connection.execute(
-            f"SELECT {key_columns}, {app_columns}, o.disabled FROM api_keys AS k"
+            f"SELECT {key_columns}, {app_columns}, o.disabled, {JOIN_COLUMNS} FROM api_keys AS k"
             " LEFT JOIN applications AS a ON a.id = k.application_id"
             " LEFT JOIN organizations AS o ON o.id = a.organization_id"
-            " WHERE k.key_id = ?",
+            f"{JOIN} WHERE k.key_id = ?",
             (key_id,),
         ).fetchone()
         if row is None:
             return None
         key_width = len(_KEY_COLUMNS.split(","))
-        application_row = row[key_width:-1]
+        app_width = len(_APP_COLUMNS.split(","))
+        application_row = row[key_width : key_width + app_width]
         application = _application(application_row) if application_row[0] is not None else None
-        return KeyLookup(_key(row[:key_width]), application, row[-1] == 0)
+        disabled = row[key_width + app_width]
+        settings = (
+            joined_settings(row[-8:], application.organization_id, application.id)
+            if application is not None
+            else StoredSettings(None, None)
+        )
+        return KeyLookup(_key(row[:key_width]), application, disabled == 0, settings=settings)
 
     async def list_keys(self, application_id: str) -> list[ApiKeyRecord]:
         rows = self._connection.execute(

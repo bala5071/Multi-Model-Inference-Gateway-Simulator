@@ -92,7 +92,8 @@ Authenticated with an application API key, with the same plan, rate limit, budge
 `max_completion_tokens`, `seed`, `user`, ...), as is an image or audio part. Every refusal uses
 the OpenAI error shape (`{"error": {"message", "type", "param", "code"}}`).
 
-Headers: `X-Model-Used` (the tier), `X-Provider` (`gateway`, the gateway's own tier; it said
+Headers (`X-Max-Tokens-Applied` was added by note 39): `X-Model-Used` (the tier),
+`X-Provider` (`gateway`, the gateway's own tier; it said
 `local` until PR 20, and whether that tier is local or hosted is `X-Provider-Class`, added in
 pull request 3: note 33), `X-Usage-Estimated`
 when the provider gave no usage (the body's usage then says `usage_estimated: true`; the

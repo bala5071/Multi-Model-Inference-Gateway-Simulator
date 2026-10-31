@@ -27,7 +27,7 @@ import asyncio
 import contextvars
 import json
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
@@ -60,6 +60,22 @@ from gateway.providers import _COLUMNS as _PROVIDER_COLUMNS
 from gateway.providers import ProviderConfig, StoredKey, _config
 from gateway.roles import check_app_role_name
 from gateway.schema import RequestResult
+from gateway.settings import _ROW_COLUMNS as _SETTINGS_ROW
+from gateway.settings import _VERSION_COLUMNS as _SETTINGS_VERSION
+from gateway.settings import (
+    JOIN,
+    JOIN_COLUMNS,
+    SETTINGS_SCHEMA_VERSION,
+    VERSIONS_KEPT,
+    Scope,
+    SettingsRow,
+    SettingsVersion,
+    SettingsVersionConflictError,
+    StoredSettings,
+    joined_settings,
+    settings_row,
+    settings_version,
+)
 from gateway.state import POSTGRES_URL_ENV, StateBackend, StateUnavailableError
 from gateway.usage import _COLUMNS as _USAGE_COLUMNS
 from gateway.usage import (
@@ -98,7 +114,7 @@ LOCK_POLL_MS = 20.0
 # The advisory lock keys: management writes, and applying the schema. Fixed, distinct.
 WRITE_LOCK = 0x6777_5752_4954_4531  # "gwWRITE1"
 SCHEMA_LOCK = 0x6777_5343_4845_4D31  # "gwSCHEM1"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # How long a settled reservation's id is kept, so that a settle tried again is not charged twice
 # (docs/37).
 SETTLED_KEEP_MS = 24 * 60 * 60 * 1000.0
@@ -262,8 +278,35 @@ CREATE TABLE budget_settlements (
   reservation_id bigint PRIMARY KEY, settled_at_ms double precision NOT NULL);
 """
 
+# Version 3 (docs/39): settings and their versions, the tables of SQLite migration 14.
+PG_SETTINGS = """
+CREATE TABLE settings_current (
+  scope_type text NOT NULL CHECK (scope_type IN ('organization', 'application')),
+  scope_id text NOT NULL,
+  version integer NOT NULL CHECK (version >= 1),
+  document text NOT NULL,
+  schema_version integer NOT NULL,
+  updated_at_ms double precision NOT NULL,
+  PRIMARY KEY (scope_type, scope_id));
+
+CREATE TABLE settings_versions (
+  scope_type text NOT NULL CHECK (scope_type IN ('organization', 'application')),
+  scope_id text NOT NULL,
+  version integer NOT NULL CHECK (version >= 1),
+  document text NOT NULL,
+  previous_document text,
+  changed_fields text NOT NULL,
+  changed_by_user_id text,
+  via text NOT NULL,
+  changed_at_ms double precision NOT NULL,
+  PRIMARY KEY (scope_type, scope_id, version));
+"""
+
 # Each version and what it adds, applied in order to a database that has an earlier one.
-SCHEMA = ((1, PG_BASELINE), (2, PG_BUDGETS))
+SCHEMA = ((1, PG_BASELINE), (2, PG_BUDGETS), (3, PG_SETTINGS))
+# What takes a version back out, for the versions that can be (``rollback_schema``). Versions 1
+# and 2 have none: ``migrate-to-sqlite`` is their way back.
+SCHEMA_DOWN = {3: "DROP TABLE settings_versions; DROP TABLE settings_current;"}
 
 # The tables of PG_BUDGETS: Postgres only, never copied to or from SQLite.
 BUDGET_TABLES = ("budget_counters", "budget_reservations", "budget_settlements")
@@ -282,6 +325,8 @@ TABLES = (
     "provider_configs",
     "provider_keys",
     "modes",
+    "settings_current",
+    "settings_versions",
 )
 
 
@@ -560,6 +605,34 @@ async def ensure_schema(connection: asyncpg.Connection) -> bool:
     return applied
 
 
+async def rollback_schema(db: PostgresDatabase, target: int) -> tuple[int, ...]:
+    """Take the schema back to ``target``, newest version first, in one transaction under the
+    schema lock: only versions that have a way back (``SCHEMA_DOWN``). Returns the versions
+    taken out. The data in their tables goes with them."""
+    try:
+        async with (
+            db.management.acquire(timeout=COMMAND_TIMEOUT_S) as connection,
+            connection.transaction(),
+        ):
+            await connection.execute("SELECT pg_advisory_xact_lock($1)", SCHEMA_LOCK)
+            found = await connection.fetchval("SELECT max(version) FROM gateway_schema")
+            current = int(found or 0)
+            if not 0 <= target <= current:
+                raise RuntimeError(f"cannot roll back to {target}; the schema is at {current}")
+            undone = []
+            for version in range(current, target, -1):
+                if version not in SCHEMA_DOWN:
+                    raise RuntimeError(
+                        f"schema version {version} has no way back here; use migrate-to-sqlite"
+                    )
+                await connection.execute(SCHEMA_DOWN[version])
+                await connection.execute("DELETE FROM gateway_schema WHERE version = $1", version)
+                undone.append(version)
+            return tuple(undone)
+    except _UNAVAILABLE as exc:
+        raise StateUnavailableError(type(exc).__name__) from None
+
+
 async def apply_schema(db: PostgresDatabase) -> int:
     """Bring the schema to this code's version (``ensure_schema``), in one transaction.
     Returns the schema version."""
@@ -819,19 +892,31 @@ class PostgresApplicationStore(_Store):
         app_columns = ", ".join(f"a.{c.strip()}" for c in _APP_COLUMNS.split(","))
         # The database's time in the same query: the key check decides expiry on it and costs
         # no second round trip (section 3.8).
+        # The settings rows too, in the same statement (docs/39).
         row = await self._row(
-            f"SELECT {key_columns}, {app_columns}, o.disabled, gateway_now_ms() FROM api_keys AS k"
+            f"SELECT {key_columns}, {app_columns}, o.disabled, gateway_now_ms(), {JOIN_COLUMNS}"
+            " FROM api_keys AS k"
             " LEFT JOIN applications AS a ON a.id = k.application_id"
-            " LEFT JOIN organizations AS o ON o.id = a.organization_id WHERE k.key_id = $1",
+            f" LEFT JOIN organizations AS o ON o.id = a.organization_id{JOIN}"
+            " WHERE k.key_id = $1",
             key_id,
         )
         if row is None:
             return None
         values = tuple(row.values())
         width = len(_KEY_COLUMNS.split(","))
-        application_row = values[width:-2]
+        app_width = len(_APP_COLUMNS.split(","))
+        application_row = values[width : width + app_width]
         application = _application(application_row) if application_row[0] is not None else None
-        return KeyLookup(_key(values[:width]), application, values[-2] == 0, float(values[-1]))
+        disabled, now_ms = values[width + app_width], values[width + app_width + 1]
+        settings = (
+            joined_settings(values[-8:], application.organization_id, application.id)
+            if application is not None
+            else StoredSettings(None, None)
+        )
+        return KeyLookup(
+            _key(values[:width]), application, disabled == 0, float(now_ms), settings=settings
+        )
 
     async def list_keys(self, application_id: str) -> list[ApiKeyRecord]:
         rows = await self._fetch(
@@ -1383,6 +1468,95 @@ class PostgresModeStore(_Store):
         await self._set("application", application_id, mode, at_ms)
 
 
+class PostgresSettingsStore(_Store):
+    """Settings in the tables of schema version 3. A version's time is the database's."""
+
+    async def current(self, scope: Scope, scope_id: str) -> SettingsRow | None:
+        row = await self._row(
+            f"SELECT {_SETTINGS_ROW} FROM settings_current WHERE scope_type = $1 AND scope_id = $2",
+            Scope(scope).value,
+            scope_id,
+        )
+        return settings_row(tuple(row.values())) if row is not None else None
+
+    async def versions(self, scope: Scope, scope_id: str, limit: int) -> list[SettingsVersion]:
+        rows = await self._fetch(
+            f"SELECT {_SETTINGS_VERSION} FROM settings_versions"
+            " WHERE scope_type = $1 AND scope_id = $2 ORDER BY version DESC LIMIT $3",
+            Scope(scope).value,
+            scope_id,
+            limit,
+        )
+        return [settings_version(tuple(r.values())) for r in rows]
+
+    async def version(self, scope: Scope, scope_id: str, version: int) -> SettingsVersion | None:
+        row = await self._row(
+            f"SELECT {_SETTINGS_VERSION} FROM settings_versions"
+            " WHERE scope_type = $1 AND scope_id = $2 AND version = $3",
+            Scope(scope).value,
+            scope_id,
+            version,
+        )
+        return settings_version(tuple(row.values())) if row is not None else None
+
+    async def write(
+        self,
+        scope: Scope,
+        scope_id: str,
+        *,
+        expected_version: int,
+        document: str,
+        changed: Sequence[str],
+        changed_by_user_id: str | None,
+        via: str,
+        at_ms: float,
+    ) -> int:
+        scope_type = Scope(scope).value
+        async with self._db.connection() as c:
+            found = await c.fetchrow(
+                "SELECT version, document FROM settings_current"
+                " WHERE scope_type = $1 AND scope_id = $2 FOR UPDATE",
+                scope_type,
+                scope_id,
+            )
+            current = int(found["version"]) if found is not None else 0
+            if current != expected_version:
+                raise SettingsVersionConflictError(current)
+            version = current + 1
+            await c.execute(
+                f"INSERT INTO settings_current ({_SETTINGS_ROW})"
+                " VALUES ($1, $2, $3, $4, $5, gateway_now_ms())"
+                " ON CONFLICT (scope_type, scope_id) DO UPDATE SET version = excluded.version,"
+                " document = excluded.document, schema_version = excluded.schema_version,"
+                " updated_at_ms = excluded.updated_at_ms",
+                scope_type,
+                scope_id,
+                version,
+                document,
+                SETTINGS_SCHEMA_VERSION,
+            )
+            await c.execute(
+                f"INSERT INTO settings_versions ({_SETTINGS_VERSION})"
+                " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, gateway_now_ms())",
+                scope_type,
+                scope_id,
+                version,
+                document,
+                found["document"] if found is not None else None,
+                json.dumps(list(changed)),
+                changed_by_user_id,
+                via,
+            )
+            await c.execute(
+                "DELETE FROM settings_versions"
+                " WHERE scope_type = $1 AND scope_id = $2 AND version <= $3",
+                scope_type,
+                scope_id,
+                version - VERSIONS_KEPT,
+            )
+        return version
+
+
 # --- budgets (docs/37) ---------------------------------------------------------------------
 
 # The tokens of the period's usage events, for a counter seen for the first time: billed tokens,
@@ -1691,5 +1865,6 @@ def postgres_state(db: PostgresDatabase) -> StateBackend:
         audit=PostgresAuditStore(db),
         providers=PostgresProviderStore(db),
         modes=PostgresModeStore(db),
+        settings=PostgresSettingsStore(db),
         clock=db,
     )

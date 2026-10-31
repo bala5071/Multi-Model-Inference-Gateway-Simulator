@@ -373,6 +373,14 @@ fallback. The usage record says the same (rows stored before PR 20 call the gate
 when they are on this machine (loopback in the backends file) or listed in
 `GATEWAY_PROVIDER_LOCAL_ALLOW` (`host:port`, comma-separated).
 
+Each application can have settings of its own under its plan's and its organization's caps
+(the stricter wins): which tiers it may use, its own model names, a default quality, its rate
+limit, budget and `max_tokens`, a `default_max_tokens`, and its timeouts. The operator sets
+them with `scripts/manage.py settings-set` ([docs/39](docs/39-settings.md)). When a request
+names no `max_tokens`, the application's `default_max_tokens` is applied as if it had, and
+every answer of `/v1/generate` and `/v1/chat/completions` says what was applied in
+`X-Max-Tokens-Applied` (a number, or `none` when no limit applies).
+
 ### Real-model mode
 
 1. Get three models running, either as three llama.cpp servers
