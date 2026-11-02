@@ -184,13 +184,13 @@ async def _half_open(r: Routing, *provider_ids: str) -> None:
 
 
 def _hold_re_read(r: Routing, at: int, then: BaseException | None) -> asyncio.Event:
-    """The ``at``-th read of the organization's mode (counting from 1) waits forever, or raises
-    ``then``; the returned event is set when it is reached."""
+    """The ``at``-th re-read just before a hosted attempt (``hosted_policy``, counting from 1)
+    waits forever, or raises ``then``; the returned event is set when it is reached."""
     reads = 0
     reached = asyncio.Event()
-    real = r.router._modes.organization_mode
+    real = r.router._modes.hosted_policy
 
-    async def organization_mode(organization_id: str) -> Any:
+    async def hosted_policy(organization_id: str, application_id: str) -> Any:
         nonlocal reads
         reads += 1
         if reads == at:
@@ -198,9 +198,9 @@ def _hold_re_read(r: Routing, at: int, then: BaseException | None) -> asyncio.Ev
             if then is not None:
                 raise then
             await asyncio.Event().wait()
-        return await real(organization_id)
+        return await real(organization_id, application_id)
 
-    r.router._modes.organization_mode = organization_mode  # type: ignore[method-assign]
+    r.router._modes.hosted_policy = hosted_policy  # type: ignore[method-assign]
     return reached
 
 
@@ -213,7 +213,7 @@ async def test_a_probe_cancelled_during_the_modes_re_read_frees_its_slot_at_once
         await r.mode(PRIMARY)
         await _providers(r, 1)
         await _half_open(r, A)
-        reached = _hold_re_read(r, at=2, then=None)  # 1: the handler's read; 2: the re-read
+        reached = _hold_re_read(r, at=1, then=None)
         request = asyncio.ensure_future(r.chat())
         await reached.wait()
         request.cancel()
@@ -234,7 +234,7 @@ async def test_a_probe_whose_modes_re_read_fails_frees_its_slot_and_still_fails_
         await r.mode(PRIMARY)
         await _providers(r, 1)
         await _half_open(r, A)
-        _hold_re_read(r, at=2, then=StateUnavailableError("down"))
+        _hold_re_read(r, at=1, then=StateUnavailableError("down"))
         answer = await r.chat()
         assert (answer.status_code, answer.json()["error"]["code"]) == (503, "state_unavailable")
         assert r.org_net.connections == []
@@ -257,8 +257,8 @@ async def test_another_requests_probe_is_never_released() -> None:
         r.org_net.responses = [gate]
         first = asyncio.ensure_future(r.chat())
         await gate.reached.wait()  # the first request is A's probe, at A
-        # Counted from here: the second request's handler read is 1, its re-read before B 2.
-        _hold_re_read(r, at=2, then=StateUnavailableError("down"))
+        # Counted from here: the second request's re-read before B is the first.
+        _hold_re_read(r, at=1, then=StateUnavailableError("down"))
         second = await r.chat()
         assert second.status_code == 503
         breakers = r.router.breakers

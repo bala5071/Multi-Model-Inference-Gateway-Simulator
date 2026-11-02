@@ -9,6 +9,9 @@ settings most of their values are (the plan's section 4).
 
 ## Endpoints
 
+As built in S2. Note 42 has the table as it is now, with the preset endpoints and the
+action each write escalates to when it loosens where prompts go; the tests read that one.
+
 | Method | Path | Action | Step-up | Success |
 |---|---|---|---|---|
 | `GET` | `/settings` | `org_settings.read` | | 200 |

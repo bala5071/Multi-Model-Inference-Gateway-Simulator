@@ -52,7 +52,13 @@ from gateway.audit import AuditEntry, AuditEvent, Reason, _entry
 from gateway.clock import Clock
 from gateway.ledger import ApplicationUsage, BudgetExceededError, Expired, Reservation
 from gateway.management import ManagementRefusal
-from gateway.modes import DEFAULT_MODE, Mode
+from gateway.modes import (
+    DEFAULT_MODE,
+    HOSTED_POLICY_POSTGRES,
+    HostedPolicy,
+    Mode,
+    hosted_policy_from,
+)
 from gateway.organizations import Organization, normalize_name
 from gateway.periods import BudgetPeriods, CalendarMonthsUTC
 from gateway.permissions import Assignment, Role, ScopeType
@@ -1458,6 +1464,11 @@ class PostgresModeStore(_Store):
 
     async def application_mode(self, application_id: str) -> Mode:
         return await self._get("application", application_id)
+
+    async def hosted_policy(self, organization_id: str, application_id: str) -> HostedPolicy:
+        row = await self._row(HOSTED_POLICY_POSTGRES, organization_id, application_id)
+        assert row is not None
+        return hosted_policy_from(row.values(), organization_id, application_id)
 
     async def set_organization_mode(self, organization_id: str, mode: Mode, at_ms: float) -> None:
         await self._set("organization", organization_id, mode, at_ms)

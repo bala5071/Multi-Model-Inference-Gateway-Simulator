@@ -731,6 +731,9 @@ async def _scenario(s: StateBackend) -> list[Any]:
         await st.version(Scope.APPLICATION, "app0", 1),
         await st.version(Scope.APPLICATION, "app0", 7),
         (await a.lookup_key("key0")).settings,  # type: ignore[union-attr]
+        # Both modes and both settings rows in one statement (docs/42).
+        await m.hosted_policy("north", "app0"),
+        await m.hosted_policy("solo", "app9"),
     ]
     return out
 

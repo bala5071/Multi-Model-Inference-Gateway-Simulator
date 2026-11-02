@@ -29,6 +29,7 @@ from typing import Any, Protocol
 
 from gateway.permissions import PERMISSIONS
 from gateway.settings import CATALOGUE as _SETTINGS
+from gateway.settings import PRESETS as _PRESETS
 
 SETTING_NAMES = frozenset(_SETTINGS)
 
@@ -87,6 +88,8 @@ class AuditAction(StrEnum):
     # the names of the fields changed, never their values.
     SETTINGS_CHANGED = "settings_changed"
     SETTINGS_REVERTED = "settings_reverted"
+    # A preset applied to an application (docs/42): its name, the version, the fields changed.
+    SETTINGS_PRESET_APPLIED = "settings_preset_applied"
 
 
 class Outcome(StrEnum):
@@ -178,6 +181,9 @@ DETAIL_FIELDS: Mapping[str, type] = {
     "old_mode": str,
     "new_mode": str,
     "settings_version": int,
+    "preset": str,
+    # Whether a settings change loosened S13 to S16, and so used up a step-up window (docs/42).
+    "loosened_egress": bool,
     # A list of setting names from gateway.settings.CATALOGUE.
     "changed_fields": list,
 }
@@ -202,6 +208,7 @@ FIXED_VALUES: Mapping[str, frozenset[str]] = {
     "switch": frozenset({"organization", "platform"}),
     "old_mode": _MODES,
     "new_mode": _MODES,
+    "preset": frozenset(_PRESETS),
     # "ok", or the code a provider failure or refusal maps to (gateway.chat, docs/32).
     "outcome_code": frozenset(
         {

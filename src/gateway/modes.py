@@ -20,7 +20,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 from gateway.audit import (
     ORGANIZATION_ID_PATTERN,
@@ -35,6 +35,14 @@ from gateway.clock import EpochSource
 from gateway.database import write_transaction
 from gateway.management import ManagementRefusal
 from gateway.permissions import Actor
+from gateway.settings import (
+    JOIN,
+    JOIN_COLUMNS,
+    NO_SETTINGS,
+    InMemorySettingsStore,
+    StoredSettings,
+    joined_settings,
+)
 
 
 class Mode(StrEnum):
@@ -73,8 +81,23 @@ def may_reach_hosted(mode: Mode) -> bool:
     return mode is not Mode.LOCAL_ONLY
 
 
+@dataclass(frozen=True, slots=True)
+class HostedPolicy:
+    """What decides a hosted attempt, read just before it in one statement (docs/42): both
+    modes and both settings rows."""
+
+    organization_mode: Mode
+    application_mode: Mode
+    settings: StoredSettings
+
+
 class ModeStore(Protocol):
     def write_transaction(self) -> contextlib.AbstractAsyncContextManager[None]: ...
+
+    async def hosted_policy(self, organization_id: str, application_id: str) -> HostedPolicy:
+        """Both modes and both settings rows, in one statement: read before each hosted
+        attempt, where a stricter value stops it (docs/42)."""
+        ...
 
     async def organization_mode(self, organization_id: str) -> Mode: ...
 
@@ -90,8 +113,22 @@ class ModeStore(Protocol):
 class InMemoryModeStore:
     """Modes in memory, for tests and simulated runs. Absent means ``local_only``."""
 
-    def __init__(self) -> None:
+    def __init__(self, settings: InMemorySettingsStore | None = None) -> None:
         self._modes: dict[tuple[str, str], Mode] = {}
+        # The settings the in-memory application store keeps, read with the modes.
+        self.settings = settings
+
+    async def hosted_policy(self, organization_id: str, application_id: str) -> HostedPolicy:
+        stored = (
+            self.settings.stored(organization_id, application_id)
+            if self.settings is not None
+            else NO_SETTINGS
+        )
+        return HostedPolicy(
+            await self.organization_mode(organization_id),
+            await self.application_mode(application_id),
+            stored,
+        )
 
     @asynccontextmanager
     async def write_transaction(self) -> AsyncIterator[None]:
@@ -140,11 +177,37 @@ class SqliteModeStore:
     async def application_mode(self, application_id: str) -> Mode:
         return await self._get("application", application_id)
 
+    async def hosted_policy(self, organization_id: str, application_id: str) -> HostedPolicy:
+        row = self._connection.execute(HOSTED_POLICY_SQLITE, (
+            organization_id, application_id, organization_id, application_id,
+        )).fetchone()  # fmt: skip
+        return hosted_policy_from(row, organization_id, application_id)
+
     async def set_organization_mode(self, organization_id: str, mode: Mode, at_ms: float) -> None:
         await self._set("organization", organization_id, mode, at_ms)
 
     async def set_application_mode(self, application_id: str, mode: Mode, at_ms: float) -> None:
         await self._set("application", application_id, mode, at_ms)
+
+
+# Both modes and both settings rows in one statement (docs/42). Parameters: the organization and
+# the application for the modes, then again for the settings rows.
+_HOSTED_POLICY = (
+    "SELECT (SELECT mode FROM modes WHERE scope_type = 'organization' AND scope_id = {0}),"
+    " (SELECT mode FROM modes WHERE scope_type = 'application' AND scope_id = {1}),"
+    f" {JOIN_COLUMNS} FROM (SELECT {{2}} AS organization_id, {{3}} AS id) AS a{JOIN}"
+)
+HOSTED_POLICY_SQLITE = _HOSTED_POLICY.format("?", "?", "?", "?")
+HOSTED_POLICY_POSTGRES = _HOSTED_POLICY.format("$1", "$2", "$1::text", "$2::text")
+
+
+def hosted_policy_from(row: Any, organization_id: str, application_id: str) -> HostedPolicy:
+    values = tuple(row)
+    return HostedPolicy(
+        Mode(values[0]) if values[0] is not None else DEFAULT_MODE,
+        Mode(values[1]) if values[1] is not None else DEFAULT_MODE,
+        joined_settings(values[2:10], organization_id, application_id),
+    )
 
 
 class ChangeMarker(Protocol):

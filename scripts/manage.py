@@ -86,6 +86,7 @@ from gateway.applications import (
 )
 from gateway.audit import AuditLog
 from gateway.auth import AccountService
+from gateway.chatrouter import max_hosted_attempts_from
 from gateway.clock import EpochSource, SystemEpoch, WallClock
 from gateway.database import (
     DatabaseInUseError,
@@ -454,7 +455,9 @@ def _show_settings(scope: Scope, scope_id: str, view: SettingsView) -> None:
         _note(f"  aliases not in force: {', '.join(view.effective.ignored_aliases)}")
 
 
-async def _settings_command(args: argparse.Namespace, state: StateBackend) -> None:
+async def _settings_command(
+    args: argparse.Namespace, state: StateBackend, env: Mapping[str, str]
+) -> None:
     """Settings as the operator changes them (docs/39): every change a version, checked
     against the caps in force, audited with the operator as the actor."""
     service = SettingsService(
@@ -462,7 +465,7 @@ async def _settings_command(args: argparse.Namespace, state: StateBackend) -> No
         state.applications,
         AuditLog(state.audit),
         SystemEpoch(),
-        default_platform_settings(),
+        default_platform_settings(max_hosted_attempts_from(env)),
     )
     scope = Scope.APPLICATION if args.application else Scope.ORGANIZATION
     scope_id = args.application or args.organization
@@ -524,7 +527,7 @@ async def _store_command(
             await store.set_organization_disabled(args.organization, disabled)
         _note(f"organization {args.organization!r} {'disabled' if disabled else 'enabled'}")
     elif args.command in SETTINGS_COMMANDS:
-        await _settings_command(args, state)
+        await _settings_command(args, state, env)
     elif args.command in ACCOUNT_COMMANDS:
         await _account_command(args, _accounts(state, env), read_password)
     elif args.command == "organization-usage":

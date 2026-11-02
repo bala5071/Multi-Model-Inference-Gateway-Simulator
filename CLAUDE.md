@@ -73,24 +73,29 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `chatservice.py` — `ChatService`: one chat request on one tier, through the simulator or the
   tier's adapter, first-token and total timeouts on the injected clock, cancellation (exists)
 - `modes.py` — `Mode`, `effective_mode` (the only place the mode is decided: the stricter of the
-  organization's and the application's), the mode stores over migration 12, and `ModeService`
-  (consume-on-use, audited) (exists)
+  organization's and the application's), the mode stores over migration 12, `hosted_policy`
+  (both modes and both settings rows in one statement, read before each hosted attempt,
+  docs/42), and `ModeService` (consume-on-use, audited) (exists)
 - `chatrouter.py` — `ChatRouter`: a chat request's candidates (the tier, the organization's
   providers for that tier) in the mode's order, the five fallback triggers, never after output,
   never another tier, at most `GATEWAY_CHAT_MAX_HOSTED_ATTEMPTS` (3) calls to organization
   providers a request (`attempt_cap`, docs/41); the mode read once per request by the handler and passed in, the egress
   scope answering from it, and read again just before each hosted attempt, which a stricter mode
-  refuses (docs/33, docs/38); `X-Provider` (`gateway` for the gateway's own tier, `local` before PR 20),
+  refuses (docs/33, docs/38); `HostedLimits`, S13 to S16 held to the stricter of what the
+  request read and what the re-read finds, never the looser (docs/42); `X-Provider` (`gateway` for the gateway's own tier, `local` before PR 20),
   `X-Provider-Class` and the usage record's source (exists)
-- `settings.py` — the settings catalogue (S1 to S11 of `docs/settings-and-alerts-plan.md`),
+- `settings.py` — the settings catalogue (S1 to S16 of `docs/settings-and-alerts-plan.md`),
   `effective_settings` (the only place a value is decided: platform, plan copy, organization,
   application, the stricter wins), `parse_row` and `resolve` (a missing row is the defaults; a
   row that cannot be judged is `SettingsUnreadableError`, answered 503, never a looser value),
   `DocumentCache`, and `SettingsStore` on memory and SQLite (migration 14); the rows are read
-  with the key in `lookup_key`'s own statement (docs/39) (exists)
-- `settingsservice.py` — `SettingsService`: set, unset, revert, each a version checked against
-  the caps in force in one `write_transaction()`, audited by field name, and `validate`, the
-  same code up to the point of writing; the CLI's and the settings endpoints' (exists)
+  with the key in `lookup_key`'s own statement (docs/39); `loosens_egress` (the one place a
+  loosening of S13 to S16 is judged) and `PRESETS` (docs/42) (exists)
+- `settingsservice.py` — `SettingsService`: set, unset, revert, presets, each a version checked
+  against the caps in force in one `write_transaction()`, audited by field name, and `validate`,
+  the same code up to the point of writing; whether a change loosens S13 to S16 for any
+  application it affects is judged again inside the write and must match the step-up the
+  handler claimed (docs/42); the CLI's and the settings endpoints' (exists)
 - `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
   warning, on the injected clock, `circuit_breaker` events; `admit_attempt` says whether an
   admission is a half-open probe, whose slot frees itself after 120 s (`PROBE_MS`) (exists)
@@ -239,7 +244,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `GATEWAY_STATE=shared` (Postgres and Valkey, opened in the lifespan, no process lock,
   docs/37); JSON or server-sent-event
   responses; serves the built dashboard at `/dashboard`; with accounts, the management
-  endpoints under `/v1/admin/orgs/{org}` (docs/30), the settings endpoints (docs/40) and the
+  endpoints under `/v1/admin/orgs/{org}` (docs/30), the settings endpoints (docs/40, the presets and
+  the escalation when a change loosens egress in docs/42) and the
   provider endpoints (docs/32), each
   through `requires` (which claims the step-up window for consume-on-use actions), every answer
   `Cache-Control: no-store` (exists)

@@ -73,6 +73,7 @@ class Kind(StrEnum):
     QUALITY = "quality"
     BOOL = "bool"
     INT = "int"
+    PROVIDERS = "providers"
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +91,16 @@ _APP = frozenset({Scope.APPLICATION})
 MAX_ALIASES = 16
 ALIAS_PATTERN = re.compile(r"[a-z0-9._-]{1,32}")
 TIER_PATTERN = re.compile(r"[a-z0-9._-]{1,32}")
+PROVIDER_PATTERN = re.compile(r"prv_[0-9a-f]{16}")
+MAX_ALLOWED_PROVIDERS = 20
+# The settings that decide where a prompt may go and how many times (docs/42): loosening one
+# needs step-up, and a stricter value applies before a request's next hosted attempt.
+EGRESS_SETTINGS = (
+    "allowed_providers",
+    "max_hosted_attempts",
+    "retry_invalid_tool_json",
+    "hosted_first_token_ms",
+)
 
 # S1 to S11 of the plan, in its order. S12 (the mode) has its own table; S13 to S16 come with
 # PR S3; key policy is out of scope.
@@ -108,6 +119,11 @@ CATALOGUE: Mapping[str, Setting] = MappingProxyType(
             Setting("generate_timeout_ms", Kind.INT, _BOTH, 1_000, 3_600_000),
             Setting("chat_first_token_ms", Kind.INT, _BOTH, 1_000, 3_600_000),
             Setting("chat_total_timeout_ms", Kind.INT, _BOTH, 1_000, 3_600_000),
+            # S13 to S16 (PR S3): where a prompt may go, and how many times.
+            Setting("allowed_providers", Kind.PROVIDERS, _APP),
+            Setting("max_hosted_attempts", Kind.INT, _BOTH, 1, 5),
+            Setting("retry_invalid_tool_json", Kind.BOOL, _BOTH),
+            Setting("hosted_first_token_ms", Kind.INT, _BOTH, 1_000, 600_000),
         )
     }
 )
@@ -152,6 +168,18 @@ def _check_value(setting: Setting, value: object) -> object:
         if not isinstance(value, str) or value not in {q.value for q in Quality}:
             raise SettingsInvalidError(name, "must be cheapest, balanced or best")
         return value
+    if setting.kind is Kind.PROVIDERS:
+        if value == "all":
+            return value
+        if not isinstance(value, list) or len(value) > MAX_ALLOWED_PROVIDERS:
+            raise SettingsInvalidError(
+                name, f'must be "all" or a list of at most {MAX_ALLOWED_PROVIDERS} provider ids'
+            )
+        if not all(isinstance(p, str) and PROVIDER_PATTERN.fullmatch(p) for p in value):
+            raise SettingsInvalidError(name, "must list provider ids")
+        if len(set(value)) != len(value):
+            raise SettingsInvalidError(name, "lists a provider twice")
+        return sorted(value)
     if setting.kind is Kind.TIERS:
         if not isinstance(value, list) or not value:
             raise SettingsInvalidError(name, "must be a non-empty list of tiers")
@@ -302,6 +330,9 @@ class PlatformSettings:
     generate_timeout_ms: float | None
     chat_first_token_ms: float
     chat_total_timeout_ms: float
+    # The operator's cap on one request's hosted attempts (GATEWAY_CHAT_MAX_HOSTED_ATTEMPTS,
+    # docs/41): the ceiling of S14.
+    max_hosted_attempts: int = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +357,12 @@ class EffectiveSettings:
     generate_timeout_ms: float | None
     chat_first_token_ms: float
     chat_total_timeout_ms: float
+    # S13 to S16. None: every enabled provider of the organization may be a candidate.
+    allowed_providers: frozenset[str] | None = None
+    max_hosted_attempts: int = 3
+    retry_invalid_tool_json: bool = True
+    # None: each provider's own first-token budget.
+    hosted_first_token_ms: float | None = None
     explain: Mapping[str, Effective] = field(default_factory=dict)
     # Aliases kept in the application's document but not in force: their target is not an
     # allowed tier, or the name is the registry's.
@@ -467,6 +504,39 @@ def effective_settings(
         ],
         own.get("chat_first_token_ms"),
     )
+    providers = own.get("allowed_providers", "all")
+    explain["allowed_providers"] = Effective(
+        providers, Source.APPLICATION if "allowed_providers" in own else Source.DEFAULT
+    )
+    attempts = _lowest(
+        (platform.max_hosted_attempts, Source.PLATFORM),
+        [
+            (platform.max_hosted_attempts, Source.PLATFORM),
+            (organization.get("max_hosted_attempts"), Source.ORGANIZATION),
+        ],
+        own.get("max_hosted_attempts"),
+    )
+    # True unless either level turns it off: off is the stricter.
+    retry, retry_source = True, Source.DEFAULT
+    if "retry_invalid_tool_json" in own:
+        retry, retry_source = bool(own["retry_invalid_tool_json"]), Source.APPLICATION
+    retry_capped: Source | None = None
+    if organization.get("retry_invalid_tool_json") is False and retry:
+        retry = False
+        if retry_source is Source.APPLICATION:
+            retry_capped = Source.ORGANIZATION
+        else:
+            retry_source = Source.ORGANIZATION
+    explain["retry_invalid_tool_json"] = Effective(retry, retry_source, retry_capped)
+    hosted_first = _lowest(
+        (None, Source.DEFAULT),
+        [(organization.get("hosted_first_token_ms"), Source.ORGANIZATION)],
+        own.get("hosted_first_token_ms"),
+    )
+    explain.update(
+        max_hosted_attempts=attempts,
+        hosted_first_token_ms=hosted_first,
+    )
     explain.update(
         requests_per_minute=rpm,
         monthly_token_budget=budget,
@@ -491,6 +561,10 @@ def effective_settings(
         generate_timeout_ms=_float_or_none(generate.value),
         chat_first_token_ms=float(first.value),  # type: ignore[arg-type]
         chat_total_timeout_ms=float(total.value),  # type: ignore[arg-type]
+        allowed_providers=None if providers == "all" else frozenset(providers),
+        max_hosted_attempts=int(attempts.value),  # type: ignore[call-overload]
+        retry_invalid_tool_json=retry,
+        hosted_first_token_ms=_float_or_none(hosted_first.value),
         explain=MappingProxyType(explain),
         ignored_aliases=tuple(ignored),
     )
@@ -549,6 +623,8 @@ def refusals(
         "generate_timeout_ms": [(platform.generate_timeout_ms, Source.PLATFORM)],
         "chat_first_token_ms": [(platform.chat_first_token_ms, Source.PLATFORM)],
         "chat_total_timeout_ms": [(platform.chat_total_timeout_ms, Source.PLATFORM)],
+        "max_hosted_attempts": [(platform.max_hosted_attempts, Source.PLATFORM)],
+        "hosted_first_token_ms": [],
     }
     if scope is Scope.ORGANIZATION:
         tiers = document.get("allowed_tiers")
@@ -580,6 +656,10 @@ def refusals(
             found.append(
                 Refusal("chat_first_token_ms", effective.explain["chat_total_timeout_ms"].source)
             )
+        if document.get("retry_invalid_tool_json") is True and (
+            org.get("retry_invalid_tool_json") is False
+        ):
+            found.append(Refusal("retry_invalid_tool_json", Source.ORGANIZATION))
         for alias, target in dict(document.get("model_aliases") or {}).items():
             if alias in platform.reserved_model_names:
                 found.append(Refusal("model_aliases", Source.PLATFORM))
@@ -600,6 +680,60 @@ def refusals(
             seen.add(refusal.setting)
             unique.append(refusal)
     return sorted(unique, key=lambda r: list(CATALOGUE).index(r.setting))
+
+
+def loosens_egress(before: EffectiveSettings, after: EffectiveSettings) -> tuple[str, ...]:
+    """The settings among S13 to S16 that ``after`` makes looser than ``before``: a provider
+    allowed that was not, more hosted attempts, the retry turned back on, a longer first-token
+    budget (None, each provider's own, being the longest). The one place loosening is judged;
+    any of them needs step-up (docs/42)."""
+    found = []
+    was, now = before.allowed_providers, after.allowed_providers
+    if was is not None and (now is None or now - was):
+        found.append("allowed_providers")
+    if after.max_hosted_attempts > before.max_hosted_attempts:
+        found.append("max_hosted_attempts")
+    if after.retry_invalid_tool_json and not before.retry_invalid_tool_json:
+        found.append("retry_invalid_tool_json")
+    old, new = before.hosted_first_token_ms, after.hosted_first_token_ms
+    if old is not None and (new is None or new > old):
+        found.append("hosted_first_token_ms")
+    return tuple(found)
+
+
+# The presets of the plan's section 4, with their exact values: applied as one versioned change
+# (``via: preset:<name>``), checked like any write, step-up decided from what they change.
+PRESETS: Mapping[str, Mapping[str, object]] = MappingProxyType(
+    {
+        "cheap": MappingProxyType(
+            {
+                "allowed_tiers": ["economy"],
+                "default_quality": "cheapest",
+                "allow_downgrade_default": True,
+                "max_hosted_attempts": 1,
+                "retry_invalid_tool_json": False,
+            }
+        ),
+        "fast": MappingProxyType(
+            {
+                "default_quality": "cheapest",
+                "allow_downgrade_default": True,
+                "chat_first_token_ms": 5000,
+                "hosted_first_token_ms": 3000,
+                "max_hosted_attempts": 2,
+                "generate_timeout_ms": 30000,
+                "chat_total_timeout_ms": 30000,
+            }
+        ),
+        "private": MappingProxyType(
+            {
+                "allowed_providers": [],
+                "max_hosted_attempts": 1,
+                "retry_invalid_tool_json": False,
+            }
+        ),
+    }
+)
 
 
 def changed_fields(before: Document, after: Document) -> tuple[str, ...]:
@@ -907,6 +1041,7 @@ def caps_of(
         "generate_timeout_ms": platform.generate_timeout_ms,
         "chat_first_token_ms": platform.chat_first_token_ms,
         "chat_total_timeout_ms": platform.chat_total_timeout_ms,
+        "max_hosted_attempts": platform.max_hosted_attempts,
     }
     found: dict[str, dict[str, object]] = {}
     for name, setting in CATALOGUE.items():

@@ -86,7 +86,7 @@ def _application(
 # --- the catalogue and validation (no store) ------------------------------------------------------
 
 
-def test_the_catalogue_is_s1_to_s11_in_the_plans_order() -> None:
+def test_the_catalogue_is_s1_to_s16_in_the_plans_order() -> None:
     assert list(CATALOGUE) == [
         "allowed_tiers",
         "model_aliases",
@@ -99,6 +99,10 @@ def test_the_catalogue_is_s1_to_s11_in_the_plans_order() -> None:
         "generate_timeout_ms",
         "chat_first_token_ms",
         "chat_total_timeout_ms",
+        "allowed_providers",
+        "max_hosted_attempts",
+        "retry_invalid_tool_json",
+        "hosted_first_token_ms",
     ]
 
 

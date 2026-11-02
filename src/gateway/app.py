@@ -101,6 +101,7 @@ from gateway.chat import (
 from gateway.chatrouter import (
     DEFAULT_MAX_HOSTED_ATTEMPTS,
     ChatRouter,
+    HostedLimits,
     NoCandidateError,
     RoutedOutcome,
     RouteTrace,
@@ -222,6 +223,7 @@ from gateway.settings import (
     CATALOGUE,
     DocumentCache,
     EffectiveSettings,
+    InMemorySettingsStore,
     PlatformSettings,
     Scope,
     SettingsInvalidError,
@@ -235,6 +237,7 @@ from gateway.settings import (
     reserved_names,
     resolve,
 )
+from gateway.settings import PRESETS as SETTINGS_PRESETS
 from gateway.settingsservice import SettingsChange, SettingsService, SettingsValidation
 from gateway.state import (
     POSTGRES_URL_ENV,
@@ -807,7 +810,36 @@ def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
         setattr(check, DECLARATION, RouteDeclaration("requires", action, "authorize"))
         return Depends(check)
 
+    @asynccontextmanager
+    async def escalate(auth: Authorized, action: str) -> AsyncIterator[ConsumeToken]:
+        """For a change that turns out to need more than its route's action (docs/42): the
+        actor must also hold ``action`` on the same resource, and this session's step-up window
+        is claimed (consume-on-use), given back if nothing is changed. The route declares it
+        with ``escalates``."""
+        if action not in PERMISSIONS or not PERMISSIONS[action].consume:
+            raise ValueError(f"{action} is not a consume-on-use action")
+        decision = authorize(auth.actor, action, auth.resource)
+        if not decision.allowed:
+            raise ForbiddenError()
+        claimed = await service.claim_step_up(auth.context, action)
+        token = ConsumeToken()
+        try:
+            yield token
+        except BaseException:
+            if not token.was_changed:
+                await service.restore_step_up(auth.context, claimed)
+            raise
+
+    vars(requires)["escalate"] = escalate
     return requires
+
+
+def escalates(action: str) -> Callable[[Endpoint], Endpoint]:
+    """Declares the action a route escalates to when a change needs it (docs/42), beside its
+    ``requires``: the route walk sees both."""
+    if action not in PERMISSIONS or not PERMISSIONS[action].consume:
+        raise ValueError(f"{action} is not a consume-on-use action")
+    return _declare(RouteDeclaration("escalates", action, "a change that loosens egress"))
 
 
 def declaration_of(route: object) -> list[RouteDeclaration]:
@@ -872,6 +904,8 @@ class Keyed:
 
     application: Application
     settings: EffectiveSettings
+    # The application as stored (its plan copy), for deciding the settings again (docs/42).
+    stored: Application
 
 
 class _Hold:
@@ -1517,14 +1551,20 @@ def _version_view(found: SettingsVersion) -> dict[str, object]:
 
 
 def _settings_routes(
-    app: FastAPI, accounts: AccountAccess, settings: SettingsService, store: SettingsStore
+    app: FastAPI,
+    accounts: AccountAccess,
+    settings: SettingsService,
+    store: SettingsStore,
+    modes: ModeStore,
 ) -> None:
     """The settings endpoints under /v1/admin/orgs/{org} (docs/40): an organization's caps and
     an application's settings, their versions, revert and the dry run, each through
     ``requires`` with a resolver that answers anything outside the path's organization, or a
-    version that does not exist, as missing. No step-up: no setting of S1 to S11 loosens where
-    prompts go (the ``*.loosen_egress`` actions are declared for PR S3)."""
+    version that does not exist, as missing. A change that loosens S13 to S16 for any
+    application it affects (a preset, a revert, an organization cap included) needs step-up,
+    consume-on-use, through the ``*.loosen_egress`` action; tightening needs none (docs/42)."""
     requires = app.state.requires
+    escalate = vars(requires)["escalate"]
     stores = Stores(accounts.service.organizations, accounts.service.store)
     platform = settings.platform
 
@@ -1550,6 +1590,29 @@ def _settings_routes(
     writing_application = requires("settings.write", application)
     reading_application_version = requires("settings.read", application_version)
 
+    async def application_preset(request: Request) -> Resource | None:
+        p = request.path_params
+        if p["name"] not in SETTINGS_PRESETS:
+            return None
+        return await resolve_application(stores, p["org"], p["app"])
+
+    applying_preset = requires("settings.write", application_preset)
+
+    async def written(
+        auth: Authorized,
+        action: str,
+        loosens: Sequence[str],
+        write: Callable[[bool], Awaitable[SettingsChange]],
+    ) -> SettingsChange:
+        """Write, with step-up when the dry run found the change loosens egress; the write
+        judges it again inside its transaction and refuses a mismatch (a conflict)."""
+        if not loosens:
+            return await write(False)
+        # Nothing can fail after the write returns, so the window is never given back for a
+        # change that was stored: ``escalate`` gives it back only when an exception leaves it.
+        async with escalate(auth, action):
+            return await write(True)
+
     @app.exception_handler(SettingsInvalidError)
     async def settings_invalid(_: Request, exc: SettingsInvalidError) -> JSONResponse:
         return _error(
@@ -1565,6 +1628,8 @@ def _settings_routes(
         caps = caps_of(platform, None, view.document)
         return {
             "organization_id": org,
+            # S12: shown from its own table, set by its own endpoint (docs/33).
+            "mode": (await modes.organization_mode(org)).value,
             "version": view.row.version if view.row is not None else 0,
             "settings": {k: _json_value(v) for k, v in view.document.items()},
             "platform_caps": {
@@ -1581,9 +1646,17 @@ def _settings_routes(
         stored = await accounts.service.organizations.get_application(app_id)
         assert stored is not None
         assert view.effective is not None
+        organization_mode = await modes.organization_mode(org)
+        application_mode = await modes.application_mode(app_id)
         return {
             "application_id": app_id,
             "organization_id": org,
+            # S12: shown from its own table, set by its own endpoint (docs/33).
+            "mode": {
+                "organization": organization_mode.value,
+                "application": application_mode.value,
+                "effective": effective_mode(organization_mode, application_mode).value,
+            },
             "version": view.row.version if view.row is not None else 0,
             "settings": {k: _json_value(v) for k, v in view.document.items()},
             "effective": _effective_view(
@@ -1608,8 +1681,9 @@ def _settings_routes(
             "refusals": [{"setting": r.setting, "level": r.level.value} for r in result.refusals],
             "changed": list(result.changed),
             "settings": {k: _json_value(v) for k, v in result.document.items()},
-            # Step-up is asked only of a change that loosens S13 to S16 (PR S3): none here.
-            "step_up_required": False,
+            # A change that loosens S13 to S16 asks for a fresh password (docs/42).
+            "loosens": list(result.loosens),
+            "step_up_required": bool(result.loosens),
         }
         if result.effective is not None:
             body["effective"] = {
@@ -1646,19 +1720,36 @@ def _settings_routes(
     ) -> JSONResponse:
         return JSONResponse(await organization_body(org))
 
+    async def dry(scope: Scope, scope_id: str, body: SettingsChangeBody) -> tuple[str, ...]:
+        return (
+            await settings.validate(
+                scope,
+                scope_id,
+                expected_version=body.expected_version,
+                values=body.values,
+                unset=body.unset,
+            )
+        ).loosens
+
     @app.put(ORG_PREFIX + "/settings")
+    @escalates("org_settings.loosen_egress")
     async def put_organization_settings(
         org: str, body: SettingsChangeBody, auth: Authorized = writing_organization
     ) -> JSONResponse:
-        change = await settings.set(
-            Scope.ORGANIZATION,
-            org,
-            expected_version=body.expected_version,
-            values=body.values,
-            unset=body.unset,
-            actor_user_id=auth.actor.user_id,
-            via="http",
-        )
+        async def write(step_up: bool) -> SettingsChange:
+            return await settings.set(
+                Scope.ORGANIZATION,
+                org,
+                expected_version=body.expected_version,
+                values=body.values,
+                unset=body.unset,
+                actor_user_id=auth.actor.user_id,
+                via="http",
+                step_up=step_up,
+            )
+
+        loosens = await dry(Scope.ORGANIZATION, org, body)
+        change = await written(auth, "org_settings.loosen_egress", loosens, write)
         return JSONResponse(change_body(change))
 
     @app.post(ORG_PREFIX + "/settings/validate")
@@ -1675,16 +1766,38 @@ def _settings_routes(
         return JSONResponse(validation_body(result))
 
     @app.post(ORG_PREFIX + "/settings/revert")
+    @escalates("org_settings.loosen_egress")
     async def revert_organization_settings(
         org: str, body: SettingsRevertBody, auth: Authorized = writing_organization
     ) -> JSONResponse:
-        change = await settings.revert(
-            Scope.ORGANIZATION,
-            org,
-            expected_version=body.expected_version,
-            actor_user_id=auth.actor.user_id,
+        async def write(step_up: bool) -> SettingsChange:
+            return await settings.revert(
+                Scope.ORGANIZATION,
+                org,
+                expected_version=body.expected_version,
+                actor_user_id=auth.actor.user_id,
+                step_up=step_up,
+            )
+
+        loosens = await settings.revert_loosens(
+            Scope.ORGANIZATION, org, expected_version=body.expected_version
         )
+        change = await written(auth, "org_settings.loosen_egress", loosens, write)
         return JSONResponse(change_body(change))
+
+    @app.get(ORG_PREFIX + "/settings/presets")
+    async def list_settings_presets(
+        org: str, auth: Authorized = reading_organization
+    ) -> JSONResponse:
+        # Their exact values (the plan's section 4); applied to an application by name.
+        return JSONResponse(
+            {
+                "presets": {
+                    name: {k: _json_value(v) for k, v in values.items()}
+                    for name, values in SETTINGS_PRESETS.items()
+                }
+            }
+        )
 
     @app.get(ORG_PREFIX + "/settings/versions")
     async def list_organization_settings_versions(
@@ -1710,21 +1823,27 @@ def _settings_routes(
         return JSONResponse(await application_body(org, app_id))
 
     @app.put(ORG_PREFIX + "/applications/{app}/settings")
+    @escalates("settings.loosen_egress")
     async def put_application_settings(
         org: str,
         body: SettingsChangeBody,
         app_id: str = Path_(alias="app"),
         auth: Authorized = writing_application,
     ) -> JSONResponse:
-        change = await settings.set(
-            Scope.APPLICATION,
-            app_id,
-            expected_version=body.expected_version,
-            values=body.values,
-            unset=body.unset,
-            actor_user_id=auth.actor.user_id,
-            via="http",
-        )
+        async def write(step_up: bool) -> SettingsChange:
+            return await settings.set(
+                Scope.APPLICATION,
+                app_id,
+                expected_version=body.expected_version,
+                values=body.values,
+                unset=body.unset,
+                actor_user_id=auth.actor.user_id,
+                via="http",
+                step_up=step_up,
+            )
+
+        loosens = await dry(Scope.APPLICATION, app_id, body)
+        change = await written(auth, "settings.loosen_egress", loosens, write)
         return JSONResponse(change_body(change))
 
     @app.post(ORG_PREFIX + "/applications/{app}/settings/validate")
@@ -1744,18 +1863,56 @@ def _settings_routes(
         return JSONResponse(validation_body(result))
 
     @app.post(ORG_PREFIX + "/applications/{app}/settings/revert")
+    @escalates("settings.loosen_egress")
     async def revert_application_settings(
         org: str,
         body: SettingsRevertBody,
         app_id: str = Path_(alias="app"),
         auth: Authorized = writing_application,
     ) -> JSONResponse:
-        change = await settings.revert(
-            Scope.APPLICATION,
-            app_id,
-            expected_version=body.expected_version,
-            actor_user_id=auth.actor.user_id,
+        async def write(step_up: bool) -> SettingsChange:
+            return await settings.revert(
+                Scope.APPLICATION,
+                app_id,
+                expected_version=body.expected_version,
+                actor_user_id=auth.actor.user_id,
+                step_up=step_up,
+            )
+
+        loosens = await settings.revert_loosens(
+            Scope.APPLICATION, app_id, expected_version=body.expected_version
         )
+        change = await written(auth, "settings.loosen_egress", loosens, write)
+        return JSONResponse(change_body(change))
+
+    @app.post(ORG_PREFIX + "/applications/{app}/settings/presets/{name}")
+    @escalates("settings.loosen_egress")
+    async def apply_settings_preset(
+        org: str,
+        name: str,
+        body: SettingsRevertBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = applying_preset,
+    ) -> JSONResponse:
+        async def write(step_up: bool) -> SettingsChange:
+            return await settings.apply_preset(
+                app_id,
+                name,
+                expected_version=body.expected_version,
+                actor_user_id=auth.actor.user_id,
+                step_up=step_up,
+            )
+
+        # Step-up decided from the change the preset makes here, never from its name.
+        loosens = (
+            await settings.validate(
+                Scope.APPLICATION,
+                app_id,
+                expected_version=body.expected_version,
+                values=SETTINGS_PRESETS[name],
+            )
+        ).loosens
+        change = await written(auth, "settings.loosen_egress", loosens, write)
         return JSONResponse(change_body(change))
 
     @app.get(ORG_PREFIX + "/applications/{app}/settings/versions")
@@ -2001,6 +2158,17 @@ def _invalid(field: str, message: str) -> JSONResponse:
     )
 
 
+def hosted_limits(mode: Mode, settings: EffectiveSettings) -> HostedLimits:
+    """A request's hosted limits: its mode and settings S13 to S16 (docs/42)."""
+    return HostedLimits(
+        mode,
+        settings.allowed_providers,
+        settings.max_hosted_attempts,
+        settings.retry_invalid_tool_json,
+        settings.hosted_first_token_ms,
+    )
+
+
 # The max_tokens a request was served with (docs/39): its own, or the application's
 # default_max_tokens; "none" when no limit applies at all.
 MAX_TOKENS_HEADER = "X-Max-Tokens-Applied"
@@ -2011,7 +2179,10 @@ def applied_header(max_tokens: int | None) -> dict[str, str]:
 
 
 def platform_settings(
-    registry: ModelRegistry, generate_timeout_ms: float | None, chat: ChatService | None = None
+    registry: ModelRegistry,
+    generate_timeout_ms: float | None,
+    chat: ChatService | None = None,
+    max_hosted_attempts: int = DEFAULT_MAX_HOSTED_ATTEMPTS,
 ) -> PlatformSettings:
     """This instance's values at the top of the settings' levels (docs/39)."""
     first = chat.first_token_timeout_ms if chat is not None else DEFAULT_FIRST_TOKEN_TIMEOUT_MS
@@ -2022,10 +2193,13 @@ def platform_settings(
         generate_timeout_ms=generate_timeout_ms,
         chat_first_token_ms=first,
         chat_total_timeout_ms=total,
+        max_hosted_attempts=max_hosted_attempts,
     )
 
 
-def default_platform_settings() -> PlatformSettings:
+def default_platform_settings(
+    max_hosted_attempts: int = DEFAULT_MAX_HOSTED_ATTEMPTS,
+) -> PlatformSettings:
     """The platform values the server factories run with (``DEFAULT_OVERLOAD``'s timeout, the
     chat service's defaults, the profiles' tiers and aliases), for the operator's CLI, which
     has no registry. A test keeps it equal to the default server's."""
@@ -2036,6 +2210,7 @@ def default_platform_settings() -> PlatformSettings:
         generate_timeout_ms=DEFAULT_OVERLOAD.request_timeout_ms,
         chat_first_token_ms=DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
         chat_total_timeout_ms=DEFAULT_TOTAL_TIMEOUT_MS,
+        max_hosted_attempts=max_hosted_attempts,
     )
 
 
@@ -2210,7 +2385,9 @@ def create_app(
 
     # This instance's values at the top of the settings' levels (docs/39): the chat service is
     # built on the same defaults.
-    settings_platform = platform_settings(registry, timeout_ms)
+    settings_platform = platform_settings(
+        registry, timeout_ms, max_hosted_attempts=max_hosted_attempts
+    )
 
     # Where load control reads an application's settings (docs/39): the given store, or the
     # in-memory application store's own. The request path reads them with the key instead.
@@ -2224,6 +2401,13 @@ def create_app(
     # Fallback modes and the providers' circuit breakers (docs/33). The router owns the
     # breakers and publishes their transitions; nothing reads them back from the bus.
     mode_store = modes if modes is not None else InMemoryModeStore()
+    # In memory the modes and the settings are two stores: the hosted policy reads both (docs/42).
+    if (
+        isinstance(mode_store, InMemoryModeStore)
+        and mode_store.settings is None
+        and isinstance(settings_store, InMemorySettingsStore)
+    ):
+        mode_store.settings = settings_store
 
     def breaker_moved(moved: Transition) -> None:
         bus.publish(
@@ -2353,6 +2537,13 @@ def create_app(
                         epoch if epoch is not None else ClockEpoch(clock),
                     ),
                 )
+
+        async def organization_providers(organization_id: str) -> frozenset[str]:
+            """The provider ids an application's ``allowed_providers`` may name (S13)."""
+            if providers is None:
+                return frozenset()
+            return frozenset(c.id for c in await providers.store.list_for(organization_id))
+
         if management is not None and applications is not None and settings_store is not None:
             _settings_routes(
                 app,
@@ -2363,8 +2554,10 @@ def create_app(
                     accounts.service.audit,
                     epoch if epoch is not None else ClockEpoch(clock),
                     settings_platform,
+                    providers=organization_providers,
                 ),
                 settings_store,
+                mode_store,
             )
         # Outermost, so even the local-only guard's refusals of /v1/admin are not cached.
         app.add_middleware(NoStoreMiddleware)
@@ -2829,7 +3022,9 @@ def create_app(
 
         chat = ChatService(registry, clock, chat_adapters)
         platform = settings_platform
-        assert platform == platform_settings(registry, timeout_ms, chat)
+        assert platform == platform_settings(
+            registry, timeout_ms, chat, max_hosted_attempts=max_hosted_attempts
+        )
         documents = DocumentCache()
 
         def keyed(application: Application) -> Keyed:
@@ -2837,7 +3032,7 @@ def create_app(
             a missing row is the defaults; a row that cannot be judged raises
             ``SettingsUnreadableError`` (503). The application as the request sees it."""
             effective = resolve(platform, application, application.stored_settings, documents)
-            return Keyed(effective_application(application, effective), effective)
+            return Keyed(effective_application(application, effective), effective, application)
 
         # async, so it runs on the event loop: a dependency run on a thread would let a
         # SimClock's time jump, and the SQLite connection belongs to the loop's thread.
@@ -3081,6 +3276,17 @@ def create_app(
             # the rest of the request; the router reads it again only before a hosted attempt,
             # to refuse one a stricter mode no longer allows (docs/33, docs/38).
             mode = await chat_router.mode(caller.organization_id, caller.id)
+
+            async def recheck() -> HostedLimits:
+                # Just before each hosted attempt: both modes and both settings rows in one
+                # statement, decided as the key lookup's were (docs/42). A row that cannot be
+                # judged raises, and the attempt is not made (closed).
+                policy = await mode_store.hosted_policy(caller.organization_id, caller.id)
+                now = resolve(platform, found.stored, policy.settings, documents)
+                return hosted_limits(
+                    effective_mode(policy.organization_mode, policy.application_mode), now
+                )
+
             try:
                 # Only to answer at once when no candidate may serve it; the router asks again.
                 await chat_router.candidates(
@@ -3156,6 +3362,8 @@ def create_app(
                         timeouts=ChatTimeouts(
                             settings.chat_first_token_ms, settings.chat_total_timeout_ms
                         ),
+                        limits=hosted_limits(mode, settings),
+                        recheck=recheck,
                     )
                     if timeout_ms is not None:
                         return await run_with_timeout(clock, work, timeout_ms)

@@ -73,7 +73,7 @@ class Wired(StrEnum):
     A5 = "A5"  # provider keys and modes
     A8 = "A8"  # monitoring and control: local only until then
     SETTINGS_S2 = "settings S2"  # the settings endpoints (docs/40)
-    SETTINGS_S3 = "settings S3"  # declared; reached once the hosted settings exist
+    SETTINGS_S3 = "settings S3"  # a settings write that loosens where prompts go (docs/42)
     LATER = "later"  # declared; no endpoint is planned in A2
 
 
