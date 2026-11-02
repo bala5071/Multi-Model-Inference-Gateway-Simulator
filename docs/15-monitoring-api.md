@@ -88,11 +88,18 @@ one line in the real stream.)
              "counts": {"state_change": 0, "queue_full": 0, "timeout": 0, "downgrade": 0,
                         "budget_exhausted": 0, "circuit_breaker": 0,
                         "state_store_restarted": 0, "reservation_expired": 0},
-             "recent": []}
+             "recent": []},
+  "breakers": {"available": true,
+               "reports_dropped": {"queue_full": 0, "flush_timeout": 0, "unavailable": 0}}
 }
 ```
 
 `models` has every registered model, in registration order.
+
+`breakers.reports_dropped` (added by note 41) counts the circuit breakers' reports this
+instance dropped since it started, by reason: the queue was full, the shutdown flush ran out of
+time, or the counters could not take one. A dropped report can make a breaker open late or
+early; it never admits anything. A count of what the instance did: nothing decides from it.
 
 ### Model groups: the state now
 
@@ -301,6 +308,7 @@ gateway_ttft_ms{model="premium",quantile="0.99"} 50.0
   is no lifetime `_sum` to go with them.
 - Application usage (`gateway_application_used_tokens` and the like) is exported as gauges, since it
   starts again from zero each budget period.
+- `gateway_breaker_reports_dropped_total{reason=...}` is `breakers.reports_dropped` (note 41).
 - The full output for one request is asserted in
   `test_metrics_endpoint_is_exact_prometheus_text_for_one_request`.
 

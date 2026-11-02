@@ -51,6 +51,8 @@ from gateway.breaker import (
     FAILURE_THRESHOLD,
     MAX_OPEN_MS,
     OPEN_MS,
+    PROBE_MS,
+    Admission,
     BreakerState,
     Transition,
 )
@@ -78,8 +80,8 @@ DAY_MS = 24 * 60 * MINUTE_MS
 # How long a breaker's state, a dropped-row count and a restart marker are kept when untouched.
 # An integer: PEXPIRE takes whole milliseconds and refuses "86400000.0".
 KEEP_MS = int(DAY_MS)
-# How long a half-open probe holds its slot if its instance dies before reporting (decision 10).
-PROBE_MS = 120_000.0
+# PROBE_MS (gateway.breaker): how long a half-open probe holds its slot if its instance dies
+# before reporting (decision 10); the in-memory breakers use the same since docs/41.
 
 # KEYS: one sorted set per window. ARGV: now, member, then (limit, window_ms) per key.
 # Every window is checked first; only if none is full is the member added to all of them.
@@ -465,27 +467,37 @@ class ValkeyBreakers:
         return found
 
     async def admit(self, organization_id: str, provider_id: str) -> bool:
+        return await self.admit_attempt(organization_id, provider_id) is not Admission.REFUSED
+
+    async def admit_attempt(self, organization_id: str, provider_id: str) -> Admission:
         try:
             found = await self._run("admit", organization_id, provider_id)
         except StateUnavailableError as exc:
             _unavailable("breaker", exc)
-            return False
-        return int(found[0]) == 1
+            return Admission.REFUSED
+        if int(found[0]) != 1:
+            return Admission.REFUSED
+        # Admitted while half-open: the one probe (the script took its slot).
+        if str(found[3]) == BreakerState.HALF_OPEN.value:
+            return Admission.PROBE
+        return Admission.ADMITTED
 
-    async def _report(self, op: str, organization_id: str, provider_id: str) -> None:
+    async def _report(self, op: str, organization_id: str, provider_id: str) -> bool:
         try:
             await self._run(op, organization_id, provider_id)
         except StateUnavailableError as exc:
             _unavailable("breaker", exc)
+            return False
+        return True
 
-    async def release(self, organization_id: str, provider_id: str) -> None:
-        await self._report("release", organization_id, provider_id)
+    async def release(self, organization_id: str, provider_id: str) -> bool:
+        return await self._report("release", organization_id, provider_id)
 
-    async def success(self, organization_id: str, provider_id: str) -> None:
-        await self._report("success", organization_id, provider_id)
+    async def success(self, organization_id: str, provider_id: str) -> bool:
+        return await self._report("success", organization_id, provider_id)
 
-    async def failure(self, organization_id: str, provider_id: str) -> None:
-        await self._report("failure", organization_id, provider_id)
+    async def failure(self, organization_id: str, provider_id: str) -> bool:
+        return await self._report("failure", organization_id, provider_id)
 
     async def state(self, organization_id: str, provider_id: str) -> BreakerState:
         try:

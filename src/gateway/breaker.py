@@ -6,7 +6,10 @@ See docs/33-fallback-modes.md.
   trigger kinds (a connection error, a 5xx, a missed first-token budget, invalid tool JSON).
 - **open** for ``open_ms``, doubling (up to ``max_open_ms``) each time a probe fails; while
   open the provider is skipped (``circuit_open``).
-- **half-open** when the time has passed: one request goes through; the others still skip.
+- **half-open** when the time has passed: one request goes through (the probe); the others
+  still skip. A probe whose report never comes frees its slot after ``probe_ms`` (120 s), in
+  memory as in Valkey (docs/41): a request cancelled between its admission and its attempt sends
+  none.
 - **closed** again after ``close_after`` consecutive successes (the hysteresis); a failure
   while half-open opens it again, for twice as long.
 
@@ -31,12 +34,24 @@ OPEN_MS = 30_000.0
 MAX_OPEN_MS = 5 * 60_000.0
 CLOSE_AFTER = 2
 SLOW_AFTER = 3
+# How long a half-open probe holds its slot if no report comes (scale-out decision 10; in
+# memory too since docs/41).
+PROBE_MS = 120_000.0
 
 
 class BreakerState(StrEnum):
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"
+
+
+class Admission(StrEnum):
+    """What ``admit_attempt`` decided: refused, admitted by a closed breaker, or admitted as
+    the half-open breaker's one probe (whose report is sent at once, docs/41)."""
+
+    REFUSED = "refused"
+    ADMITTED = "admitted"
+    PROBE = "probe"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +74,7 @@ class _Breaker:
         "misses",
         "open_ms",
         "open_until_ms",
+        "probe_until_ms",
         "probing",
         "state",
         "successes",
@@ -71,6 +87,7 @@ class _Breaker:
         self.open_until_ms = 0.0
         self.open_ms = 0.0
         self.probing = False
+        self.probe_until_ms = 0.0
 
 
 class SlowWarnings:
@@ -107,11 +124,16 @@ class BreakerStore(Protocol):
 
     async def admit(self, organization_id: str, provider_id: str) -> bool: ...
 
-    async def release(self, organization_id: str, provider_id: str) -> None: ...
+    async def admit_attempt(self, organization_id: str, provider_id: str) -> Admission:
+        """``admit``, saying whether the admission is a half-open probe."""
+        ...
 
-    async def success(self, organization_id: str, provider_id: str) -> None: ...
+    # Each report says whether it was written: False when the counters could not take it.
+    async def release(self, organization_id: str, provider_id: str) -> bool: ...
 
-    async def failure(self, organization_id: str, provider_id: str) -> None: ...
+    async def success(self, organization_id: str, provider_id: str) -> bool: ...
+
+    async def failure(self, organization_id: str, provider_id: str) -> bool: ...
 
     async def state(self, organization_id: str, provider_id: str) -> BreakerState: ...
 
@@ -127,8 +149,10 @@ class Breakers:
         max_open_ms: float = MAX_OPEN_MS,
         close_after: int = CLOSE_AFTER,
         slow_after: int = SLOW_AFTER,
+        probe_ms: float = PROBE_MS,
     ) -> None:
         self._clock = clock
+        self._probe_ms = probe_ms
         self._on_transition = on_transition
         self._failure_threshold = failure_threshold
         self._open_ms = open_ms
@@ -158,26 +182,35 @@ class Breakers:
         self._move(key, breaker, BreakerState.OPEN)
 
     async def admit(self, organization_id: str, provider_id: str) -> bool:
-        """Whether a request may try this provider now. When an open breaker's time has
-        passed it turns half-open and admits exactly one request until that one reports."""
+        """Whether a request may try this provider now."""
+        return await self.admit_attempt(organization_id, provider_id) is not Admission.REFUSED
+
+    async def admit_attempt(self, organization_id: str, provider_id: str) -> Admission:
+        """Whether a request may try this provider now, and as what. When an open breaker's
+        time has passed it turns half-open and admits exactly one request (the probe) until
+        that one reports, or until ``probe_ms`` has passed without a report."""
         key = (organization_id, provider_id)
         breaker = self._get(*key)
+        now = self._clock.now_ms()
         if breaker.state is BreakerState.OPEN:
-            if self._clock.now_ms() < breaker.open_until_ms:
-                return False
+            if now < breaker.open_until_ms:
+                return Admission.REFUSED
             self._move(key, breaker, BreakerState.HALF_OPEN)
         if breaker.state is BreakerState.HALF_OPEN:
-            if breaker.probing:
-                return False
+            if breaker.probing and now < breaker.probe_until_ms:
+                return Admission.REFUSED
             breaker.probing = True
-        return True
+            breaker.probe_until_ms = now + self._probe_ms
+            return Admission.PROBE
+        return Admission.ADMITTED
 
-    async def release(self, organization_id: str, provider_id: str) -> None:
+    async def release(self, organization_id: str, provider_id: str) -> bool:
         """An admitted request ended without a verdict (cancelled, or a non-trigger failure):
         let the next one probe."""
         self._get(organization_id, provider_id).probing = False
+        return True
 
-    async def success(self, organization_id: str, provider_id: str) -> None:
+    async def success(self, organization_id: str, provider_id: str) -> bool:
         key = (organization_id, provider_id)
         breaker = self._get(*key)
         breaker.failures = 0
@@ -188,17 +221,19 @@ class Breakers:
                 breaker.successes = 0
                 breaker.open_ms = 0.0
                 self._move(key, breaker, BreakerState.CLOSED)
+        return True
 
-    async def failure(self, organization_id: str, provider_id: str) -> None:
+    async def failure(self, organization_id: str, provider_id: str) -> bool:
         key = (organization_id, provider_id)
         breaker = self._get(*key)
         breaker.probing = False
         if breaker.state is BreakerState.HALF_OPEN:
             self._open(key, breaker, breaker.open_ms * 2 if breaker.open_ms else self._open_ms)
-            return
+            return True
         breaker.failures += 1
         if breaker.failures >= self._failure_threshold:
             self._open(key, breaker, self._open_ms)
+        return True
 
     async def state(self, organization_id: str, provider_id: str) -> BreakerState:
         return self._get(organization_id, provider_id).state

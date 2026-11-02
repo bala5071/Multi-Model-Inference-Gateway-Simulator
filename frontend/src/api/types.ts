@@ -179,6 +179,15 @@ export interface EventsGroup {
   recent: GatewayEvent[];
 }
 
+// Circuit breaker reports this instance dropped, by reason (docs/41). A count only.
+export const BREAKER_DROP_REASONS = ["queue_full", "flush_timeout", "unavailable"] as const;
+export type BreakerDropReason = (typeof BREAKER_DROP_REASONS)[number];
+
+export interface BreakersGroup {
+  available: boolean;
+  reports_dropped: Record<BreakerDropReason, number>;
+}
+
 export interface Snapshot {
   at_ms: number;
   resolution_ms: number;
@@ -186,4 +195,5 @@ export interface Snapshot {
   models: Record<string, ModelSnapshot>;
   applications: ApplicationsGroup;
   events: EventsGroup;
+  breakers: BreakersGroup;
 }
