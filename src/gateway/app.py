@@ -18,6 +18,7 @@ import os
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeVar
@@ -30,6 +31,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from gateway.adapters.base import HttpAdapter
+from gateway.alertrecorder import MINUTE_MS, AlertRecorder
+from gateway.alertrollups import (
+    AlertRollups,
+    InMemoryAlertRollups,
+    RollupFlusher,
+    SharedAlertRollups,
+)
 from gateway.apikeys import (
     INVALID_KEY_MESSAGE,
     ApiKeyRequiredError,
@@ -100,6 +108,7 @@ from gateway.chat import (
 )
 from gateway.chatrouter import (
     DEFAULT_MAX_HOSTED_ATTEMPTS,
+    HOSTED,
     ChatRouter,
     HostedLimits,
     NoCandidateError,
@@ -1183,6 +1192,101 @@ class NoStoreMiddleware:
             await send(message)
 
         await self.app(scope, receive, no_store)
+
+
+@dataclass
+class AlertNote:
+    """What the handlers learn about one request for the alert recorder (docs/43): whose it
+    is, how long it took, and for a chat request its route."""
+
+    kind: str
+    application_id: str | None = None
+    ttft_ms: float | None = None
+    total_ms: float | None = None
+    downgraded: bool = False
+    trace: RouteTrace | None = None
+
+
+# The requests the alert recorder is told about, and their kind.
+ALERT_PATHS = {"/v1/generate": "generate", "/v1/chat/completions": "chat"}
+# Enough of an error body for its code: every error answer is small.
+_ERROR_BODY_BYTES = 4096
+
+
+def _error_code(body: bytes) -> str | None:
+    try:
+        found = json.loads(body)["error"]["code"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    return found if isinstance(found, str) else None
+
+
+class AlertOutcomeMiddleware:
+    """Tells the alert recorder how each keyed request of ``ALERT_PATHS`` ended (docs/43): its
+    status, the code of an error answer, and what the handlers noted. When the last of the
+    answer is sent, so a stream is recorded at its end; a request whose client went away
+    before the end is not. A request with no application (no key, an invalid key) is not
+    recorded. The recorder does no I/O and never awaits."""
+
+    def __init__(self, app: Any, recorder: AlertRecorder, note: ContextVar[AlertNote | None]):
+        self.app = app
+        self.recorder = recorder
+        self.note = note
+
+    def _record(self, note: AlertNote, status: int, body: bytes) -> None:
+        if note.application_id is None:
+            return
+        trace = note.trace
+        self.recorder.record(
+            note.application_id,
+            kind=note.kind,
+            status=status,
+            code=_error_code(body) if status >= 400 else None,
+            ttft_ms=note.ttft_ms,
+            total_ms=note.total_ms,
+            fallbacks=(trace.fallback_reason or "",)
+            if trace is not None and trace.fallback_from is not None
+            else (),
+            hosted_attempts=trace.hosted_attempts if trace is not None else 0,
+            hosted=trace is not None and trace.provider_class == HOSTED,
+            downgraded=note.downgraded,
+        )
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        kind = (
+            ALERT_PATHS.get(scope.get("path", ""))
+            if scope["type"] == "http" and scope.get("method") == "POST"
+            else None
+        )
+        if kind is None:
+            await self.app(scope, receive, send)
+            return
+        note = AlertNote(kind)
+        token = self.note.set(note)
+        status = [500]
+        body = bytearray()
+        done = [False]
+
+        async def watch(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                status[0] = int(message["status"])
+            elif message["type"] == "http.response.body":
+                if status[0] >= 400 and len(body) < _ERROR_BODY_BYTES:
+                    body.extend(message.get("body", b""))
+                if not message.get("more_body", False) and not done[0]:
+                    done[0] = True
+                    self._record(note, status[0], bytes(body))
+            await send(message)
+
+        try:
+            await self.app(scope, receive, watch)
+        except Exception:
+            if not done[0]:  # answered 500 by the server's own handler
+                done[0] = True
+                self._record(note, 500, b"")
+            raise
+        finally:
+            self.note.reset(token)
 
 
 def _page_body(name: str, items: list[dict[str, object]], next_cursor: str | None) -> JSONResponse:
@@ -2428,6 +2532,41 @@ def create_app(
     # The reports, off the request path but a half-open probe's (docs/41); flushed at shutdown.
     reports = BreakerReports(breakers, clock, on_drop=monitoring.breaker_report_dropped)
 
+    # The alert recorder (docs/43): told how each keyed request ended. Its rollups are this
+    # process's own, written at once, or with shared counters every instance's in Valkey,
+    # flushed every 10 s off the request path. Nothing on the request path reads them.
+    alert_note: ContextVar[AlertNote | None] = ContextVar("alert_note", default=None)
+    alert_recorder: AlertRecorder | None = None
+    alert_rollups: AlertRollups | None = None
+    shared_rollups: SharedAlertRollups | None = None
+    flusher: RollupFlusher | None = None
+    if applications is not None:
+        alert_epoch = epoch if epoch is not None else ClockEpoch(clock)
+        if counters is not None:
+            shared_rollups = counters.alert_rollups()
+            alert_rollups = shared_rollups
+            alert_recorder = AlertRecorder(alert_epoch)
+
+            def rollups_dropped(entries: int) -> None:
+                logging.getLogger("gateway.alerts").warning(
+                    "alert rollups dropped: %d application minutes not sent", entries
+                )
+
+            flusher = RollupFlusher(
+                alert_recorder,
+                shared_rollups,
+                clock,
+                secrets.token_hex(8),
+                on_dropped=rollups_dropped,
+            )
+        else:
+            local_rollups = InMemoryAlertRollups()
+            alert_rollups = local_rollups
+            alert_recorder = AlertRecorder(alert_epoch, sink=local_rollups)
+
+    def noted() -> AlertNote | None:
+        return alert_note.get()
+
     # Filled in further down, once the generate handler it sends through exists.
     load: LoadController | None = None
 
@@ -2448,11 +2587,22 @@ def create_app(
 
             async def restarted(_: str) -> None:
                 monitoring.state_store_restarted("valkey")
+                if shared_rollups is not None:
+                    # Every minute up to now lost its counts (docs/43).
+                    minute = int((epoch if epoch is not None else ClockEpoch(clock)).epoch_ms()
+                                 // MINUTE_MS)  # fmt: skip
+                    try:
+                        await shared_rollups.note_restart(minute)
+                    except StateUnavailableError:
+                        logging.getLogger("gateway.alerts").warning(
+                            "alert rollups: the restart could not be marked"
+                        )
 
             await counters.watch.start(restarted)
             watching = asyncio.create_task(counters.watch.run(restarted))
         if load is not None and autostart_load is not None:
             await load.start(autostart_load, seed)
+        flushing = asyncio.create_task(flusher.run()) if flusher is not None else None
         # Retention runs beside the server, never on a request (docs/21).
         retainer = budgets if budgets is not None else ledger
         retention = (
@@ -2495,6 +2645,10 @@ def create_app(
         # Before the counters' client closes: what is queued is sent within the limit, the
         # rest dropped and counted (docs/41).
         await reports.flush()
+        if flushing is not None:
+            flushing.cancel()
+        if flusher is not None:
+            await flusher.flush()  # what this instance recorded since the last flush
         if watching is not None:
             watching.cancel()
         if counters is not None:
@@ -2506,6 +2660,11 @@ def create_app(
 
     app = FastAPI(title="Cost-aware multi-model inference gateway", lifespan=lifespan)
     app.state.settings_platform = settings_platform
+    app.state.alert_recorder = alert_recorder
+    app.state.alert_rollups = alert_rollups
+    app.state.alert_flusher = flusher
+    if alert_recorder is not None:
+        app.add_middleware(AlertOutcomeMiddleware, recorder=alert_recorder, note=alert_note)
     if local_only is not None:
         app.add_middleware(LocalOnlyMiddleware, policy=local_only)
     if accounts is not None:
@@ -2736,6 +2895,8 @@ def create_app(
         monitoring.completed(
             model, application_id, result, billed_cost_usd=cost_usd, live_tokens=live_tokens
         )
+        if (note := noted()) is not None:
+            note.ttft_ms, note.total_ms = result.time_to_first_token_ms, result.latency_ms
         return GenerateResponse(
             id=request_id,
             # A simulated run generates no text, so say so in its place.
@@ -2863,6 +3024,8 @@ def create_app(
         if downgraded_from is not None:
             headers["X-Downgraded-From"] = downgraded_from
             monitoring.downgraded(application_id, downgraded_from, model)
+            if (note := noted()) is not None:
+                note.downgraded = True
 
         # Token events for a streaming response; None marks the end of the request.
         tokens: asyncio.Queue[tuple[int, float, str] | None] = asyncio.Queue()
@@ -3040,7 +3203,10 @@ def create_app(
             scheme, _, credentials = (authorization or "").strip().partition(" ")
             if scheme.lower() != "bearer" or not credentials.strip():
                 raise ApiKeyRequiredError()
-            return keyed(await keys.authenticate(credentials.strip()))
+            found = keyed(await keys.authenticate(credentials.strip()))
+            if (note := noted()) is not None:
+                note.application_id = found.application.id
+            return found
 
         @app.post("/v1/generate", response_model=GenerateResponse)
         @public_route("an application API key, checked by the route")
@@ -3114,6 +3280,8 @@ def create_app(
                 billed_cost_usd=billed,
                 live_tokens=timing.tokens_out,
             )
+            if (note := noted()) is not None:
+                note.ttft_ms, note.total_ms = timing.time_to_first_token_ms, timing.latency_ms
 
         def source_headers(trace: RouteTrace | ChatSource) -> dict[str, str]:
             """Where the answer came from: a provider id or ``gateway`` (the gateway's own
@@ -3171,6 +3339,8 @@ def create_app(
                 )
             try:
                 found = keyed(await keys.authenticate(credentials.strip()))
+                if (note := noted()) is not None:
+                    note.application_id = found.application.id
             except InvalidApiKeyError:
                 return _openai_error(
                     401,
@@ -3309,6 +3479,8 @@ def create_app(
                     kind="api_error",
                 )
             trace = RouteTrace()
+            if (note := noted()) is not None:
+                note.trace = trace
             completion_id = "chatcmpl-" + request_id.removeprefix("req-")
             created = int(chat_epoch.epoch_ms() // 1000)
             multiplier = route.plan.price_multiplier

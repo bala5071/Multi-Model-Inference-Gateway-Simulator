@@ -96,6 +96,15 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   the same code up to the point of writing; whether a change loosens S13 to S16 for any
   application it affects is judged again inside the write and must match the step-up the
   handler claimed (docs/42); the CLI's and the settings endpoints' (exists)
+- `alertrecorder.py` — `AlertRecorder`: per application and per minute, how its requests
+  ended, in fixed field names and fixed-edge latency histograms (`EDGES`, `snap`,
+  `percentile`); never awaits, no I/O; told by `app.py`'s `AlertOutcomeMiddleware` (docs/43)
+  (exists)
+- `alertrollups.py` — `AlertRollups`, `InMemoryAlertRollups` (the recorder writes into it at
+  once) and `RollupFlusher` (every 10 s to Valkey's `ValkeyAlertRollups`, one batch id applied
+  once, kept 10 minutes, then dropped and the minutes marked incomplete) (docs/43) (exists)
+- `signals.py` — the alert signals and their minimums, pure, from one application's rollups or
+  durable values of its own; "too few to judge", never 0 (docs/43) (exists)
 - `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
   warning, on the injected clock, `circuit_breaker` events; `admit_attempt` says whether an
   admission is a half-open probe, whose slot frees itself after 120 s (`PROBE_MS`) (exists)
@@ -194,7 +203,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   each atomic rule one Lua script, every key an HMAC; missing is forbidden; `ValkeyWatch`
   (the settings and the skew at startup, the skew and the run id every 30 s; the skew against
   Postgres's `gateway_now_ms()` when there is one, docs/37);
-  `GATEWAY_COUNTERS=valkey` and `GATEWAY_VALKEY_URL`. Budgets are not in it (exists)
+  `GATEWAY_COUNTERS=valkey` and `GATEWAY_VALKEY_URL`; `ValkeyAlertRollups` (docs/43). Budgets
+  are not in it (exists)
 - `postgres.py` — every durable store on Postgres (asyncpg): `PG_BASELINE` (SQLite migrations
   1 to 13, plus `ord` where SQLite orders by rowid), `PG_SETTINGS` (schema version 3, migration
   14, with `rollback_schema`), `PostgresSettingsStore`, `PostgresDatabase` with two pools (request,
@@ -310,6 +320,7 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   on Postgres with the shared budgets, its store calls and Postgres round trips (BEGIN, the
   statement timeout, COMMIT, the pool's reset) counted and timed as made (needs
   `GATEWAY_POSTGRES_URL`); the numbers in `docs/38` (exists)
+- `benchmarks/alert_recorder.py` — one alert recorder call; the numbers in `docs/43` (exists)
 - `benchmarks/management_requests.py` — management reads and key writes on the running
   server, beside `/healthz` and `/v1/auth/me`; the numbers in `docs/30` (exists)
 

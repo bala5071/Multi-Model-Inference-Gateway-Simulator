@@ -155,6 +155,8 @@ class RouteTrace:
     fallback_reason: str | None = None
     # Every candidate's reason for being left, in order; the first is ``fallback_reason``.
     reasons: list[FallbackReason] = field(default_factory=list)
+    # Calls made to organization providers, the retry included (for the alert recorder).
+    hosted_attempts: int = 0
 
     def source(self, usage_estimated: bool) -> ChatSource:
         assert self.provider is not None
@@ -434,6 +436,7 @@ class ChatRouter:
                             break
                     if candidate.config is not None:
                         attempts += 1
+                        trace.hosted_attempts = attempts
                     try:
                         outcome = await self._attempt(
                             candidate, request, relay, timeouts, held.first_token_ms

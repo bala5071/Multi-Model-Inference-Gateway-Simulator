@@ -29,13 +29,14 @@ import itertools
 import logging
 import math
 import secrets
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from functools import partial
 from typing import Any, TypeVar, cast
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from gateway.alertrollups import MinuteRollup
 from gateway.audit import (
     AuditAction,
     AuditEvent,
@@ -189,6 +190,41 @@ return {admitted, moved, redis.call('HGET', key, 'open_ms') or '', state}
 """
 
 
+# KEYS: the batch's id, then one hash per (application, minute). ARGV: how long to keep, then
+# per hash its number of fields followed by (field, count) pairs. Applied once per batch id:
+# a batch sent again (its call timed out after it was applied) adds nothing. Returns 1 if
+# applied now, 0 if it already was.
+ROLLUP_ADD = """
+local keep = tonumber(ARGV[1])
+if not redis.call('SET', KEYS[1], '1', 'NX', 'PX', keep) then return 0 end
+local a = 2
+for i = 2, #KEYS do
+  local n = tonumber(ARGV[a])
+  a = a + 1
+  for j = 1, n do
+    redis.call('HINCRBY', KEYS[i], ARGV[a], ARGV[a + 1])
+    a = a + 2
+  end
+  redis.call('PEXPIRE', KEYS[i], keep)
+end
+return 1
+"""
+
+# KEYS: the restart marker. ARGV: the minute the store was seen restarted, how long to keep.
+# Keeps the latest minute: every minute at or before it lost its counts.
+ROLLUP_RESTART = """
+local was = tonumber(redis.call('GET', KEYS[1]) or '-1')
+if tonumber(ARGV[1]) > was then
+  redis.call('SET', KEYS[1], ARGV[1], 'PX', tonumber(ARGV[2]))
+end
+return 1
+"""
+
+# How long a rollup, a batch id and the restart marker are kept (the plan's two hours).
+ROLLUP_KEEP_MS = 2 * 60 * 60 * 1000
+INCOMPLETE = "incomplete"
+
+
 class ValkeyNotSafeError(RuntimeError):
     """Valkey is not set up to count in: it could evict a counter (a forgotten failure is an
     admitted attempt) or lose them all on a restart. The server refuses to start."""
@@ -222,6 +258,7 @@ class ValkeyCounters:
         self._timeout_ms = timeout_ms
         self._names = derive_key(secret, KeyPurpose.COUNTER_KEYS)
         self._login_key = derive_key(secret, KeyPurpose.LOGIN_LIMITER)
+        self._rollup_names = derive_key(secret, KeyPurpose.ALERT_ROLLUPS)
         self._instance = random_bytes(8).hex()
         self._sequence = itertools.count()
         # False while the instance's clock is past the skew bound: every call is refused.
@@ -230,6 +267,8 @@ class ValkeyCounters:
         self.audit_take = client.register_script(AUDIT_TAKE)
         self.audit_collect = client.register_script(AUDIT_COLLECT)
         self.breaker = client.register_script(BREAKER)
+        self.rollup_add = client.register_script(ROLLUP_ADD)
+        self.rollup_restart = client.register_script(ROLLUP_RESTART)
         self._watch = ValkeyWatch(self, max_skew_ms, check_every_ms, audit, reference)
 
     def __repr__(self) -> str:
@@ -242,6 +281,11 @@ class ValkeyCounters:
     def name(self, kind: str, identifier: str) -> str:
         """A key's name: what it counts, as an HMAC; never the identifier itself."""
         digest = hmac.new(self._names, identifier.encode(), hashlib.sha256).hexdigest()
+        return f"{self.prefix}{kind}:{digest[:32]}"
+
+    def rollup_name(self, kind: str, identifier: str) -> str:
+        """A rollup key's name, under the rollups' own derived key (docs/43)."""
+        digest = hmac.new(self._rollup_names, identifier.encode(), hashlib.sha256).hexdigest()
         return f"{self.prefix}{kind}:{digest[:32]}"
 
     def login_key(self, username: str) -> str:
@@ -295,6 +339,9 @@ class ValkeyCounters:
 
     def audit_cap(self, rows_per_minute: int) -> ValkeyAuditCap:
         return ValkeyAuditCap(self, rows_per_minute)
+
+    def alert_rollups(self) -> ValkeyAlertRollups:
+        return ValkeyAlertRollups(self)
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -558,6 +605,64 @@ class ValkeyAuditCap:
         except StateUnavailableError as exc:
             _unavailable("dropped-row count", exc)
         return None
+
+
+class ValkeyAlertRollups:
+    """The alert rollups of every instance (docs/43): one hash per (application, minute), its
+    name an HMAC under ``KeyPurpose.ALERT_ROLLUPS``, its fields the recorder's fixed names and
+    its values counts. Off the request path: the flusher adds, the evaluator reads."""
+
+    def __init__(self, counters: ValkeyCounters) -> None:
+        self._c = counters
+        self._restart = counters.rollup_name("rollup-restart", "")
+
+    def _key(self, application_id: str, minute: int) -> str:
+        return self._c.rollup_name("rollup", f"{application_id}\x00{minute}")
+
+    async def add(self, batch: str, deltas: Mapping[tuple[str, int], Mapping[str, int]]) -> None:
+        keys = [self._c.rollup_name("rollup-batch", batch)]
+        args: list[str | int] = [ROLLUP_KEEP_MS]
+        for (application_id, minute), counts in sorted(deltas.items()):
+            keys.append(self._key(application_id, minute))
+            args.append(len(counts))
+            for name, n in sorted(counts.items()):
+                args += [name, n]
+        await self._c.call(partial(self._c.rollup_add, keys=keys, args=args))
+
+    async def mark_incomplete(self, keys: Sequence[tuple[str, int]]) -> None:
+        async def mark() -> None:
+            async with self._c.client.pipeline(transaction=True) as pipe:
+                for application_id, minute in keys:
+                    name = self._key(application_id, minute)
+                    pipe.hset(name, INCOMPLETE, 1)
+                    pipe.pexpire(name, ROLLUP_KEEP_MS)
+                await pipe.execute()
+
+        await self._c.call(mark)
+
+    async def note_restart(self, minute: int) -> None:
+        """The store restarted: every minute up to ``minute`` lost its counts."""
+        await self._c.call(
+            partial(self._c.rollup_restart, keys=[self._restart], args=[minute, ROLLUP_KEEP_MS])
+        )
+
+    async def read(self, application_id: str, minutes: Sequence[int]) -> list[MinuteRollup]:
+        async def fetch() -> list[Any]:
+            async with self._c.client.pipeline(transaction=False) as pipe:
+                for minute in minutes:
+                    pipe.hgetall(self._key(application_id, minute))
+                pipe.get(self._restart)
+                found: list[Any] = await pipe.execute()
+                return found
+
+        *found, restart = await self._c.call(fetch)
+        restarted = int(restart) if restart is not None else -1
+        rollups = []
+        for minute, fields in zip(minutes, found, strict=True):
+            counts = {str(k): int(v) for k, v in fields.items() if k != INCOMPLETE}
+            incomplete = INCOMPLETE in fields or minute <= restarted
+            rollups.append(MinuteRollup(application_id, minute, counts, incomplete))
+        return rollups
 
 
 class ValkeyWatch:
