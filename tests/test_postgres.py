@@ -69,6 +69,7 @@ from gateway.pg_migrate import (
 from gateway.postgres import (
     NO_PASSWORD_FOR_TESTS_ENV,
     PG_BASELINE,
+    PG_SETTINGS,
     TABLES,
     WRITE_LOCK,
     PostgresApplicationStore,
@@ -87,6 +88,7 @@ from gateway.providers import (
 )
 from gateway.redaction import Redactor
 from gateway.routing import load_plans
+from gateway.settings import Scope, SettingsVersionConflictError
 from gateway.state import (
     STATE_ENV,
     SharedStateRefusedError,
@@ -124,9 +126,9 @@ NOWHERE = f"postgresql://gateway:{PLANTED}@127.0.0.1:1/gateway"
 
 
 def _postgres_columns() -> dict[str, list[str]]:
-    """Each table's columns, read from the baseline's text."""
+    """Each table's columns, read from the text of the baseline and of version 3 (settings)."""
     found: dict[str, list[str]] = {}
-    for match in re.finditer(r"CREATE TABLE (\w+) \((.*?)\);\n", PG_BASELINE, re.S):
+    for match in re.finditer(r"CREATE TABLE (\w+) \((.*?)\);\n", PG_BASELINE + PG_SETTINGS, re.S):
         depth, part, parts = 0, "", []
         for char in match.group(2):
             depth += {"(": 1, ")": -1}.get(char, 0)
@@ -144,8 +146,8 @@ def _postgres_columns() -> dict[str, list[str]]:
 
 
 def test_the_postgres_schema_has_sqlites_tables_and_columns() -> None:
-    """The baseline is SQLite migrations 1 to 13: the same tables and columns, in the same order,
-    plus ``ord`` where the SQLite stores order by rowid."""
+    """The baseline and version 3 are SQLite migrations 1 to 14: the same tables and columns, in
+    the same order, plus ``ord`` where the SQLite stores order by rowid."""
     connection = open_database(":memory:")
     MigrationRunner(connection, MIGRATIONS, SystemEpoch()).migrate()
     sqlite_tables = {
@@ -466,7 +468,7 @@ class _Counting:
 async def _outcome(call: Awaitable[Any]) -> Any:
     try:
         return ("ok", await call)
-    except (ValueError, KeyError) as exc:
+    except (ValueError, KeyError, SettingsVersionConflictError) as exc:
         return (type(exc).__name__, str(exc))
 
 
@@ -690,6 +692,46 @@ async def _scenario(s: StateBackend) -> list[Any]:
         await m.set_application_mode("app0", Mode.LOCAL_ONLY, 99.5)
     await m.set_application_mode("app0", Mode.LOCAL_WITH_HOSTED_FALLBACK, 99.7)
     out += [await m.organization_mode("north"), await m.application_mode("app0")]
+    # Settings (docs/39): versions on both scopes, a conflict, and the key lookup's join. The
+    # times are the database's on Postgres, so the same time is given on SQLite.
+    st = s.settings
+    out += [
+        await st.current(Scope.APPLICATION, "app0"),
+        await st.versions(Scope.APPLICATION, "app0", 5),
+    ]
+    async with st.write_transaction():
+        for scope, scope_id, expected, document in (
+            (Scope.ORGANIZATION, "north", 0, '{"max_tokens":64}'),
+            (Scope.APPLICATION, "app0", 0, '{"default_quality":"best"}'),
+            (Scope.APPLICATION, "app0", 1, '{"default_quality":"cheapest"}'),
+        ):
+            await st.write(
+                scope, scope_id, expected_version=expected, document=document,
+                changed=("max_tokens",), changed_by_user_id=None, via="cli", at_ms=NOW,
+            )  # fmt: skip
+    async with st.write_transaction():
+        out.append(
+            await _outcome(
+                st.write(
+                    Scope.APPLICATION,
+                    "app0",
+                    expected_version=1,
+                    document="{}",
+                    changed=(),
+                    changed_by_user_id="usr_00000000000000aa",
+                    via="http",
+                    at_ms=NOW,
+                )
+            )
+        )
+    out += [
+        await st.current(Scope.ORGANIZATION, "north"),
+        await st.current(Scope.APPLICATION, "app0"),
+        await st.versions(Scope.APPLICATION, "app0", 5),
+        await st.version(Scope.APPLICATION, "app0", 1),
+        await st.version(Scope.APPLICATION, "app0", 7),
+        (await a.lookup_key("key0")).settings,  # type: ignore[union-attr]
+    ]
     return out
 
 
@@ -699,6 +741,7 @@ def _protocol_methods() -> set[str]:
     from gateway.modes import ModeStore
     from gateway.providers import ProviderStore
     from gateway.roles import RoleStore
+    from gateway.settings import SettingsStore
     from gateway.usage import UsageStore
     from gateway.users import AccountStore
 
@@ -710,6 +753,7 @@ def _protocol_methods() -> set[str]:
         ProviderStore: "PostgresProviderStore",
         ModeStore: "PostgresModeStore",
         UsageStore: "PostgresUsageStore",
+        SettingsStore: "PostgresSettingsStore",
     }
     return {
         f"{store}.{name}"

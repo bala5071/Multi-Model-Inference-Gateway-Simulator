@@ -274,6 +274,7 @@ async def _case(
     classes: list[type] = [
         type(state.applications),
         type(state.modes),
+        type(state.settings),
         type(state.providers),
         type(state.usage),
         type(state.accounts),

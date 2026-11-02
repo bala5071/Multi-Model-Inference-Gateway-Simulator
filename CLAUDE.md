@@ -81,6 +81,14 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   scope answering from it, and read again just before each hosted attempt, which a stricter mode
   refuses (docs/33, docs/38); `X-Provider` (`gateway` for the gateway's own tier, `local` before PR 20),
   `X-Provider-Class` and the usage record's source (exists)
+- `settings.py` — the settings catalogue (S1 to S11 of `docs/settings-and-alerts-plan.md`),
+  `effective_settings` (the only place a value is decided: platform, plan copy, organization,
+  application, the stricter wins), `parse_row` and `resolve` (a missing row is the defaults; a
+  row that cannot be judged is `SettingsUnreadableError`, answered 503, never a looser value),
+  `DocumentCache`, and `SettingsStore` on memory and SQLite (migration 14); the rows are read
+  with the key in `lookup_key`'s own statement (docs/39) (exists)
+- `settingsservice.py` — `SettingsService`: set, unset, revert, each a version checked against
+  the caps in force in one `write_transaction()`, audited by field name; the CLI's (exists)
 - `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
   warning, on the injected clock, `circuit_breaker` events (exists)
 - `passthrough.py` — `PassthroughWorker`: forwards to a backend that does its own
@@ -177,7 +185,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   Postgres's `gateway_now_ms()` when there is one, docs/37);
   `GATEWAY_COUNTERS=valkey` and `GATEWAY_VALKEY_URL`. Budgets are not in it (exists)
 - `postgres.py` — every durable store on Postgres (asyncpg): `PG_BASELINE` (SQLite migrations
-  1 to 13, plus `ord` where SQLite orders by rowid), `PostgresDatabase` with two pools (request,
+  1 to 13, plus `ord` where SQLite orders by rowid), `PG_SETTINGS` (schema version 3, migration
+  14, with `rollback_schema`), `PostgresSettingsStore`, `PostgresDatabase` with two pools (request,
   management), `write_transaction()` taking the global advisory `WRITE_LOCK` with a timeout that
   fails closed (`GATEWAY_STATE_LOCK_TIMEOUT_MS`), `request_transaction()` without it, the SQL
   clock `gateway_now_ms()` (its `StoreClock`), `ready()` for `/readyz`, and `postgres_state`;
@@ -194,7 +203,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   rebuild on a database with data, `scripts/manage.py migrate` backs up first); 5 `users`, 6
   `sessions`, 7 `audit_log`, 8 `role_assignments` and `app_roles` (a rebuild of `users` without
   `platform_admin`), 9 `sessions.step_up_until_ms`, 10 `provider_configs`, 11 `provider_keys`,
-  12 `modes`, 13 the chat source columns of `usage_events`. The default database is in the user's data folder,
+  12 `modes`, 13 the chat source columns of `usage_events`, 14 `settings_current` and
+  `settings_versions`. The default database is in the user's data folder,
   owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
   `restore_database` use SQLite's backup API (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),
@@ -332,7 +342,8 @@ the monitoring API (`docs/15`); it has no logic of its own about the gateway.
 `capture_demo.py` (retakes the dashboard pictures in `docs/img/`),
 `run_local_models.sh`, `manage.py` (creates organizations and applications and issues, rotates
 and revokes API keys, audited like the management endpoints; prints a new key once, never logs
-it; `rotate-vault-key` and `vault-drop-unreadable` for provider keys (docs/32); also
+it; `rotate-vault-key` and `vault-drop-unreadable` for provider keys (docs/32);
+`settings-show`, `settings-set` and `settings-revert` (docs/39); also
 `migrate` with `--dry-run` and a backup before a table rebuild, backup and restore), `readme_quickstart.py` (runs the README's quickstart blocks exactly as written and
 checks the result; a CI job, so the README cannot go stale), `check_characters.py` (a CI
 gate: tracked source, test, workflow and shell files are printable ASCII, with a short

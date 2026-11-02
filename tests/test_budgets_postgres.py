@@ -52,6 +52,7 @@ from gateway.postgres import (
     PostgresDatabase,
     PostgresModeStore,
     PostgresProviderStore,
+    PostgresSettingsStore,
     PostgresUsageStore,
     postgres_state,
 )
@@ -771,6 +772,8 @@ async def test_the_store_calls_of_a_chat_request_and_a_generate_request_in_share
         for store, names in (
             (type(state.applications), ("lookup_key",)),
             (type(state.modes), ("organization_mode", "application_mode")),
+            # Read with the key, never on their own (docs/39): any call would be counted.
+            (type(state.settings), ("current", "versions", "version", "write")),
             (type(state.usage), ("append", "usage_by_model")),
             (PostgresBudgets, ("reserve", "settle", "release")),
         ):
@@ -860,6 +863,7 @@ async def test_the_store_calls_of_a_chat_request_an_organization_provider_serves
         for cls in (
             PostgresApplicationStore,
             PostgresModeStore,
+            PostgresSettingsStore,
             PostgresProviderStore,
             PostgresUsageStore,
             PostgresAccountStore,

@@ -45,7 +45,7 @@ from gateway.chat import (
     ProviderError,
     ProviderErrorCode,
 )
-from gateway.chatservice import GATEWAY_PROVIDER, ChatOutcome, ChatService
+from gateway.chatservice import GATEWAY_PROVIDER, ChatOutcome, ChatService, ChatTimeouts
 from gateway.egress import LocalDestinations, egress_scope
 from gateway.modes import Mode, ModeStore, effective_mode, looser_than, may_reach_hosted
 from gateway.providers import ProviderConfig, ProviderService
@@ -240,6 +240,8 @@ class ChatRouter:
         mode: Mode,
         on_delta: ChatDeltaCallback | None = None,
         trace: RouteTrace | None = None,
+        *,
+        timeouts: ChatTimeouts | None = None,
     ) -> RoutedOutcome:
         """Serve ``request`` under ``mode``, the request's mode read once by its handler;
         the modes are read again only before a hosted attempt (``_made_stricter``)."""
@@ -293,7 +295,7 @@ class ChatRouter:
                         await self._account(organization_id, candidate, None)
                         break
                     try:
-                        outcome = await self._attempt(candidate, request, relay)
+                        outcome = await self._attempt(candidate, request, relay, timeouts)
                     except asyncio.CancelledError:
                         # The client went away: no verdict, and a half-open breaker's one
                         # probe is free again.
@@ -362,11 +364,15 @@ class ChatRouter:
             await self.breakers.release(organization_id, config.id)
 
     async def _attempt(
-        self, candidate: Candidate, request: ChatRequest, relay: ChatDeltaCallback
+        self,
+        candidate: Candidate,
+        request: ChatRequest,
+        relay: ChatDeltaCallback,
+        timeouts: ChatTimeouts | None,
     ) -> ChatOutcome:
         config = candidate.config
         if config is None:
-            return await self._chat.run(request, relay)
+            return await self._chat.run(request, relay, timeouts)
         assert self._providers is not None
         assert self._client_factory is not None
         providers = self._providers
@@ -386,6 +392,8 @@ class ChatRouter:
                     credential=key,
                     first_token_timeout_ms=config.first_token_budget_ms
                     or DEFAULT_HOSTED_FIRST_TOKEN_MS,
+                    # The provider's own first-token budget; the request's total (docs/39).
+                    total_timeout_ms=timeouts.total_ms if timeouts is not None else None,
                     provider=config.id,
                 )
         usage = outcome.result.usage

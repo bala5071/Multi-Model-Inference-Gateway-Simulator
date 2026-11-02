@@ -31,6 +31,14 @@ docs/26-organizations.md and docs/30-management-endpoints.md.
     uv run python scripts/manage.py rotate-key --key-id <id> --grace-hours 24
     uv run python scripts/manage.py revoke-key --key-id <id>
     uv run python scripts/manage.py list-keys --application shop
+    uv run python scripts/manage.py settings-show --application shop
+    uv run python scripts/manage.py settings-set --application shop --expected-version 0 \\
+        --set max_tokens=512 --set 'allowed_tiers=["economy"]'
+    uv run python scripts/manage.py settings-set --organization north --expected-version 0 \\
+        --set requests_per_minute=600
+    uv run python scripts/manage.py settings-set --application shop --expected-version 1 \\
+        --unset max_tokens
+    uv run python scripts/manage.py settings-revert --application shop --expected-version 2
     uv run python scripts/manage.py backup --to /backups/gateway-2025-06-01.db
     uv run python scripts/manage.py restore --from /backups/gateway-2025-06-01.db
     uv run python scripts/manage.py rotate-vault-key
@@ -62,6 +70,7 @@ import asyncio
 import dataclasses
 import getpass
 import io
+import json
 import os
 import secrets
 import sqlite3
@@ -70,6 +79,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from gateway.apikeys import ApiKeyService, load_pepper
+from gateway.app import default_platform_settings
 from gateway.applications import (
     ApiKeyRecord,
     seed_demo_applications,
@@ -114,6 +124,8 @@ from gateway.pg_migrate import (
 from gateway.postgres import URL_ENV as POSTGRES_URL_ENV
 from gateway.postgres import PostgresDatabase, PostgresPasswordMissingError
 from gateway.routing import PlansConfig, load_plans
+from gateway.settings import Scope, SettingsUnreadableError
+from gateway.settingsservice import SettingsService, SettingsView
 from gateway.state import StateBackend, StateUnavailableError, sqlite_state
 from gateway.vault import (
     VAULT_KEY_ENV,
@@ -405,6 +417,73 @@ async def _account_command(
             _note(f"revoked {args.role} ({scope_type} {scope_id}) from {name!r}")
 
 
+SETTINGS_COMMANDS = ("settings-show", "settings-set", "settings-revert")
+
+
+def _settings_values(pairs: Sequence[str]) -> dict[str, object]:
+    """``--set name=value`` arguments, each value JSON (a number, true, a list in quotes)."""
+    values: dict[str, object] = {}
+    for pair in pairs:
+        name, sep, raw = pair.partition("=")
+        if not sep or not name:
+            raise ValueError(f"--set takes name=value, not {pair!r}")
+        try:
+            values[name] = json.loads(raw)
+        except ValueError:
+            raise ValueError(f"{name}: the value is not JSON (a list needs quotes)") from None
+    return values
+
+
+def _show_settings(scope: Scope, scope_id: str, view: SettingsView) -> None:
+    version = view.row.version if view.row is not None else 0
+    _note(f"{scope.value} {scope_id}: settings version {version}")
+    for name, value in view.document.items():
+        _note(f"  set  {name} = {json.dumps(value)}")
+    if view.effective is None:
+        return
+    _note("  effective:")
+    for name, found in view.effective.explain.items():
+        shown: object = found.value
+        if isinstance(shown, tuple):
+            shown = list(shown)
+        elif isinstance(shown, Mapping):
+            shown = dict(shown)
+        capped = f", capped by the {found.capped_by.value}" if found.capped_by else ""
+        _note(f"  {name:<24} {json.dumps(shown):<28} from the {found.source.value}{capped}")
+    if view.effective.ignored_aliases:
+        _note(f"  aliases not in force: {', '.join(view.effective.ignored_aliases)}")
+
+
+async def _settings_command(args: argparse.Namespace, state: StateBackend) -> None:
+    """Settings as the operator changes them (docs/39): every change a version, checked
+    against the caps in force, audited with the operator as the actor."""
+    service = SettingsService(
+        state.settings,
+        state.applications,
+        AuditLog(state.audit),
+        SystemEpoch(),
+        default_platform_settings(),
+    )
+    scope = Scope.APPLICATION if args.application else Scope.ORGANIZATION
+    scope_id = args.application or args.organization
+    if args.command == "settings-show":
+        _show_settings(scope, scope_id, await service.view(scope, scope_id))
+        return
+    if args.command == "settings-revert":
+        change = await service.revert(scope, scope_id, expected_version=args.expected_version)
+    else:
+        change = await service.set(
+            scope,
+            scope_id,
+            expected_version=args.expected_version,
+            values=_settings_values(args.set or ()),
+            unset=args.unset or (),
+            replace=args.replace,
+        )
+    changed = ", ".join(change.changed) or "nothing"
+    _note(f"{scope.value} {scope_id}: settings version {change.version} (changed: {changed})")
+
+
 async def _store_command(
     args: argparse.Namespace,
     env: dict[str, str],
@@ -444,6 +523,8 @@ async def _store_command(
                 raise ValueError(f"no organization {args.organization!r}")
             await store.set_organization_disabled(args.organization, disabled)
         _note(f"organization {args.organization!r} {'disabled' if disabled else 'enabled'}")
+    elif args.command in SETTINGS_COMMANDS:
+        await _settings_command(args, state)
     elif args.command in ACCOUNT_COMMANDS:
         await _account_command(args, _accounts(state, env), read_password)
     elif args.command == "organization-usage":
@@ -657,6 +738,30 @@ def main(
     revoke.add_argument("--key-id", required=True)
     keys = commands.add_parser("list-keys", help="key ids, labels and state; never the keys")
     keys.add_argument("--application", required=True)
+    for name, help_text in (
+        ("settings-show", "an application's or organization's settings, and what is in force"),
+        ("settings-set", "set or unset settings; a new version, checked against the caps"),
+        ("settings-revert", "back one version: the previous version's settings, as a new one"),
+    ):
+        command = commands.add_parser(name, help=help_text)
+        target = command.add_mutually_exclusive_group(required=True)
+        target.add_argument("--application", help="an application id")
+        target.add_argument("--organization", help="an organization id (caps its applications)")
+        if name != "settings-show":
+            command.add_argument(
+                "--expected-version",
+                type=int,
+                required=True,
+                help="the version shown by settings-show; any other is refused",
+            )
+        if name == "settings-set":
+            command.add_argument("--set", action="append", metavar="NAME=JSON")
+            command.add_argument("--unset", action="append", metavar="NAME")
+            command.add_argument(
+                "--replace",
+                action="store_true",
+                help="the settings are exactly the --set ones (writes over an unreadable row)",
+            )
     backup = commands.add_parser(
         "backup", help="a consistent copy of the database, safe while the server runs"
     )
@@ -745,6 +850,7 @@ def main(
         PasswordPolicyError,
         NotPermittedError,
         VaultKeyError,
+        SettingsUnreadableError,
     ) as exc:
         _note(f"error: {exc}")
         return 1

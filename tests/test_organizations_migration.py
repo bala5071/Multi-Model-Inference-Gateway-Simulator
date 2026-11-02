@@ -193,6 +193,9 @@ async def test_a_realistic_database_keeps_every_key_and_every_event_exactly(
     assert {r[0] for r in _rows(v3, "SELECT organization_id FROM applications")} == {
         DEFAULT_ORGANIZATION_ID
     }
+    # The key check reads the settings rows too (migration 14, docs/39), as the server does
+    # once it has migrated: migrate the rest of the way before checking the keys.
+    MigrationRunner(v3, MIGRATIONS, _epoch()).migrate()
     service = ApiKeyService(SqliteApplicationStore(v3), TEST_PEPPER, _epoch())
     for key, application in expected.items():
         if application is None:
@@ -279,7 +282,7 @@ def test_the_default_organization_is_made_even_with_no_applications(
     connection = open_database(tmp_path / "new.db")
     clock = SimClock()
     runner = MigrationRunner(connection, MIGRATIONS, ClockEpoch(clock, origin_ms=NOW_MS))
-    assert runner.migrate() == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
+    assert runner.migrate() == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
     assert runner.migrate() == ()  # idempotent
     [(org_id, name, kind, created, disabled)] = _rows(connection, "SELECT * FROM organizations")
     applied = _rows(connection, "SELECT applied_at_ms FROM schema_migrations WHERE version = 4")
@@ -383,7 +386,7 @@ def test_the_plan_reports_changes_and_conflicts_without_writing(tmp_path: Path) 
     plan = plan_migrations(readonly, MIGRATIONS)
     readonly.close()
     assert plan.current_version == 3
-    assert [m.version for m, _ in plan.pending] == [4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+    assert [m.version for m, _ in plan.pending] == [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     assert plan.rebuilds_tables
     preview = plan.pending[0][1]
     assert any("2 application(s) into 'default'" in c for c in preview.changes)
@@ -395,7 +398,7 @@ def test_the_plan_reports_changes_and_conflicts_without_writing(tmp_path: Path) 
 
     empty = sqlite3.connect(":memory:")
     fresh = plan_migrations(empty, MIGRATIONS)
-    assert (fresh.current_version, len(fresh.pending), fresh.conflicts) == (0, 13, ())
+    assert (fresh.current_version, len(fresh.pending), fresh.conflicts) == (0, 14, ())
     assert _rows(empty, "SELECT name FROM sqlite_master") == []  # nothing created
     empty.close()
 

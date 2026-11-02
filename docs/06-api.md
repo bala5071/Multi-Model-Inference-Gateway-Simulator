@@ -9,6 +9,10 @@ replaced `MetricsRecorder`. `/metrics/summary` keeps the shape shown below; its 
 now cover the last five minutes (at most 10,000 requests per model) instead of every
 request since the process started, and `GET /metrics/detail` has the fuller figures.
 
+**Updated by settings PR S1 (`docs/39-settings.md`).** Every answer also carries
+`X-Max-Tokens-Applied`: the `max_tokens` the request was served with (its own, or its
+application's `default_max_tokens`), or `none` when no limit applies.
+
 **Updated by platform step 2 (`docs/20-applications-api-keys.md`).** Tenants are now applications, and a request names its application with an API key (`Authorization: Bearer <key>`), not a `tenant_id` in the body, which is now a 422. Usage moved to `GET /v1/applications/me/usage`. The examples below predate that.
 
 **Updated by the routing step (`docs/09-routing.md`).** The default server now loads tenant

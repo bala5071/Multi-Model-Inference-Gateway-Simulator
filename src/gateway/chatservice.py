@@ -58,6 +58,15 @@ SIMULATED_CAPABILITIES = Capabilities(
 
 
 @dataclass(frozen=True, slots=True)
+class ChatTimeouts:
+    """One request's timeouts, from its application's settings (docs/39): the first token
+    from the gateway's own tier, and each attempt's whole answer."""
+
+    first_token_ms: float
+    total_ms: float
+
+
+@dataclass(frozen=True, slots=True)
 class ChatOutcome:
     result: ChatResult
     # When it arrived, started, first answered and finished, and its tokens, for metrics and
@@ -93,12 +102,21 @@ class ChatService:
         return self._adapters.get(tier)
 
     async def run(
-        self, request: ChatRequest, on_delta: ChatDeltaCallback | None = None
+        self,
+        request: ChatRequest,
+        on_delta: ChatDeltaCallback | None = None,
+        timeouts: ChatTimeouts | None = None,
     ) -> ChatOutcome:
         adapter = self._adapters.get(request.model)
         if adapter is None:
             return await self._simulated(request, on_delta)
-        return await self.attempt(adapter, request, on_delta)
+        return await self.attempt(
+            adapter,
+            request,
+            on_delta,
+            first_token_timeout_ms=timeouts.first_token_ms if timeouts is not None else None,
+            total_timeout_ms=timeouts.total_ms if timeouts is not None else None,
+        )
 
     async def _simulated(
         self, request: ChatRequest, on_delta: ChatDeltaCallback | None
@@ -130,14 +148,17 @@ class ChatService:
         *,
         credential: Secret | None = None,
         first_token_timeout_ms: float | None = None,
+        total_timeout_ms: float | None = None,
         provider: str = GATEWAY_PROVIDER,
     ) -> ChatOutcome:
-        """One request to one adapter, under the first-token and total timeouts."""
+        """One request to one adapter, under the first-token and total timeouts (the
+        service's own unless the request's are given)."""
         first_token_ms = (
             first_token_timeout_ms
             if first_token_timeout_ms is not None
             else self.first_token_timeout_ms
         )
+        total_ms = total_timeout_ms if total_timeout_ms is not None else self.total_timeout_ms
         clock = self._clock
         started = clock.now_ms()
         first_ms: list[float] = []
@@ -154,7 +175,7 @@ class ChatService:
         try:
             if not await self._within(task, first, first_token_ms):
                 raise ProviderError(ProviderErrorCode.UPSTREAM_TIMEOUT, detail="first_token")
-            remaining = self.total_timeout_ms - (clock.now_ms() - started)
+            remaining = total_ms - (clock.now_ms() - started)
             if not await self._within(task, None, remaining):
                 raise ProviderError(ProviderErrorCode.UPSTREAM_TIMEOUT, detail="total")
             result = task.result()

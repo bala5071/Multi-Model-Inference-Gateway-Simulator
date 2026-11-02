@@ -28,6 +28,9 @@ from enum import StrEnum
 from typing import Any, Protocol
 
 from gateway.permissions import PERMISSIONS
+from gateway.settings import CATALOGUE as _SETTINGS
+
+SETTING_NAMES = frozenset(_SETTINGS)
 
 MINUTE_MS = 60_000.0
 DEFAULT_UNKNOWN_USER_ROWS_PER_MINUTE = 60
@@ -80,6 +83,10 @@ class AuditAction(StrEnum):
     PROVIDER_TESTED = "provider_tested"
     # A fallback mode set on an organization or an application (docs/33).
     MODE_CHANGED = "mode_changed"
+    # Settings set or reverted on an organization or an application (docs/39): the version and
+    # the names of the fields changed, never their values.
+    SETTINGS_CHANGED = "settings_changed"
+    SETTINGS_REVERTED = "settings_reverted"
 
 
 class Outcome(StrEnum):
@@ -133,6 +140,9 @@ class Reason(StrEnum):
     KEY_UNREADABLE = "key_unreadable"
     TEST_RATE_LIMITED = "test_rate_limited"
     MODE_LOOSER_THAN_ORGANIZATION = "mode_looser_than_organization"
+    SETTING_LOOSER_THAN_CAP = "setting_looser_than_cap"
+    SETTINGS_VERSION_CONFLICT = "settings_version_conflict"
+    NO_PREVIOUS_VERSION = "no_previous_version"
 
 
 # The only keys ``details`` may have, and the type of each value.
@@ -167,6 +177,9 @@ DETAIL_FIELDS: Mapping[str, type] = {
     "key_deleted": bool,
     "old_mode": str,
     "new_mode": str,
+    "settings_version": int,
+    # A list of setting names from gateway.settings.CATALOGUE.
+    "changed_fields": list,
 }
 # gateway.egress.refusal's reasons for an address.
 _ADDRESS_REFUSALS = (
@@ -233,6 +246,11 @@ def _checked_details(details: Mapping[str, object]) -> dict[str, object]:
             raise ValueError(f"audit details may not have a {key!r} field")
         if kind is Reason:
             checked[key] = Reason(str(value)).value  # only the fixed reasons
+        elif kind is list:
+            names = list(value) if isinstance(value, (list, tuple)) else None
+            if names is None or not all(n in SETTING_NAMES for n in names):
+                raise ValueError(f"audit detail {key!r} must list setting names")
+            checked[key] = names
         elif kind is bool:
             if not isinstance(value, bool):
                 raise ValueError(f"audit detail {key!r} must be a bool")
