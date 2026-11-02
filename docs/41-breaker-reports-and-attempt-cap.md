@@ -86,6 +86,23 @@ of one request in ms, the range over the runs, before (`9c2c272`) and after (`43
 | One organization provider, SQLite | 5.505 to 6.177 | 4.701 to 5.467 |
 | One organization provider, Postgres | 28.890 to 33.670 | 28.070 to 28.935 |
 
-No case's range moved up. That benchmark keeps the counters in memory, where a breaker call
-costs little; the saving the queue makes against Valkey (about a millisecond a call, note 35)
-was not measured here.
+No case's range moved up. That run keeps the counters in memory, where a breaker call costs
+little.
+
+**With the counters in Valkey** (`--counters valkey`, the Valkey of
+`docker-compose.valkey.yml` on the same machine), the same benchmark run on the base and this
+branch in turn, three times each, p50 in ms, before (`9c2c272`) and after (`c8756ae`):
+
+| Case | Before | After |
+|---|---|---|
+| Gateway tier, SQLite | 5.317 to 6.087 | 5.249 to 9.321 |
+| Gateway tier, Postgres | 19.091 to 19.470 | 17.696 to 25.223 |
+| One organization provider, SQLite | 7.537 to 8.382 | 7.076 to 7.913 |
+| One organization provider, Postgres | 30.668 to 33.597 | 29.225 to 32.982 |
+
+**The saving is small.** A request the gateway's tier answers makes no breaker call, so nothing
+moves there; the one high run (9.3 and 25.2 ms) is the machine's, on a path this PR does not
+change. A request one organization provider answers sends one report fewer on the path (its
+`success`), and its ranges move down by about 0.3 to 0.6 ms, the size of their own spread. The
+queue matters in the worst case (13 counter calls became at most 4 with closed breakers), not in
+the common one.
