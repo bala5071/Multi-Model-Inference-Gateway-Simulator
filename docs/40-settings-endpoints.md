@@ -51,6 +51,12 @@ scope's or does not exist, or is not a positive number of at most nine digits
 same 403 `forbidden`, byte for byte, as a resource the actor may not touch, before step-up or
 anything else is looked at, and nothing is written or audited.
 
+An organization that does not exist is covered at the resolver level, because no route can
+observe that rule: `authorize` refuses every organization but the actor's own, whatever the
+resolver says (`test_resolve_organization_answers_an_organization_that_does_not_exist_as_missing`).
+The dry run, too, answers only after `authorize`: on another organization's path every body,
+valid, invalid or malformed, gets the same 403 (`test_validate_answers_only_after_authorize`).
+
 ## What the answers say
 
 - `GET .../settings` of an organization: its version, the settings it set, and the platform's

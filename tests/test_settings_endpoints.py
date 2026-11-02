@@ -30,6 +30,7 @@ from gateway.localonly import LocalOnlyPolicy
 from gateway.management import (
     Stores,
     resolve_application_settings_version,
+    resolve_organization,
     resolve_organization_settings_version,
 )
 from gateway.permissions import PERMISSIONS
@@ -645,3 +646,51 @@ async def test_no_session_csrf_token_password_or_key_reaches_rows_logs_or_answer
         assert value not in audit, name
         assert value not in logged, name
         assert value not in answered, name
+
+
+# --- what no route can observe, and the order of the checks -------------------------------------
+
+
+async def test_resolve_organization_answers_an_organization_that_does_not_exist_as_missing(
+    world: World,
+) -> None:
+    """The settings routes' organization resolver on its own. No route can observe this rule:
+    for any organization but the actor's own, ``authorize`` refuses whatever the resolver says
+    (docs/40). So it is pinned here, at the resolver, where mutation M13a fails it."""
+    stores = Stores(world.accounts.organizations, world.accounts.store)
+    found = await resolve_organization(stores, "north")
+    assert found is not None
+    assert (found.level.value, found.organization_id) == ("organization", "north")
+    for missing in ("nowhere", "North", "", "north "):
+        assert await resolve_organization(stores, missing) is None, missing
+
+
+async def test_validate_answers_only_after_authorize(world: World) -> None:
+    """The dry run on south's path, for alice of north: a valid change, an invalid setting, a
+    stale version and a body that is not even well formed all get the same 403, byte for
+    byte. Authorization comes before the body is looked at, so validate tells an outsider
+    nothing about south's settings, their version or the catalogue's checks."""
+    async with settings_console(world) as admin:
+        await _versions(admin)
+        alice = await admin.login("alice")
+        bodies: list[dict[str, Any]] = [
+            {"expected_version": 2, "set": {"max_tokens": 8}},  # would be valid for south
+            {"expected_version": 2, "set": {"max_tokens": 0}},  # invalid value
+            {"expected_version": 9, "set": {"max_tokens": 8}},  # stale version
+            {"expected_version": 2, "set": {"no_such_setting": 1}},
+            {"expected_version": -1},  # fails the body's own schema
+            {"unexpected": True},
+        ]
+        for path in (
+            "/south/settings/validate",
+            "/south/applications/south-shop/settings/validate",
+        ):
+            answers = [_raw(await admin.call(alice, "POST", path, body)) for body in bodies]
+            assert answers[0][0] == 403
+            assert answers[0][2] == FORBIDDEN_BYTES
+            assert all(answer == answers[0] for answer in answers), path
+        # The control: south's own org_admin gets each body's real answer.
+        sid = await admin.login("sid")
+        own = [await admin.call(sid, "POST", "/south/settings/validate", body) for body in bodies]
+        assert [a.status_code for a in own] == [200, 200, 200, 200, 422, 422]
+        assert [a.json().get("valid") for a in own[:4]] == [True, False, False, False]
