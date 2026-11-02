@@ -111,6 +111,7 @@ class Routing:
     client: httpx.AsyncClient
     router: ChatRouter
     bus: EventBus
+    app: Any = None
 
     @property
     def clock(self) -> Any:
@@ -207,6 +208,7 @@ async def routing(
     operator: str | None = OPERATOR,
     local: LocalDestinations = LOCAL,
     operators: Mapping[str, str] | None = None,
+    max_hosted_attempts: int = 3,
 ) -> AsyncIterator[Routing]:
     """North's applications, the economy tier served by the operator's server at ``operator``
     (the simulator when None), and the organization's providers on another scripted network.
@@ -258,11 +260,21 @@ async def routing(
         local_destinations=local,
         events=bus,
         usage_store=SqliteUsageStore(accounts.connection),
+        max_hosted_attempts=max_hosted_attempts,
     )
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
         yield Routing(
-            world, providers, modes, org_net, op_net, resolver, client, app.state.chat_router, bus
+            world,
+            providers,
+            modes,
+            org_net,
+            op_net,
+            resolver,
+            client,
+            app.state.chat_router,
+            bus,
+            app,
         )
     await registry.aclose()
 
@@ -1028,32 +1040,78 @@ class _Counting:
         return counted
 
 
-async def test_the_most_counter_calls_one_chat_request_makes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The worst case for the shared counters (docs/35): every hosted provider is tried and
-    each gives invalid tool JSON twice, so each is admitted, reported, admitted again for the
-    one retry, and reported again. One rate-limit call, then four breaker calls per provider,
-    one after another: 1 + 4N, never two at once."""
-    counting = _Counting()
+def _count_counter_calls(monkeypatch: pytest.MonkeyPatch, r: Routing, counting: _Counting) -> None:
+    """Every rate-limit and breaker call, by name; a report the queue's sender makes, not the
+    request, is counted as ``queued:<name>``."""
     real_admit = RequestRateLimiter.admit
 
     async def admit(self: RequestRateLimiter, *args: Any) -> None:
         await counting.wrap("rate", lambda: real_admit(self, *args))()
 
     monkeypatch.setattr(RequestRateLimiter, "admit", admit)
+    breakers, reports = r.router.breakers, r.router.reports
+    assert reports is not None
+    for op in ("admit_attempt", "release", "success", "failure"):
+        real = getattr(breakers, op)
+
+        def counted(*args: Any, op: str = op, real: Any = real) -> Any:
+            sender = reports._sender
+            on_path = sender is None or asyncio.current_task() is not sender
+            name = "admit" if op == "admit_attempt" else op
+            return counting.wrap(name if on_path else f"queued:{name}", real)(*args)
+
+        monkeypatch.setattr(breakers, op, counted)
+
+
+async def test_the_most_counter_calls_one_chat_request_makes_with_closed_breakers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worst case on the path with every breaker closed (docs/41): every provider gives
+    invalid tool JSON twice; the cap (3) stops the request after A, A's retry and B. On the path:
+    one rate-limit call and one admission per attempt, 1 + C; the reports go through the queue
+    afterwards, one at a time. Before PR 2b it was 1 + 4N with no cap (13 for these three)."""
+    counting = _Counting()
     async with routing(operator=None) as r:
         await r.mode(PRIMARY)
         for provider_id, host in ((A, "a"), (B, "b"), (P, "p")):
             await r.provider(provider_id, f"{host}.provider.test", role="primary", tools=True)
-        breakers = r.router.breakers
-        for op in ("admit", "release", "success", "failure"):
-            monkeypatch.setattr(breakers, op, counting.wrap(op, getattr(breakers, op)))
+        _count_counter_calls(monkeypatch, r, counting)
         r.org_net.responses = [BAD_TOOL] * 6
         answer = await r.chat(tools=True)
+        on_path = [c for c in counting.calls if not c.startswith("queued:")]
+        assert r.router.reports is not None
+        await r.router.reports.drained()
+        assert len(r.org_net.connections) == 3  # A, A's retry, B: the cap
     assert answer.status_code == 502
-    assert counting.calls == ["rate"] + ["admit", "failure"] * 6
-    assert len(counting.calls) == 1 + 4 * 3
+    assert on_path == ["rate", "admit", "admit", "admit"]
+    assert len(on_path) == 1 + r.router.max_hosted_attempts
+    assert [c for c in counting.calls if c.startswith("queued:")] == ["queued:failure"] * 3
+    assert counting.most_at_once == 1
+
+
+async def test_the_most_counter_calls_one_chat_request_makes_when_every_attempt_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worst case on the path with every breaker half-open (docs/41): each attempt is its
+    breaker's probe, so its report is sent at once, and the admission of its retry is refused
+    (the probe failed: open again), except the last attempt's retry, which the cap stops before
+    its breaker is asked. One rate-limit call, three per attempt but two for the last: 3C."""
+    counting = _Counting()
+    async with routing(operator=None) as r:
+        await r.mode(PRIMARY)
+        for provider_id, host in ((A, "a"), (B, "b"), (P, "p")):
+            await r.provider(provider_id, f"{host}.provider.test", role="primary", tools=True)
+            for _ in range(5):
+                await r.router.breakers.failure("north", provider_id)
+        await r.clock.sleep_ms(30_000.0)  # open, then half-open at the next admission
+        _count_counter_calls(monkeypatch, r, counting)
+        r.org_net.responses = [BAD_TOOL] * 3
+        answer = await r.chat(tools=True)
+        assert r.router.reports is not None
+        assert r.router.reports.queued == 0
+    assert answer.status_code == 502
+    assert counting.calls == ["rate"] + ["admit", "failure", "admit"] * 2 + ["admit", "failure"]
+    assert len(counting.calls) == 3 * r.router.max_hosted_attempts
     assert counting.most_at_once == 1
 
 

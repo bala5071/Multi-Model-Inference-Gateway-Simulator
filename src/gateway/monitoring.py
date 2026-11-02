@@ -174,6 +174,16 @@ class EventsGroup:
 
 
 @dataclass(frozen=True, slots=True)
+class BreakersGroup:
+    """The circuit breakers' reports this instance dropped, by reason (``queue_full``,
+    ``flush_timeout``, ``unavailable``), counted since it started (docs/41). A count of what
+    the instance did; nothing decides anything from it."""
+
+    available: bool
+    reports_dropped: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
 class Snapshot:
     at_ms: float
     resolution_ms: float
@@ -181,12 +191,17 @@ class Snapshot:
     models: dict[str, ModelSnapshot]
     applications: ApplicationsGroup
     events: EventsGroup
+    breakers: BreakersGroup
 
 
 def _quantiles(distribution: Distribution | None) -> Quantiles | None:
     if distribution is None:
         return None
     return Quantiles(distribution.p50, distribution.p99, distribution.samples)
+
+
+# gateway.breakerreports.DropReason's values, named here so monitoring imports nothing of it.
+BREAKER_DROP_REASONS = ("queue_full", "flush_timeout", "unavailable")
 
 
 class Monitor:
@@ -224,6 +239,7 @@ class Monitor:
         for model in slo_models:
             if model in self._views:
                 series.set_degraded(model, False)
+        self._reports_dropped = dict.fromkeys(BREAKER_DROP_REASONS, 0)
 
     @property
     def events(self) -> EventBus:
@@ -318,6 +334,11 @@ class Monitor:
         in ``gateway_events_total{type="state_store_restarted"}`` like every event."""
         self._events.publish("state_store_restarted", store=store)
 
+    def breaker_report_dropped(self, reason: str) -> None:
+        """A breaker's report was not written (docs/41): it can make the breaker open late or
+        early; it never admits anything."""
+        self._reports_dropped[str(reason)] += 1
+
     def reservation_expired(self, application_id: str, tokens: int) -> None:
         """A shared budget reservation was released by the sweep: its instance died or could
         not settle it, and that request's usage was not charged (docs/37)."""
@@ -361,6 +382,7 @@ class Monitor:
                 counts=self._events.counts,
                 recent=self._events.recent(recent_events),
             ),
+            breakers=BreakersGroup(available=True, reports_dropped=dict(self._reports_dropped)),
         )
 
     def _observe(self, model: str) -> None:
@@ -719,6 +741,15 @@ def render_prometheus(snapshot: Snapshot) -> str:
             "counter",
             "Events published on the gateway's event bus, by type.",
             [({"type": kind}, count) for kind, count in snapshot.events.counts.items()],
+        ),
+        (
+            "gateway_breaker_reports_dropped_total",
+            "counter",
+            "Breaker reports this instance dropped, by reason.",
+            [
+                ({"reason": reason}, count)
+                for reason, count in snapshot.breakers.reports_dropped.items()
+            ],
         ),
     ]
 

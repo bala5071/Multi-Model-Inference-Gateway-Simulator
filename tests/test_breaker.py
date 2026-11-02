@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from gateway.breaker import Breakers, BreakerState, Transition
+from gateway.breaker import PROBE_MS, Admission, Breakers, BreakerState, Transition
 from gateway.clock import SimClock
 
 ORG, PROVIDER = "north", "prv_00000000000000a1"
@@ -94,3 +94,30 @@ async def test_three_missed_budgets_flag_a_slow_provider_and_one_in_budget_clear
     breakers.first_token(ORG, PROVIDER, missed=False)
     cleared = breakers.slow(ORG, PROVIDER)
     assert (cleared.slow_since_ms, cleared.consecutive_misses) == (None, 0)
+
+
+async def test_a_probe_that_never_reports_frees_its_slot_after_120_s() -> None:
+    """In memory as in Valkey (docs/41): a half-open probe holds the one slot until it
+    reports, or for ``PROBE_MS`` if it never does; then the next request probes."""
+    breakers, clock, _ = make()
+    for _ in range(5):
+        await breakers.failure(ORG, PROVIDER)
+    await clock.sleep_ms(30_000.0)
+    assert await breakers.admit_attempt(ORG, PROVIDER) is Admission.PROBE
+    await clock.sleep_ms(PROBE_MS - 1.0)
+    assert await breakers.admit_attempt(ORG, PROVIDER) is Admission.REFUSED
+    await clock.sleep_ms(1.0)
+    assert await breakers.admit_attempt(ORG, PROVIDER) is Admission.PROBE
+    # A probe that reports frees the slot at once, as before.
+    assert await breakers.release(ORG, PROVIDER) is True
+    assert await breakers.admit_attempt(ORG, PROVIDER) is Admission.PROBE
+
+
+async def test_admit_attempt_says_closed_admissions_from_probes() -> None:
+    breakers, _, _ = make()
+    assert await breakers.admit_attempt(ORG, PROVIDER) is Admission.ADMITTED
+    assert await breakers.admit(ORG, PROVIDER) is True
+    for _ in range(5):
+        await breakers.failure(ORG, PROVIDER)
+    assert await breakers.admit_attempt(ORG, PROVIDER) is Admission.REFUSED
+    assert await breakers.admit(ORG, PROVIDER) is False

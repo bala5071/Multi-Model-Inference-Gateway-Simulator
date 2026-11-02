@@ -77,7 +77,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   (consume-on-use, audited) (exists)
 - `chatrouter.py` — `ChatRouter`: a chat request's candidates (the tier, the organization's
   providers for that tier) in the mode's order, the five fallback triggers, never after output,
-  never another tier; the mode read once per request by the handler and passed in, the egress
+  never another tier, at most `GATEWAY_CHAT_MAX_HOSTED_ATTEMPTS` (3) calls to organization
+  providers a request (`attempt_cap`, docs/41); the mode read once per request by the handler and passed in, the egress
   scope answering from it, and read again just before each hosted attempt, which a stricter mode
   refuses (docs/33, docs/38); `X-Provider` (`gateway` for the gateway's own tier, `local` before PR 20),
   `X-Provider-Class` and the usage record's source (exists)
@@ -91,7 +92,11 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   the caps in force in one `write_transaction()`, audited by field name, and `validate`, the
   same code up to the point of writing; the CLI's and the settings endpoints' (exists)
 - `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
-  warning, on the injected clock, `circuit_breaker` events (exists)
+  warning, on the injected clock, `circuit_breaker` events; `admit_attempt` says whether an
+  admission is a half-open probe, whose slot frees itself after 120 s (`PROBE_MS`) (exists)
+- `breakerreports.py` — `BreakerReports`: the breakers' reports through a bounded queue off the
+  request path, in order, a half-open probe's sent at once, flushed at shutdown, drops counted by
+  reason (docs/41) (exists)
 - `passthrough.py` — `PassthroughWorker`: forwards to a backend that does its own
   batching and only times the result; the pair for `LlamaCppBackend` (exists)
 - `backend_config.py` + `backends.yaml` — which backend to use and where each tier's

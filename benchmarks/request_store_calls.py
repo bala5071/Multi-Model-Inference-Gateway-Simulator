@@ -29,6 +29,10 @@ are made here and never printed. The compose file's test database has no passwor
 
     GATEWAY_POSTGRES_URL=postgresql://postgres@127.0.0.1:5433/postgres \\
     GATEWAY_POSTGRES_TEST_NO_PASSWORD=1 uv run python -m benchmarks.request_store_calls
+
+``--counters valkey`` keeps the counters (the rate limit, the breakers) in the Valkey at
+``GATEWAY_VALKEY_URL`` instead of in memory, under a key prefix of its own, deleted afterwards
+(never anything else): what a shared server's chat request pays for them (docs/41).
 """
 
 from __future__ import annotations
@@ -50,6 +54,7 @@ from typing import Any
 
 import asyncpg
 import httpx
+from redis.asyncio import Redis
 
 from benchmarks.calibrate import describe_machine
 from benchmarks.chat_routing import OPERATOR, Network, _resolve
@@ -81,6 +86,8 @@ from gateway.providers import ProviderConfig, ProviderService
 from gateway.redaction import Redactor
 from gateway.routing import load_plans
 from gateway.state import StateBackend, sqlite_state
+from gateway.valkey import URL_ENV as VALKEY_URL_ENV
+from gateway.valkey import ValkeyCounters
 from gateway.vault import Vault
 
 WARMUP = 20
@@ -227,8 +234,18 @@ async def _case(
     *,
     budgets: PostgresBudgets | None,
     store_clock: Any,
+    valkey_url: str | None = None,
 ) -> Case:
     clock, epoch = WallClock(), SystemEpoch()
+    counters: ValkeyCounters | None = None
+    if valkey_url is not None:
+        counters = ValkeyCounters(
+            Redis.from_url(valkey_url, decode_responses=True),
+            clock,
+            epoch,
+            secrets.token_bytes(32),
+            prefix=f"gwbench:{secrets.token_hex(8)}:",
+        )
     templates = load_plans()
     tls = httpx.create_ssl_context()  # once, as the server does
     providers = ProviderService(
@@ -269,6 +286,7 @@ async def _case(
         overload=OverloadPolicy(request_timeout_ms=TIMEOUT_MS),
         budgets=budgets,
         reservation_bounds=BOUNDS if budgets is not None else None,
+        counters=counters,
     )
     recorder = Recorder(clock)
     classes: list[type] = [
@@ -305,6 +323,15 @@ async def _case(
                         requests.append(request)
     finally:
         await registry.aclose()
+        # The queued reports (docs/41) are sent before Valkey's keys go; before PR 2b there are
+        # none, so the same benchmark measures both.
+        reports = getattr(getattr(app.state, "chat_router", None), "reports", None)
+        if reports is not None:
+            await reports.flush()
+        if counters is not None:
+            async for key in counters.client.scan_iter(match=counters.prefix + "*"):
+                await counters.client.delete(key)
+            await counters.aclose()
     return Case(case, store, times, requests)
 
 
@@ -338,18 +365,37 @@ async def _postgres(
         await admin.close()
 
 
-async def run(rounds: int, url: str, env: Mapping[str, str]) -> list[Case]:
-    """Each case on each store, in a database of its own."""
+async def run(
+    rounds: int, url: str, env: Mapping[str, str], valkey_url: str | None = None
+) -> list[Case]:
+    """Each case on each store, in a database of its own; the counters in Valkey when
+    ``valkey_url`` is given."""
     results = []
     for case in CASES:
         async with _sqlite() as (state, _):
             results.append(
-                await _case(case, "sqlite", state, rounds, budgets=None, store_clock=None)
+                await _case(
+                    case,
+                    "sqlite",
+                    state,
+                    rounds,
+                    budgets=None,
+                    store_clock=None,
+                    valkey_url=valkey_url,
+                )
             )
         async with _postgres(url, env) as (state, db):
             budgets = PostgresBudgets(db, WallClock())
             results.append(
-                await _case(case, "postgres", state, rounds, budgets=budgets, store_clock=db)
+                await _case(
+                    case,
+                    "postgres",
+                    state,
+                    rounds,
+                    budgets=budgets,
+                    store_clock=db,
+                    valkey_url=valkey_url,
+                )
             )
     return results
 
@@ -362,21 +408,28 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Count and time one chat request's store calls.")
     parser.add_argument("--rounds", type=int, default=300)
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--counters", choices=("memory", "valkey"), default="memory")
     args = parser.parse_args(argv)
     if args.rounds < 1 or args.runs < 1:
         parser.error("--rounds and --runs must be at least 1")
     url = os.environ.get(URL_ENV)
     if not url:
         parser.error(f"set {URL_ENV} to the Postgres to measure against")
+    valkey_url = None
+    if args.counters == "valkey":
+        valkey_url = os.environ.get(VALKEY_URL_ENV)
+        if not valkey_url:
+            parser.error(f"--counters valkey needs {VALKEY_URL_ENV}")
     machine = describe_machine()
     print("MEASURED on this machine: real time, in process; a SQLite file and a real Postgres.")
+    print(f"counters: {args.counters}")
     for key in ("cpu", "logical_cores", "ram_gb", "os", "python"):
         print(f"{key}: {machine[key]}")
     print(f"{args.runs} runs of {args.rounds} requests after {WARMUP} warm-up; ms; nearest rank")
     p50s: dict[str, list[float]] = {}
     for number in range(1, args.runs + 1):
         print(f"run {number}")
-        cases = asyncio.run(run(args.rounds, url, os.environ))
+        cases = asyncio.run(run(args.rounds, url, os.environ, valkey_url))
         for case in cases:
             label = f"{case.name}, {case.store}"
             calls = case.calls()

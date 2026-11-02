@@ -84,6 +84,7 @@ from gateway.backend_config import (
 )
 from gateway.backends import Backend, BackendError
 from gateway.breaker import Breakers, BreakerStore, SlowWarnings, Transition
+from gateway.breakerreports import BreakerReports
 from gateway.chat import (
     TOOL_NAME_PATTERN,
     ChatDelta,
@@ -97,7 +98,14 @@ from gateway.chat import (
     ToolSpec,
     json_object,
 )
-from gateway.chatrouter import ChatRouter, NoCandidateError, RoutedOutcome, RouteTrace
+from gateway.chatrouter import (
+    DEFAULT_MAX_HOSTED_ATTEMPTS,
+    ChatRouter,
+    NoCandidateError,
+    RoutedOutcome,
+    RouteTrace,
+    max_hosted_attempts_from,
+)
 from gateway.chatservice import (
     DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
     DEFAULT_TOTAL_TIMEOUT_MS,
@@ -2053,6 +2061,7 @@ def create_app(
     chat_adapters: Mapping[str, Backend] | None = None,
     providers: ProviderService | None = None,
     modes: ModeStore | None = None,
+    max_hosted_attempts: int = DEFAULT_MAX_HOSTED_ATTEMPTS,
     settings: SettingsStore | None = None,
     local_destinations: LocalDestinations | None = None,
     counters: SharedCounters | None = None,
@@ -2232,6 +2241,8 @@ def create_app(
     else:
         own = Breakers(clock, breaker_moved)
         breakers, warnings = own, own.warnings
+    # The reports, off the request path but a half-open probe's (docs/41); flushed at shutdown.
+    reports = BreakerReports(breakers, clock, on_drop=monitoring.breaker_report_dropped)
 
     # Filled in further down, once the generate handler it sends through exists.
     load: LoadController | None = None
@@ -2297,6 +2308,9 @@ def create_app(
         await registry.aclose()
         if applications is not None:
             await applications.keys.flush_last_used()
+        # Before the counters' client closes: what is queued is sent within the limit, the
+        # rest dropped and counted (docs/41).
+        await reports.flush()
         if watching is not None:
             watching.cancel()
         if counters is not None:
@@ -2861,6 +2875,8 @@ def create_app(
             providers,
             providers.client_factory if providers is not None else None,
             warnings=warnings,
+            reports=reports,
+            max_hosted_attempts=max_hosted_attempts,
         )
         app.state.chat_router = chat_router
         chat_epoch = epoch if epoch is not None else ClockEpoch(clock)
@@ -3928,6 +3944,8 @@ def create_default_app() -> FastAPI:
         overload=DEFAULT_OVERLOAD,
         dashboard_dir=DASHBOARD_DIR,
         load_control=os.environ.get("GATEWAY_LOAD_CONTROL") == "1",
+        # The operator's cap on one request's hosted attempts; out of range refuses the start.
+        max_hosted_attempts=max_hosted_attempts_from(os.environ),
         seed=seed,
         local_only=policy_from(os.environ),
         chat_adapters=chat_adapters,
@@ -4063,6 +4081,7 @@ def create_shared_app(environ: Mapping[str, str]) -> FastAPI:
         overload=DEFAULT_OVERLOAD,
         dashboard_dir=DASHBOARD_DIR,
         load_control=environ.get("GATEWAY_LOAD_CONTROL") == "1",
+        max_hosted_attempts=max_hosted_attempts_from(environ),
         seed=seed,
         local_only=policy_from(environ),
         chat_adapters=chat_adapters,

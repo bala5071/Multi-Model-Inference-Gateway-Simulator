@@ -263,6 +263,10 @@ async def test_snapshot_of_one_request_has_exact_values() -> None:
             "counts": NO_EVENTS,
             "recent": [],
         },
+        "breakers": {
+            "available": True,
+            "reports_dropped": {"queue_full": 0, "flush_timeout": 0, "unavailable": 0},
+        },
     }
     # Prefill ends at 5 ms; the tokens come at 9, 13 and 17 ms.
     assert after["at_ms"] == 17.0
@@ -1007,6 +1011,11 @@ gateway_events_total{type="budget_exhausted"} 0
 gateway_events_total{type="circuit_breaker"} 0
 gateway_events_total{type="state_store_restarted"} 0
 gateway_events_total{type="reservation_expired"} 0
+# HELP gateway_breaker_reports_dropped_total Breaker reports this instance dropped, by reason.
+# TYPE gateway_breaker_reports_dropped_total counter
+gateway_breaker_reports_dropped_total{reason="queue_full"} 0
+gateway_breaker_reports_dropped_total{reason="flush_timeout"} 0
+gateway_breaker_reports_dropped_total{reason="unavailable"} 0
 """
 
 SAMPLE_LINE = re.compile(r'^[a-z_]+(\{[a-z]+="[^"]*"(,[a-z]+="[^"]*")*\})? -?[0-9.e+-]+$')

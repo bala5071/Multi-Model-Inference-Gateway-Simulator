@@ -847,5 +847,13 @@
         }
       }
     ]
+  },
+  "breakers": {
+    "available": true,
+    "reports_dropped": {
+      "queue_full": 0,
+      "flush_timeout": 0,
+      "unavailable": 0
+    }
   }
 }

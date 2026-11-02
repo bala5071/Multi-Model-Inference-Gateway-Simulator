@@ -38,7 +38,8 @@ from gateway.auth import (
     LoginFailedError,
     StepUpFailedError,
 )
-from gateway.breaker import BreakerState, Transition
+from gateway.breaker import Admission, BreakerState, Transition
+from gateway.breakerreports import BreakerReports, DropReason, Report
 from gateway.clock import SimClock, SystemEpoch, WallClock
 from gateway.continuous import build_continuous_registry
 from gateway.counters import OnRestart
@@ -627,3 +628,43 @@ def test_the_cli_works_with_valkey_down(tmp_path: Path, capsys: pytest.CaptureFi
         connection.close()
     for action in ("user_created", "user_unlocked", "password_reset", "user_disabled"):
         assert action in actions
+
+
+@valkey
+async def test_one_shared_breakers_reports_arrive_in_order_from_two_instances() -> None:
+    """Two instances, one breaker in Valkey, each instance's reports through its own queue
+    (docs/41). The first sends four failures and then a success, the second two failures: in
+    order, the success resets the run, so the breaker holds two failures and opens at the
+    fifth, three more. Sent out of order (the success first) it would hold six and be open."""
+    epoch = ManualEpoch()
+    clock = SimClock()
+    async with instances(epoch) as (a, b):
+        shared = [a.breakers(lambda _: None), b.breakers(lambda _: None)]
+        first, second = (BreakerReports(each, clock) for each in shared)
+        for _ in range(4):
+            first.enqueue(Report.FAILURE, ORG, PROVIDER)
+        first.enqueue(Report.SUCCESS, ORG, PROVIDER)
+        await first.drained()
+        for _ in range(2):
+            second.enqueue(Report.FAILURE, ORG, PROVIDER)
+        await second.drained()
+        assert await shared[1].state(ORG, PROVIDER) is BreakerState.CLOSED
+        for count in range(3):
+            assert await shared[count % 2].state(ORG, PROVIDER) is BreakerState.CLOSED
+            await shared[count % 2].failure(ORG, PROVIDER)
+        assert await shared[0].state(ORG, PROVIDER) is BreakerState.OPEN
+        assert first.dropped == second.dropped == dict.fromkeys(DropReason, 0)
+
+
+@valkey
+async def test_a_probe_admitted_in_valkey_is_reported_as_one() -> None:
+    epoch = ManualEpoch()
+    async with instances(epoch) as (a, b):
+        breakers = a.breakers(lambda _: None)
+        assert await breakers.admit_attempt(ORG, PROVIDER) is Admission.ADMITTED
+        for _ in range(5):
+            await breakers.failure(ORG, PROVIDER)
+        assert await breakers.admit_attempt(ORG, PROVIDER) is Admission.REFUSED
+        epoch.now_ms += 30_000.0
+        assert await b.breakers(lambda _: None).admit_attempt(ORG, PROVIDER) is Admission.PROBE
+        assert await breakers.admit_attempt(ORG, PROVIDER) is Admission.REFUSED

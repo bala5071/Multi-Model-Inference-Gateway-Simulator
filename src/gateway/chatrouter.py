@@ -30,14 +30,15 @@ hosted attempt of a request in flight; a looser one applies from the next reques
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 import httpx
 
 from gateway.adapters.base import HttpAdapter
-from gateway.breaker import BreakerStore, SlowWarnings
+from gateway.breaker import Admission, BreakerStore, SlowWarnings
+from gateway.breakerreports import BreakerReports, Report
 from gateway.chat import (
     ChatDelta,
     ChatDeltaCallback,
@@ -65,6 +66,8 @@ class FallbackReason(StrEnum):
     CIRCUIT_OPEN = "circuit_open"
     INVALID_TOOL_JSON = "invalid_tool_json"
     KEY_UNREADABLE = "key_unreadable"
+    # The request had made its hosted attempts (``max_hosted_attempts``, docs/41).
+    ATTEMPT_CAP = "attempt_cap"
 
 
 def trigger(exc: BaseException) -> FallbackReason | None:
@@ -90,6 +93,37 @@ def trigger(exc: BaseException) -> FallbackReason | None:
     if code is ProviderErrorCode.UPSTREAM_MALFORMED and detail == "tool_arguments":
         return FallbackReason.INVALID_TOOL_JSON
     return None
+
+
+# The operator's cap on one request's calls to organization providers, the retry after
+# invalid tool JSON included (GATEWAY_CHAT_MAX_HOSTED_ATTEMPTS, docs/41).
+MAX_HOSTED_ATTEMPTS_ENV = "GATEWAY_CHAT_MAX_HOSTED_ATTEMPTS"
+DEFAULT_MAX_HOSTED_ATTEMPTS = 3
+MAX_HOSTED_ATTEMPTS_RANGE = range(1, 6)
+
+
+def check_max_hosted_attempts(value: int) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value not in (MAX_HOSTED_ATTEMPTS_RANGE)
+    ):
+        raise ValueError(
+            f"{MAX_HOSTED_ATTEMPTS_ENV} must be a whole number from 1 to 5, not {value!r}"
+        )
+    return value
+
+
+def max_hosted_attempts_from(environ: Mapping[str, str]) -> int:
+    """The operator's cap, from the environment (3 when unset); anything but a whole number
+    from 1 to 5 refuses the start, naming the variable."""
+    raw = environ.get(MAX_HOSTED_ATTEMPTS_ENV)
+    if raw is None:
+        return DEFAULT_MAX_HOSTED_ATTEMPTS
+    text = raw.strip()
+    if not text.isascii() or not text.isdigit():
+        raise ValueError(f"{MAX_HOSTED_ATTEMPTS_ENV} must be a whole number from 1 to 5")
+    return check_max_hosted_attempts(int(text))
 
 
 # The triggers that count against a provider's breaker (an open breaker is not a failure).
@@ -119,6 +153,8 @@ class RouteTrace:
     provider_class: str | None = None
     fallback_from: str | None = None
     fallback_reason: str | None = None
+    # Every candidate's reason for being left, in order; the first is ``fallback_reason``.
+    reasons: list[FallbackReason] = field(default_factory=list)
 
     def source(self, usage_estimated: bool) -> ChatSource:
         assert self.provider is not None
@@ -159,12 +195,18 @@ class ChatRouter:
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
         *,
         warnings: SlowWarnings,
+        reports: BreakerReports | None = None,
+        max_hosted_attempts: int = DEFAULT_MAX_HOSTED_ATTEMPTS,
     ) -> None:
         if (providers is None) != (client_factory is None):
             raise ValueError("organization providers need their guarded client factory")
+        check_max_hosted_attempts(max_hosted_attempts)
         self._chat = chat
         self._modes = modes
         self.breakers = breakers
+        # Without a queue, every report is sent at once (as before docs/41).
+        self.reports = reports
+        self.max_hosted_attempts = max_hosted_attempts
         self.warnings = warnings
         self._local = local
         self._providers = providers
@@ -257,6 +299,8 @@ class ChatRouter:
         first = order[0].provider
         # Why the first candidate was left, then why each later one was: the first is reported.
         reasons: list[FallbackReason] = []
+        # The same list, read by the trace when the request ends however it ends.
+        trace.reasons = reasons
         current: list[Candidate] = []
         emitted = [False]
 
@@ -277,10 +321,18 @@ class ChatRouter:
                 on_delta(delta)
 
         failure: BaseException | None = None
+        # Calls to organization providers this request has made, the retry included (docs/41).
+        attempts = 0
         with egress_scope(its_mode_allows_hosted):
             for candidate in order:
+                probe = False
                 if candidate.config is not None:
-                    skipped = await self._skip(organization_id, candidate.config)
+                    if attempts >= self.max_hosted_attempts:
+                        # Skipped without a call, and without asking its breaker: the gateway's
+                        # own tier is still tried where the mode allows it.
+                        reasons.append(FallbackReason.ATTEMPT_CAP)
+                        continue
+                    skipped, probe = await self._skip(organization_id, candidate.config)
                     if skipped is not None:
                         reasons.append(skipped)
                         continue
@@ -288,35 +340,52 @@ class ChatRouter:
                 tries = 2  # invalid tool JSON: one retry on the same candidate
                 while True:
                     tries -= 1
-                    if candidate.provider_class == HOSTED and await self._made_stricter(
-                        organization_id, application_id, mode
-                    ):
-                        # No hosted attempt: a half-open breaker's probe is free again.
-                        await self._account(organization_id, candidate, None)
-                        break
+                    if candidate.provider_class == HOSTED:
+                        try:
+                            stricter = await self._made_stricter(
+                                organization_id, application_id, mode
+                            )
+                        except BaseException:
+                            # The re-read was cancelled or failed: no attempt is made, and the
+                            # request still fails as it did (closed). What this request was
+                            # admitted for is given back, so a half-open probe's slot is free at
+                            # once (docs/41); nothing else is released.
+                            await self._account(organization_id, candidate, None, probe=probe)
+                            raise
+                        if stricter:
+                            # No hosted attempt: a half-open breaker's probe is free again.
+                            await self._account(organization_id, candidate, None, probe=probe)
+                            break
+                    if candidate.config is not None:
+                        attempts += 1
                     try:
                         outcome = await self._attempt(candidate, request, relay, timeouts)
                     except asyncio.CancelledError:
                         # The client went away: no verdict, and a half-open breaker's one
                         # probe is free again.
-                        await self._account(organization_id, candidate, None)
+                        await self._account(organization_id, candidate, None, probe=probe)
                         raise
                     except Exception as exc:
                         why = trigger(exc)
-                        await self._account(organization_id, candidate, why)
+                        await self._account(organization_id, candidate, why, probe=probe)
                         if emitted[0] or why is None:
                             raise  # output has started, or not a trigger: the answer
                         failure = exc
                         retry = why is FallbackReason.INVALID_TOOL_JSON and tries > 0
-                        if retry and (
-                            candidate.config is None
-                            or await self.breakers.admit(organization_id, candidate.provider)
-                        ):
+                        if retry and candidate.config is None:
                             continue
+                        if retry and attempts < self.max_hosted_attempts:
+                            assert candidate.config is not None
+                            admission = await self.breakers.admit_attempt(
+                                organization_id, candidate.provider
+                            )
+                            if admission is not Admission.REFUSED:
+                                probe = admission is Admission.PROBE
+                                continue
                         reasons.append(why)
                         break
                     else:
-                        await self._account(organization_id, candidate, None, outcome)
+                        await self._account(organization_id, candidate, None, outcome, probe=probe)
                         answered_by(candidate)
                         source = trace.source(outcome.result.usage.estimated)
                         return RoutedOutcome(outcome, source)
@@ -330,14 +399,30 @@ class ChatRouter:
         current mode is stricter than the request's (``mode``). A looser one is not used."""
         return looser_than(mode, await self.mode(organization_id, application_id))
 
-    async def _skip(self, organization_id: str, config: ProviderConfig) -> FallbackReason | None:
+    async def _skip(
+        self, organization_id: str, config: ProviderConfig
+    ) -> tuple[FallbackReason | None, bool]:
+        """Why the provider is skipped, if it is, and whether its admission is the half-open
+        breaker's probe."""
         assert self._providers is not None
         stored = await self._providers.store.get_key(config.id)
         if stored is None or not self._providers.vault.readable(stored.sealed):
-            return FallbackReason.KEY_UNREADABLE
-        if not await self.breakers.admit(organization_id, config.id):
-            return FallbackReason.CIRCUIT_OPEN
-        return None
+            return FallbackReason.KEY_UNREADABLE, False
+        admission = await self.breakers.admit_attempt(organization_id, config.id)
+        if admission is Admission.REFUSED:
+            return FallbackReason.CIRCUIT_OPEN, False
+        return None, admission is Admission.PROBE
+
+    async def _report(
+        self, report: Report, organization_id: str, provider_id: str, *, probe: bool
+    ) -> None:
+        """A probe's report at once, on the path; any other through the queue (docs/41)."""
+        if self.reports is None:
+            await getattr(self.breakers, report.value)(organization_id, provider_id)
+        elif probe:
+            await self.reports.send_now(report, organization_id, provider_id)
+        else:
+            self.reports.enqueue(report, organization_id, provider_id)
 
     async def _account(
         self,
@@ -345,8 +430,11 @@ class ChatRouter:
         candidate: Candidate,
         why: FallbackReason | None,
         outcome: ChatOutcome | None = None,
+        *,
+        probe: bool = False,
     ) -> None:
-        """Tell the breaker and the slow-provider warning what happened (providers only)."""
+        """Tell the breaker and the slow-provider warning what happened (providers only): a
+        half-open probe's report at once, any other through the queue (docs/41)."""
         config = candidate.config
         if config is None:
             return
@@ -354,14 +442,14 @@ class ChatRouter:
             budget = config.first_token_budget_ms or DEFAULT_HOSTED_FIRST_TOKEN_MS
             waited = outcome.timing.first_token_ms - outcome.timing.start_ms
             self.warnings.first_token(organization_id, config.id, missed=waited > budget)
-            await self.breakers.success(organization_id, config.id)
+            await self._report(Report.SUCCESS, organization_id, config.id, probe=probe)
             return
         if why is FallbackReason.FIRST_TOKEN_BUDGET:
             self.warnings.first_token(organization_id, config.id, missed=True)
         if why in _BREAKER_FAILURES:
-            await self.breakers.failure(organization_id, config.id)
+            await self._report(Report.FAILURE, organization_id, config.id, probe=probe)
         else:
-            await self.breakers.release(organization_id, config.id)
+            await self._report(Report.RELEASE, organization_id, config.id, probe=probe)
 
     async def _attempt(
         self,
