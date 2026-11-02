@@ -570,9 +570,10 @@ without changing #24. Neither is built before PR 3 is merged.
 - **The worst case on the path,** with the cap of item 2 (C hosted attempts, 3 by default): one
   rate-limit call, then for each attempt its admission (the retry after invalid tool JSON is
   admitted again); a probe also sends its report at once, and the admission of its retry is
-  then refused, the breaker having opened again. So **1 + C** counter calls when every breaker
-  is closed (the reports queued) and **1 + 3C** when every attempt is a half-open probe; with C
-  = 3, 4 and 10. Before 2b, 1 + 4N for N providers, unbounded (note 35).
+  then refused, the breaker having opened again, except the last attempt's retry, which the cap
+  stops before its breaker is asked. So **1 + C** counter calls when every breaker is closed
+  (the reports queued) and **3C** when every attempt is a half-open probe; with C = 3, 4 and 9.
+  Before 2b, 1 + 4N for N providers, unbounded (note 35).
 - **A bound:** the queue holds a bounded number of reports. One that does not fit is dropped,
   as a report that cannot be written is today. **A dropped report never admits anything.** It
   can make a breaker open late (a `failure` dropped) or early (a `success` dropped, so the run
@@ -599,7 +600,7 @@ without changing #24. Neither is built before PR 3 is merged.
   - a full queue drops and counts;
   - the shutdown flush writes what is queued, and counts what it cannot;
   - a request no longer waits for a closed breaker's reports, and waits for a probe's
-    (counted as in `test_the_most_counter_calls_one_chat_request_makes`: 1 + C and 1 + 3C);
+    (counted as in `test_the_most_counter_calls_one_chat_request_makes`: 1 + C and 3C);
   - the in-memory probe expiry, and the probe that never reports today (a request cancelled
     during the modes' re-read), freed after 120 s.
 - **Mutation checks:** reports sent out of order, the flush removed, the drop not counted,
