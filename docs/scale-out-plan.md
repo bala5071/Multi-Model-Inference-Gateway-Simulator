@@ -549,7 +549,7 @@ order.
 | 3 | `scale-out/step-3` | Postgres: `asyncpg` (provenance check), `pg0001`, every durable store, the budget reservation and its two-instance edge test (Q1), the step-up claim, the lockout update, the write lock, `migrate-to-postgres` and back; the skew check moves to `gateway_now_ms()`; `GATEWAY_STATE=shared`; `/readyz` | Only with `shared` |
 | 3b | `scale-out/step-3b` | Budgets on Postgres: the reservation (3.1) and its two-instance edge test (Q1), the per-tier settings (Q2); `GATEWAY_STATE=shared` allowed; Valkey's skew check against `gateway_now_ms()` | Only with `shared` |
 | 3c | `scale-out/step-3c` | Each mode read once per chat request and passed on (note 36: 12 of the 20 store calls of a provider-served request) | Fewer store calls; the modes read again just before each hosted attempt: a stricter mode stops the next hosted attempt of a request in flight, a looser one applies from the next request (on approval of #28, 2026-10-30) |
-| 2b | `scale-out/step-2b` | After PR 3, recorded 2026-10-29, not built: the breaker reports off the request path, and a per-request cap on hosted attempts (below) | Chat: fewer counter calls on the path; at most 3 hosted attempts a request by default |
+| 2b | `scale-out/step-2b` | After PR 3, recorded 2026-10-29: the breaker reports off the request path (a half-open probe's sent at once), the 120 s probe expiry in memory too, and a per-request cap on hosted attempts (below) | Chat: fewer counter calls on the path; at most 3 hosted attempts a request by default; a probe whose report never comes frees its slot after 120 s in memory too |
 | 4 | `scale-out/step-4` | The two-instance tests in process and in two processes, the mutation table, the failure tests, `benchmarks/shared_state.py`, the note, the compose file for a two-instance demo on Postgres and Valkey | None |
 
 The questions PRs 2 and 3 depended on are answered (section 11). Each PR has the template,
@@ -563,28 +563,48 @@ without changing #24. Neither is built before PR 3 is merged.
 **1. The breaker reports off the request path.**
 
 - **What moves:** `admit` stays on the path, because it decides whether a provider is tried. The
-  reports (`success`, `failure`, `release`) go through a per-instance queue that sends them in
-  order for each breaker. A chat request's worst case on the path goes from 1 + 4N counter
-  calls to 1 + 2N.
+  reports (`success`, `failure`, `release`) of an attempt a closed breaker admitted go through
+  a per-instance queue that sends them in order for each breaker. **A half-open probe's report
+  is sent at once, on the request path, and never queued** (decided 2026-11-02): a probe slot
+  is never held by a report waiting in, or dropped from, the queue.
+- **The worst case on the path,** with the cap of item 2 (C hosted attempts, 3 by default): one
+  rate-limit call, then for each attempt its admission (the retry after invalid tool JSON is
+  admitted again); a probe also sends its report at once, and the admission of its retry is
+  then refused, the breaker having opened again. So **1 + C** counter calls when every breaker
+  is closed (the reports queued) and **1 + 3C** when every attempt is a half-open probe; with C
+  = 3, 4 and 10. Before 2b, 1 + 4N for N providers, unbounded (note 35).
 - **A bound:** the queue holds a bounded number of reports. One that does not fit is dropped,
-  as a report that cannot be written is today. A dropped report never admits anything: it can
-  only leave a breaker closed a little longer, or a half-open probe slot held until its 120 s
-  expiry.
+  as a report that cannot be written is today. **A dropped report never admits anything.** It
+  can make a breaker open late (a `failure` dropped) or early (a `success` dropped, so the run
+  of consecutive failures is not reset), and so refuse a provider wrongly, for at most the
+  breaker's open time, after which it probes. It cannot hold a half-open probe slot: probe
+  reports are never queued. Every drop is counted in the dropped-report metric, so a wrong
+  refusal it may have caused is visible.
+- **A probe expiry in memory too** (decided 2026-11-02): the in-memory breakers get the 120 s
+  expiry of a half-open probe's slot that the Valkey ones have (`PROBE_MS`, decision 10), so the
+  bound is the same with and without Valkey. It is needed today, without any queue: a probe
+  admitted and then cancelled (the client hangs up), or whose request fails, while the modes are
+  read again just before the attempt (docs/38) sends no report, and in memory its slot was held
+  until the process restarted.
 - **A shutdown flush:** the lifespan drains the queue on shutdown, within a time limit, before
   the counters' client closes. What is still queued at the limit is dropped and counted.
-- **A dropped-report metric:** a Prometheus counter of reports dropped, whether the queue was
-  full, the flush ran out of time, or Valkey could not answer. It is labelled by reason, and
-  its name follows docs/15. It is a count of what the instance did; nothing decides anything
-  from it.
+- **A dropped-report metric:** a count of reports dropped, whether the queue was full, the
+  flush ran out of time, or Valkey could not answer, labelled by reason: in the monitoring
+  snapshot (`breakers.reports_dropped`, docs/15), with the dashboard's fixtures and types
+  regenerated as CLAUDE.md says, and in Prometheus (`gateway_breaker_reports_dropped_total`). It
+  is a count of what the instance did; nothing decides anything from it.
 - **Unchanged:** failing closed. `admit` still refuses when Valkey cannot answer.
 - **Tests:**
-  - the reports of one breaker arrive in order;
+  - the reports of one breaker arrive in order, and on two instances sharing it in Valkey;
   - a full queue drops and counts;
   - the shutdown flush writes what is queued, and counts what it cannot;
-  - a request no longer waits for its reports (counted as in
-    `test_the_most_counter_calls_one_chat_request_makes`: 1 + 2N on the path).
-- **Mutation checks:** reports sent out of order, the flush removed, the drop not counted, and
-  `admit` moved off the path, each failing a test.
+  - a request no longer waits for a closed breaker's reports, and waits for a probe's
+    (counted as in `test_the_most_counter_calls_one_chat_request_makes`: 1 + C and 1 + 3C);
+  - the in-memory probe expiry, and the probe that never reports today (a request cancelled
+    during the modes' re-read), freed after 120 s.
+- **Mutation checks:** reports sent out of order, the flush removed, the drop not counted,
+  `admit` moved off the path, a probe's report queued, and the in-memory probe expiry removed,
+  each failing a test.
 - **Timing:** measured before and after, three runs each, on this machine.
 
 **2. A per-request cap on hosted attempts.**
