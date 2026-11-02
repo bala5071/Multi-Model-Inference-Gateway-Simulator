@@ -574,7 +574,8 @@ without changing #24. Neither is built before PR 3 is merged.
   stops before its breaker is asked. So **1 + C** counter calls when every breaker is closed
   (the reports queued) and **3C** when every attempt is a half-open probe; with C = 3, 4 and 9.
   Before 2b, 1 + 4N for N providers, unbounded (note 35).
-- **A bound:** the queue holds a bounded number of reports. One that does not fit is dropped,
+- **A bound:** the queue holds a bounded number of reports (1,024) and the shutdown flush has a
+  time limit (2 s); **both numbers are chosen, not measured.** One that does not fit is dropped,
   as a report that cannot be written is today. **A dropped report never admits anything.** It
   can make a breaker open late (a `failure` dropped) or early (a `success` dropped, so the run
   of consecutive failures is not reset), and so refuse a provider wrongly, for at most the

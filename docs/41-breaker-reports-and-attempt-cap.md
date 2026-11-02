@@ -9,7 +9,7 @@ calls to organization providers are capped.
 `admit` stays on the path: it decides whether a provider is tried, and it still fails closed
 (Valkey unavailable: refused). The reports (`success`, `failure`, `release`) of an attempt a
 closed breaker admitted go into a bounded queue of the instance's (`BreakerReports`, 1,024 at
-most), sent in the order they were made by one sender; the request no longer waits for them.
+most, a number chosen, not measured), sent in the order they were made by one sender; the request no longer waits for them.
 
 **A half-open probe's report is sent at once, on the path, never queued**, after any report of
 the same breaker still in the queue, so the breaker sees every report in the order it was made.
@@ -28,7 +28,8 @@ is counted, so such a refusal is visible:
 - in Prometheus, `gateway_breaker_reports_dropped_total{reason=...}`.
 
 Nothing decides anything from the counts. The server's lifespan flushes the queue at shutdown,
-before the counters' client closes, for at most 2 s of the injected clock; what is left is
+before the counters' client closes, for at most 2 s of the injected clock (chosen, not
+measured); what is left is
 dropped and counted, a report cut off while being written included.
 
 ## A probe that never reports, in memory too, and the hole that made one
