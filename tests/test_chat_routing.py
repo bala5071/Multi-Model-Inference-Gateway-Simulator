@@ -1191,3 +1191,28 @@ async def test_a_hosted_answer_over_the_applied_max_tokens_is_settled_and_logged
         assert json.loads(written.split(b"\r\n\r\n", 1)[1])["max_tokens"] == 1
     logged = [rec.getMessage() for rec in caplog.records if rec.name == "gateway.settings"]
     assert logged == [f"provider {P} answered 2 completion tokens over the applied max_tokens 1"]
+
+
+async def test_the_total_timeout_of_a_chat_attempt_is_the_applications() -> None:
+    """The operator's adapter sends a first token, then stalls: the attempt gives up at the
+    application's chat_total_timeout_ms, not at the platform's 120 s."""
+
+    def stalled() -> Pauses:
+        chunks = openai_text("He", "llo").chunks
+        return Pauses(
+            http_response(b"", Content_Type="text/event-stream") + chunks[0][1] + chunks[1][1],
+            b"".join(data for _, data in chunks[2:]),
+        )
+
+    async with routing() as r:
+        r.op_net.responses = [stalled()]
+        started = r.clock.now_ms()
+        default = await r.chat()
+        assert _code(default) == "upstream_timeout"
+        assert r.clock.now_ms() - started == 120_000.0
+        await _settings(r, chat_total_timeout_ms=3_000)
+        r.op_net.responses = [stalled()]
+        started = r.clock.now_ms()
+        quick = await r.chat()
+        assert _code(quick) == "upstream_timeout"
+        assert r.clock.now_ms() - started == 3_000.0
