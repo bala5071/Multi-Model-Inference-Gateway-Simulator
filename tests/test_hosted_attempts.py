@@ -75,7 +75,8 @@ def test_the_cap_is_3_by_default_and_1_to_5_when_set() -> None:
     assert max_hosted_attempts_from({}) == 3
     for value in ("1", "5", " 2 "):
         assert max_hosted_attempts_from({MAX_HOSTED_ATTEMPTS_ENV: value}) == int(value)
-    for value in ("0", "6", "3.0", "three", "-1", "", "٣"):
+    # The last is ARABIC-INDIC DIGIT THREE: a digit to str.isdigit, not a whole number here.
+    for value in ("0", "6", "3.0", "three", "-1", "", chr(0x0663)):
         with pytest.raises(ValueError, match=MAX_HOSTED_ATTEMPTS_ENV):
             max_hosted_attempts_from({MAX_HOSTED_ATTEMPTS_ENV: value})
 
