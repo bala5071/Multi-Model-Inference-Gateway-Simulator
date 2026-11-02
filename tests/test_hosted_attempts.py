@@ -1,8 +1,8 @@
 """Scale-out PR 2b on the chat path (docs/41): the operator's cap on one request's hosted
-attempts, a half-open probe that never reports (it happens without any queue) freed after
-120 s, the shutdown flush of the breakers' reports, the dropped-report metric, and the leak
-scan. The queue on its own is in ``test_breaker_reports.py``; the counter calls on the path
-in ``test_chat_routing.py``."""
+attempts, a half-open probe whose mode re-read is cancelled or fails freed at once, the
+shutdown flush of the breakers' reports, the dropped-report metric, and the leak scan. The
+queue on its own is in ``test_breaker_reports.py``; the counter calls on the path in
+``test_chat_routing.py``."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from gateway.breaker import PROBE_MS, Admission
+from gateway.breaker import Admission
 from gateway.breakerreports import DropReason, Report
 from gateway.chatrouter import (
     MAX_HOSTED_ATTEMPTS_ENV,
@@ -173,45 +173,100 @@ async def test_a_provider_skipped_without_a_call_is_not_an_attempt(
     assert contacted == ["b.provider.test", "p.provider.test", "d.provider.test"]
 
 
-# --- a probe that never reports, today ---------------------------------------------------------
+# --- a probe whose mode re-read is cancelled or fails ------------------------------------------
 
 
-async def test_a_probe_cancelled_during_the_modes_re_read_holds_its_slot_for_120_s() -> None:
-    """Found while planning PR 2b, without any queue: A's breaker is half-open and this request
-    is its probe; the client hangs up while the modes are read again just before the attempt
-    (docs/38). No report is sent, so the slot stays taken: until PR 2b, in memory, until the
-    process restarted. Now it frees itself after 120 s, as in Valkey."""
+async def _half_open(r: Routing, *provider_ids: str) -> None:
+    for provider_id in provider_ids:
+        for _ in range(5):
+            await r.router.breakers.failure("north", provider_id)
+    await r.clock.sleep_ms(30_000.0)
+
+
+def _hold_re_read(r: Routing, at: int, then: BaseException | None) -> asyncio.Event:
+    """The ``at``-th read of the organization's mode (counting from 1) waits forever, or raises
+    ``then``; the returned event is set when it is reached."""
+    reads = 0
+    reached = asyncio.Event()
+    real = r.router._modes.organization_mode
+
+    async def organization_mode(organization_id: str) -> Any:
+        nonlocal reads
+        reads += 1
+        if reads == at:
+            reached.set()
+            if then is not None:
+                raise then
+            await asyncio.Event().wait()
+        return await real(organization_id)
+
+    r.router._modes.organization_mode = organization_mode  # type: ignore[method-assign]
+    return reached
+
+
+async def test_a_probe_cancelled_during_the_modes_re_read_frees_its_slot_at_once() -> None:
+    """Found while planning PR 2b: A's breaker is half-open and this request is its probe; the
+    client hangs up while the modes are read again just before the attempt (docs/38). Its
+    admission is given back then: the next request may probe at once, not after 120 s (and in
+    memory, before PR 2b, not until the process restarted)."""
     async with routing(operator=None) as r:
         await r.mode(PRIMARY)
         await _providers(r, 1)
-        for _ in range(5):
-            await r.router.breakers.failure("north", A)
-        await r.clock.sleep_ms(30_000.0)
-        reads = 0
-        stuck = asyncio.Event()
-        real = r.router._modes.organization_mode
-
-        async def organization_mode(organization_id: str) -> Any:
-            nonlocal reads
-            reads += 1
-            if reads == 2:  # the re-read just before the hosted attempt
-                stuck.set()
-                await asyncio.Event().wait()
-            return await real(organization_id)
-
-        r.router._modes.organization_mode = organization_mode  # type: ignore[method-assign]
+        await _half_open(r, A)
+        reached = _hold_re_read(r, at=2, then=None)  # 1: the handler's read; 2: the re-read
         request = asyncio.ensure_future(r.chat())
-        await stuck.wait()
+        await reached.wait()
         request.cancel()
         with pytest.raises(asyncio.CancelledError):
             await request
         assert r.org_net.connections == []  # it never reached A
+        assert await r.router.breakers.admit_attempt("north", A) is Admission.PROBE
+
+
+async def test_a_probe_whose_modes_re_read_fails_frees_its_slot_and_still_fails_closed() -> (
+    None
+):  # fmt: skip
+    """The re-read cannot be answered (the store is down): the request is refused as before,
+    503 ``state_unavailable``, A is never contacted, and A's slot is free at once."""
+    from gateway.state import StateUnavailableError
+
+    async with routing(operator=None) as r:
+        await r.mode(PRIMARY)
+        await _providers(r, 1)
+        await _half_open(r, A)
+        _hold_re_read(r, at=2, then=StateUnavailableError("down"))
+        answer = await r.chat()
+        assert (answer.status_code, answer.json()["error"]["code"]) == (503, "state_unavailable")
+        assert r.org_net.connections == []
+        assert await r.router.breakers.admit_attempt("north", A) is Admission.PROBE
+
+
+async def test_another_requests_probe_is_never_released() -> None:
+    """A is half-open and the first request is its probe, still waiting for A's answer. The
+    second request is refused A (circuit_open), is admitted to B, and its re-read before B
+    fails: what it gives back is its own admission to B, never the first request's slot on A,
+    which stays taken until the first request reports."""
+    from gateway.state import StateUnavailableError
+    from mock_network import Gate
+
+    async with routing(operator=None) as r:
+        await r.mode(PRIMARY)
+        await _providers(r, 2)
+        await _half_open(r, A)
+        gate = Gate(TEXT)
+        r.org_net.responses = [gate]
+        first = asyncio.ensure_future(r.chat())
+        await gate.reached.wait()  # the first request is A's probe, at A
+        # Counted from here: the second request's handler read is 1, its re-read before B 2.
+        _hold_re_read(r, at=2, then=StateUnavailableError("down"))
+        second = await r.chat()
+        assert second.status_code == 503
         breakers = r.router.breakers
-        assert await breakers.admit_attempt("north", A) is Admission.REFUSED
-        await r.clock.sleep_ms(PROBE_MS - 1.0)
-        assert await breakers.admit_attempt("north", A) is Admission.REFUSED
-        await r.clock.sleep_ms(1.0)
-        assert await breakers.admit_attempt("north", A) is Admission.PROBE
+        assert await breakers.admit_attempt("north", A) is Admission.REFUSED  # still taken
+        gate.opened.set()
+        answered = await first
+        assert answered.headers["x-provider"] == A
+        assert await breakers.admit_attempt("north", A) is Admission.PROBE  # reported: free
 
 
 # --- the shutdown flush and the metric -----------------------------------------------------------

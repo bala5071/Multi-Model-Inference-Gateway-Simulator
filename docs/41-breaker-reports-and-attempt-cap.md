@@ -31,15 +31,19 @@ Nothing decides anything from the counts. The server's lifespan flushes the queu
 before the counters' client closes, for at most 2 s of the injected clock; what is left is
 dropped and counted, a report cut off while being written included.
 
-## A probe that never reports, in memory too
+## A probe that never reports, in memory too, and the hole that made one
 
 The in-memory breakers now free a half-open probe's slot after 120 s without a report
-(`PROBE_MS`), as the Valkey ones always have. It was needed before any queue existed: a probe
-admitted and then cancelled (the client hangs up), or whose request fails, while the modes are
-read again just before the hosted attempt (note 38) sends no report. In Valkey the slot freed
-itself after 120 s; in memory it stayed taken until the process restarted, and every request
-skipped that provider meanwhile.
-`test_a_probe_cancelled_during_the_modes_re_read_holds_its_slot_for_120_s` shows it.
+(`PROBE_MS`), as the Valkey ones always have, whatever keeps the report from coming.
+
+One way it did not come existed before any queue: a probe admitted and then cancelled (the
+client hangs up), or whose mode re-read just before the hosted attempt (note 38) failed, sent
+no report. In Valkey the slot freed itself after 120 s; in memory it stayed taken until the
+process restarted, and every request skipped that provider meanwhile. That hole is closed:
+when the re-read is cancelled or fails, the request gives back what it was admitted for, so the
+slot is free at once, and the request still fails as before (closed; 503 `state_unavailable`
+when the store cannot answer). It gives back only its own admission: another request's probe
+is never released (`test_another_requests_probe_is_never_released`).
 
 ## The cap on hosted attempts
 

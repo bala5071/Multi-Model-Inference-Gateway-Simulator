@@ -583,10 +583,12 @@ without changing #24. Neither is built before PR 3 is merged.
   refusal it may have caused is visible.
 - **A probe expiry in memory too** (decided 2026-11-02): the in-memory breakers get the 120 s
   expiry of a half-open probe's slot that the Valkey ones have (`PROBE_MS`, decision 10), so the
-  bound is the same with and without Valkey. It is needed today, without any queue: a probe
-  admitted and then cancelled (the client hangs up), or whose request fails, while the modes are
-  read again just before the attempt (docs/38) sends no report, and in memory its slot was held
-  until the process restarted.
+  bound is the same with and without Valkey. It was needed before any queue: a probe admitted
+  and then cancelled (the client hangs up), or whose mode re-read just before the attempt
+  (docs/38) failed, sent no report, and in memory its slot was held until the process
+  restarted. **That hole is closed in 2b** (on approval of #33, 2026-11-02): when the re-read is
+  cancelled or fails, the request gives back its own admission at once and still fails closed;
+  another request's probe is never released.
 - **A shutdown flush:** the lifespan drains the queue on shutdown, within a time limit, before
   the counters' client closes. What is still queued at the limit is dropped and counted.
 - **A dropped-report metric:** a count of reports dropped, whether the queue was full, the

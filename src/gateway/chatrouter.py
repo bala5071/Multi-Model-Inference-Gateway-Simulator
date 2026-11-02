@@ -340,12 +340,22 @@ class ChatRouter:
                 tries = 2  # invalid tool JSON: one retry on the same candidate
                 while True:
                     tries -= 1
-                    if candidate.provider_class == HOSTED and await self._made_stricter(
-                        organization_id, application_id, mode
-                    ):
-                        # No hosted attempt: a half-open breaker's probe is free again.
-                        await self._account(organization_id, candidate, None, probe=probe)
-                        break
+                    if candidate.provider_class == HOSTED:
+                        try:
+                            stricter = await self._made_stricter(
+                                organization_id, application_id, mode
+                            )
+                        except BaseException:
+                            # The re-read was cancelled or failed: no attempt is made, and the
+                            # request still fails as it did (closed). What this request was
+                            # admitted for is given back, so a half-open probe's slot is free at
+                            # once (docs/41); nothing else is released.
+                            await self._account(organization_id, candidate, None, probe=probe)
+                            raise
+                        if stricter:
+                            # No hosted attempt: a half-open breaker's probe is free again.
+                            await self._account(organization_id, candidate, None, probe=probe)
+                            break
                     if candidate.config is not None:
                         attempts += 1
                     try:
