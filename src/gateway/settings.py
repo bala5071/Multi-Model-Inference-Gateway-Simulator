@@ -644,8 +644,11 @@ class SettingsStore(Protocol):
 
     async def current(self, scope: Scope, scope_id: str) -> SettingsRow | None: ...
 
-    async def versions(self, scope: Scope, scope_id: str, limit: int) -> list[SettingsVersion]:
-        """The latest ``limit`` versions, newest first."""
+    async def versions(
+        self, scope: Scope, scope_id: str, limit: int, *, before: int | None = None
+    ) -> list[SettingsVersion]:
+        """The latest ``limit`` versions, newest first; only those older than ``before``
+        when it is given (a page after the last one shown)."""
         ...
 
     async def version(
@@ -693,8 +696,11 @@ class InMemorySettingsStore:
     async def current(self, scope: Scope, scope_id: str) -> SettingsRow | None:
         return self._current.get((Scope(scope), scope_id))
 
-    async def versions(self, scope: Scope, scope_id: str, limit: int) -> list[SettingsVersion]:
-        return list(reversed(self._versions.get((Scope(scope), scope_id), [])))[:limit]
+    async def versions(
+        self, scope: Scope, scope_id: str, limit: int, *, before: int | None = None
+    ) -> list[SettingsVersion]:
+        found = reversed(self._versions.get((Scope(scope), scope_id), []))
+        return [v for v in found if before is None or v.version < before][:limit]
 
     async def version(self, scope: Scope, scope_id: str, version: int) -> SettingsVersion | None:
         found = self._versions.get((Scope(scope), scope_id), [])
@@ -809,11 +815,13 @@ class SqliteSettingsStore:
         ).fetchone()
         return settings_row(row) if row is not None else None
 
-    async def versions(self, scope: Scope, scope_id: str, limit: int) -> list[SettingsVersion]:
+    async def versions(
+        self, scope: Scope, scope_id: str, limit: int, *, before: int | None = None
+    ) -> list[SettingsVersion]:
         rows = self._connection.execute(
             f"SELECT {_VERSION_COLUMNS} FROM settings_versions"
-            " WHERE scope_type = ? AND scope_id = ? ORDER BY version DESC LIMIT ?",
-            (Scope(scope).value, scope_id, limit),
+            " WHERE scope_type = ? AND scope_id = ? AND version < ? ORDER BY version DESC LIMIT ?",
+            (Scope(scope).value, scope_id, before if before is not None else 2**62, limit),
         ).fetchall()
         return [settings_version(r) for r in rows]
 
@@ -878,3 +886,40 @@ class SqliteSettingsStore:
 
 def reserved_names(tiers: Iterable[str], aliases: Iterable[str]) -> frozenset[str]:
     return frozenset((*tiers, *aliases))
+
+
+def caps_of(
+    platform: PlatformSettings, application: Application | None, organization: Document
+) -> dict[str, dict[str, object]]:
+    """Every cap above each setting, by level (``platform``, ``plan``, ``organization``), for
+    the effective view: only the caps that are set. Without ``application``, an organization's
+    view: the platform's caps over what it may set."""
+    plan_caps: dict[str, object] = {}
+    if application is not None:
+        plan_caps = {
+            "allowed_tiers": list(application.plan.models),
+            "requests_per_minute": application.requests_per_minute,
+            "monthly_token_budget": application.plan.monthly_token_budget,
+            "max_tokens": application.max_tokens,
+        }
+    platform_caps: dict[str, object] = {
+        "allowed_tiers": list(platform.tiers),
+        "generate_timeout_ms": platform.generate_timeout_ms,
+        "chat_first_token_ms": platform.chat_first_token_ms,
+        "chat_total_timeout_ms": platform.chat_total_timeout_ms,
+    }
+    found: dict[str, dict[str, object]] = {}
+    for name, setting in CATALOGUE.items():
+        levels: dict[str, object] = {}
+        if platform_caps.get(name) is not None:
+            levels["platform"] = platform_caps[name]
+        if plan_caps.get(name) is not None:
+            levels["plan"] = plan_caps[name]
+        if (
+            application is not None
+            and Scope.ORGANIZATION in setting.levels
+            and name in organization
+        ):
+            levels["organization"] = organization[name]
+        found[name] = levels
+    return found

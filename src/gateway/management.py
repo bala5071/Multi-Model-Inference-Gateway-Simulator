@@ -43,6 +43,7 @@ from gateway.clock import EpochSource
 from gateway.organizations import normalize_name
 from gateway.permissions import Actor, Resource, authorize
 from gateway.routing import PlansConfig
+from gateway.settings import Scope, SettingsStore
 from gateway.users import AccountStore, normalize_username
 
 T = TypeVar("T")
@@ -142,6 +143,32 @@ async def resolve_application(
     if application is None or application.organization_id != organization_id:
         return None
     return Resource.application(organization_id, application.id)
+
+
+# A settings version in a path: a positive number of at most nine digits, nothing else.
+SETTINGS_VERSION_PATTERN = re.compile(r"[1-9][0-9]{0,8}")
+
+
+async def resolve_organization_settings_version(
+    stores: Stores, settings: SettingsStore, organization_id: str, version: str
+) -> Resource | None:
+    """The organization, if it exists and has settings ``version`` of its own (docs/40)."""
+    resource = await resolve_organization(stores, organization_id)
+    if resource is None or not SETTINGS_VERSION_PATTERN.fullmatch(version):
+        return None
+    found = await settings.version(Scope.ORGANIZATION, organization_id, int(version))
+    return resource if found is not None else None
+
+
+async def resolve_application_settings_version(
+    stores: Stores, settings: SettingsStore, organization_id: str, application_id: str, version: str
+) -> Resource | None:
+    """The application, if it belongs to the organization **and** has settings ``version``."""
+    resource = await resolve_application(stores, organization_id, application_id)
+    if resource is None or not SETTINGS_VERSION_PATTERN.fullmatch(version):
+        return None
+    found = await settings.version(Scope.APPLICATION, application_id, int(version))
+    return resource if found is not None else None
 
 
 async def resolve_key(

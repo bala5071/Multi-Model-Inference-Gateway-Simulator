@@ -152,9 +152,11 @@ from gateway.management import (
     Stores,
     UnknownPlanError,
     resolve_application,
+    resolve_application_settings_version,
     resolve_key,
     resolve_member,
     resolve_organization,
+    resolve_organization_settings_version,
 )
 from gateway.metrics import Distribution, MetricsStore
 from gateway.migrations import MIGRATIONS, MigrationError, MigrationRunner
@@ -209,17 +211,23 @@ from gateway.registry import ModelRegistry, UnknownModelError
 from gateway.routing import ModelNotAllowedError, Quality, Router, load_plans, pick_by_quality
 from gateway.schema import GenerateRequest, RequestResult
 from gateway.settings import (
+    CATALOGUE,
     DocumentCache,
     EffectiveSettings,
     PlatformSettings,
     Scope,
+    SettingsInvalidError,
     SettingsStore,
     SettingsUnreadableError,
+    SettingsVersion,
     StoredSettings,
+    caps_of,
     effective_application,
+    parse_row,
     reserved_names,
     resolve,
 )
+from gateway.settingsservice import SettingsChange, SettingsService, SettingsValidation
 from gateway.state import (
     POSTGRES_URL_ENV,
     STATE_ENV,
@@ -1443,6 +1451,325 @@ def _mode_routes(app: FastAPI, accounts: AccountAccess, modes: ModeService) -> N
         )
 
 
+class SettingsChangeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    # The version the change was made from; 0 for settings never set.
+    expected_version: int = Field(ge=0, le=999_999_999)
+    # Checked by the service against the catalogue, whose refusal names the setting.
+    values: dict[str, Any] = Field(default_factory=dict, alias="set", max_length=32)
+    unset: list[str] = Field(default_factory=list, max_length=32)
+
+
+class SettingsRevertBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=0, le=999_999_999)
+
+
+def _json_value(value: object) -> object:
+    """A setting's value as JSON: tuples and read-only maps as lists and objects."""
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, Mapping):
+        return dict(value)
+    return value
+
+
+def _effective_view(
+    platform: PlatformSettings,
+    application: Application,
+    organization: Mapping[str, object],
+    document: Mapping[str, object],
+    effective: EffectiveSettings,
+) -> dict[str, object]:
+    """Each setting: what is in force, where it came from, what capped it, what the application
+    stored, and every cap above it (docs/40)."""
+    caps = caps_of(platform, application, organization)
+    view: dict[str, object] = {}
+    for name, found in effective.explain.items():
+        view[name] = {
+            "value": _json_value(found.value),
+            "source": found.source.value,
+            "capped_by": found.capped_by.value if found.capped_by is not None else None,
+            "stored": _json_value(document[name]) if name in document else None,
+            "caps": {level: _json_value(v) for level, v in caps[name].items()},
+        }
+    return view
+
+
+def _version_view(found: SettingsVersion) -> dict[str, object]:
+    return {
+        "version": found.version,
+        "changed_fields": list(found.changed_fields),
+        "changed_by_user_id": found.changed_by_user_id,
+        "via": found.via,
+        "changed_at_ms": found.changed_at_ms,
+    }
+
+
+def _settings_routes(
+    app: FastAPI, accounts: AccountAccess, settings: SettingsService, store: SettingsStore
+) -> None:
+    """The settings endpoints under /v1/admin/orgs/{org} (docs/40): an organization's caps and
+    an application's settings, their versions, revert and the dry run, each through
+    ``requires`` with a resolver that answers anything outside the path's organization, or a
+    version that does not exist, as missing. No step-up: no setting of S1 to S11 loosens where
+    prompts go (the ``*.loosen_egress`` actions are declared for PR S3)."""
+    requires = app.state.requires
+    stores = Stores(accounts.service.organizations, accounts.service.store)
+    platform = settings.platform
+
+    async def organization(request: Request) -> Resource | None:
+        return await resolve_organization(stores, request.path_params["org"])
+
+    async def application(request: Request) -> Resource | None:
+        p = request.path_params
+        return await resolve_application(stores, p["org"], p["app"])
+
+    async def organization_version(request: Request) -> Resource | None:
+        p = request.path_params
+        return await resolve_organization_settings_version(stores, store, p["org"], p["n"])
+
+    async def application_version(request: Request) -> Resource | None:
+        p = request.path_params
+        return await resolve_application_settings_version(stores, store, p["org"], p["app"], p["n"])
+
+    reading_organization = requires("org_settings.read", organization)
+    writing_organization = requires("org_settings.write", organization)
+    reading_organization_version = requires("org_settings.read", organization_version)
+    reading_application = requires("settings.read", application)
+    writing_application = requires("settings.write", application)
+    reading_application_version = requires("settings.read", application_version)
+
+    @app.exception_handler(SettingsInvalidError)
+    async def settings_invalid(_: Request, exc: SettingsInvalidError) -> JSONResponse:
+        return _error(
+            422,
+            "invalid_request",
+            "The request is not valid.",
+            details=[{"field": exc.setting, "message": str(exc)}],
+            headers=_NO_STORE,
+        )
+
+    async def organization_body(org: str) -> dict[str, object]:
+        view = await settings.view(Scope.ORGANIZATION, org)
+        caps = caps_of(platform, None, view.document)
+        return {
+            "organization_id": org,
+            "version": view.row.version if view.row is not None else 0,
+            "settings": {k: _json_value(v) for k, v in view.document.items()},
+            "platform_caps": {
+                name: {level: _json_value(v) for level, v in levels.items()}
+                for name, levels in caps.items()
+                if Scope.ORGANIZATION in CATALOGUE[name].levels
+            },
+        }
+
+    async def application_body(org: str, app_id: str) -> dict[str, object]:
+        view = await settings.view(Scope.APPLICATION, app_id)
+        found = await store.current(Scope.ORGANIZATION, org)
+        organization_document = parse_row(found, Scope.ORGANIZATION) if found is not None else {}
+        stored = await accounts.service.organizations.get_application(app_id)
+        assert stored is not None
+        assert view.effective is not None
+        return {
+            "application_id": app_id,
+            "organization_id": org,
+            "version": view.row.version if view.row is not None else 0,
+            "settings": {k: _json_value(v) for k, v in view.document.items()},
+            "effective": _effective_view(
+                platform, stored, organization_document, view.document, view.effective
+            ),
+            "ignored_aliases": list(view.effective.ignored_aliases),
+        }
+
+    def change_body(change: SettingsChange) -> dict[str, object]:
+        return {
+            "version": change.version,
+            "changed": list(change.changed),
+            "settings": {k: _json_value(v) for k, v in change.document.items()},
+        }
+
+    def validation_body(result: SettingsValidation) -> dict[str, object]:
+        body: dict[str, object] = {
+            "valid": result.valid,
+            "code": result.code,
+            "message": result.message,
+            "invalid_setting": result.invalid_setting,
+            "refusals": [{"setting": r.setting, "level": r.level.value} for r in result.refusals],
+            "changed": list(result.changed),
+            "settings": {k: _json_value(v) for k, v in result.document.items()},
+            # Step-up is asked only of a change that loosens S13 to S16 (PR S3): none here.
+            "step_up_required": False,
+        }
+        if result.effective is not None:
+            body["effective"] = {
+                name: _json_value(found.value) for name, found in result.effective.explain.items()
+            }
+        return body
+
+    async def versions_body(scope: Scope, scope_id: str, limit: int, after: int | None) -> (
+        dict[str, object]
+    ):  # fmt: skip
+        page = await settings.versions(scope, scope_id, limit=limit, before=after)
+        return {
+            "versions": [_version_view(v) for v in page],
+            # The next page starts after the last version shown, while one was full.
+            "next_after": page[-1].version if len(page) == limit else None,
+        }
+
+    async def version_body(scope: Scope, scope_id: str, n: str) -> dict[str, object]:
+        found = await store.version(scope, scope_id, int(n))
+        assert found is not None  # the resolver found it
+        return {
+            **_version_view(found),
+            "settings": json.loads(found.document),
+            "previous_settings": json.loads(found.previous_document)
+            if found.previous_document is not None
+            else None,
+        }
+
+    # --- the organization's -------------------------------------------------------------------
+
+    @app.get(ORG_PREFIX + "/settings")
+    async def get_organization_settings(
+        org: str, auth: Authorized = reading_organization
+    ) -> JSONResponse:
+        return JSONResponse(await organization_body(org))
+
+    @app.put(ORG_PREFIX + "/settings")
+    async def put_organization_settings(
+        org: str, body: SettingsChangeBody, auth: Authorized = writing_organization
+    ) -> JSONResponse:
+        change = await settings.set(
+            Scope.ORGANIZATION,
+            org,
+            expected_version=body.expected_version,
+            values=body.values,
+            unset=body.unset,
+            actor_user_id=auth.actor.user_id,
+            via="http",
+        )
+        return JSONResponse(change_body(change))
+
+    @app.post(ORG_PREFIX + "/settings/validate")
+    async def validate_organization_settings(
+        org: str, body: SettingsChangeBody, auth: Authorized = writing_organization
+    ) -> JSONResponse:
+        result = await settings.validate(
+            Scope.ORGANIZATION,
+            org,
+            expected_version=body.expected_version,
+            values=body.values,
+            unset=body.unset,
+        )
+        return JSONResponse(validation_body(result))
+
+    @app.post(ORG_PREFIX + "/settings/revert")
+    async def revert_organization_settings(
+        org: str, body: SettingsRevertBody, auth: Authorized = writing_organization
+    ) -> JSONResponse:
+        change = await settings.revert(
+            Scope.ORGANIZATION,
+            org,
+            expected_version=body.expected_version,
+            actor_user_id=auth.actor.user_id,
+        )
+        return JSONResponse(change_body(change))
+
+    @app.get(ORG_PREFIX + "/settings/versions")
+    async def list_organization_settings_versions(
+        org: str,
+        limit: int = Query(default=50, ge=1, le=100),
+        after: int | None = Query(default=None, ge=1),
+        auth: Authorized = reading_organization,
+    ) -> JSONResponse:
+        return JSONResponse(await versions_body(Scope.ORGANIZATION, org, limit, after))
+
+    @app.get(ORG_PREFIX + "/settings/versions/{n}")
+    async def get_organization_settings_version(
+        org: str, n: str, auth: Authorized = reading_organization_version
+    ) -> JSONResponse:
+        return JSONResponse(await version_body(Scope.ORGANIZATION, org, n))
+
+    # --- an application's ---------------------------------------------------------------------
+
+    @app.get(ORG_PREFIX + "/applications/{app}/settings")
+    async def get_application_settings(
+        org: str, app_id: str = Path_(alias="app"), auth: Authorized = reading_application
+    ) -> JSONResponse:
+        return JSONResponse(await application_body(org, app_id))
+
+    @app.put(ORG_PREFIX + "/applications/{app}/settings")
+    async def put_application_settings(
+        org: str,
+        body: SettingsChangeBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = writing_application,
+    ) -> JSONResponse:
+        change = await settings.set(
+            Scope.APPLICATION,
+            app_id,
+            expected_version=body.expected_version,
+            values=body.values,
+            unset=body.unset,
+            actor_user_id=auth.actor.user_id,
+            via="http",
+        )
+        return JSONResponse(change_body(change))
+
+    @app.post(ORG_PREFIX + "/applications/{app}/settings/validate")
+    async def validate_application_settings(
+        org: str,
+        body: SettingsChangeBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = writing_application,
+    ) -> JSONResponse:
+        result = await settings.validate(
+            Scope.APPLICATION,
+            app_id,
+            expected_version=body.expected_version,
+            values=body.values,
+            unset=body.unset,
+        )
+        return JSONResponse(validation_body(result))
+
+    @app.post(ORG_PREFIX + "/applications/{app}/settings/revert")
+    async def revert_application_settings(
+        org: str,
+        body: SettingsRevertBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = writing_application,
+    ) -> JSONResponse:
+        change = await settings.revert(
+            Scope.APPLICATION,
+            app_id,
+            expected_version=body.expected_version,
+            actor_user_id=auth.actor.user_id,
+        )
+        return JSONResponse(change_body(change))
+
+    @app.get(ORG_PREFIX + "/applications/{app}/settings/versions")
+    async def list_application_settings_versions(
+        org: str,
+        app_id: str = Path_(alias="app"),
+        limit: int = Query(default=50, ge=1, le=100),
+        after: int | None = Query(default=None, ge=1),
+        auth: Authorized = reading_application,
+    ) -> JSONResponse:
+        return JSONResponse(await versions_body(Scope.APPLICATION, app_id, limit, after))
+
+    @app.get(ORG_PREFIX + "/applications/{app}/settings/versions/{n}")
+    async def get_application_settings_version(
+        org: str,
+        n: str,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = reading_application_version,
+    ) -> JSONResponse:
+        return JSONResponse(await version_body(Scope.APPLICATION, app_id, n))
+
+
 def _provider_routes(
     app: FastAPI,
     accounts: AccountAccess,
@@ -1872,6 +2199,10 @@ def create_app(
         else None
     )
 
+    # This instance's values at the top of the settings' levels (docs/39): the chat service is
+    # built on the same defaults.
+    settings_platform = platform_settings(registry, timeout_ms)
+
     # Where load control reads an application's settings (docs/39): the given store, or the
     # in-memory application store's own. The request path reads them with the key instead.
     settings_store = settings
@@ -1976,6 +2307,7 @@ def create_app(
             await durable.aclose()
 
     app = FastAPI(title="Cost-aware multi-model inference gateway", lifespan=lifespan)
+    app.state.settings_platform = settings_platform
     if local_only is not None:
         app.add_middleware(LocalOnlyMiddleware, policy=local_only)
     if accounts is not None:
@@ -2007,6 +2339,19 @@ def create_app(
                         epoch if epoch is not None else ClockEpoch(clock),
                     ),
                 )
+        if management is not None and applications is not None and settings_store is not None:
+            _settings_routes(
+                app,
+                accounts,
+                SettingsService(
+                    settings_store,
+                    applications.store,
+                    accounts.service.audit,
+                    epoch if epoch is not None else ClockEpoch(clock),
+                    settings_platform,
+                ),
+                settings_store,
+            )
         # Outermost, so even the local-only guard's refusals of /v1/admin are not cached.
         app.add_middleware(NoStoreMiddleware)
     app.state.slo_monitor = monitor
@@ -2469,8 +2814,8 @@ def create_app(
         keys = applications.keys
 
         chat = ChatService(registry, clock, chat_adapters)
-        platform = platform_settings(registry, timeout_ms, chat)
-        app.state.settings_platform = platform
+        platform = settings_platform
+        assert platform == platform_settings(registry, timeout_ms, chat)
         documents = DocumentCache()
 
         def keyed(application: Application) -> Keyed:

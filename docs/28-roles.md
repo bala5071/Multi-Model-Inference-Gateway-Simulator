@@ -89,6 +89,9 @@ planned in A2).
 | `provider_keys.set` | organization | `org_admin@own_organization` | consume | A5 |
 | `provider_keys.delete` | organization | `org_admin@own_organization` | consume | A5 |
 | `mode.set_organization` | organization | `org_admin@own_organization` | consume | A5 |
+| `org_settings.read` | organization | `org_admin@own_organization`, `viewer@own_organization` | | settings S2 |
+| `org_settings.write` | organization | `org_admin@own_organization` | | settings S2 |
+| `org_settings.loosen_egress` | organization | `org_admin@own_organization` | consume | settings S3 |
 | `audit.read_organization` | organization | `org_admin@own_organization`, `platform_admin@platform` | | later |
 | `applications.read` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@application_in_own_organization`, `viewer@own_application` | | step 7 |
 | `usage.read_application` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@application_in_own_organization`, `viewer@own_application` | | later |
@@ -101,6 +104,9 @@ planned in A2).
 | `application_roles.list` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | | later |
 | `audit.read_application` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | | later |
 | `mode.set_application` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | consume | A5 |
+| `settings.read` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@application_in_own_organization`, `viewer@own_application` | | settings S2 |
+| `settings.write` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | | settings S2 |
+| `settings.loosen_egress` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | consume | settings S3 |
 | `monitoring.read` | platform | `platform_admin@platform` | | A8 |
 | `control.write` | platform | `platform_admin@platform` | | A8 |
 | `playground.use` | platform | `platform_admin@platform` | | A8 |

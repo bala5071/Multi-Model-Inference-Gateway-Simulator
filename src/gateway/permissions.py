@@ -72,6 +72,8 @@ class Wired(StrEnum):
     STEP_7 = "step 7"  # the management endpoints
     A5 = "A5"  # provider keys and modes
     A8 = "A8"  # monitoring and control: local only until then
+    SETTINGS_S2 = "settings S2"  # the settings endpoints (docs/40)
+    SETTINGS_S3 = "settings S3"  # declared; reached once the hosted settings exist
     LATER = "later"  # declared; no endpoint is planned in A2
 
 
@@ -155,6 +157,12 @@ def _rows() -> list[Permission]:
         ("provider_keys.set", o, (_ORG_ADMIN,), CONSUME, w.A5),
         ("provider_keys.delete", o, (_ORG_ADMIN,), CONSUME, w.A5),
         ("mode.set_organization", o, (_ORG_ADMIN,), CONSUME, w.A5),
+        # An organization's settings: caps for all its applications (docs/40). A write needs
+        # step-up only when it loosens where prompts go (S13 to S16, PR S3): then it is the
+        # loosen_egress action, which nothing in S1 to S11 reaches.
+        ("org_settings.read", o, (_ORG_ADMIN, "viewer@own_organization"), False, w.SETTINGS_S2),
+        ("org_settings.write", o, (_ORG_ADMIN,), False, w.SETTINGS_S2),
+        ("org_settings.loosen_egress", o, (_ORG_ADMIN,), CONSUME, w.SETTINGS_S3),
         # The audit log: organization-, user-, role- and login-level entries.
         ("audit.read_organization", o, (_PLATFORM, _ORG_ADMIN), False, w.LATER),
         # Inside an application: never platform_admin.
@@ -183,6 +191,16 @@ def _rows() -> list[Permission]:
         ("audit.read_application", a, in_app, False, w.LATER),
         # Modes (A5 step 3): an application may be stricter than its organization.
         ("mode.set_application", a, in_app, CONSUME, w.A5),
+        # An application's settings, within its caps (docs/40); loosen_egress as above.
+        (
+            "settings.read",
+            a,
+            (*in_app, "viewer@own_application", "viewer@application_in_own_organization"),
+            False,
+            w.SETTINGS_S2,
+        ),
+        ("settings.write", a, in_app, False, w.SETTINGS_S2),
+        ("settings.loosen_egress", a, in_app, CONSUME, w.SETTINGS_S3),
         # Monitoring, control and the Playground: local only until A8.
         ("monitoring.read", p, (_PLATFORM,), False, w.A8),
         ("control.write", p, (_PLATFORM,), False, w.A8),

@@ -213,6 +213,9 @@ for use when the console cannot be reached (the Valkey outage runbook of note 35
 
 ### 4. Presets
 
+**Built in PR S3**, with the hosted settings they set (decided 2026-11-01, when
+S2 started: most of their values are S13 to S16).
+
 Named bundles applied as one versioned change (`via: preset:<name>`), checked like any write:
 a preset value outside a cap in force is refused, never silently clamped. A preset sets only
 the fields it names; every other field keeps its value. Whether it needs step-up is decided
@@ -826,7 +829,7 @@ application, as today.
 | Action | Level | Allowed | Step-up |
 |---|---|---|---|
 | `settings.read` | application | org_admin, app_admin, viewer (own application, or application in own organization) | no |
-| `settings.write` (set, revert, preset, when the change loosens nothing of S13 to S16) | application | org_admin, app_admin | no |
+| `settings.write` (set, revert, and from PR S3 preset, when the change loosens nothing of S13 to S16) | application | org_admin, app_admin | no |
 | `settings.loosen_egress` (the same writes, when the change loosens S13, S14, S15 or S16) | application | org_admin, app_admin | consume |
 | `org_settings.read` | organization | org_admin, viewer of the organization | no |
 | `org_settings.write` (set, revert, when no application's effective S13 to S16 becomes looser) | organization | org_admin | no |
@@ -887,8 +890,8 @@ as `invalid_request` with the same body as a channel id that does not exist.
 ### 13. Audit
 
 Through `AuditEvent`'s allowlist, new actions: `settings_changed`, `settings_reverted`,
-`settings_preset_applied` (scope, version, the names of the fields changed; the values are in the
-version table, not the audit row), `alert_rule_created`, `alert_rule_changed`,
+`settings_preset_applied` (PR S3; scope, version, the names of the fields changed; the values
+are in the version table, not the audit row), `alert_rule_created`, `alert_rule_changed`,
 `alert_rule_enabled`, `alert_rule_disabled`, `alert_rule_deleted`, `alert_rules_restored`,
 `alert_channel_created`, `alert_channel_changed`, `alert_channel_deleted`,
 `alert_channel_key_rotated`, `alert_channel_disabled`, `alert_channel_tested` (the outcome
@@ -995,12 +998,12 @@ has one.
 | `POST /settings/revert` (`expected_version`) | `org_settings.write`, or `org_settings.loosen_egress` | consume, only if it loosens | 200 |
 | `GET /settings/versions` | `org_settings.read` | | 200 |
 | `GET /settings/versions/{n}` | `org_settings.read` | | 200 |
-| `GET /settings/presets` | `org_settings.read` | | 200 |
+| `GET /settings/presets` (PR S3) | `org_settings.read` | | 200 |
 | `GET /applications/{app}/settings` (the effective view) | `settings.read` | | 200 |
 | `PUT /applications/{app}/settings` (`expected_version`, `set`, `unset`) | `settings.write`, or `settings.loosen_egress` | consume, only if it loosens | 200 |
 | `POST /applications/{app}/settings/validate` | `settings.write` | | 200 |
 | `POST /applications/{app}/settings/revert` (`expected_version`) | `settings.write`, or `settings.loosen_egress` | consume, only if it loosens | 200 |
-| `POST /applications/{app}/settings/presets/{name}` (`expected_version`) | `settings.write`, or `settings.loosen_egress` | consume, only if it loosens | 200 |
+| `POST /applications/{app}/settings/presets/{name}` (`expected_version`; PR S3) | `settings.write`, or `settings.loosen_egress` | consume, only if it loosens | 200 |
 | `GET /applications/{app}/settings/versions` | `settings.read` | | 200 |
 | `GET /applications/{app}/settings/versions/{n}` | `settings.read` | | 200 |
 | `GET /applications/{app}/alert-rules` | `alert_rules.read` | | 200 |
@@ -1258,8 +1261,8 @@ must be merged before S3.
 |---|---|---|---|
 | S0 | `settings-alerts/plan` | This plan | None |
 | S1 | `settings-alerts/s1` | Migration 14 and Postgres schema 3 (settings tables); `SettingsStore` on memory, SQLite and Postgres; `effective_settings`; the join into `lookup_key` on every request path, `/v1/generate` included; `settings_from_rows` (a missing row the defaults, unreadable or invalid a 503, with its table of tests); settings S1 to S11 applied on the request path; S8 applied and enforced as the request's limit, with `X-Max-Tokens-Applied` and its documentation; the CLI; the key lookup and `request_store_calls` measured before and after; tests; note 39 | The `X-Max-Tokens-Applied` header on every answer; otherwise none until a setting is set: defaults are today's values |
-| S2 | `settings-alerts/s2` | The settings endpoints (application and organization), the permission rows (with `*.loosen_egress` declared; no setting of S1 to S11 reaches it, so no write needs step-up yet), versions, revert, validate, presets, audit, the cross-organization tests | New endpoints |
-| S3 | `settings-alerts/s3` | S12 shown, S13 to S16 added; `loosens_egress` and step-up on loosening (M10 to M12, M38); `hosted_policy` (one statement for both modes and both settings rows); the in-flight rule for each; measured before and after | One store call fewer per hosted attempt; the in-flight rule for the new settings; loosening S13 to S16 asks for the password |
+| S2 | `settings-alerts/s2` | The settings endpoints (application and organization), the permission rows (with `*.loosen_egress` declared; no setting of S1 to S11 reaches it, so no write needs step-up yet), versions, revert, validate, audit, the cross-organization tests | New endpoints |
+| S3 | `settings-alerts/s3` | S12 shown, S13 to S16 added; `loosens_egress` and step-up on loosening (M10 to M12, M38); the presets of section 4: `GET .../settings/presets`, `POST .../applications/{app}/settings/presets/{name}`, the `settings_preset_applied` audit entry and `via: preset:<name>`, and step-up decided from what a preset changes; `hosted_policy` (one statement for both modes and both settings rows); the in-flight rule for each; measured before and after | One store call fewer per hosted attempt; the in-flight rule for the new settings; loosening S13 to S16 asks for the password |
 | A1 | `settings-alerts/a1` | `AlertRecorder`, `AlertRollups` (memory, Valkey), the histogram, the signals and their minimums; no rules; the recorder measured | None (nothing reads it but tests) |
 | A2 | `settings-alerts/a2` | Rules: tables, endpoints, permissions, defaults (with the data step for existing applications), validate with the last-hour preview | New endpoints; nothing fires yet |
 | A3 | `settings-alerts/a3` | The evaluator: the lease and its epoch, the heartbeat in `/healthz`, metrics, the snapshot and events (section 11.6), the states, incidents, dedupe, cooldown, quiet hours, acknowledge, the incident endpoints; no channels (the incident list only) | Incidents appear; `/healthz` gains `alert_evaluator` |
@@ -1270,6 +1273,12 @@ must be merged before S3.
 | C2 | `settings-alerts/c2` | Console: alert rules, channels, incidents | Frontend |
 
 S1 to S3 and A1 can go in either order after S0; A2 needs S2's permission work; A4 needs A3.
+
+**S2, as agreed when it started (2026-11-01).** The row above, with the presets moved to S3:
+their values are mostly S13 to S16, which S3 adds. The mutations S2 makes are M6, M13 (one per
+settings resolver), M14, and one for each new permission row: viewers refused writes, an
+app_admin refused another application of its organization, `org_settings.write` for
+org_admin only.
 
 **S1, as agreed when it started (2026-10-31).** Exactly the row above. `hosted_policy` and
 the in-flight rule stay in S3, after scale-out PR 2b. The mutations S1 makes are M1 to M5,

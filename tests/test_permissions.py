@@ -128,6 +128,9 @@ def test_a_viewer_never_changes_anything(name: str) -> None:
         "applications.read",
         "usage.read_organization",
         "usage.read_application",
+        # Settings are read by viewers too (docs/40); writing them is not theirs.
+        "org_settings.read",
+        "settings.read",
     }
 
 
@@ -445,10 +448,10 @@ def test_every_route_of_every_app_declares_itself() -> None:
     # The explicit lists match real routes, so they cannot go stale.
     assert seen_lists >= DOCUMENTATION
     # With accounts, the user endpoints; with applications too, all thirteen (docs/30); the
-    # default server also has the provider endpoints (docs/32), on 7 more paths, and the two
-    # mode endpoints (docs/33).
+    # default server also has the provider endpoints (docs/32), on 7 more paths, the two mode
+    # endpoints (docs/33), and the settings endpoints (docs/40) on 10 more paths.
     assert len({p for v, p in requires_routes if v == "accounts"}) == 5
-    assert len({p for v, p in requires_routes if v == "default server"}) == 19
+    assert len({p for v, p in requires_routes if v == "default server"}) == 29
 
 
 def test_a_route_without_a_declaration_is_found() -> None:
