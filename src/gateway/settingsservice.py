@@ -26,9 +26,11 @@ from gateway.settings import (
     PlatformSettings,
     Refusal,
     Scope,
+    SettingsInvalidError,
     SettingsRow,
     SettingsStore,
     SettingsUnreadableError,
+    SettingsVersion,
     SettingsVersionConflictError,
     canonical,
     changed_fields,
@@ -47,6 +49,31 @@ class SettingsChange:
     version: int
     changed: tuple[str, ...]
     document: Document
+
+
+@dataclass(frozen=True, slots=True)
+class _Prepared:
+    row: SettingsRow | None
+    current: int
+    document: Document
+    changed: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsValidation:
+    """What a write would do, from ``validate``: whether it would be stored; the refusal's
+    code if not (``setting_looser_than_cap``, ``settings_version_conflict``, or None with
+    ``invalid_setting`` for a document that is not valid); the fields it would change and the
+    document it would store; for an application, the effective values it would have."""
+
+    valid: bool
+    code: str | None
+    changed: tuple[str, ...]
+    document: Document
+    effective: EffectiveSettings | None
+    refusals: tuple[Refusal, ...]
+    invalid_setting: str | None
+    message: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,10 +114,10 @@ class SettingsService:
         row = await self.store.current(scope, scope_id)
         return row, (parse_row(row, scope) if row is not None else {})
 
-    async def _check(
+    async def _refusals(
         self, scope: Scope, scope_id: str, document: Document, changed: Sequence[str]
-    ) -> None:
-        """Refuse ``document`` if a setting it changes is looser than a cap in force, read now.
+    ) -> list[Refusal]:
+        """The settings ``document`` changes that are looser than a cap in force, read now.
         A value it does not change was checked when it was written, and a cap tightened since
         clamps it when it is read: it does not block an unrelated change."""
         if scope is Scope.ORGANIZATION:
@@ -105,7 +132,12 @@ class SettingsService:
             found = refusals(
                 self.platform, scope, document, application=application, organization=organization
             )
-        found = [r for r in found if r.setting in changed]
+        return [r for r in found if r.setting in changed]
+
+    async def _check(
+        self, scope: Scope, scope_id: str, document: Document, changed: Sequence[str]
+    ) -> None:
+        found = await self._refusals(scope, scope_id, document, changed)
         if found:
             raise _refused(found)
 
@@ -119,6 +151,87 @@ class SettingsService:
             _, organization = await self._document(Scope.ORGANIZATION, application.organization_id)
             effective = effective_settings(self.platform, application, organization, document)
         return SettingsView(row, document, effective)
+
+    async def _prepare(
+        self,
+        scope: Scope,
+        scope_id: str,
+        expected_version: int,
+        values: Mapping[str, object] | None,
+        unset: Sequence[str],
+        replace: bool,
+    ) -> _Prepared:
+        """What a write would store, up to the point of storing it: the new document,
+        validated, made from the version expected, and the fields it changes. The one path for
+        ``set`` and ``validate``."""
+        if replace:
+            row = await self.store.current(scope, scope_id)
+            before: Document = {}
+            if row is not None:
+                try:
+                    before = parse_row(row, scope)
+                except SettingsUnreadableError:  # every field is reported as changed
+                    before = {}
+        else:
+            row, before = await self._document(scope, scope_id)
+        document = {} if replace else dict(before)
+        document.update(values or {})
+        for name in unset:
+            document.pop(name, None)
+        document = validate_document(scope, document)
+        current = row.version if row is not None else 0
+        if current != expected_version:
+            raise ManagementRefusal(
+                Reason.SETTINGS_VERSION_CONFLICT,
+                f"the settings are at version {current}, not {expected_version}: read them "
+                "again and make the change from there",
+            )
+        return _Prepared(row, current, document, changed_fields(before, document))
+
+    async def validate(
+        self,
+        scope: Scope,
+        scope_id: str,
+        *,
+        expected_version: int,
+        values: Mapping[str, object] | None = None,
+        unset: Sequence[str] = (),
+    ) -> SettingsValidation:
+        """A dry run of ``set``: every check it makes, on the same code, and what it would
+        store and change, with every refusal. Writes nothing and takes no write lock."""
+        scope = Scope(scope)
+        try:
+            prepared = await self._prepare(scope, scope_id, expected_version, values, unset, False)
+        except SettingsInvalidError as exc:
+            return SettingsValidation(False, None, (), {}, None, (), exc.setting, str(exc))
+        except ManagementRefusal as exc:
+            return SettingsValidation(False, exc.reason.value, (), {}, None, (), None, str(exc))
+        found = await self._refusals(scope, scope_id, prepared.document, prepared.changed)
+        effective = None
+        if scope is Scope.APPLICATION:
+            application = await self._applications.get_application(scope_id)
+            if application is None:
+                raise KeyError(f"no application {scope_id!r}")
+            _, organization = await self._document(Scope.ORGANIZATION, application.organization_id)
+            effective = effective_settings(
+                self.platform, application, organization, prepared.document
+            )
+        return SettingsValidation(
+            not found,
+            Reason.SETTING_LOOSER_THAN_CAP.value if found else None,
+            prepared.changed,
+            prepared.document,
+            effective,
+            tuple(found),
+            None,
+            str(_refused(found)) if found else None,
+        )
+
+    async def versions(
+        self, scope: Scope, scope_id: str, *, limit: int, before: int | None = None
+    ) -> list[SettingsVersion]:
+        """A page of versions, newest first, older than ``before`` when given."""
+        return await self.store.versions(Scope(scope), scope_id, limit, before=before)
 
     async def set(
         self,
@@ -139,30 +252,11 @@ class SettingsService:
         made from another version (``settings_version_conflict``)."""
         scope = Scope(scope)
         async with self.store.write_transaction():
-            if replace:
-                row = await self.store.current(scope, scope_id)
-                before: Document = {}
-                if row is not None:
-                    try:
-                        before = parse_row(row, scope)
-                    except SettingsUnreadableError:  # every field is reported as changed
-                        before = {}
-            else:
-                row, before = await self._document(scope, scope_id)
-            document = {} if replace else dict(before)
-            document.update(values or {})
-            for name in unset:
-                document.pop(name, None)
-            document = validate_document(scope, document)
-            current = row.version if row is not None else 0
-            if current != expected_version:
-                raise ManagementRefusal(
-                    Reason.SETTINGS_VERSION_CONFLICT,
-                    f"the settings are at version {current}, not {expected_version}: read them "
-                    "again and make the change from there",
-                )
-            changed = changed_fields(before, document)
-            if not changed and not (replace and row is not None):
+            prepared = await self._prepare(
+                scope, scope_id, expected_version, values, unset, replace
+            )
+            current, document, changed = prepared.current, prepared.document, prepared.changed
+            if not changed and not (replace and prepared.row is not None):
                 return SettingsChange(scope, scope_id, current, (), document)
             await self._check(scope, scope_id, document, changed)
             version = await self._write(scope, scope_id, current, document, changed,

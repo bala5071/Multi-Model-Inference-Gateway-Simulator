@@ -160,7 +160,8 @@ async def _window(accounts: Accounts, session: tuple[str, str]) -> float | None:
 
 
 async def test_every_flagged_action_needs_step_up_and_passes_with_it(accounts: Accounts) -> None:
-    assert len(FLAGGED) == 24
+    # 24 before the settings plan, and its two loosen_egress rows (docs/40), declared for S3.
+    assert len(FLAGGED) == 26
     async with console(accounts) as c:
         for action in FLAGGED:
             session = await c.login(_who(action))
@@ -490,6 +491,9 @@ def test_the_table_has_a_consume_column_and_it_always_means_step_up() -> None:
         # Mode changes too, with the A5 step 3 request (docs/33).
         "mode.set_organization",
         "mode.set_application",
+        # Loosening where prompts go (docs/40): declared in S2, reached from S3.
+        "settings.loosen_egress",
+        "org_settings.loosen_egress",
     }
     assert all(PERMISSIONS[a].step_up for a in consumed)
 

@@ -88,7 +88,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `DocumentCache`, and `SettingsStore` on memory and SQLite (migration 14); the rows are read
   with the key in `lookup_key`'s own statement (docs/39) (exists)
 - `settingsservice.py` — `SettingsService`: set, unset, revert, each a version checked against
-  the caps in force in one `write_transaction()`, audited by field name; the CLI's (exists)
+  the caps in force in one `write_transaction()`, audited by field name, and `validate`, the
+  same code up to the point of writing; the CLI's and the settings endpoints' (exists)
 - `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
   warning, on the injected clock, `circuit_breaker` events (exists)
 - `passthrough.py` — `PassthroughWorker`: forwards to a backend that does its own
@@ -233,7 +234,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `GATEWAY_STATE=shared` (Postgres and Valkey, opened in the lifespan, no process lock,
   docs/37); JSON or server-sent-event
   responses; serves the built dashboard at `/dashboard`; with accounts, the management
-  endpoints under `/v1/admin/orgs/{org}` (docs/30) and the provider endpoints (docs/32), each
+  endpoints under `/v1/admin/orgs/{org}` (docs/30), the settings endpoints (docs/40) and the
+  provider endpoints (docs/32), each
   through `requires` (which claims the step-up window for consume-on-use actions), every answer
   `Cache-Control: no-store` (exists)
 

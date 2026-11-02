@@ -1477,12 +1477,16 @@ class PostgresSettingsStore(_Store):
         )
         return settings_row(tuple(row.values())) if row is not None else None
 
-    async def versions(self, scope: Scope, scope_id: str, limit: int) -> list[SettingsVersion]:
+    async def versions(
+        self, scope: Scope, scope_id: str, limit: int, *, before: int | None = None
+    ) -> list[SettingsVersion]:
         rows = await self._fetch(
             f"SELECT {_SETTINGS_VERSION} FROM settings_versions"
-            " WHERE scope_type = $1 AND scope_id = $2 ORDER BY version DESC LIMIT $3",
+            " WHERE scope_type = $1 AND scope_id = $2 AND version < $3"
+            " ORDER BY version DESC LIMIT $4",
             Scope(scope).value,
             scope_id,
+            before if before is not None else 2**31 - 1,
             limit,
         )
         return [settings_version(tuple(r.values())) for r in rows]
