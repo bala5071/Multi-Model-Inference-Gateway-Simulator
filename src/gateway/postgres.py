@@ -34,6 +34,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import asyncpg
 
+from gateway.alertrules import COLUMNS as RULE_COLUMNS
+from gateway.alertrules import AlertRule, RuleVersionConflictError, rule_from_row, rule_row
 from gateway.applications import (
     _APP_COLUMNS,
     _KEY_COLUMNS,
@@ -52,7 +54,13 @@ from gateway.audit import AuditEntry, AuditEvent, Reason, _entry
 from gateway.clock import Clock
 from gateway.ledger import ApplicationUsage, BudgetExceededError, Expired, Reservation
 from gateway.management import ManagementRefusal
-from gateway.modes import DEFAULT_MODE, Mode
+from gateway.modes import (
+    DEFAULT_MODE,
+    HOSTED_POLICY_POSTGRES,
+    HostedPolicy,
+    Mode,
+    hosted_policy_from,
+)
 from gateway.organizations import Organization, normalize_name
 from gateway.periods import BudgetPeriods, CalendarMonthsUTC
 from gateway.permissions import Assignment, Role, ScopeType
@@ -113,7 +121,7 @@ LOCK_POLL_MS = 20.0
 # The advisory lock keys: management writes, and applying the schema. Fixed, distinct.
 WRITE_LOCK = 0x6777_5752_4954_4531  # "gwWRITE1"
 SCHEMA_LOCK = 0x6777_5343_4845_4D31  # "gwSCHEM1"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # How long a settled reservation's id is kept, so that a settle tried again is not charged twice
 # (docs/37).
 SETTLED_KEEP_MS = 24 * 60 * 60 * 1000.0
@@ -301,11 +309,73 @@ CREATE TABLE settings_versions (
   PRIMARY KEY (scope_type, scope_id, version));
 """
 
+
+def _literal(value: object) -> str:
+    """One of the default rules' own values as SQL: never anything a client sent."""
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return repr(value)
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _alert_rules_schema() -> str:
+    """Version 4 (docs/44): the table of SQLite migration 15, and its data step: the default
+    rules of every application there already is, with the ids ``default_rule_id`` gives."""
+    from gateway.alertrules import DEFAULT_RULES
+
+    defaults = []
+    for key, spec in DEFAULT_RULES.items():
+        row = rule_row(AlertRule("rul_0000000000000000", "-", spec, 1, key, 0.0, 0.0))
+        defaults.append("(" + ", ".join(_literal(v) for v in (key, *row[2:15])) + ")")
+    return f"""
+CREATE TABLE alert_rules (
+  id text PRIMARY KEY,
+  application_id text NOT NULL,
+  name text NOT NULL,
+  signal text NOT NULL,
+  parameter text,
+  comparison text NOT NULL CHECK (comparison IN ('>', '>=', '<', '<=')),
+  threshold double precision NOT NULL,
+  window_minutes integer,
+  for_minutes integer NOT NULL,
+  severity text NOT NULL CHECK (severity IN ('info', 'warning', 'critical')),
+  channels text NOT NULL,
+  cooldown_minutes integer NOT NULL,
+  repeat_every_minutes integer,
+  quiet_hours text,
+  enabled integer NOT NULL CHECK (enabled IN (0, 1)),
+  version integer NOT NULL CHECK (version >= 1),
+  default_key text,
+  created_at_ms double precision NOT NULL,
+  updated_at_ms double precision NOT NULL);
+CREATE INDEX alert_rules_by_application ON alert_rules (application_id, id);
+
+INSERT INTO alert_rules
+SELECT 'rul_' || substr(encode(sha256(convert_to(a.id || ':' || d.key, 'UTF8')), 'hex'), 1, 16),
+  a.id, d.name, d.signal, d.parameter::text, d.comparison, d.threshold::double precision,
+  d.window_minutes::integer, d.for_minutes::integer, d.severity, d.channels,
+  d.cooldown_minutes::integer, d.repeat_every_minutes::integer, d.quiet_hours::text,
+  d.enabled::integer, 1, d.key, a.created_at_ms, a.created_at_ms
+FROM applications a CROSS JOIN (VALUES
+  {("," + chr(10) + "  ").join(defaults)}
+) AS d(key, name, signal, parameter, comparison, threshold, window_minutes, for_minutes,
+  severity, channels, cooldown_minutes, repeat_every_minutes, quiet_hours, enabled);
+"""
+
+
+PG_ALERT_RULES = _alert_rules_schema()
+
 # Each version and what it adds, applied in order to a database that has an earlier one.
-SCHEMA = ((1, PG_BASELINE), (2, PG_BUDGETS), (3, PG_SETTINGS))
+SCHEMA = ((1, PG_BASELINE), (2, PG_BUDGETS), (3, PG_SETTINGS), (4, PG_ALERT_RULES))
 # What takes a version back out, for the versions that can be (``rollback_schema``). Versions 1
 # and 2 have none: ``migrate-to-sqlite`` is their way back.
-SCHEMA_DOWN = {3: "DROP TABLE settings_versions; DROP TABLE settings_current;"}
+SCHEMA_DOWN = {
+    3: "DROP TABLE settings_versions; DROP TABLE settings_current;",
+    4: "DROP TABLE alert_rules;",
+}
 
 # The tables of PG_BUDGETS: Postgres only, never copied to or from SQLite.
 BUDGET_TABLES = ("budget_counters", "budget_reservations", "budget_settlements")
@@ -326,6 +396,7 @@ TABLES = (
     "modes",
     "settings_current",
     "settings_versions",
+    "alert_rules",
 )
 
 
@@ -1459,6 +1530,11 @@ class PostgresModeStore(_Store):
     async def application_mode(self, application_id: str) -> Mode:
         return await self._get("application", application_id)
 
+    async def hosted_policy(self, organization_id: str, application_id: str) -> HostedPolicy:
+        row = await self._row(HOSTED_POLICY_POSTGRES, organization_id, application_id)
+        assert row is not None
+        return hosted_policy_from(row.values(), organization_id, application_id)
+
     async def set_organization_mode(self, organization_id: str, mode: Mode, at_ms: float) -> None:
         await self._set("organization", organization_id, mode, at_ms)
 
@@ -1857,6 +1933,88 @@ class PostgresBudgets:
             )
 
 
+class PostgresRuleStore(_Store):
+    """Alert rules in the table of schema version 4 (docs/44)."""
+
+    async def list_rules(
+        self, application_id: str, limit: int, after: str | None = None
+    ) -> list[AlertRule]:
+        rows = await self._fetch(
+            f"SELECT {RULE_COLUMNS} FROM alert_rules WHERE application_id = $1 AND id > $2"
+            " ORDER BY id LIMIT $3",
+            application_id,
+            after or "",
+            limit,
+        )
+        return [rule_from_row(tuple(r.values())) for r in rows]
+
+    async def get_rule(self, application_id: str, rule_id: str) -> AlertRule | None:
+        row = await self._row(
+            f"SELECT {RULE_COLUMNS} FROM alert_rules WHERE application_id = $1 AND id = $2",
+            application_id,
+            rule_id,
+        )
+        return rule_from_row(tuple(row.values())) if row is not None else None
+
+    async def count_rules(self, application_id: str) -> int:
+        return int(
+            await self._value(
+                "SELECT count(*) FROM alert_rules WHERE application_id = $1", application_id
+            )
+        )
+
+    async def insert_rule(self, rule: AlertRule) -> None:
+        try:
+            await self._execute(
+                f"INSERT INTO alert_rules ({RULE_COLUMNS}) VALUES ({_placeholders(19)})",
+                *rule_row(rule),
+            )
+        except asyncpg.UniqueViolationError:
+            raise RuleVersionConflictError(None) from None
+
+    async def put_rule(self, rule: AlertRule, expected_version: int | None) -> None:
+        row = rule_row(rule)
+        if expected_version is None:
+            await self._execute(
+                f"INSERT INTO alert_rules ({RULE_COLUMNS}) VALUES ({_placeholders(19)})"
+                " ON CONFLICT (id) DO UPDATE SET name = excluded.name, signal = excluded.signal,"
+                " parameter = excluded.parameter, comparison = excluded.comparison,"
+                " threshold = excluded.threshold, window_minutes = excluded.window_minutes,"
+                " for_minutes = excluded.for_minutes, severity = excluded.severity,"
+                " channels = excluded.channels, cooldown_minutes = excluded.cooldown_minutes,"
+                " repeat_every_minutes = excluded.repeat_every_minutes,"
+                " quiet_hours = excluded.quiet_hours, enabled = excluded.enabled,"
+                " version = excluded.version, default_key = excluded.default_key,"
+                " updated_at_ms = excluded.updated_at_ms",
+                *row,
+            )
+            return
+        done = await self._execute(
+            "UPDATE alert_rules SET name = $1, signal = $2, parameter = $3, comparison = $4,"
+            " threshold = $5, window_minutes = $6, for_minutes = $7, severity = $8,"
+            " channels = $9, cooldown_minutes = $10, repeat_every_minutes = $11,"
+            " quiet_hours = $12, enabled = $13, version = $14, default_key = $15,"
+            " updated_at_ms = $16 WHERE id = $17 AND application_id = $18 AND version = $19",
+            *row[2:17],
+            row[18],
+            rule.id,
+            rule.application_id,
+            expected_version,
+        )
+        if done != 1:
+            raise RuleVersionConflictError(None)
+
+    async def delete_rule(self, application_id: str, rule_id: str, expected_version: int) -> None:
+        done = await self._execute(
+            "DELETE FROM alert_rules WHERE id = $1 AND application_id = $2 AND version = $3",
+            rule_id,
+            application_id,
+            expected_version,
+        )
+        if done != 1:
+            raise RuleVersionConflictError(None)
+
+
 def postgres_state(db: PostgresDatabase) -> StateBackend:
     """Every store over one Postgres database; windows on its clock."""
     return StateBackend(
@@ -1868,5 +2026,6 @@ def postgres_state(db: PostgresDatabase) -> StateBackend:
         providers=PostgresProviderStore(db),
         modes=PostgresModeStore(db),
         settings=PostgresSettingsStore(db),
+        rules=PostgresRuleStore(db),
         clock=db,
     )

@@ -236,11 +236,12 @@ def test_the_gateway_migrations_create_exactly_their_tables(tmp_path: Path) -> N
 
     # Migrations 5 to 9: users, sessions, the audit log, roles, step-up (docs/27 to 29);
     # 10 and 11: providers and their sealed keys (docs/32); 12 modes and 13 where a chat
-    # answer came from, in usage_events (docs/33); 14 settings and their versions (docs/39).
-    assert runner.migrate() == (5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
+    # answer came from, in usage_events (docs/33); 14 settings and their versions (docs/39);
+    # 15 alert rules (docs/44).
+    assert runner.migrate() == (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
     accounts = {"users", "sessions", "audit_log", "role_assignments", "app_roles"}
     accounts |= {"provider_configs", "provider_keys", "modes"}
-    accounts |= {"settings_current", "settings_versions"}
+    accounts |= {"settings_current", "settings_versions", "alert_rules"}
     assert _tables(db) == every_table | {"organizations"} | accounts
     assert _columns(db, "usage_events")[10:] == [
         "provider",
@@ -250,9 +251,9 @@ def test_the_gateway_migrations_create_exactly_their_tables(tmp_path: Path) -> N
         "usage_estimated",
     ]
 
-    assert runner.rollback(1) == (14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2)
+    assert runner.rollback(1) == (15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2)
     assert _tables(db) == {"schema_migrations", "usage_events"}
     assert runner.rollback(0) == (1,)
     assert _tables(db) == {"schema_migrations"}
-    assert runner.migrate() == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
+    assert runner.migrate() == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
     assert _tables(db) == every_table | {"organizations"} | accounts

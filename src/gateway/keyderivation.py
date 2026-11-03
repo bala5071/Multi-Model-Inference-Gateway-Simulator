@@ -27,6 +27,8 @@ class KeyPurpose(StrEnum):
     LOGIN_LIMITER = "login limiter"
     # The names of shared counters in Valkey (docs/35): no username or digest appears there.
     COUNTER_KEYS = "counter keys"
+    # The names of the alert rollups in Valkey (docs/43): no application id appears there.
+    ALERT_ROLLUPS = "alert rollups"
 
 
 def derive_key(secret: bytes, purpose: KeyPurpose) -> bytes:

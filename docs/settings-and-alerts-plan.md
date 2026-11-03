@@ -1274,6 +1274,28 @@ must be merged before S3.
 
 S1 to S3 and A1 can go in either order after S0; A2 needs S2's permission work; A4 needs A3.
 
+**A2 without its channel-dependent parts (decided 2026-11-02, when A2 started).** Channels
+do not exist until A4, so A2 is its row above without what needs them. **Moved to A4**, with
+their tests and mutations:
+
+- the validation of a rule's channel ids (that each belongs to the organization, at write and
+  again when a notification is queued), with M15;
+- `GET /applications/{app}/alert-channels` (ids, names and types, under `alert_rules.read`);
+- the built-in rule `channel_delivery_failing` (on, cannot be deleted);
+- the `rule_weakened` notice (section 14), with M29.
+
+**Until A4**, a rule's `channels` field accepts only an empty list or `["organization
+defaults"]`, stored as a plain list with no link to a table; A4's migration adds the channels
+table and turns the validation on. Default rules are created with `["organization
+defaults"]`. A2 still makes no outbound connection and stores no new secret. Everything else
+in A2 is as Part F defines it: the validate preview, the endpoints, the permission rows, the
+cross-organization tests, and a mutation for each rule and each new permission row.
+
+**S3, A1 and A2, as agreed when they started (2026-11-02).** One draft PR with three
+commit groups in order, each ending with its own checks, after scale-out PR 2b (#33) merged.
+Each group is its row above and nothing more; A1 and A2 make no outbound connection and store
+no new secret. A plan conflict or a surviving mutation stops the PR at the end of its group.
+
 **S2, as agreed when it started (2026-11-01).** The row above, with the presets moved to S3:
 their values are mostly S13 to S16, which S3 adds. The mutations S2 makes are M6, M13 (one per
 settings resolver), M14, and one for each new permission row: viewers refused writes, an

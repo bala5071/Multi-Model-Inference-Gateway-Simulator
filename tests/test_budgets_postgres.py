@@ -771,7 +771,7 @@ async def test_the_store_calls_of_a_chat_request_and_a_generate_request_in_share
         state = postgres_state(db)
         for store, names in (
             (type(state.applications), ("lookup_key",)),
-            (type(state.modes), ("organization_mode", "application_mode")),
+            (type(state.modes), ("organization_mode", "application_mode", "hosted_policy")),
             # Read with the key, never on their own (docs/39): any call would be counted.
             (type(state.settings), ("current", "versions", "version", "write")),
             (type(state.usage), ("append", "usage_by_model")),
@@ -904,13 +904,12 @@ async def test_the_store_calls_of_a_chat_request_an_organization_provider_serves
         *candidates,  # the handler's, before admission to one
         *candidates,  # the router's
         "get_key",  # skipped if unreadable
-        "organization_mode",
-        "application_mode",  # again, just before the hosted attempt (docs/33)
+        "hosted_policy",  # both modes and both settings rows, just before the attempt (docs/42)
         "get_key",  # leased
         "settle",
         "append",  # inside the settle's transaction
     ]
-    assert len(calls) - 1 == 13  # store calls; the append is a statement of the settle
+    assert len(calls) - 1 == 12  # store calls; the append is a statement of the settle
 
 
 @postgres
@@ -925,8 +924,8 @@ async def test_the_request_benchmark_counts_each_round_trip_and_leaves_no_schema
     modes = ["organization_mode", "application_mode"]
     providers = ["list_for", "get_key"]
     gateway = ["lookup_key", "reserve", *modes, "settle"]
-    provider = ["lookup_key", "reserve", *modes, *providers, *providers, "get_key", *modes]
-    provider += ["get_key", "settle"]  # the modes again before the hosted attempt
+    provider = ["lookup_key", "reserve", *modes, *providers, *providers, "get_key"]
+    provider += ["hosted_policy", "get_key", "settle"]  # before the hosted attempt (docs/42)
     assert [(c.name, c.store, c.calls()) for c in cases] == [
         ("gateway tier", "sqlite", gateway),
         ("gateway tier", "postgres", gateway),
@@ -937,7 +936,11 @@ async def test_the_request_benchmark_counts_each_round_trip_and_leaves_no_schema
     transactions = {"BEGIN": 2, "SET": 2, "COMMIT": 2}
     assert trips == {
         "gateway tier": {**transactions, "statement": 11, "RESET": 5},
-        "org provider": {**transactions, "statement": 19, "RESET": 13},
+        "org provider": {
+            **transactions,
+            "statement": 18,
+            "RESET": 12,
+        },  # one round trip fewer: hosted_policy (docs/42)
     }
     admin = await asyncpg.connect(url)
     try:

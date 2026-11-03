@@ -29,6 +29,7 @@ import pytest
 from benchmarks import durable_calls
 
 from accounts_helpers import PASSWORD, cookie, with_csrf
+from gateway.alertrules import DEFAULT_RULES, AlertRule, RuleVersionConflictError, default_rules
 from gateway.apikeys import ApiKeyService, ApplicationAccess, InvalidApiKeyError
 from gateway.app import create_app, create_default_app
 from gateway.applications import (
@@ -68,6 +69,7 @@ from gateway.pg_migrate import (
 )
 from gateway.postgres import (
     NO_PASSWORD_FOR_TESTS_ENV,
+    PG_ALERT_RULES,
     PG_BASELINE,
     PG_SETTINGS,
     TABLES,
@@ -126,9 +128,11 @@ NOWHERE = f"postgresql://gateway:{PLANTED}@127.0.0.1:1/gateway"
 
 
 def _postgres_columns() -> dict[str, list[str]]:
-    """Each table's columns, read from the text of the baseline and of version 3 (settings)."""
+    """Each table's columns, read from the text of the baseline, of version 3 (settings) and
+    of version 4 (alert rules)."""
     found: dict[str, list[str]] = {}
-    for match in re.finditer(r"CREATE TABLE (\w+) \((.*?)\);\n", PG_BASELINE + PG_SETTINGS, re.S):
+    text = PG_BASELINE + PG_SETTINGS + PG_ALERT_RULES
+    for match in re.finditer(r"CREATE TABLE (\w+) \((.*?)\);\n", text, re.S):
         depth, part, parts = 0, "", []
         for char in match.group(2):
             depth += {"(": 1, ")": -1}.get(char, 0)
@@ -468,7 +472,7 @@ class _Counting:
 async def _outcome(call: Awaitable[Any]) -> Any:
     try:
         return ("ok", await call)
-    except (ValueError, KeyError, SettingsVersionConflictError) as exc:
+    except (ValueError, KeyError, SettingsVersionConflictError, RuleVersionConflictError) as exc:
         return (type(exc).__name__, str(exc))
 
 
@@ -731,11 +735,37 @@ async def _scenario(s: StateBackend) -> list[Any]:
         await st.version(Scope.APPLICATION, "app0", 1),
         await st.version(Scope.APPLICATION, "app0", 7),
         (await a.lookup_key("key0")).settings,  # type: ignore[union-attr]
+        # Both modes and both settings rows in one statement (docs/42).
+        await m.hosted_policy("north", "app0"),
+        await m.hosted_policy("solo", "app9"),
     ]
+    # Alert rules (docs/44): defaults, a rule of its own, a change, a conflict, a delete.
+    r = s.rules
+    for rule in default_rules("app0", NOW):
+        await r.insert_rule(rule)
+    own = AlertRule("rul_00000000000000aa", "app0", DEFAULT_RULES["error_rate"], 1, None, NOW, NOW)
+    async with r.write_transaction():
+        await r.insert_rule(own)
+    out.append(await _outcome(r.insert_rule(own)))
+    changed = AlertRule(own.id, "app0", DEFAULT_RULES["hosted_share"], 2, None, NOW, NOW)
+    await r.put_rule(changed, 1)
+    out.append(await _outcome(r.put_rule(changed, 1)))
+    await r.put_rule(default_rules("app0", NOW)[0], None)
+    out.append(await _outcome(r.delete_rule("app0", own.id, 1)))
+    out += [
+        await r.count_rules("app0"),
+        await r.list_rules("app0", 3),
+        await r.list_rules("app0", 50, after=own.id),
+        await r.get_rule("app0", own.id),
+        await r.get_rule("app9", own.id),
+    ]
+    await r.delete_rule("app0", default_rules("app0", NOW)[-1].id, 1)
+    out.append(await r.count_rules("app0"))
     return out
 
 
 def _protocol_methods() -> set[str]:
+    from gateway.alertrules import RuleStore
     from gateway.applications import ApplicationStore
     from gateway.audit import AuditStore
     from gateway.modes import ModeStore
@@ -754,6 +784,7 @@ def _protocol_methods() -> set[str]:
         ModeStore: "PostgresModeStore",
         UsageStore: "PostgresUsageStore",
         SettingsStore: "PostgresSettingsStore",
+        RuleStore: "PostgresRuleStore",
     }
     return {
         f"{store}.{name}"

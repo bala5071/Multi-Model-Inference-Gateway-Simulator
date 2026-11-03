@@ -47,21 +47,21 @@ class Endpoint:
     method: str
     path: str  # under /v1/admin/orgs, with {org}
     action: str
-    step_up: bool
+    escalates: str | None  # the action a change that loosens egress takes (docs/42)
     success: int
 
 
 def documented_endpoints() -> list[Endpoint]:
-    text = (REPO / "docs" / "40-settings-endpoints.md").read_text(encoding="utf-8")
+    text = (REPO / "docs" / "42-hosted-settings-and-presets.md").read_text(encoding="utf-8")
     pattern = re.compile(
-        r"^\| `(GET|POST|PUT)` \| `([^`]+)` \| `([a-z_.]+)` \| (yes|consume|) ?\| (\d{3}) \|$"
+        r"^\| `(GET|POST|PUT)` \| `([^`]+)` \| `([a-z_.]+)` \| (?:`([a-z_.]+)`)? ?\| (\d{3}) \|$"
     )
     found = []
     for line in text.splitlines():
         match = pattern.match(line.strip())
         if match:
-            method, path, action, step_up, success = match.groups()
-            found.append(Endpoint(method, "/{org}" + path, action, step_up != "", int(success)))
+            method, path, action, escalates, success = match.groups()
+            found.append(Endpoint(method, "/{org}" + path, action, escalates, int(success)))
     return found
 
 
@@ -71,6 +71,7 @@ BODIES: dict[str, dict[str, Any]] = {
     "PUT": {"expected_version": 0, "set": {"max_tokens": 32}},
     "validate": {"expected_version": 0, "set": {"max_tokens": 32}},
     "revert": {"expected_version": 2},
+    "preset": {"expected_version": 2},
 }
 
 
@@ -81,6 +82,8 @@ def _body(endpoint: Endpoint) -> dict[str, Any] | None:
         return BODIES["validate"]
     if endpoint.path.endswith("/revert"):
         return BODIES["revert"]
+    if endpoint.path.endswith("/presets/{name}"):
+        return BODIES["preset"]
     return None
 
 
@@ -158,8 +161,9 @@ async def _versions(admin: Admin) -> None:
                 )
 
 
-def _path(endpoint: Endpoint, org: str, app: str, n: str = "1") -> str:
-    return endpoint.path.replace("{org}", org).replace("{app}", app).replace("{n}", n)
+def _path(endpoint: Endpoint, org: str, app: str, n: str = "1", name: str = "private") -> str:
+    path = endpoint.path.replace("{org}", org).replace("{app}", app)
+    return path.replace("{n}", n).replace("{name}", name)
 
 
 def _raw(response: httpx.Response) -> tuple[int, list[tuple[str, str]], bytes]:
@@ -186,30 +190,38 @@ async def _audit(world: World, action: AuditAction) -> list[AuditEntry]:
 
 
 async def test_each_settings_route_is_documented_and_declares_its_action(world: World) -> None:
-    """Every settings route, its method and the action it declares, equal note 40's table; each
-    action's step-up flag equals the permission table's. A route declared with another action,
-    or not through ``requires``, fails here."""
-    assert len(ENDPOINTS) == 12
+    """Every settings route, its method, the action it declares and the action it escalates to,
+    equal note 42's table. A route declared with another action, not through ``requires``, or
+    writing without declaring its escalation, fails here."""
+    assert len(ENDPOINTS) == 14
     async with settings_console(world) as admin:
         app = admin.client._transport.app  # type: ignore[attr-defined]
         routes = set()
         for route in app.routes:
             if isinstance(route, APIRoute) and "/settings" in route.path:
-                [declaration] = declaration_of(route)
-                assert declaration.kind == "requires", route.path
+                declarations = declaration_of(route)
+                [declaration] = [d for d in declarations if d.kind == "requires"]
+                escalations = [d.action for d in declarations if d.kind == "escalates"]
+                assert len(declarations) == 1 + len(escalations) <= 2, route.path
                 for method in route.methods or ():
                     routes.add(
-                        (method, route.path.removeprefix("/v1/admin/orgs"), declaration.action)
+                        (
+                            method,
+                            route.path.removeprefix("/v1/admin/orgs"),
+                            declaration.action,
+                            escalations[0] if escalations else None,
+                        )
                     )
-    assert routes == {(e.method, e.path, e.action) for e in ENDPOINTS}
+    assert routes == {(e.method, e.path, e.action, e.escalates) for e in ENDPOINTS}
     for endpoint in ENDPOINTS:
-        assert PERMISSIONS[endpoint.action].step_up is endpoint.step_up, endpoint
-    # The two loosen_egress rows are declared for PR S3 and on no route yet.
-    assert {e.action for e in ENDPOINTS}.isdisjoint(
-        {"settings.loosen_egress", "org_settings.loosen_egress"}
-    )
-    assert PERMISSIONS["settings.loosen_egress"].consume
-    assert PERMISSIONS["org_settings.loosen_egress"].consume
+        # No route's own action asks for step-up: only the escalation does, when it is taken.
+        assert PERMISSIONS[endpoint.action].step_up is False, endpoint
+        if endpoint.escalates is not None:
+            assert PERMISSIONS[endpoint.escalates].consume, endpoint
+    # Every write that can change a stored value escalates; a dry run and a read never do.
+    for endpoint in ENDPOINTS:
+        changes = endpoint.method == "PUT" or endpoint.path.endswith(("/revert", "/{name}"))
+        assert (endpoint.escalates is not None) is changes, endpoint
 
 
 # --- cross-organization, and missing equals forbidden -------------------------------------------
@@ -233,6 +245,8 @@ async def test_nothing_crosses_organizations_and_missing_looks_forbidden(world: 
             if "{app}" in endpoint.path:
                 attempts["south's application via north"] = _path(endpoint, "north", "south-shop")
                 attempts["no such application"] = _path(endpoint, "north", "app_00000000")
+            if "{name}" in endpoint.path:
+                attempts["no such preset"] = _path(endpoint, "north", "north-shop", name="nope")
             if "{n}" in endpoint.path:
                 attempts["no such version"] = _path(endpoint, "north", "north-shop", "9")
                 attempts["not a number"] = _path(endpoint, "north", "north-shop", "1x")
@@ -283,6 +297,8 @@ async def test_south_can_do_all_of_it_to_its_own(world: World) -> None:
                 body = {"expected_version": 3, "set": {"max_tokens": 8}}
             if endpoint.path.endswith("/revert"):
                 body = {"expected_version": 3}
+            if endpoint.path.endswith("/{name}"):
+                body = {"expected_version": 4}
             answer = await admin.call(
                 sid, endpoint.method, _path(endpoint, "south", "south-shop"), body
             )
@@ -475,14 +491,15 @@ async def test_set_view_revert_and_the_audit_of_every_change(world: World) -> No
         ("application", "north-shop"),
         ("organization", "north"),
     ]
+    unloosened = {"loosened_egress": False}
     assert [e.event.details for e in changed] == [
-        {"settings_version": 1, "changed_fields": ["max_tokens"]},
-        {"settings_version": 1, "changed_fields": ["model_aliases", "max_tokens"]},
-        {"settings_version": 2, "changed_fields": ["model_aliases", "max_tokens"]},
-        {"settings_version": 2, "changed_fields": ["allowed_tiers"]},
+        {"settings_version": 1, "changed_fields": ["max_tokens"], **unloosened},
+        {"settings_version": 1, "changed_fields": ["model_aliases", "max_tokens"], **unloosened},
+        {"settings_version": 2, "changed_fields": ["model_aliases", "max_tokens"], **unloosened},
+        {"settings_version": 2, "changed_fields": ["allowed_tiers"], **unloosened},
     ]
     assert [e.event.details for e in reverted_rows] == [
-        {"settings_version": 3, "changed_fields": ["model_aliases", "max_tokens"]}
+        {"settings_version": 3, "changed_fields": ["model_aliases", "max_tokens"], **unloosened}
     ]
     assert {e.event.actor_user_id for e in changed + reverted_rows} == {alice_id}
 
@@ -624,6 +641,8 @@ async def test_no_session_csrf_token_password_or_key_reaches_rows_logs_or_answer
                 body = _body(endpoint)
                 if endpoint.method == "PUT":
                     body = {"expected_version": 2, "set": {"max_tokens": 12}}
+                if endpoint.path.endswith("/{name}"):
+                    body = {"expected_version": 4}
                 answers.append(
                     await admin.call(
                         session, endpoint.method, _path(endpoint, "north", "north-shop"), body

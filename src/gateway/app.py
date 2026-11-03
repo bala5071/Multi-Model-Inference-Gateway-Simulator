@@ -18,6 +18,7 @@ import os
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeVar
@@ -30,6 +31,24 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from gateway.adapters.base import HttpAdapter
+from gateway.alertrecorder import MINUTE_MS, AlertRecorder
+from gateway.alertrollups import (
+    AlertRollups,
+    InMemoryAlertRollups,
+    RollupFlusher,
+    SharedAlertRollups,
+)
+from gateway.alertrules import (
+    DEFAULT_RULES,
+    AlertRule,
+    InMemoryRuleStore,
+    RuleInvalidError,
+    RuleService,
+    RuleStore,
+    resolve_rule,
+    spec_body,
+    validate_rule,
+)
 from gateway.apikeys import (
     INVALID_KEY_MESSAGE,
     ApiKeyRequiredError,
@@ -100,7 +119,9 @@ from gateway.chat import (
 )
 from gateway.chatrouter import (
     DEFAULT_MAX_HOSTED_ATTEMPTS,
+    HOSTED,
     ChatRouter,
+    HostedLimits,
     NoCandidateError,
     RoutedOutcome,
     RouteTrace,
@@ -222,6 +243,7 @@ from gateway.settings import (
     CATALOGUE,
     DocumentCache,
     EffectiveSettings,
+    InMemorySettingsStore,
     PlatformSettings,
     Scope,
     SettingsInvalidError,
@@ -235,6 +257,7 @@ from gateway.settings import (
     reserved_names,
     resolve,
 )
+from gateway.settings import PRESETS as SETTINGS_PRESETS
 from gateway.settingsservice import SettingsChange, SettingsService, SettingsValidation
 from gateway.state import (
     POSTGRES_URL_ENV,
@@ -807,7 +830,36 @@ def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
         setattr(check, DECLARATION, RouteDeclaration("requires", action, "authorize"))
         return Depends(check)
 
+    @asynccontextmanager
+    async def escalate(auth: Authorized, action: str) -> AsyncIterator[ConsumeToken]:
+        """For a change that turns out to need more than its route's action (docs/42): the
+        actor must also hold ``action`` on the same resource, and this session's step-up window
+        is claimed (consume-on-use), given back if nothing is changed. The route declares it
+        with ``escalates``."""
+        if action not in PERMISSIONS or not PERMISSIONS[action].consume:
+            raise ValueError(f"{action} is not a consume-on-use action")
+        decision = authorize(auth.actor, action, auth.resource)
+        if not decision.allowed:
+            raise ForbiddenError()
+        claimed = await service.claim_step_up(auth.context, action)
+        token = ConsumeToken()
+        try:
+            yield token
+        except BaseException:
+            if not token.was_changed:
+                await service.restore_step_up(auth.context, claimed)
+            raise
+
+    vars(requires)["escalate"] = escalate
     return requires
+
+
+def escalates(action: str) -> Callable[[Endpoint], Endpoint]:
+    """Declares the action a route escalates to when a change needs it (docs/42), beside its
+    ``requires``: the route walk sees both."""
+    if action not in PERMISSIONS or not PERMISSIONS[action].consume:
+        raise ValueError(f"{action} is not a consume-on-use action")
+    return _declare(RouteDeclaration("escalates", action, "a change that loosens egress"))
 
 
 def declaration_of(route: object) -> list[RouteDeclaration]:
@@ -872,6 +924,8 @@ class Keyed:
 
     application: Application
     settings: EffectiveSettings
+    # The application as stored (its plan copy), for deciding the settings again (docs/42).
+    stored: Application
 
 
 class _Hold:
@@ -1149,6 +1203,101 @@ class NoStoreMiddleware:
             await send(message)
 
         await self.app(scope, receive, no_store)
+
+
+@dataclass
+class AlertNote:
+    """What the handlers learn about one request for the alert recorder (docs/43): whose it
+    is, how long it took, and for a chat request its route."""
+
+    kind: str
+    application_id: str | None = None
+    ttft_ms: float | None = None
+    total_ms: float | None = None
+    downgraded: bool = False
+    trace: RouteTrace | None = None
+
+
+# The requests the alert recorder is told about, and their kind.
+ALERT_PATHS = {"/v1/generate": "generate", "/v1/chat/completions": "chat"}
+# Enough of an error body for its code: every error answer is small.
+_ERROR_BODY_BYTES = 4096
+
+
+def _error_code(body: bytes) -> str | None:
+    try:
+        found = json.loads(body)["error"]["code"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    return found if isinstance(found, str) else None
+
+
+class AlertOutcomeMiddleware:
+    """Tells the alert recorder how each keyed request of ``ALERT_PATHS`` ended (docs/43): its
+    status, the code of an error answer, and what the handlers noted. When the last of the
+    answer is sent, so a stream is recorded at its end; a request whose client went away
+    before the end is not. A request with no application (no key, an invalid key) is not
+    recorded. The recorder does no I/O and never awaits."""
+
+    def __init__(self, app: Any, recorder: AlertRecorder, note: ContextVar[AlertNote | None]):
+        self.app = app
+        self.recorder = recorder
+        self.note = note
+
+    def _record(self, note: AlertNote, status: int, body: bytes) -> None:
+        if note.application_id is None:
+            return
+        trace = note.trace
+        self.recorder.record(
+            note.application_id,
+            kind=note.kind,
+            status=status,
+            code=_error_code(body) if status >= 400 else None,
+            ttft_ms=note.ttft_ms,
+            total_ms=note.total_ms,
+            fallbacks=(trace.fallback_reason or "",)
+            if trace is not None and trace.fallback_from is not None
+            else (),
+            hosted_attempts=trace.hosted_attempts if trace is not None else 0,
+            hosted=trace is not None and trace.provider_class == HOSTED,
+            downgraded=note.downgraded,
+        )
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        kind = (
+            ALERT_PATHS.get(scope.get("path", ""))
+            if scope["type"] == "http" and scope.get("method") == "POST"
+            else None
+        )
+        if kind is None:
+            await self.app(scope, receive, send)
+            return
+        note = AlertNote(kind)
+        token = self.note.set(note)
+        status = [500]
+        body = bytearray()
+        done = [False]
+
+        async def watch(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                status[0] = int(message["status"])
+            elif message["type"] == "http.response.body":
+                if status[0] >= 400 and len(body) < _ERROR_BODY_BYTES:
+                    body.extend(message.get("body", b""))
+                if not message.get("more_body", False) and not done[0]:
+                    done[0] = True
+                    self._record(note, status[0], bytes(body))
+            await send(message)
+
+        try:
+            await self.app(scope, receive, watch)
+        except Exception:
+            if not done[0]:  # answered 500 by the server's own handler
+                done[0] = True
+                self._record(note, 500, b"")
+            raise
+        finally:
+            self.note.reset(token)
 
 
 def _page_body(name: str, items: list[dict[str, object]], next_cursor: str | None) -> JSONResponse:
@@ -1516,15 +1665,206 @@ def _version_view(found: SettingsVersion) -> dict[str, object]:
     }
 
 
+class RuleChangeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1, le=999_999_999)
+    # Checked field by field by gateway.alertrules.validate_rule, whose refusal names it.
+    rule: dict[str, Any] = Field(max_length=16)
+
+
+class RuleVersionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1, le=999_999_999)
+
+
+def _rule_view(rule: AlertRule) -> dict[str, object]:
+    default = DEFAULT_RULES.get(rule.default_key) if rule.default_key is not None else None
+    return {
+        "id": rule.id,
+        "version": rule.version,
+        "default_key": rule.default_key,
+        # A default rule someone changed: shown so that a weakened default is visible.
+        "changed_from_default": default is not None and default != rule.spec,
+        **spec_body(rule.spec),
+        "created_at_ms": rule.created_at_ms,
+        "updated_at_ms": rule.updated_at_ms,
+    }
+
+
+def _alert_rule_routes(app: FastAPI, accounts: AccountAccess, rules: RuleService) -> None:
+    """The alert rule endpoints under /v1/admin/orgs/{org}/applications/{app} (docs/44), each
+    through ``requires`` with a resolver that answers an application outside the path's
+    organization, or a rule outside the path's application, as missing. No step-up: a rule
+    change is audited (the plan's section 14)."""
+    requires = app.state.requires
+    stores = Stores(accounts.service.organizations, accounts.service.store)
+    store = rules.store
+
+    async def application(request: Request) -> Resource | None:
+        p = request.path_params
+        return await resolve_application(stores, p["org"], p["app"])
+
+    async def rule(request: Request) -> Resource | None:
+        p = request.path_params
+        return await resolve_rule(stores, store, p["org"], p["app"], p["rule"])
+
+    reading = requires("alert_rules.read", application)
+    writing = requires("alert_rules.write", application)
+    reading_rule = requires("alert_rules.read", rule)
+    writing_rule = requires("alert_rules.write", rule)
+    prefix = ORG_PREFIX + "/applications/{app}/alert-rules"
+
+    @app.exception_handler(RuleInvalidError)
+    async def rule_invalid(_: Request, exc: RuleInvalidError) -> JSONResponse:
+        return _error(
+            422,
+            "invalid_request",
+            "The request is not valid.",
+            details=[{"field": exc.field, "message": str(exc)}],
+            headers=_NO_STORE,
+        )
+
+    @app.get(prefix)
+    async def list_alert_rules(
+        org: str,
+        app_id: str = Path_(alias="app"),
+        limit: int = Query(default=50, ge=1, le=100),
+        after: str | None = Query(default=None, max_length=20),
+        auth: Authorized = reading,
+    ) -> JSONResponse:
+        page = await store.list_rules(app_id, limit, after)
+        return JSONResponse(
+            {
+                "rules": [_rule_view(r) for r in page],
+                "next": page[-1].id if len(page) == limit else None,
+            }
+        )
+
+    @app.post(prefix, status_code=201)
+    async def create_alert_rule(
+        org: str,
+        body: dict[str, Any],
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = writing,
+    ) -> JSONResponse:
+        created = await rules.create(app_id, body, auth.actor.user_id)
+        return JSONResponse(_rule_view(created), status_code=201)
+
+    @app.post(prefix + "/validate")
+    async def validate_alert_rule(
+        org: str,
+        body: dict[str, Any],
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = reading,
+    ) -> JSONResponse:
+        """A rule body checked as a write would check it, and what it would have been over
+        the last hour from the rollups. Writes nothing."""
+        try:
+            spec = validate_rule(body)
+        except RuleInvalidError as exc:
+            return JSONResponse(
+                {"valid": False, "invalid_field": exc.field, "message": str(exc), "rule": None,
+                 "preview": None}
+            )  # fmt: skip
+        minutes = await rules.preview(app_id, spec)
+        preview = (
+            None
+            if minutes is None
+            else {
+                "minutes": [
+                    {"minute": m.minute, "value": m.value, "why_not": m.why_not, "met": m.met}
+                    for m in minutes
+                ],
+                "met": sum(1 for m in minutes if m.met),
+            }
+        )
+        return JSONResponse(
+            {"valid": True, "invalid_field": None, "message": None, "rule": spec_body(spec),
+             "preview": preview}
+        )  # fmt: skip
+
+    @app.post(prefix + "/restore-defaults")
+    async def restore_default_alert_rules(
+        org: str, app_id: str = Path_(alias="app"), auth: Authorized = writing
+    ) -> JSONResponse:
+        return JSONResponse({"written": await rules.restore_defaults(app_id, auth.actor.user_id)})
+
+    @app.get(prefix + "/{rule}")
+    async def get_alert_rule(
+        org: str, rule: str, app_id: str = Path_(alias="app"), auth: Authorized = reading_rule
+    ) -> JSONResponse:
+        found = await store.get_rule(app_id, rule)
+        assert found is not None  # the resolver found it
+        return JSONResponse(_rule_view(found))
+
+    @app.put(prefix + "/{rule}")
+    async def update_alert_rule(
+        org: str,
+        rule: str,
+        body: RuleChangeBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = writing_rule,
+    ) -> JSONResponse:
+        changed = await rules.update(
+            app_id, rule, body.expected_version, body.rule, auth.actor.user_id
+        )
+        return JSONResponse(_rule_view(changed))
+
+    @app.post(prefix + "/{rule}/enable")
+    async def enable_alert_rule(
+        org: str,
+        rule: str,
+        body: RuleVersionBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = writing_rule,
+    ) -> JSONResponse:
+        changed = await rules.set_enabled(
+            app_id, rule, body.expected_version, True, auth.actor.user_id
+        )
+        return JSONResponse(_rule_view(changed))
+
+    @app.post(prefix + "/{rule}/disable")
+    async def disable_alert_rule(
+        org: str,
+        rule: str,
+        body: RuleVersionBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = writing_rule,
+    ) -> JSONResponse:
+        changed = await rules.set_enabled(
+            app_id, rule, body.expected_version, False, auth.actor.user_id
+        )
+        return JSONResponse(_rule_view(changed))
+
+    @app.delete(prefix + "/{rule}")
+    async def delete_alert_rule(
+        org: str,
+        rule: str,
+        body: RuleVersionBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = writing_rule,
+    ) -> JSONResponse:
+        await rules.delete(app_id, rule, body.expected_version, auth.actor.user_id)
+        return JSONResponse({"deleted": rule})
+
+
 def _settings_routes(
-    app: FastAPI, accounts: AccountAccess, settings: SettingsService, store: SettingsStore
+    app: FastAPI,
+    accounts: AccountAccess,
+    settings: SettingsService,
+    store: SettingsStore,
+    modes: ModeStore,
 ) -> None:
     """The settings endpoints under /v1/admin/orgs/{org} (docs/40): an organization's caps and
     an application's settings, their versions, revert and the dry run, each through
     ``requires`` with a resolver that answers anything outside the path's organization, or a
-    version that does not exist, as missing. No step-up: no setting of S1 to S11 loosens where
-    prompts go (the ``*.loosen_egress`` actions are declared for PR S3)."""
+    version that does not exist, as missing. A change that loosens S13 to S16 for any
+    application it affects (a preset, a revert, an organization cap included) needs step-up,
+    consume-on-use, through the ``*.loosen_egress`` action; tightening needs none (docs/42)."""
     requires = app.state.requires
+    escalate = vars(requires)["escalate"]
     stores = Stores(accounts.service.organizations, accounts.service.store)
     platform = settings.platform
 
@@ -1550,6 +1890,29 @@ def _settings_routes(
     writing_application = requires("settings.write", application)
     reading_application_version = requires("settings.read", application_version)
 
+    async def application_preset(request: Request) -> Resource | None:
+        p = request.path_params
+        if p["name"] not in SETTINGS_PRESETS:
+            return None
+        return await resolve_application(stores, p["org"], p["app"])
+
+    applying_preset = requires("settings.write", application_preset)
+
+    async def written(
+        auth: Authorized,
+        action: str,
+        loosens: Sequence[str],
+        write: Callable[[bool], Awaitable[SettingsChange]],
+    ) -> SettingsChange:
+        """Write, with step-up when the dry run found the change loosens egress; the write
+        judges it again inside its transaction and refuses a mismatch (a conflict)."""
+        if not loosens:
+            return await write(False)
+        # Nothing can fail after the write returns, so the window is never given back for a
+        # change that was stored: ``escalate`` gives it back only when an exception leaves it.
+        async with escalate(auth, action):
+            return await write(True)
+
     @app.exception_handler(SettingsInvalidError)
     async def settings_invalid(_: Request, exc: SettingsInvalidError) -> JSONResponse:
         return _error(
@@ -1565,6 +1928,8 @@ def _settings_routes(
         caps = caps_of(platform, None, view.document)
         return {
             "organization_id": org,
+            # S12: shown from its own table, set by its own endpoint (docs/33).
+            "mode": (await modes.organization_mode(org)).value,
             "version": view.row.version if view.row is not None else 0,
             "settings": {k: _json_value(v) for k, v in view.document.items()},
             "platform_caps": {
@@ -1581,9 +1946,17 @@ def _settings_routes(
         stored = await accounts.service.organizations.get_application(app_id)
         assert stored is not None
         assert view.effective is not None
+        organization_mode = await modes.organization_mode(org)
+        application_mode = await modes.application_mode(app_id)
         return {
             "application_id": app_id,
             "organization_id": org,
+            # S12: shown from its own table, set by its own endpoint (docs/33).
+            "mode": {
+                "organization": organization_mode.value,
+                "application": application_mode.value,
+                "effective": effective_mode(organization_mode, application_mode).value,
+            },
             "version": view.row.version if view.row is not None else 0,
             "settings": {k: _json_value(v) for k, v in view.document.items()},
             "effective": _effective_view(
@@ -1608,8 +1981,9 @@ def _settings_routes(
             "refusals": [{"setting": r.setting, "level": r.level.value} for r in result.refusals],
             "changed": list(result.changed),
             "settings": {k: _json_value(v) for k, v in result.document.items()},
-            # Step-up is asked only of a change that loosens S13 to S16 (PR S3): none here.
-            "step_up_required": False,
+            # A change that loosens S13 to S16 asks for a fresh password (docs/42).
+            "loosens": list(result.loosens),
+            "step_up_required": bool(result.loosens),
         }
         if result.effective is not None:
             body["effective"] = {
@@ -1646,19 +2020,36 @@ def _settings_routes(
     ) -> JSONResponse:
         return JSONResponse(await organization_body(org))
 
+    async def dry(scope: Scope, scope_id: str, body: SettingsChangeBody) -> tuple[str, ...]:
+        return (
+            await settings.validate(
+                scope,
+                scope_id,
+                expected_version=body.expected_version,
+                values=body.values,
+                unset=body.unset,
+            )
+        ).loosens
+
     @app.put(ORG_PREFIX + "/settings")
+    @escalates("org_settings.loosen_egress")
     async def put_organization_settings(
         org: str, body: SettingsChangeBody, auth: Authorized = writing_organization
     ) -> JSONResponse:
-        change = await settings.set(
-            Scope.ORGANIZATION,
-            org,
-            expected_version=body.expected_version,
-            values=body.values,
-            unset=body.unset,
-            actor_user_id=auth.actor.user_id,
-            via="http",
-        )
+        async def write(step_up: bool) -> SettingsChange:
+            return await settings.set(
+                Scope.ORGANIZATION,
+                org,
+                expected_version=body.expected_version,
+                values=body.values,
+                unset=body.unset,
+                actor_user_id=auth.actor.user_id,
+                via="http",
+                step_up=step_up,
+            )
+
+        loosens = await dry(Scope.ORGANIZATION, org, body)
+        change = await written(auth, "org_settings.loosen_egress", loosens, write)
         return JSONResponse(change_body(change))
 
     @app.post(ORG_PREFIX + "/settings/validate")
@@ -1675,16 +2066,38 @@ def _settings_routes(
         return JSONResponse(validation_body(result))
 
     @app.post(ORG_PREFIX + "/settings/revert")
+    @escalates("org_settings.loosen_egress")
     async def revert_organization_settings(
         org: str, body: SettingsRevertBody, auth: Authorized = writing_organization
     ) -> JSONResponse:
-        change = await settings.revert(
-            Scope.ORGANIZATION,
-            org,
-            expected_version=body.expected_version,
-            actor_user_id=auth.actor.user_id,
+        async def write(step_up: bool) -> SettingsChange:
+            return await settings.revert(
+                Scope.ORGANIZATION,
+                org,
+                expected_version=body.expected_version,
+                actor_user_id=auth.actor.user_id,
+                step_up=step_up,
+            )
+
+        loosens = await settings.revert_loosens(
+            Scope.ORGANIZATION, org, expected_version=body.expected_version
         )
+        change = await written(auth, "org_settings.loosen_egress", loosens, write)
         return JSONResponse(change_body(change))
+
+    @app.get(ORG_PREFIX + "/settings/presets")
+    async def list_settings_presets(
+        org: str, auth: Authorized = reading_organization
+    ) -> JSONResponse:
+        # Their exact values (the plan's section 4); applied to an application by name.
+        return JSONResponse(
+            {
+                "presets": {
+                    name: {k: _json_value(v) for k, v in values.items()}
+                    for name, values in SETTINGS_PRESETS.items()
+                }
+            }
+        )
 
     @app.get(ORG_PREFIX + "/settings/versions")
     async def list_organization_settings_versions(
@@ -1710,21 +2123,27 @@ def _settings_routes(
         return JSONResponse(await application_body(org, app_id))
 
     @app.put(ORG_PREFIX + "/applications/{app}/settings")
+    @escalates("settings.loosen_egress")
     async def put_application_settings(
         org: str,
         body: SettingsChangeBody,
         app_id: str = Path_(alias="app"),
         auth: Authorized = writing_application,
     ) -> JSONResponse:
-        change = await settings.set(
-            Scope.APPLICATION,
-            app_id,
-            expected_version=body.expected_version,
-            values=body.values,
-            unset=body.unset,
-            actor_user_id=auth.actor.user_id,
-            via="http",
-        )
+        async def write(step_up: bool) -> SettingsChange:
+            return await settings.set(
+                Scope.APPLICATION,
+                app_id,
+                expected_version=body.expected_version,
+                values=body.values,
+                unset=body.unset,
+                actor_user_id=auth.actor.user_id,
+                via="http",
+                step_up=step_up,
+            )
+
+        loosens = await dry(Scope.APPLICATION, app_id, body)
+        change = await written(auth, "settings.loosen_egress", loosens, write)
         return JSONResponse(change_body(change))
 
     @app.post(ORG_PREFIX + "/applications/{app}/settings/validate")
@@ -1744,18 +2163,56 @@ def _settings_routes(
         return JSONResponse(validation_body(result))
 
     @app.post(ORG_PREFIX + "/applications/{app}/settings/revert")
+    @escalates("settings.loosen_egress")
     async def revert_application_settings(
         org: str,
         body: SettingsRevertBody,
         app_id: str = Path_(alias="app"),
         auth: Authorized = writing_application,
     ) -> JSONResponse:
-        change = await settings.revert(
-            Scope.APPLICATION,
-            app_id,
-            expected_version=body.expected_version,
-            actor_user_id=auth.actor.user_id,
+        async def write(step_up: bool) -> SettingsChange:
+            return await settings.revert(
+                Scope.APPLICATION,
+                app_id,
+                expected_version=body.expected_version,
+                actor_user_id=auth.actor.user_id,
+                step_up=step_up,
+            )
+
+        loosens = await settings.revert_loosens(
+            Scope.APPLICATION, app_id, expected_version=body.expected_version
         )
+        change = await written(auth, "settings.loosen_egress", loosens, write)
+        return JSONResponse(change_body(change))
+
+    @app.post(ORG_PREFIX + "/applications/{app}/settings/presets/{name}")
+    @escalates("settings.loosen_egress")
+    async def apply_settings_preset(
+        org: str,
+        name: str,
+        body: SettingsRevertBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = applying_preset,
+    ) -> JSONResponse:
+        async def write(step_up: bool) -> SettingsChange:
+            return await settings.apply_preset(
+                app_id,
+                name,
+                expected_version=body.expected_version,
+                actor_user_id=auth.actor.user_id,
+                step_up=step_up,
+            )
+
+        # Step-up decided from the change the preset makes here, never from its name.
+        loosens = (
+            await settings.validate(
+                Scope.APPLICATION,
+                app_id,
+                expected_version=body.expected_version,
+                values=SETTINGS_PRESETS[name],
+            )
+        ).loosens
+        change = await written(auth, "settings.loosen_egress", loosens, write)
         return JSONResponse(change_body(change))
 
     @app.get(ORG_PREFIX + "/applications/{app}/settings/versions")
@@ -2001,6 +2458,17 @@ def _invalid(field: str, message: str) -> JSONResponse:
     )
 
 
+def hosted_limits(mode: Mode, settings: EffectiveSettings) -> HostedLimits:
+    """A request's hosted limits: its mode and settings S13 to S16 (docs/42)."""
+    return HostedLimits(
+        mode,
+        settings.allowed_providers,
+        settings.max_hosted_attempts,
+        settings.retry_invalid_tool_json,
+        settings.hosted_first_token_ms,
+    )
+
+
 # The max_tokens a request was served with (docs/39): its own, or the application's
 # default_max_tokens; "none" when no limit applies at all.
 MAX_TOKENS_HEADER = "X-Max-Tokens-Applied"
@@ -2011,7 +2479,10 @@ def applied_header(max_tokens: int | None) -> dict[str, str]:
 
 
 def platform_settings(
-    registry: ModelRegistry, generate_timeout_ms: float | None, chat: ChatService | None = None
+    registry: ModelRegistry,
+    generate_timeout_ms: float | None,
+    chat: ChatService | None = None,
+    max_hosted_attempts: int = DEFAULT_MAX_HOSTED_ATTEMPTS,
 ) -> PlatformSettings:
     """This instance's values at the top of the settings' levels (docs/39)."""
     first = chat.first_token_timeout_ms if chat is not None else DEFAULT_FIRST_TOKEN_TIMEOUT_MS
@@ -2022,10 +2493,13 @@ def platform_settings(
         generate_timeout_ms=generate_timeout_ms,
         chat_first_token_ms=first,
         chat_total_timeout_ms=total,
+        max_hosted_attempts=max_hosted_attempts,
     )
 
 
-def default_platform_settings() -> PlatformSettings:
+def default_platform_settings(
+    max_hosted_attempts: int = DEFAULT_MAX_HOSTED_ATTEMPTS,
+) -> PlatformSettings:
     """The platform values the server factories run with (``DEFAULT_OVERLOAD``'s timeout, the
     chat service's defaults, the profiles' tiers and aliases), for the operator's CLI, which
     has no registry. A test keeps it equal to the default server's."""
@@ -2036,6 +2510,7 @@ def default_platform_settings() -> PlatformSettings:
         generate_timeout_ms=DEFAULT_OVERLOAD.request_timeout_ms,
         chat_first_token_ms=DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
         chat_total_timeout_ms=DEFAULT_TOTAL_TIMEOUT_MS,
+        max_hosted_attempts=max_hosted_attempts,
     )
 
 
@@ -2063,6 +2538,7 @@ def create_app(
     modes: ModeStore | None = None,
     max_hosted_attempts: int = DEFAULT_MAX_HOSTED_ATTEMPTS,
     settings: SettingsStore | None = None,
+    rules: RuleStore | None = None,
     local_destinations: LocalDestinations | None = None,
     counters: SharedCounters | None = None,
     startup_applications: Sequence[Application] | None = None,
@@ -2210,7 +2686,9 @@ def create_app(
 
     # This instance's values at the top of the settings' levels (docs/39): the chat service is
     # built on the same defaults.
-    settings_platform = platform_settings(registry, timeout_ms)
+    settings_platform = platform_settings(
+        registry, timeout_ms, max_hosted_attempts=max_hosted_attempts
+    )
 
     # Where load control reads an application's settings (docs/39): the given store, or the
     # in-memory application store's own. The request path reads them with the key instead.
@@ -2224,6 +2702,13 @@ def create_app(
     # Fallback modes and the providers' circuit breakers (docs/33). The router owns the
     # breakers and publishes their transitions; nothing reads them back from the bus.
     mode_store = modes if modes is not None else InMemoryModeStore()
+    # In memory the modes and the settings are two stores: the hosted policy reads both (docs/42).
+    if (
+        isinstance(mode_store, InMemoryModeStore)
+        and mode_store.settings is None
+        and isinstance(settings_store, InMemorySettingsStore)
+    ):
+        mode_store.settings = settings_store
 
     def breaker_moved(moved: Transition) -> None:
         bus.publish(
@@ -2243,6 +2728,41 @@ def create_app(
         breakers, warnings = own, own.warnings
     # The reports, off the request path but a half-open probe's (docs/41); flushed at shutdown.
     reports = BreakerReports(breakers, clock, on_drop=monitoring.breaker_report_dropped)
+
+    # The alert recorder (docs/43): told how each keyed request ended. Its rollups are this
+    # process's own, written at once, or with shared counters every instance's in Valkey,
+    # flushed every 10 s off the request path. Nothing on the request path reads them.
+    alert_note: ContextVar[AlertNote | None] = ContextVar("alert_note", default=None)
+    alert_recorder: AlertRecorder | None = None
+    alert_rollups: AlertRollups | None = None
+    shared_rollups: SharedAlertRollups | None = None
+    flusher: RollupFlusher | None = None
+    if applications is not None:
+        alert_epoch = epoch if epoch is not None else ClockEpoch(clock)
+        if counters is not None:
+            shared_rollups = counters.alert_rollups()
+            alert_rollups = shared_rollups
+            alert_recorder = AlertRecorder(alert_epoch)
+
+            def rollups_dropped(entries: int) -> None:
+                logging.getLogger("gateway.alerts").warning(
+                    "alert rollups dropped: %d application minutes not sent", entries
+                )
+
+            flusher = RollupFlusher(
+                alert_recorder,
+                shared_rollups,
+                clock,
+                secrets.token_hex(8),
+                on_dropped=rollups_dropped,
+            )
+        else:
+            local_rollups = InMemoryAlertRollups()
+            alert_rollups = local_rollups
+            alert_recorder = AlertRecorder(alert_epoch, sink=local_rollups)
+
+    def noted() -> AlertNote | None:
+        return alert_note.get()
 
     # Filled in further down, once the generate handler it sends through exists.
     load: LoadController | None = None
@@ -2264,11 +2784,22 @@ def create_app(
 
             async def restarted(_: str) -> None:
                 monitoring.state_store_restarted("valkey")
+                if shared_rollups is not None:
+                    # Every minute up to now lost its counts (docs/43).
+                    minute = int((epoch if epoch is not None else ClockEpoch(clock)).epoch_ms()
+                                 // MINUTE_MS)  # fmt: skip
+                    try:
+                        await shared_rollups.note_restart(minute)
+                    except StateUnavailableError:
+                        logging.getLogger("gateway.alerts").warning(
+                            "alert rollups: the restart could not be marked"
+                        )
 
             await counters.watch.start(restarted)
             watching = asyncio.create_task(counters.watch.run(restarted))
         if load is not None and autostart_load is not None:
             await load.start(autostart_load, seed)
+        flushing = asyncio.create_task(flusher.run()) if flusher is not None else None
         # Retention runs beside the server, never on a request (docs/21).
         retainer = budgets if budgets is not None else ledger
         retention = (
@@ -2311,6 +2842,10 @@ def create_app(
         # Before the counters' client closes: what is queued is sent within the limit, the
         # rest dropped and counted (docs/41).
         await reports.flush()
+        if flushing is not None:
+            flushing.cancel()
+        if flusher is not None:
+            await flusher.flush()  # what this instance recorded since the last flush
         if watching is not None:
             watching.cancel()
         if counters is not None:
@@ -2322,11 +2857,24 @@ def create_app(
 
     app = FastAPI(title="Cost-aware multi-model inference gateway", lifespan=lifespan)
     app.state.settings_platform = settings_platform
+    app.state.alert_recorder = alert_recorder
+    app.state.alert_rollups = alert_rollups
+    app.state.alert_flusher = flusher
+    if alert_recorder is not None:
+        app.add_middleware(AlertOutcomeMiddleware, recorder=alert_recorder, note=alert_note)
     if local_only is not None:
         app.add_middleware(LocalOnlyMiddleware, policy=local_only)
     if accounts is not None:
         app.state.accounts = accounts
         _auth_routes(app, accounts)
+        # An application's alert rules (docs/44): in the durable store given, or in memory.
+        rule_service = RuleService(
+            rules if rules is not None else InMemoryRuleStore(),
+            accounts.service.audit,
+            epoch if epoch is not None else ClockEpoch(clock),
+            alert_rollups,
+            secrets.token_bytes,
+        )
         # Applications and keys over HTTP need both: a session to act, applications to act on.
         management = (
             ManagementService(
@@ -2335,6 +2883,8 @@ def create_app(
                 accounts.service.audit,
                 epoch if epoch is not None else ClockEpoch(clock),
                 limits=KeyLimits(),
+                # Each new application with its default alert rules, in its transaction.
+                on_created=rule_service.create_defaults,
             )
             if applications is not None
             else None
@@ -2353,6 +2903,15 @@ def create_app(
                         epoch if epoch is not None else ClockEpoch(clock),
                     ),
                 )
+
+        async def organization_providers(organization_id: str) -> frozenset[str]:
+            """The provider ids an application's ``allowed_providers`` may name (S13)."""
+            if providers is None:
+                return frozenset()
+            return frozenset(c.id for c in await providers.store.list_for(organization_id))
+
+        if management is not None and applications is not None:
+            _alert_rule_routes(app, accounts, rule_service)
         if management is not None and applications is not None and settings_store is not None:
             _settings_routes(
                 app,
@@ -2363,8 +2922,10 @@ def create_app(
                     accounts.service.audit,
                     epoch if epoch is not None else ClockEpoch(clock),
                     settings_platform,
+                    providers=organization_providers,
                 ),
                 settings_store,
+                mode_store,
             )
         # Outermost, so even the local-only guard's refusals of /v1/admin are not cached.
         app.add_middleware(NoStoreMiddleware)
@@ -2543,6 +3104,8 @@ def create_app(
         monitoring.completed(
             model, application_id, result, billed_cost_usd=cost_usd, live_tokens=live_tokens
         )
+        if (note := noted()) is not None:
+            note.ttft_ms, note.total_ms = result.time_to_first_token_ms, result.latency_ms
         return GenerateResponse(
             id=request_id,
             # A simulated run generates no text, so say so in its place.
@@ -2670,6 +3233,8 @@ def create_app(
         if downgraded_from is not None:
             headers["X-Downgraded-From"] = downgraded_from
             monitoring.downgraded(application_id, downgraded_from, model)
+            if (note := noted()) is not None:
+                note.downgraded = True
 
         # Token events for a streaming response; None marks the end of the request.
         tokens: asyncio.Queue[tuple[int, float, str] | None] = asyncio.Queue()
@@ -2829,7 +3394,9 @@ def create_app(
 
         chat = ChatService(registry, clock, chat_adapters)
         platform = settings_platform
-        assert platform == platform_settings(registry, timeout_ms, chat)
+        assert platform == platform_settings(
+            registry, timeout_ms, chat, max_hosted_attempts=max_hosted_attempts
+        )
         documents = DocumentCache()
 
         def keyed(application: Application) -> Keyed:
@@ -2837,7 +3404,7 @@ def create_app(
             a missing row is the defaults; a row that cannot be judged raises
             ``SettingsUnreadableError`` (503). The application as the request sees it."""
             effective = resolve(platform, application, application.stored_settings, documents)
-            return Keyed(effective_application(application, effective), effective)
+            return Keyed(effective_application(application, effective), effective, application)
 
         # async, so it runs on the event loop: a dependency run on a thread would let a
         # SimClock's time jump, and the SQLite connection belongs to the loop's thread.
@@ -2845,7 +3412,10 @@ def create_app(
             scheme, _, credentials = (authorization or "").strip().partition(" ")
             if scheme.lower() != "bearer" or not credentials.strip():
                 raise ApiKeyRequiredError()
-            return keyed(await keys.authenticate(credentials.strip()))
+            found = keyed(await keys.authenticate(credentials.strip()))
+            if (note := noted()) is not None:
+                note.application_id = found.application.id
+            return found
 
         @app.post("/v1/generate", response_model=GenerateResponse)
         @public_route("an application API key, checked by the route")
@@ -2919,6 +3489,8 @@ def create_app(
                 billed_cost_usd=billed,
                 live_tokens=timing.tokens_out,
             )
+            if (note := noted()) is not None:
+                note.ttft_ms, note.total_ms = timing.time_to_first_token_ms, timing.latency_ms
 
         def source_headers(trace: RouteTrace | ChatSource) -> dict[str, str]:
             """Where the answer came from: a provider id or ``gateway`` (the gateway's own
@@ -2976,6 +3548,8 @@ def create_app(
                 )
             try:
                 found = keyed(await keys.authenticate(credentials.strip()))
+                if (note := noted()) is not None:
+                    note.application_id = found.application.id
             except InvalidApiKeyError:
                 return _openai_error(
                     401,
@@ -3081,6 +3655,17 @@ def create_app(
             # the rest of the request; the router reads it again only before a hosted attempt,
             # to refuse one a stricter mode no longer allows (docs/33, docs/38).
             mode = await chat_router.mode(caller.organization_id, caller.id)
+
+            async def recheck() -> HostedLimits:
+                # Just before each hosted attempt: both modes and both settings rows in one
+                # statement, decided as the key lookup's were (docs/42). A row that cannot be
+                # judged raises, and the attempt is not made (closed).
+                policy = await mode_store.hosted_policy(caller.organization_id, caller.id)
+                now = resolve(platform, found.stored, policy.settings, documents)
+                return hosted_limits(
+                    effective_mode(policy.organization_mode, policy.application_mode), now
+                )
+
             try:
                 # Only to answer at once when no candidate may serve it; the router asks again.
                 await chat_router.candidates(
@@ -3103,6 +3688,8 @@ def create_app(
                     kind="api_error",
                 )
             trace = RouteTrace()
+            if (note := noted()) is not None:
+                note.trace = trace
             completion_id = "chatcmpl-" + request_id.removeprefix("req-")
             created = int(chat_epoch.epoch_ms() // 1000)
             multiplier = route.plan.price_multiplier
@@ -3156,6 +3743,8 @@ def create_app(
                         timeouts=ChatTimeouts(
                             settings.chat_first_token_ms, settings.chat_total_timeout_ms
                         ),
+                        limits=hosted_limits(mode, settings),
+                        recheck=recheck,
                     )
                     if timeout_ms is not None:
                         return await run_with_timeout(clock, work, timeout_ms)
@@ -3961,6 +4550,7 @@ def create_default_app() -> FastAPI:
         ),
         modes=state.modes,
         settings=state.settings,
+        rules=state.rules,
         local_destinations=local,
         counters=shared,
     )
@@ -4097,6 +4687,7 @@ def create_shared_app(environ: Mapping[str, str]) -> FastAPI:
         ),
         modes=state.modes,
         settings=state.settings,
+        rules=state.rules,
         local_destinations=local,
         counters=shared,
         readiness=db.ready,

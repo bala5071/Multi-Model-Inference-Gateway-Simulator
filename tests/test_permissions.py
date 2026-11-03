@@ -131,6 +131,8 @@ def test_a_viewer_never_changes_anything(name: str) -> None:
         # Settings are read by viewers too (docs/40); writing them is not theirs.
         "org_settings.read",
         "settings.read",
+        # And alert rules (docs/44).
+        "alert_rules.read",
     }
 
 
@@ -418,8 +420,20 @@ def test_every_route_of_every_app_declares_itself() -> None:
             path = getattr(route, "path", "")
             if isinstance(route, APIRoute):
                 declarations = declaration_of(route)
+                # A settings write also declares the consume-on-use action it escalates to when
+                # a change loosens egress (docs/42): only beside a requires, never alone.
+                escalations = [d for d in declarations if d.kind == "escalates"]
+                declarations = [d for d in declarations if d.kind != "escalates"]
                 assert len(declarations) == 1, (variant, path, declarations)
                 declaration = declarations[0]
+                for escalation in escalations:
+                    assert declaration.kind == "requires", (variant, path)
+                    assert escalation.action is not None
+                    assert PERMISSIONS[escalation.action].consume, (variant, path)
+                    assert (
+                        PERMISSIONS[escalation.action].level
+                        is PERMISSIONS[declaration.action or ""].level
+                    )
                 if declaration.action is not None and PERMISSIONS[declaration.action].step_up:
                     # A flagged action is declared only through requires, which enforces it.
                     assert declaration.kind == "requires", (variant, path, declaration)
@@ -449,9 +463,10 @@ def test_every_route_of_every_app_declares_itself() -> None:
     assert seen_lists >= DOCUMENTATION
     # With accounts, the user endpoints; with applications too, all thirteen (docs/30); the
     # default server also has the provider endpoints (docs/32), on 7 more paths, the two mode
-    # endpoints (docs/33), and the settings endpoints (docs/40) on 10 more paths.
+    # endpoints (docs/33), the settings endpoints (docs/40) on 10 more paths, the two
+    # preset endpoints (docs/42), and the alert rule endpoints (docs/44) on 6 more.
     assert len({p for v, p in requires_routes if v == "accounts"}) == 5
-    assert len({p for v, p in requires_routes if v == "default server"}) == 29
+    assert len({p for v, p in requires_routes if v == "default server"}) == 37
 
 
 def test_a_route_without_a_declaration_is_found() -> None:

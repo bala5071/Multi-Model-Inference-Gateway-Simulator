@@ -29,8 +29,18 @@ from typing import Any, Protocol
 
 from gateway.permissions import PERMISSIONS
 from gateway.settings import CATALOGUE as _SETTINGS
+from gateway.settings import PRESETS as _PRESETS
 
 SETTING_NAMES = frozenset(_SETTINGS)
+# An alert rule's fields (gateway.alertrules.spec_body), which its audit rows name (docs/44).
+RULE_FIELDS = frozenset(
+    {
+        "name", "signal", "parameter", "comparison", "threshold", "window", "for_minutes",
+        "severity", "channels", "cooldown_minutes", "repeat_every_minutes", "quiet_hours",
+        "enabled",
+    }
+)  # fmt: skip
+RULE_ID_PATTERN = re.compile(r"rul_[0-9a-f]{16}")
 
 MINUTE_MS = 60_000.0
 DEFAULT_UNKNOWN_USER_ROWS_PER_MINUTE = 60
@@ -87,6 +97,15 @@ class AuditAction(StrEnum):
     # the names of the fields changed, never their values.
     SETTINGS_CHANGED = "settings_changed"
     SETTINGS_REVERTED = "settings_reverted"
+    # A preset applied to an application (docs/42): its name, the version, the fields changed.
+    SETTINGS_PRESET_APPLIED = "settings_preset_applied"
+    # An application's alert rules (docs/44): the rule id and the names of the fields changed.
+    ALERT_RULE_CREATED = "alert_rule_created"
+    ALERT_RULE_CHANGED = "alert_rule_changed"
+    ALERT_RULE_ENABLED = "alert_rule_enabled"
+    ALERT_RULE_DISABLED = "alert_rule_disabled"
+    ALERT_RULE_DELETED = "alert_rule_deleted"
+    ALERT_RULES_RESTORED = "alert_rules_restored"
 
 
 class Outcome(StrEnum):
@@ -105,6 +124,7 @@ class TargetType(StrEnum):
     APPLICATION = "application"
     API_KEY = "api_key"
     PROVIDER = "provider"
+    ALERT_RULE = "alert_rule"
 
 
 class Reason(StrEnum):
@@ -143,6 +163,8 @@ class Reason(StrEnum):
     SETTING_LOOSER_THAN_CAP = "setting_looser_than_cap"
     SETTINGS_VERSION_CONFLICT = "settings_version_conflict"
     NO_PREVIOUS_VERSION = "no_previous_version"
+    RULE_VERSION_CONFLICT = "rule_version_conflict"
+    RULE_LIMIT = "rule_limit"
 
 
 # The only keys ``details`` may have, and the type of each value.
@@ -178,8 +200,13 @@ DETAIL_FIELDS: Mapping[str, type] = {
     "old_mode": str,
     "new_mode": str,
     "settings_version": int,
+    "preset": str,
+    # Whether a settings change loosened S13 to S16, and so used up a step-up window (docs/42).
+    "loosened_egress": bool,
     # A list of setting names from gateway.settings.CATALOGUE.
     "changed_fields": list,
+    # A list of an alert rule's field names (RULE_FIELDS).
+    "rule_fields": list,
 }
 # gateway.egress.refusal's reasons for an address.
 _ADDRESS_REFUSALS = (
@@ -202,6 +229,7 @@ FIXED_VALUES: Mapping[str, frozenset[str]] = {
     "switch": frozenset({"organization", "platform"}),
     "old_mode": _MODES,
     "new_mode": _MODES,
+    "preset": frozenset(_PRESETS),
     # "ok", or the code a provider failure or refusal maps to (gateway.chat, docs/32).
     "outcome_code": frozenset(
         {
@@ -247,9 +275,10 @@ def _checked_details(details: Mapping[str, object]) -> dict[str, object]:
         if kind is Reason:
             checked[key] = Reason(str(value)).value  # only the fixed reasons
         elif kind is list:
+            allowed = RULE_FIELDS if key == "rule_fields" else SETTING_NAMES
             names = list(value) if isinstance(value, (list, tuple)) else None
-            if names is None or not all(n in SETTING_NAMES for n in names):
-                raise ValueError(f"audit detail {key!r} must list setting names")
+            if names is None or not all(n in allowed for n in names):
+                raise ValueError(f"audit detail {key!r} must list field names")
             checked[key] = names
         elif kind is bool:
             if not isinstance(value, bool):
@@ -308,6 +337,7 @@ _TARGET_PATTERNS: Mapping[TargetType, re.Pattern[str]] = {
     TargetType.APPLICATION: ORGANIZATION_ID_PATTERN,
     TargetType.API_KEY: KEY_ID_PATTERN,
     TargetType.PROVIDER: PROVIDER_ID_PATTERN,
+    TargetType.ALERT_RULE: RULE_ID_PATTERN,
 }
 
 

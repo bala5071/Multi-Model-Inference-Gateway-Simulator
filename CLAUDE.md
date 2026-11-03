@@ -73,24 +73,42 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `chatservice.py` — `ChatService`: one chat request on one tier, through the simulator or the
   tier's adapter, first-token and total timeouts on the injected clock, cancellation (exists)
 - `modes.py` — `Mode`, `effective_mode` (the only place the mode is decided: the stricter of the
-  organization's and the application's), the mode stores over migration 12, and `ModeService`
-  (consume-on-use, audited) (exists)
+  organization's and the application's), the mode stores over migration 12, `hosted_policy`
+  (both modes and both settings rows in one statement, read before each hosted attempt,
+  docs/42), and `ModeService` (consume-on-use, audited) (exists)
 - `chatrouter.py` — `ChatRouter`: a chat request's candidates (the tier, the organization's
   providers for that tier) in the mode's order, the five fallback triggers, never after output,
   never another tier, at most `GATEWAY_CHAT_MAX_HOSTED_ATTEMPTS` (3) calls to organization
   providers a request (`attempt_cap`, docs/41); the mode read once per request by the handler and passed in, the egress
   scope answering from it, and read again just before each hosted attempt, which a stricter mode
-  refuses (docs/33, docs/38); `X-Provider` (`gateway` for the gateway's own tier, `local` before PR 20),
+  refuses (docs/33, docs/38); `HostedLimits`, S13 to S16 held to the stricter of what the
+  request read and what the re-read finds, never the looser (docs/42); `X-Provider` (`gateway` for the gateway's own tier, `local` before PR 20),
   `X-Provider-Class` and the usage record's source (exists)
-- `settings.py` — the settings catalogue (S1 to S11 of `docs/settings-and-alerts-plan.md`),
+- `settings.py` — the settings catalogue (S1 to S16 of `docs/settings-and-alerts-plan.md`),
   `effective_settings` (the only place a value is decided: platform, plan copy, organization,
   application, the stricter wins), `parse_row` and `resolve` (a missing row is the defaults; a
   row that cannot be judged is `SettingsUnreadableError`, answered 503, never a looser value),
   `DocumentCache`, and `SettingsStore` on memory and SQLite (migration 14); the rows are read
-  with the key in `lookup_key`'s own statement (docs/39) (exists)
-- `settingsservice.py` — `SettingsService`: set, unset, revert, each a version checked against
-  the caps in force in one `write_transaction()`, audited by field name, and `validate`, the
-  same code up to the point of writing; the CLI's and the settings endpoints' (exists)
+  with the key in `lookup_key`'s own statement (docs/39); `loosens_egress` (the one place a
+  loosening of S13 to S16 is judged) and `PRESETS` (docs/42) (exists)
+- `settingsservice.py` — `SettingsService`: set, unset, revert, presets, each a version checked
+  against the caps in force in one `write_transaction()`, audited by field name, and `validate`,
+  the same code up to the point of writing; whether a change loosens S13 to S16 for any
+  application it affects is judged again inside the write and must match the step-up the
+  handler claimed (docs/42); the CLI's and the settings endpoints' (exists)
+- `alertrecorder.py` — `AlertRecorder`: per application and per minute, how its requests
+  ended, in fixed field names and fixed-edge latency histograms (`EDGES`, `snap`,
+  `percentile`); never awaits, no I/O; told by `app.py`'s `AlertOutcomeMiddleware` (docs/43)
+  (exists)
+- `alertrollups.py` — `AlertRollups`, `InMemoryAlertRollups` (the recorder writes into it at
+  once) and `RollupFlusher` (every 10 s to Valkey's `ValkeyAlertRollups`, one batch id applied
+  once, kept 10 minutes, then dropped and the minutes marked incomplete) (docs/43) (exists)
+- `alertrules.py` — `validate_rule`, `DEFAULT_RULES` (ids from `default_rule_id`), `RuleStore`
+  on memory, SQLite (migration 15) and Postgres (schema 4), `RuleService` (versions, the cap
+  of 50, restore-defaults, the preview from the rollups, audited) and `resolve_rule`; channels
+  `[]` or `["organization defaults"]` until A4 (docs/44) (exists)
+- `signals.py` — the alert signals and their minimums, pure, from one application's rollups or
+  durable values of its own; "too few to judge", never 0 (docs/43) (exists)
 - `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
   warning, on the injected clock, `circuit_breaker` events; `admit_attempt` says whether an
   admission is a half-open probe, whose slot frees itself after 120 s (`PROBE_MS`) (exists)
@@ -189,10 +207,12 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   each atomic rule one Lua script, every key an HMAC; missing is forbidden; `ValkeyWatch`
   (the settings and the skew at startup, the skew and the run id every 30 s; the skew against
   Postgres's `gateway_now_ms()` when there is one, docs/37);
-  `GATEWAY_COUNTERS=valkey` and `GATEWAY_VALKEY_URL`. Budgets are not in it (exists)
+  `GATEWAY_COUNTERS=valkey` and `GATEWAY_VALKEY_URL`; `ValkeyAlertRollups` (docs/43). Budgets
+  are not in it (exists)
 - `postgres.py` — every durable store on Postgres (asyncpg): `PG_BASELINE` (SQLite migrations
   1 to 13, plus `ord` where SQLite orders by rowid), `PG_SETTINGS` (schema version 3, migration
-  14, with `rollback_schema`), `PostgresSettingsStore`, `PostgresDatabase` with two pools (request,
+  14, with `rollback_schema`), `PG_ALERT_RULES` (schema version 4, migration 15 and its data
+  step), `PostgresSettingsStore`, `PostgresRuleStore`, `PostgresDatabase` with two pools (request,
   management), `write_transaction()` taking the global advisory `WRITE_LOCK` with a timeout that
   fails closed (`GATEWAY_STATE_LOCK_TIMEOUT_MS`), `request_transaction()` without it, the SQL
   clock `gateway_now_ms()` (its `StoreClock`), `ready()` for `/readyz`, and `postgres_state`;
@@ -210,7 +230,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `sessions`, 7 `audit_log`, 8 `role_assignments` and `app_roles` (a rebuild of `users` without
   `platform_admin`), 9 `sessions.step_up_until_ms`, 10 `provider_configs`, 11 `provider_keys`,
   12 `modes`, 13 the chat source columns of `usage_events`, 14 `settings_current` and
-  `settings_versions`. The default database is in the user's data folder,
+  `settings_versions`, 15 `alert_rules` (with a data step: every existing application's default
+  rules). The default database is in the user's data folder,
   owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
   `restore_database` use SQLite's backup API (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),
@@ -239,7 +260,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `GATEWAY_STATE=shared` (Postgres and Valkey, opened in the lifespan, no process lock,
   docs/37); JSON or server-sent-event
   responses; serves the built dashboard at `/dashboard`; with accounts, the management
-  endpoints under `/v1/admin/orgs/{org}` (docs/30), the settings endpoints (docs/40) and the
+  endpoints under `/v1/admin/orgs/{org}` (docs/30), the settings endpoints (docs/40, the presets and
+  the escalation when a change loosens egress in docs/42) and the
   provider endpoints (docs/32), each
   through `requires` (which claims the step-up window for consume-on-use actions), every answer
   `Cache-Control: no-store` (exists)
@@ -304,6 +326,7 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   on Postgres with the shared budgets, its store calls and Postgres round trips (BEGIN, the
   statement timeout, COMMIT, the pool's reset) counted and timed as made (needs
   `GATEWAY_POSTGRES_URL`); the numbers in `docs/38` (exists)
+- `benchmarks/alert_recorder.py` — one alert recorder call; the numbers in `docs/43` (exists)
 - `benchmarks/management_requests.py` — management reads and key writes on the running
   server, beside `/healthz` and `/v1/auth/me`; the numbers in `docs/30` (exists)
 

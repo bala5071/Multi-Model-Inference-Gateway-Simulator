@@ -12,7 +12,7 @@ version is a conflict and nothing is written.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from gateway.applications import ApplicationStore
@@ -20,6 +20,8 @@ from gateway.audit import AuditAction, AuditEvent, AuditLog, Outcome, Reason, Ta
 from gateway.clock import EpochSource
 from gateway.management import ManagementRefusal
 from gateway.settings import (
+    EGRESS_SETTINGS,
+    PRESETS,
     SETTINGS_SCHEMA_VERSION,
     Document,
     EffectiveSettings,
@@ -35,6 +37,7 @@ from gateway.settings import (
     canonical,
     changed_fields,
     effective_settings,
+    loosens_egress,
     parse_row,
     refusals,
     validate_document,
@@ -55,6 +58,7 @@ class SettingsChange:
 class _Prepared:
     row: SettingsRow | None
     current: int
+    before: Document
     document: Document
     changed: tuple[str, ...]
 
@@ -74,6 +78,9 @@ class SettingsValidation:
     refusals: tuple[Refusal, ...]
     invalid_setting: str | None
     message: str | None
+    # The settings among S13 to S16 the change would loosen, for any application it affects:
+    # any of them means the write needs step-up (docs/42).
+    loosens: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,12 +110,15 @@ class SettingsService:
         audit: AuditLog,
         epoch: EpochSource,
         platform: PlatformSettings,
+        providers: Callable[[str], Awaitable[frozenset[str]]] | None = None,
     ) -> None:
         self.store = store
         self._applications = applications
         self._audit = audit
         self._epoch = epoch
         self.platform = platform
+        # An organization's provider ids, which ``allowed_providers`` may name (S13).
+        self._providers = providers
 
     async def _document(self, scope: Scope, scope_id: str) -> tuple[SettingsRow | None, Document]:
         row = await self.store.current(scope, scope_id)
@@ -133,6 +143,50 @@ class SettingsService:
                 self.platform, scope, document, application=application, organization=organization
             )
         return [r for r in found if r.setting in changed]
+
+    async def _loosens(
+        self, scope: Scope, scope_id: str, before: Document, after: Document
+    ) -> tuple[str, ...]:
+        """What the change loosens among S13 to S16, judged from the effective values of every
+        application it affects, read now: the application itself, or every application of the
+        organization whose caps change (docs/42)."""
+        found: list[str] = []
+        if scope is Scope.APPLICATION:
+            application = await self._applications.get_application(scope_id)
+            if application is None:
+                raise KeyError(f"no application {scope_id!r}")
+            _, organization = await self._document(Scope.ORGANIZATION, application.organization_id)
+            found += loosens_egress(
+                effective_settings(self.platform, application, organization, before),
+                effective_settings(self.platform, application, organization, after),
+            )
+        else:
+            for application in await self._applications.list_applications(scope_id):
+                _, own = await self._document(Scope.APPLICATION, application.id)
+                found += loosens_egress(
+                    effective_settings(self.platform, application, before, own),
+                    effective_settings(self.platform, application, after, own),
+                )
+        return tuple(name for name in EGRESS_SETTINGS if name in found)
+
+    async def _check_providers(self, scope: Scope, scope_id: str, document: Document) -> None:
+        """``allowed_providers`` names only providers of the application's organization; one of
+        another organization and one that does not exist are refused alike."""
+        named = document.get("allowed_providers")
+        if scope is not Scope.APPLICATION or not isinstance(named, list) or not named:
+            return
+        application = await self._applications.get_application(scope_id)
+        if application is None:
+            raise KeyError(f"no application {scope_id!r}")
+        known = (
+            await self._providers(application.organization_id)
+            if self._providers is not None
+            else frozenset()
+        )
+        if any(provider not in known for provider in named):
+            raise SettingsInvalidError(
+                "allowed_providers", "names a provider the organization does not have"
+            )
 
     async def _check(
         self, scope: Scope, scope_id: str, document: Document, changed: Sequence[str]
@@ -179,6 +233,7 @@ class SettingsService:
         for name in unset:
             document.pop(name, None)
         document = validate_document(scope, document)
+        await self._check_providers(scope, scope_id, document)
         current = row.version if row is not None else 0
         if current != expected_version:
             raise ManagementRefusal(
@@ -186,7 +241,7 @@ class SettingsService:
                 f"the settings are at version {current}, not {expected_version}: read them "
                 "again and make the change from there",
             )
-        return _Prepared(row, current, document, changed_fields(before, document))
+        return _Prepared(row, current, before, document, changed_fields(before, document))
 
     async def validate(
         self,
@@ -207,6 +262,7 @@ class SettingsService:
         except ManagementRefusal as exc:
             return SettingsValidation(False, exc.reason.value, (), {}, None, (), None, str(exc))
         found = await self._refusals(scope, scope_id, prepared.document, prepared.changed)
+        loosens = await self._loosens(scope, scope_id, prepared.before, prepared.document)
         effective = None
         if scope is Scope.APPLICATION:
             application = await self._applications.get_application(scope_id)
@@ -225,6 +281,7 @@ class SettingsService:
             tuple(found),
             None,
             str(_refused(found)) if found else None,
+            loosens,
         )
 
     async def versions(
@@ -244,6 +301,9 @@ class SettingsService:
         replace: bool = False,
         actor_user_id: str | None = None,
         via: str = "cli",
+        step_up: bool | None = None,
+        action: AuditAction = AuditAction.SETTINGS_CHANGED,
+        preset: str | None = None,
     ) -> SettingsChange:
         """Set ``values`` and remove ``unset`` from the scope's document (or, with ``replace``,
         make the document ``values`` alone: the way to write over a row that cannot be read).
@@ -259,11 +319,53 @@ class SettingsService:
             if not changed and not (replace and prepared.row is not None):
                 return SettingsChange(scope, scope_id, current, (), document)
             await self._check(scope, scope_id, document, changed)
+            await self._agree(scope, scope_id, prepared.before, document, step_up)
             version = await self._write(scope, scope_id, current, document, changed,
                                         actor_user_id, via)  # fmt: skip
-            await self._record(AuditAction.SETTINGS_CHANGED, scope, scope_id, version, changed,
-                               actor_user_id)  # fmt: skip
+            await self._record(
+                action, scope, scope_id, version, changed, actor_user_id,
+                step_up=step_up, preset=preset,
+            )  # fmt: skip
         return SettingsChange(scope, scope_id, version, changed, document)
+
+    async def _agree(
+        self, scope: Scope, scope_id: str, before: Document, after: Document, step_up: bool | None
+    ) -> None:
+        """Inside the write's transaction: whether the change loosens S13 to S16 for any
+        application it affects, judged again now, must be what the caller's step-up was decided
+        on (``step_up``: whether one was claimed). A cap moved meanwhile is a conflict, and
+        nothing is written. ``None`` is the operator's CLI, which needs no step-up."""
+        if step_up is None:
+            return
+        if bool(await self._loosens(scope, scope_id, before, after)) != step_up:
+            raise ManagementRefusal(
+                Reason.SETTINGS_VERSION_CONFLICT,
+                "what this change loosens moved while it was checked: check it again",
+            )
+
+    async def apply_preset(
+        self,
+        application_id: str,
+        name: str,
+        *,
+        expected_version: int,
+        actor_user_id: str | None = None,
+        step_up: bool | None = None,
+    ) -> SettingsChange:
+        """A preset of the plan's section 4: its fields set as one version
+        (``via: preset:<name>``), checked like any write, its step-up decided from the change
+        it makes, never from its name."""
+        return await self.set(
+            Scope.APPLICATION,
+            application_id,
+            expected_version=expected_version,
+            values=PRESETS[name],
+            actor_user_id=actor_user_id,
+            via=f"preset:{name}",
+            step_up=step_up,
+            action=AuditAction.SETTINGS_PRESET_APPLIED,
+            preset=name,
+        )
 
     async def revert(
         self,
@@ -272,6 +374,7 @@ class SettingsService:
         *,
         expected_version: int,
         actor_user_id: str | None = None,
+        step_up: bool | None = None,
     ) -> SettingsChange:
         """One step back: version ``N + 1`` with version ``N - 1``'s document, checked against
         the caps in force like any write. Version 1 has nothing to go back to."""
@@ -300,11 +403,32 @@ class SettingsService:
             )  # fmt: skip
             changed = changed_fields(before, document)
             await self._check(scope, scope_id, document, changed)
+            await self._agree(scope, scope_id, before, document, step_up)
             version = await self._write(scope, scope_id, current, document, changed,
                                         actor_user_id, f"revert:{previous.version}")  # fmt: skip
             await self._record(AuditAction.SETTINGS_REVERTED, scope, scope_id, version, changed,
-                               actor_user_id)  # fmt: skip
+                               actor_user_id, step_up=step_up)  # fmt: skip
         return SettingsChange(scope, scope_id, version, changed, document)
+
+    async def revert_loosens(
+        self, scope: Scope, scope_id: str, *, expected_version: int
+    ) -> tuple[str, ...]:
+        """What ``revert`` would loosen among S13 to S16, read now, for the handler to decide
+        step-up; ``revert`` judges it again inside its write. Nothing when there is nothing to
+        revert (``revert`` then refuses)."""
+        row, before = await self._document(scope, scope_id)
+        current = row.version if row is not None else 0
+        if current != expected_version or current < 2:
+            return ()
+        previous = await self.store.version(scope, scope_id, current - 1)
+        if previous is None:
+            return ()
+        document = parse_row(
+            SettingsRow(scope, scope_id, previous.version, previous.document,
+                        SETTINGS_SCHEMA_VERSION, previous.changed_at_ms),
+            scope,
+        )  # fmt: skip
+        return await self._loosens(scope, scope_id, before, document)
 
     async def _write(
         self,
@@ -340,8 +464,16 @@ class SettingsService:
         version: int,
         changed: Sequence[str],
         actor_user_id: str | None,
+        *,
+        step_up: bool | None = None,
+        preset: str | None = None,
     ) -> None:
         # The names of the fields changed, never their values: those are in the version row.
+        details: dict[str, object] = {"settings_version": version, "changed_fields": list(changed)}
+        if step_up is not None:
+            details["loosened_egress"] = step_up
+        if preset is not None:
+            details["preset"] = preset
         await self._audit.write(
             AuditEvent(
                 action,
@@ -349,7 +481,7 @@ class SettingsService:
                 TargetType.ORGANIZATION if scope is Scope.ORGANIZATION else TargetType.APPLICATION,
                 scope_id,
                 actor_user_id,
-                {"settings_version": version, "changed_fields": list(changed)},
+                details,
             ),
             self._epoch.epoch_ms(),
         )

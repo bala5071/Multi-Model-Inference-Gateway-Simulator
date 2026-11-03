@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
+from gateway.alertrollups import SharedAlertRollups
 from gateway.breaker import BreakerStore, Transition
 from gateway.ratelimit import RateLimiter
 
@@ -44,5 +45,7 @@ class SharedCounters(Protocol):
     def rate_limiter(self) -> RateLimiter: ...
 
     def breakers(self, on_transition: Callable[[Transition], None]) -> BreakerStore: ...
+
+    def alert_rollups(self) -> SharedAlertRollups: ...
 
     async def aclose(self) -> None: ...

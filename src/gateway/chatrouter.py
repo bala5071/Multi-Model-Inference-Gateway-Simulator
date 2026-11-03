@@ -30,7 +30,7 @@ hosted attempt of a request in flight; a looser one applies from the next reques
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
@@ -155,6 +155,8 @@ class RouteTrace:
     fallback_reason: str | None = None
     # Every candidate's reason for being left, in order; the first is ``fallback_reason``.
     reasons: list[FallbackReason] = field(default_factory=list)
+    # Calls made to organization providers, the retry included (for the alert recorder).
+    hosted_attempts: int = 0
 
     def source(self, usage_estimated: bool) -> ChatSource:
         assert self.provider is not None
@@ -166,6 +168,41 @@ class RouteTrace:
             self.fallback_reason,
             usage_estimated,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class HostedLimits:
+    """What decides a request's hosted attempts (docs/42): its mode, and settings S13 to S16
+    (the providers it may use, None for all; how many attempts; the retry after invalid tool
+    JSON; the first-token budget, None for each provider's own)."""
+
+    mode: Mode
+    allowed_providers: frozenset[str] | None = None
+    max_hosted_attempts: int = DEFAULT_MAX_HOSTED_ATTEMPTS
+    retry_invalid_tool_json: bool = True
+    first_token_ms: float | None = None
+
+    def stricter(self, current: HostedLimits) -> HostedLimits:
+        """The stricter of each, field by field: what a request in flight is held to once it
+        has read ``current`` just before a hosted attempt. A looser value never applies."""
+        allowed = self.allowed_providers
+        if current.allowed_providers is not None:
+            allowed = (
+                current.allowed_providers
+                if allowed is None
+                else allowed & current.allowed_providers
+            )
+        firsts = [f for f in (self.first_token_ms, current.first_token_ms) if f is not None]
+        return HostedLimits(
+            effective_mode(self.mode, current.mode),
+            allowed,
+            min(self.max_hosted_attempts, current.max_hosted_attempts),
+            self.retry_invalid_tool_json and current.retry_invalid_tool_json,
+            min(firsts) if firsts else None,
+        )
+
+    def allows(self, provider_id: str) -> bool:
+        return self.allowed_providers is None or provider_id in self.allowed_providers
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,13 +321,40 @@ class ChatRouter:
         trace: RouteTrace | None = None,
         *,
         timeouts: ChatTimeouts | None = None,
+        limits: HostedLimits | None = None,
+        recheck: Callable[[], Awaitable[HostedLimits]] | None = None,
     ) -> RoutedOutcome:
-        """Serve ``request`` under ``mode``, the request's mode read once by its handler;
-        the modes are read again only before a hosted attempt (``_made_stricter``)."""
+        """Serve ``request`` under ``mode`` and ``limits``, read once by its handler. Just
+        before each hosted attempt ``recheck`` reads them again (``hosted_policy``, one
+        statement, docs/42; without it, the modes only): a stricter value stops that attempt, a
+        looser one is not used."""
         trace = trace if trace is not None else RouteTrace()
+        held = limits if limits is not None else HostedLimits(mode, None, self.max_hosted_attempts)
+        held = HostedLimits(
+            held.mode,
+            held.allowed_providers,
+            min(held.max_hosted_attempts, self.max_hosted_attempts),
+            held.retry_invalid_tool_json,
+            held.first_token_ms,
+        )
+
+        async def read_again() -> HostedLimits:
+            if recheck is not None:
+                return await recheck()
+            return HostedLimits(
+                await self.mode(organization_id, application_id), None, self.max_hosted_attempts
+            )
+
         order = await self.candidates(
             organization_id, request.model, mode, wants_tools=bool(request.tools)
         )
+        # A provider the application does not allow (S13) is no candidate at all: it is never
+        # contacted, and never reported as the one fallen back from.
+        order = [c for c in order if c.config is None or held.allows(c.provider)]
+        if not order:
+            # Only possible for tools: the tier takes none and no allowed provider does.
+            reason = self._chat.capabilities(request.model).reasons.get("supports_tools", "")
+            raise NoCandidateError("tools_not_supported", reason)
         hosted = may_reach_hosted(mode)
 
         async def its_mode_allows_hosted() -> bool:
@@ -327,7 +391,10 @@ class ChatRouter:
             for candidate in order:
                 probe = False
                 if candidate.config is not None:
-                    if attempts >= self.max_hosted_attempts:
+                    if not held.allows(candidate.provider):
+                        # Not one of the application's allowed providers (S13): not a candidate.
+                        continue
+                    if attempts >= held.max_hosted_attempts:
                         # Skipped without a call, and without asking its breaker: the gateway's
                         # own tier is still tried where the mode allows it.
                         reasons.append(FallbackReason.ATTEMPT_CAP)
@@ -342,9 +409,7 @@ class ChatRouter:
                     tries -= 1
                     if candidate.provider_class == HOSTED:
                         try:
-                            stricter = await self._made_stricter(
-                                organization_id, application_id, mode
-                            )
+                            now = await read_again()
                         except BaseException:
                             # The re-read was cancelled or failed: no attempt is made, and the
                             # request still fails as it did (closed). What this request was
@@ -352,14 +417,30 @@ class ChatRouter:
                             # once (docs/41); nothing else is released.
                             await self._account(organization_id, candidate, None, probe=probe)
                             raise
-                        if stricter:
-                            # No hosted attempt: a half-open breaker's probe is free again.
+                        if looser_than(held.mode, now.mode):
+                            # A stricter mode: no hosted attempt, a half-open breaker's probe is
+                            # free again.
                             await self._account(organization_id, candidate, None, probe=probe)
+                            break
+                        held = held.stricter(now)
+                        if candidate.config is not None and (
+                            not held.allows(candidate.provider)
+                            or attempts >= held.max_hosted_attempts
+                            or (tries == 0 and not held.retry_invalid_tool_json)
+                        ):
+                            # Stricter settings since the request began (docs/42): this attempt
+                            # is not made, and what it was admitted for is given back.
+                            await self._account(organization_id, candidate, None, probe=probe)
+                            if attempts >= held.max_hosted_attempts:
+                                reasons.append(FallbackReason.ATTEMPT_CAP)
                             break
                     if candidate.config is not None:
                         attempts += 1
+                        trace.hosted_attempts = attempts
                     try:
-                        outcome = await self._attempt(candidate, request, relay, timeouts)
+                        outcome = await self._attempt(
+                            candidate, request, relay, timeouts, held.first_token_ms
+                        )
                     except asyncio.CancelledError:
                         # The client went away: no verdict, and a half-open breaker's one
                         # probe is free again.
@@ -374,7 +455,11 @@ class ChatRouter:
                         retry = why is FallbackReason.INVALID_TOOL_JSON and tries > 0
                         if retry and candidate.config is None:
                             continue
-                        if retry and attempts < self.max_hosted_attempts:
+                        if (
+                            retry
+                            and held.retry_invalid_tool_json
+                            and attempts < held.max_hosted_attempts
+                        ):
                             assert candidate.config is not None
                             admission = await self.breakers.admit_attempt(
                                 organization_id, candidate.provider
@@ -393,11 +478,6 @@ class ChatRouter:
             raise failure
         # Every candidate was skipped (open breakers, unreadable keys, a stricter mode).
         raise ProviderError(ProviderErrorCode.UPSTREAM_UNAVAILABLE, detail="no_candidate")
-
-    async def _made_stricter(self, organization_id: str, application_id: str, mode: Mode) -> bool:
-        """Read both modes now, just before a hosted attempt leaves the machine: whether the
-        current mode is stricter than the request's (``mode``). A looser one is not used."""
-        return looser_than(mode, await self.mode(organization_id, application_id))
 
     async def _skip(
         self, organization_id: str, config: ProviderConfig
@@ -457,6 +537,7 @@ class ChatRouter:
         request: ChatRequest,
         relay: ChatDeltaCallback,
         timeouts: ChatTimeouts | None,
+        first_token_ms: float | None = None,
     ) -> ChatOutcome:
         config = candidate.config
         if config is None:
@@ -478,8 +559,11 @@ class ChatRouter:
                     request,
                     relay,
                     credential=key,
-                    first_token_timeout_ms=config.first_token_budget_ms
-                    or DEFAULT_HOSTED_FIRST_TOKEN_MS,
+                    # The provider's own budget, lowered by the application's S16.
+                    first_token_timeout_ms=min(
+                        config.first_token_budget_ms or DEFAULT_HOSTED_FIRST_TOKEN_MS,
+                        first_token_ms if first_token_ms is not None else float("inf"),
+                    ),
                     # The provider's own first-token budget; the request's total (docs/39).
                     total_timeout_ms=timeouts.total_ms if timeouts is not None else None,
                     provider=config.id,

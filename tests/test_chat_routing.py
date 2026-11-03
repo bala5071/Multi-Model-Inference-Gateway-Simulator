@@ -209,10 +209,12 @@ async def routing(
     local: LocalDestinations = LOCAL,
     operators: Mapping[str, str] | None = None,
     max_hosted_attempts: int = 3,
+    settings_routes: bool = False,
 ) -> AsyncIterator[Routing]:
     """North's applications, the economy tier served by the operator's server at ``operator``
     (the simulator when None), and the organization's providers on another scripted network.
-    ``operators`` (tier to URL, model ``local-<tier>``) replaces ``operator`` when given."""
+    ``operators`` (tier to URL, model ``local-<tier>``) replaces ``operator`` when given;
+    ``settings_routes`` adds the settings endpoints (docs/40, docs/42)."""
     world = make_world()
     accounts = world.accounts
     clock = accounts.clock
@@ -261,6 +263,7 @@ async def routing(
         events=bus,
         usage_store=SqliteUsageStore(accounts.connection),
         max_hosted_attempts=max_hosted_attempts,
+        settings=SqliteSettingsStore(accounts.connection) if settings_routes else None,
     )
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
@@ -478,20 +481,21 @@ async def test_each_mode_is_read_once_and_again_before_each_hosted_attempt(
     """Counted on the store. The common path, a request the gateway's tier answers, reads the
     organization's and the application's mode once each, whether or not the mode allows hosted
     providers. A request with a hosted attempt reads them once more for it, just before it
-    leaves the machine (A refused, then the tier; streaming and not). Before PR 3c these read
-    them twice, and six times."""
+    leaves the machine (A refused, then the tier; streaming and not), in one statement with
+    both settings rows (``hosted_policy``, docs/42). Before PR 3c these read them twice, and six
+    times; before S3 the re-read was two calls."""
     reads: list[str] = []
     once = ["application_mode", "organization_mode"]
     async with routing() as r:
         await r.provider(A, "a.provider.test", role="primary")
         await r.provider(B, "b.provider.test", role="fallback")
-        for name in ("organization_mode", "application_mode"):
+        for name in ("organization_mode", "application_mode", "hosted_policy"):
             read = getattr(r.modes, name)
 
             def counted(name: str = name, read: Any = read) -> Any:
-                async def call(scope_id: str) -> Mode:
+                async def call(*scope_ids: str) -> Any:
                     reads.append(name)
-                    return await read(scope_id)  # type: ignore[no-any-return]
+                    return await read(*scope_ids)
 
                 return call
 
@@ -512,7 +516,8 @@ async def test_each_mode_is_read_once_and_again_before_each_hosted_attempt(
             response = await r.chat(stream=stream)
             assert _source(response) == ("gateway", "local", A, "connect_error")
             counts.append(sorted(reads))
-    assert counts == [once, once, sorted(once * 2), sorted(once * 2)]
+    hosted = sorted([*once, "hosted_policy"])
+    assert counts == [once, once, hosted, hosted]
 
 
 async def test_a_stricter_mode_does_not_cut_a_streaming_answer_and_the_guard_refuses_the_next(
@@ -1178,8 +1183,9 @@ async def test_the_durable_store_calls_one_chat_request_makes(
     assert again == ["lookup_key", *modes, "append"]
     # An organization's provider: the modes once; the providers and each one's key worked out
     # by the handler before admission and again by the router; the key read to skip an
-    # unreadable one and again to lease it; the modes again just before the hosted attempt
-    # (before PR 3c: five more times, 20 calls in all).
+    # unreadable one and again to lease it; just before the hosted attempt, both modes and both
+    # settings rows in one statement (docs/42; before S3 the modes in two, 12 calls in all;
+    # before PR 3c, 20).
     providers = ["list_for", "get_key"]
     assert with_provider == [
         "lookup_key",
@@ -1187,11 +1193,11 @@ async def test_the_durable_store_calls_one_chat_request_makes(
         *providers,
         *providers,
         "get_key",
-        *modes,
+        "hosted_policy",
         "get_key",
         "append",
     ]
-    assert (len(first), len(again), len(with_provider)) == (5, 4, 12)
+    assert (len(first), len(again), len(with_provider)) == (5, 4, 11)
 
 
 # --- per-application settings on chat (docs/39) -------------------------------------------------
