@@ -122,4 +122,21 @@ The console's banner is C2's. The heartbeat chooses nothing: the lease does.
 
 ## Store calls and time
 
-STORE_CALLS_A3
+The evaluator runs beside the server, off the request path; `/healthz`, the metrics and the
+snapshot read its memory. MEASURED on this machine (Intel Core Ultra 7 155H, 22 logical cores,
+15.4 GB, Windows 11 10.0.26200, Python 3.12.10; a SQLite file and the Postgres of
+`docker-compose.postgres.yml`), before at `64765fb` (main after A2) and after on the A3 tree,
+three runs of `GATEWAY_POSTGRES_URL=... uv run python -m benchmarks.request_store_calls` (each
+three passes of 300 requests) and three of `uv run python -m benchmarks.key_checks`:
+
+| Request | Store calls before | after | p50 ms before (9 passes) | after |
+|---|---|---|---|---|
+| gateway tier, SQLite | 5 | 5 | 3.446 to 4.147 | 3.440 to 3.867 |
+| gateway tier, Postgres | 5 | 5 | 16.099 to 17.277 | 16.090 to 16.764 |
+| org provider, SQLite | 12 | 12 | 4.053 to 4.901 | 4.049 to 4.560 |
+| org provider, Postgres | 12 | 12 | 25.029 to 26.832 | 24.778 to 26.335 |
+
+Postgres round trips per request unchanged (22 and 36). The key check: p50 0.024 to 0.026 ms
+before, 0.024 to 0.029 ms after. Nothing of A3 adds a store call to a request; a cycle's own
+time is `gateway_alert_evaluation_ms`. The plan's measurement of one cycle beside the server
+for 1, 100 and 1,000 applications (its section 20) is not made in this PR.

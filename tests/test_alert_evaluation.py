@@ -11,6 +11,7 @@ values, not secrets."""
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import itertools
 import sqlite3
@@ -780,3 +781,101 @@ async def test_three_instances_one_lease_the_holder_killed_for_continuing_and_on
         assert not await killed.incidents.complete_cycle(Fence(killed.holder, killed_epoch))
         [still] = await alive[0].incidents.open_incidents()
         assert still == current
+
+
+@pytest.mark.postgres
+async def test_two_instances_each_opening_its_own_incident_for_one_series_store_one() -> None:
+    """The partial unique index itself, on Postgres: two instances' stores, each writing its own
+    new incident (its own id) for the same rule and series under the lease's fence (the holder's
+    cycle retried through another instance's pool), concurrently. The fence lets both through,
+    the primary key cannot tell them apart (their ids differ): only the index can refuse one,
+    and exactly one is stored, with its one notification."""
+    from gateway.postgres import PostgresIncidentStore
+    from postgres_helpers import pg_world
+
+    async with pg_world(instances=2) as world:
+        await world.set_time(T0)
+        first, second = (PostgresIncidentStore(db) for db in world.instances)
+        lease = await first.attempt_lease("holder")
+        fence = Fence("holder", lease.epoch)
+        rule = _rule(for_minutes=0)
+        mine = decide(_series(rule, 9.0), None, None, T0, lambda p: p + "a" * 16)
+        theirs = decide(_series(rule, 9.0), None, None, T0, lambda p: p + "b" * 16)
+        assert mine is not None
+        assert theirs is not None
+        assert mine.incident.id != theirs.incident.id
+        made = await asyncio.gather(first.apply(fence, mine), second.apply(fence, theirs))
+        rows = await world.rows("SELECT id, rule_id, series_key, state FROM incidents")
+        notes = await world.rows("SELECT incident_id FROM incident_notifications")
+    assert sorted(made) == [False, True]
+    [(incident_id, rule_id, series_key, state)] = rows
+    assert (rule_id, series_key, state) == (rule.id, "", "firing")
+    assert notes == [(incident_id,)]
+
+
+@pytest.mark.postgres
+async def test_the_postgres_constraints_refuse_a_state_a_comparison_or_a_severity_not_known() -> (
+    None
+):
+    """The CHECK constraints behind the code's own checks, reached directly."""
+    import asyncpg
+
+    from postgres_helpers import pg_world
+
+    async with pg_world() as world:
+        incident = decide(_series(_rule(for_minutes=0), 9.0), None, None, T0, _ids())
+        assert incident is not None
+        from gateway.incidents import INCIDENT_COLUMNS, incident_row
+
+        row = list(incident_row(incident.incident))
+        row[INCIDENT_COLUMNS.index("state")] = "smouldering"
+        placeholders = ", ".join(f"${n}" for n in range(1, len(row) + 1))
+        with pytest.raises(asyncpg.CheckViolationError):
+            await world.admin.execute(
+                f"INSERT INTO incidents ({', '.join(INCIDENT_COLUMNS)}) VALUES ({placeholders})",
+                *row,
+            )
+        from gateway.alertrules import COLUMNS, default_rules, rule_row
+
+        for column, value in (("comparison", "=="), ("severity", "page")):
+            values = list(rule_row(default_rules("app1", T0)[0]))
+            values[[c.strip() for c in COLUMNS.split(",")].index(column)] = value
+            with pytest.raises(asyncpg.CheckViolationError):
+                await world.admin.execute(
+                    f"INSERT INTO alert_rules ({COLUMNS}) VALUES"
+                    f" ({', '.join(f'${n}' for n in range(1, 20))})",
+                    *values,
+                )
+
+
+@pytest.mark.postgres
+async def test_two_instances_firing_one_incident_from_the_same_read_make_one_change() -> None:
+    """The compare-and-set itself, on Postgres: two instances decide the same pending incident's
+    move to firing from the same read, each with its own notification id (so no primary key can
+    tell the second from the first), and apply at once under the fence. Only the state and
+    revision compared can refuse one: one change, one firing notification."""
+    from gateway.postgres import PostgresIncidentStore
+    from postgres_helpers import pg_world
+
+    async with pg_world(instances=2) as world:
+        await world.set_time(T0)
+        first, second = (PostgresIncidentStore(db) for db in world.instances)
+        fence = Fence("holder", (await first.attempt_lease("holder")).epoch)
+        rule = _rule(for_minutes=5)
+        opened = decide(_series(rule, 9.0), None, None, T0, lambda p: p + "c" * 16)
+        assert opened is not None
+        assert await first.apply(fence, opened)
+        [pending] = await second.open_incidents()
+        later = T0 + 5 * MINUTE_MS
+        await world.set_time(later)
+        await first.attempt_lease("holder")  # renewed: the fence holds at the later time
+        mine = decide(_series(rule, 9.0), pending, None, later, lambda p: p + "d" * 16)
+        theirs = decide(_series(rule, 9.0), pending, None, later, lambda p: p + "e" * 16)
+        assert mine is not None
+        assert theirs is not None
+        made = await asyncio.gather(first.apply(fence, mine), second.apply(fence, theirs))
+        notes = await world.rows("SELECT kind FROM incident_notifications")
+        [state] = await world.rows("SELECT state, revision FROM incidents")
+    assert sorted(made) == [False, True]
+    assert notes == [("firing",)]
+    assert state == ("firing", pending.revision + 1)

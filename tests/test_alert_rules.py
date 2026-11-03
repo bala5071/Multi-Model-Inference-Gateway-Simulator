@@ -673,3 +673,40 @@ async def test_the_store_writes_a_rule_only_at_the_version_named(kind: str, tmp_
         await store.delete_rule("app2", rule.id, 2)  # another application's
     await store.delete_rule("app1", rule.id, 2)
     assert await store.get_rule("app1", rule.id) is None
+
+
+@pytest.mark.postgres
+async def test_postgres_holds_the_cap_of_fifty_across_two_instances() -> None:
+    """The cap is a count inside the write's transaction (the global write lock on Postgres):
+    two instances creating the last rules at once store exactly fifty, the rest refused."""
+    import asyncio
+    import random as _random
+
+    from gateway.alertrules import RuleService
+    from gateway.audit import AuditLog
+    from gateway.management import ManagementRefusal
+    from gateway.postgres import PostgresAuditStore, PostgresRuleStore
+    from postgres_helpers import pg_world
+
+    async with pg_world(instances=2) as world:
+        services = [
+            RuleService(
+                PostgresRuleStore(db), AuditLog(PostgresAuditStore(db)), SystemEpoch(), None,
+                _random.Random(n).randbytes,
+            )
+            for n, db in enumerate(world.instances)
+        ]  # fmt: skip
+        for i in range(MAX_RULES - 2):
+            await services[i % 2].create("app1", {**RULE, "name": f"Rule {i}"}, None)
+
+        async def one(n: int) -> str:
+            try:
+                await services[n % 2].create("app1", {**RULE, "name": f"Last {n}"}, None)
+            except ManagementRefusal as exc:
+                return exc.reason.value
+            return "created"
+
+        outcomes = await asyncio.gather(*(one(n) for n in range(6)))
+        count = await world.rows("SELECT count(*) FROM alert_rules WHERE application_id = 'app1'")
+    assert sorted(outcomes) == ["created"] * 2 + ["rule_limit"] * 4
+    assert count == [(MAX_RULES,)]
