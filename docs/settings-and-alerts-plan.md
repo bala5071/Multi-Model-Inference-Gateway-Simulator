@@ -1274,6 +1274,18 @@ must be merged before S3.
 
 S1 to S3 and A1 can go in either order after S0; A2 needs S2's permission work; A4 needs A3.
 
+**A3, as agreed when it started (2026-11-03).** Its row above and nothing from A4 or later; no
+outbound connection, no new secret. Where the row and sections 8 to 11 meet A4's outbox, the
+safe reading: **A3 records each notification on its incident** (`firing`, `firing_again`,
+`reminder`, `resolved`, a quiet-hours hold and its `quiet_hours_summary`), in the same
+transaction as the transition, shown by `GET .../incidents/{incident}` (the incident list is
+the only channel). A4 delivers those records through the outbox, with the payload of section
+10, the retries, the caps and the suppressed summary; none of those is in A3. So M22 (the
+outbox in the transition's transaction) is made on the notification record, and M25, M26 and
+the caps' tests stay in A4. The mutations A3 makes: M20 to M24, M27, M28, M30 (on the held
+record), M51 to M53, and one for each new permission row (`incidents.read`,
+`incidents.read_organization`, `incidents.acknowledge`).
+
 **A2 without its channel-dependent parts (decided 2026-11-02, when A2 started).** Channels
 do not exist until A4, so A2 is its row above without what needs them. **Moved to A4**, with
 their tests and mutations:
