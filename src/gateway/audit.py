@@ -41,6 +41,7 @@ RULE_FIELDS = frozenset(
     }
 )  # fmt: skip
 RULE_ID_PATTERN = re.compile(r"rul_[0-9a-f]{16}")
+INCIDENT_ID_PATTERN = re.compile(r"inc_[0-9a-f]{16}")
 
 MINUTE_MS = 60_000.0
 DEFAULT_UNKNOWN_USER_ROWS_PER_MINUTE = 60
@@ -106,6 +107,8 @@ class AuditAction(StrEnum):
     ALERT_RULE_DISABLED = "alert_rule_disabled"
     ALERT_RULE_DELETED = "alert_rule_deleted"
     ALERT_RULES_RESTORED = "alert_rules_restored"
+    # A firing incident acknowledged by a user (docs/45).
+    INCIDENT_ACKNOWLEDGED = "incident_acknowledged"
 
 
 class Outcome(StrEnum):
@@ -125,6 +128,7 @@ class TargetType(StrEnum):
     API_KEY = "api_key"
     PROVIDER = "provider"
     ALERT_RULE = "alert_rule"
+    INCIDENT = "incident"
 
 
 class Reason(StrEnum):
@@ -165,6 +169,7 @@ class Reason(StrEnum):
     NO_PREVIOUS_VERSION = "no_previous_version"
     RULE_VERSION_CONFLICT = "rule_version_conflict"
     RULE_LIMIT = "rule_limit"
+    INCIDENT_NOT_OPEN = "incident_not_open"
 
 
 # The only keys ``details`` may have, and the type of each value.
@@ -338,6 +343,7 @@ _TARGET_PATTERNS: Mapping[TargetType, re.Pattern[str]] = {
     TargetType.API_KEY: KEY_ID_PATTERN,
     TargetType.PROVIDER: PROVIDER_ID_PATTERN,
     TargetType.ALERT_RULE: RULE_ID_PATTERN,
+    TargetType.INCIDENT: INCIDENT_ID_PATTERN,
 }
 
 

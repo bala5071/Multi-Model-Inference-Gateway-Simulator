@@ -107,6 +107,15 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   on memory, SQLite (migration 15) and Postgres (schema 4), `RuleService` (versions, the cap
   of 50, restore-defaults, the preview from the rollups, audited) and `resolve_rule`; channels
   `[]` or `["organization defaults"]` until A4 (docs/44) (exists)
+- `incidents.py` — `Incident`, the notifications recorded on it (A4 delivers them), the lease
+  (`LeaseView`, `Fence`), and `IncidentStore` on memory, SQLite (migration 16) and Postgres
+  (schema 5): one open incident a series by a partial unique index, every change a fenced
+  compare-and-set with its notifications in one transaction (docs/45) (exists)
+- `evaluator.py` — `AlertEvaluator` (the lease attempted every 10 s, a cycle every 30 s by the
+  holder, every write fenced by its epoch), `decide` (the one place the incident states are
+  decided: cooldown, reopening, reminders, no data, quiet hours), and `Heartbeat` (ok, stale,
+  unknown, disabled, from memory: `/healthz`, metrics and the snapshot make no store call)
+  (docs/45) (exists)
 - `signals.py` — the alert signals and their minimums, pure, from one application's rollups or
   durable values of its own; "too few to judge", never 0 (docs/43) (exists)
 - `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
@@ -212,7 +221,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `postgres.py` — every durable store on Postgres (asyncpg): `PG_BASELINE` (SQLite migrations
   1 to 13, plus `ord` where SQLite orders by rowid), `PG_SETTINGS` (schema version 3, migration
   14, with `rollback_schema`), `PG_ALERT_RULES` (schema version 4, migration 15 and its data
-  step), `PostgresSettingsStore`, `PostgresRuleStore`, `PostgresDatabase` with two pools (request,
+  step), `PG_INCIDENTS` (schema version 5, migration 16), `PostgresSettingsStore`,
+  `PostgresRuleStore`, `PostgresIncidentStore`, `PostgresDatabase` with two pools (request,
   management), `write_transaction()` taking the global advisory `WRITE_LOCK` with a timeout that
   fails closed (`GATEWAY_STATE_LOCK_TIMEOUT_MS`), `request_transaction()` without it, the SQL
   clock `gateway_now_ms()` (its `StoreClock`), `ready()` for `/readyz`, and `postgres_state`;
@@ -231,7 +241,7 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `platform_admin`), 9 `sessions.step_up_until_ms`, 10 `provider_configs`, 11 `provider_keys`,
   12 `modes`, 13 the chat source columns of `usage_events`, 14 `settings_current` and
   `settings_versions`, 15 `alert_rules` (with a data step: every existing application's default
-  rules). The default database is in the user's data folder,
+  rules), 16 `alert_lease`, `incidents` and `incident_notifications`. The default database is in the user's data folder,
   owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
   `restore_database` use SQLite's backup API (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),
@@ -261,7 +271,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   docs/37); JSON or server-sent-event
   responses; serves the built dashboard at `/dashboard`; with accounts, the management
   endpoints under `/v1/admin/orgs/{org}` (docs/30), the settings endpoints (docs/40, the presets and
-  the escalation when a change loosens egress in docs/42) and the
+  the escalation when a change loosens egress in docs/42), the alert rule and incident
+  endpoints (docs/44, docs/45), `/healthz`'s `alert_evaluator` and the
   provider endpoints (docs/32), each
   through `requires` (which claims the step-up window for consume-on-use actions), every answer
   `Cache-Control: no-store` (exists)

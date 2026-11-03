@@ -34,6 +34,7 @@ from gateway.users import AccountStore, SqliteAccountStore
 
 if TYPE_CHECKING:
     from gateway.alertrules import RuleStore
+    from gateway.incidents import IncidentStore
 
 T = TypeVar("T")
 
@@ -164,6 +165,7 @@ class StateBackend:
     modes: ModeStore
     settings: SettingsStore
     rules: RuleStore
+    incidents: IncidentStore
     clock: StoreClock
 
 
@@ -172,6 +174,12 @@ def _sqlite_rules(connection: sqlite3.Connection) -> RuleStore:
     from gateway.alertrules import SqliteRuleStore
 
     return SqliteRuleStore(connection)
+
+
+def _sqlite_incidents(connection: sqlite3.Connection, epoch: EpochSource) -> IncidentStore:
+    from gateway.incidents import SqliteIncidentStore
+
+    return SqliteIncidentStore(connection, epoch)
 
 
 def sqlite_state(connection: sqlite3.Connection, epoch: EpochSource) -> StateBackend:
@@ -186,5 +194,6 @@ def sqlite_state(connection: sqlite3.Connection, epoch: EpochSource) -> StateBac
         modes=SqliteModeStore(connection),
         settings=SqliteSettingsStore(connection),
         rules=_sqlite_rules(connection),
+        incidents=_sqlite_incidents(connection, epoch),
         clock=EpochStoreClock(epoch),
     )

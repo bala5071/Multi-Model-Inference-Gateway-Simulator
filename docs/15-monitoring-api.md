@@ -87,10 +87,13 @@ one line in the real stream.)
   "events": {"available": true, "capacity": 1000, "retained": 0, "last_seq": 0,
              "counts": {"state_change": 0, "queue_full": 0, "timeout": 0, "downgrade": 0,
                         "budget_exhausted": 0, "circuit_breaker": 0,
-                        "state_store_restarted": 0, "reservation_expired": 0},
+                        "state_store_restarted": 0, "reservation_expired": 0,
+                        "alert_evaluator_stale": 0, "alert_evaluator_recovered": 0},
              "recent": []},
   "breakers": {"available": true,
-               "reports_dropped": {"queue_full": 0, "flush_timeout": 0, "unavailable": 0}}
+               "reports_dropped": {"queue_full": 0, "flush_timeout": 0, "unavailable": 0}},
+  "alert_evaluator": {"available": true, "state": "disabled", "last_cycle_age_ms": null,
+                      "holder": false, "last_evaluation_ms": null, "evaluation_failures": 0}
 }
 ```
 
@@ -100,6 +103,14 @@ one line in the real stream.)
 instance dropped since it started, by reason: the queue was full, the shutdown flush ran out of
 time, or the counters could not take one. A dropped report can make a breaker open late or
 early; it never admits anything. A count of what the instance did: nothing decides from it.
+
+`alert_evaluator` (added by note 45) is the alert evaluator's heartbeat as this instance last
+read it: `state` is `ok`, `stale`, `unknown` or `disabled` (no evaluator: simulated live mode);
+`last_cycle_age_ms` is the age of the last completed cycle, null while `unknown` (and then
+`available` is false) or before any cycle, never 0; `holder` says whether this instance holds
+the evaluator's lease; `last_evaluation_ms` is its own last cycle's time, and
+`evaluation_failures` its cycles that did not complete. Read from memory: no store call, and
+nothing decides from it.
 
 ### Model groups: the state now
 
@@ -309,6 +320,10 @@ gateway_ttft_ms{model="premium",quantile="0.99"} 50.0
 - Application usage (`gateway_application_used_tokens` and the like) is exported as gauges, since it
   starts again from zero each budget period.
 - `gateway_breaker_reports_dropped_total{reason=...}` is `breakers.reports_dropped` (note 41).
+- `gateway_alert_evaluator_state{state=...}` (1 for the current state),
+  `gateway_alert_evaluator_last_cycle_age_seconds` (absent while unknown),
+  `gateway_alert_evaluator_holder`, `gateway_alert_evaluation_ms` and
+  `gateway_alert_evaluation_failures_total` are `alert_evaluator` (note 45).
 - The full output for one request is asserted in
   `test_metrics_endpoint_is_exact_prometheus_text_for_one_request`.
 

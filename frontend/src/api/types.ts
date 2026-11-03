@@ -156,6 +156,8 @@ export const EVENT_TYPES = [
   "circuit_breaker",
   "state_store_restarted",
   "reservation_expired",
+  "alert_evaluator_stale",
+  "alert_evaluator_recovered",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];
@@ -188,6 +190,21 @@ export interface BreakersGroup {
   reports_dropped: Record<BreakerDropReason, number>;
 }
 
+// The alert evaluator's heartbeat as this instance last read it (docs/45): `available` is false
+// while the state is unknown, and the age is then null, never 0.
+export const ALERT_EVALUATOR_STATES = ["ok", "stale", "unknown", "disabled"] as const;
+export type AlertEvaluatorState = (typeof ALERT_EVALUATOR_STATES)[number];
+
+export interface AlertEvaluatorGroup {
+  available: boolean;
+  // A string, not AlertEvaluatorState: a newer gateway may report a state this build does not know.
+  state: string;
+  last_cycle_age_ms: number | null;
+  holder: boolean;
+  last_evaluation_ms: number | null;
+  evaluation_failures: number;
+}
+
 export interface Snapshot {
   at_ms: number;
   resolution_ms: number;
@@ -196,4 +213,5 @@ export interface Snapshot {
   applications: ApplicationsGroup;
   events: EventsGroup;
   breakers: BreakersGroup;
+  alert_evaluator: AlertEvaluatorGroup;
 }

@@ -800,7 +800,9 @@
       "budget_exhausted": 0,
       "circuit_breaker": 0,
       "state_store_restarted": 0,
-      "reservation_expired": 0
+      "reservation_expired": 0,
+      "alert_evaluator_stale": 0,
+      "alert_evaluator_recovered": 0
     },
     "recent": [
       {
@@ -855,5 +857,13 @@
       "flush_timeout": 0,
       "unavailable": 0
     }
+  },
+  "alert_evaluator": {
+    "available": true,
+    "state": "disabled",
+    "last_cycle_age_ms": null,
+    "holder": false,
+    "last_evaluation_ms": null,
+    "evaluation_failures": 0
   }
 }

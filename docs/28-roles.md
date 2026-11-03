@@ -92,6 +92,7 @@ planned in A2).
 | `org_settings.read` | organization | `org_admin@own_organization`, `viewer@own_organization` | | settings S2 |
 | `org_settings.write` | organization | `org_admin@own_organization` | | settings S2 |
 | `org_settings.loosen_egress` | organization | `org_admin@own_organization` | consume | settings S3 |
+| `incidents.read_organization` | organization | `org_admin@own_organization`, `viewer@own_organization` | | alerts A3 |
 | `audit.read_organization` | organization | `org_admin@own_organization`, `platform_admin@platform` | | later |
 | `applications.read` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@application_in_own_organization`, `viewer@own_application` | | step 7 |
 | `usage.read_application` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@application_in_own_organization`, `viewer@own_application` | | later |
@@ -109,6 +110,8 @@ planned in A2).
 | `settings.loosen_egress` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | consume | settings S3 |
 | `alert_rules.read` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@own_application`, `viewer@application_in_own_organization` | | alerts A2 |
 | `alert_rules.write` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | | alerts A2 |
+| `incidents.read` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@own_application`, `viewer@application_in_own_organization` | | alerts A3 |
+| `incidents.acknowledge` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | | alerts A3 |
 | `monitoring.read` | platform | `platform_admin@platform` | | A8 |
 | `control.write` | platform | `platform_admin@platform` | | A8 |
 | `playground.use` | platform | `platform_admin@platform` | | A8 |

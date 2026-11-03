@@ -24,6 +24,9 @@ EVENT_TYPES = (
     "state_store_restarted",
     # A shared budget reservation outlived its request and was released (docs/37).
     "reservation_expired",
+    # The alert evaluator's heartbeat went stale or unknown, and came back (docs/45).
+    "alert_evaluator_stale",
+    "alert_evaluator_recovered",
 )
 
 
