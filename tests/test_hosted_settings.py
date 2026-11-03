@@ -28,6 +28,7 @@ from gateway.app import create_app, default_platform_settings
 from gateway.audit import AuditAction, AuditEntry
 from gateway.auth import AccountAccess
 from gateway.backends import Backend
+from gateway.chatrouter import HostedLimits
 from gateway.continuous import build_continuous_registry
 from gateway.egress import operator_client
 from gateway.localonly import LocalOnlyPolicy
@@ -963,3 +964,47 @@ async def test_no_key_session_token_or_password_reaches_rows_logs_or_answers(
         for where, text in (("rows", rows), ("audit", audit), ("usage", usage),
                             ("logs", logged), ("answers", answered)):  # fmt: skip
             assert value not in text, (name, where)
+
+
+# --- the in-flight rule, unit by unit: the stricter of request-start and current ---------------
+
+# (the setting, then (the value at request start, the value read now, the value held) cases):
+# each setting with a current value looser than the start's, one stricter, and one the same.
+_STRICTER_OF: list[tuple[str, list[tuple[Any, Any, Any]]]] = [
+    (
+        "allowed_providers",
+        [
+            (frozenset({A}), None, frozenset({A})),  # all allowed now: still only A
+            (None, frozenset({A}), frozenset({A})),
+            (frozenset({A, B}), frozenset({B, "prv_00000000000000c3"}), frozenset({B})),
+            (frozenset(), frozenset({A}), frozenset()),
+        ],
+    ),
+    ("max_hosted_attempts", [(1, 3, 1), (3, 1, 1), (2, 2, 2)]),
+    ("retry_invalid_tool_json", [(False, True, False), (True, False, False), (True, True, True)]),
+    (
+        "first_token_ms",
+        [
+            (1_000.0, None, 1_000.0),
+            (None, 1_000.0, 1_000.0),
+            (1_000.0, 2_000.0, 1_000.0),
+            (None, None, None),
+        ],
+    ),
+]
+
+
+@pytest.mark.parametrize(("field", "cases"), _STRICTER_OF, ids=[f for f, _ in _STRICTER_OF])
+def test_a_request_is_held_to_the_stricter_of_its_start_and_the_current_value(
+    field: str, cases: list[tuple[Any, Any, Any]]
+) -> None:
+    """``HostedLimits.stricter``, S13 to S16 one at a time (the mode held at hosted primary and
+    every other field at its default): a stricter current value applies, a looser one never
+    does, and the other fields are left as they were."""
+    base = HostedLimits(Mode.HOSTED_PRIMARY_WITH_LOCAL_FALLBACK)
+    for start, now, held in cases:
+        result = dataclasses.replace(base, **{field: start}).stricter(
+            dataclasses.replace(base, **{field: now})
+        )
+        assert getattr(result, field) == held, (field, start, now)
+        assert dataclasses.replace(result, **{field: getattr(base, field)}) == base, field
