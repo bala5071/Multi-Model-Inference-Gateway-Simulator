@@ -38,6 +38,17 @@ from gateway.alertrollups import (
     RollupFlusher,
     SharedAlertRollups,
 )
+from gateway.alertrules import (
+    DEFAULT_RULES,
+    AlertRule,
+    InMemoryRuleStore,
+    RuleInvalidError,
+    RuleService,
+    RuleStore,
+    resolve_rule,
+    spec_body,
+    validate_rule,
+)
 from gateway.apikeys import (
     INVALID_KEY_MESSAGE,
     ApiKeyRequiredError,
@@ -1654,6 +1665,191 @@ def _version_view(found: SettingsVersion) -> dict[str, object]:
     }
 
 
+class RuleChangeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1, le=999_999_999)
+    # Checked field by field by gateway.alertrules.validate_rule, whose refusal names it.
+    rule: dict[str, Any] = Field(max_length=16)
+
+
+class RuleVersionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1, le=999_999_999)
+
+
+def _rule_view(rule: AlertRule) -> dict[str, object]:
+    default = DEFAULT_RULES.get(rule.default_key) if rule.default_key is not None else None
+    return {
+        "id": rule.id,
+        "version": rule.version,
+        "default_key": rule.default_key,
+        # A default rule someone changed: shown so that a weakened default is visible.
+        "changed_from_default": default is not None and default != rule.spec,
+        **spec_body(rule.spec),
+        "created_at_ms": rule.created_at_ms,
+        "updated_at_ms": rule.updated_at_ms,
+    }
+
+
+def _alert_rule_routes(app: FastAPI, accounts: AccountAccess, rules: RuleService) -> None:
+    """The alert rule endpoints under /v1/admin/orgs/{org}/applications/{app} (docs/44), each
+    through ``requires`` with a resolver that answers an application outside the path's
+    organization, or a rule outside the path's application, as missing. No step-up: a rule
+    change is audited (the plan's section 14)."""
+    requires = app.state.requires
+    stores = Stores(accounts.service.organizations, accounts.service.store)
+    store = rules.store
+
+    async def application(request: Request) -> Resource | None:
+        p = request.path_params
+        return await resolve_application(stores, p["org"], p["app"])
+
+    async def rule(request: Request) -> Resource | None:
+        p = request.path_params
+        return await resolve_rule(stores, store, p["org"], p["app"], p["rule"])
+
+    reading = requires("alert_rules.read", application)
+    writing = requires("alert_rules.write", application)
+    reading_rule = requires("alert_rules.read", rule)
+    writing_rule = requires("alert_rules.write", rule)
+    prefix = ORG_PREFIX + "/applications/{app}/alert-rules"
+
+    @app.exception_handler(RuleInvalidError)
+    async def rule_invalid(_: Request, exc: RuleInvalidError) -> JSONResponse:
+        return _error(
+            422,
+            "invalid_request",
+            "The request is not valid.",
+            details=[{"field": exc.field, "message": str(exc)}],
+            headers=_NO_STORE,
+        )
+
+    @app.get(prefix)
+    async def list_alert_rules(
+        org: str,
+        app_id: str = Path_(alias="app"),
+        limit: int = Query(default=50, ge=1, le=100),
+        after: str | None = Query(default=None, max_length=20),
+        auth: Authorized = reading,
+    ) -> JSONResponse:
+        page = await store.list_rules(app_id, limit, after)
+        return JSONResponse(
+            {
+                "rules": [_rule_view(r) for r in page],
+                "next": page[-1].id if len(page) == limit else None,
+            }
+        )
+
+    @app.post(prefix, status_code=201)
+    async def create_alert_rule(
+        org: str,
+        body: dict[str, Any],
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = writing,
+    ) -> JSONResponse:
+        created = await rules.create(app_id, body, auth.actor.user_id)
+        return JSONResponse(_rule_view(created), status_code=201)
+
+    @app.post(prefix + "/validate")
+    async def validate_alert_rule(
+        org: str,
+        body: dict[str, Any],
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = reading,
+    ) -> JSONResponse:
+        """A rule body checked as a write would check it, and what it would have been over
+        the last hour from the rollups. Writes nothing."""
+        try:
+            spec = validate_rule(body)
+        except RuleInvalidError as exc:
+            return JSONResponse(
+                {"valid": False, "invalid_field": exc.field, "message": str(exc), "rule": None,
+                 "preview": None}
+            )  # fmt: skip
+        minutes = await rules.preview(app_id, spec)
+        preview = (
+            None
+            if minutes is None
+            else {
+                "minutes": [
+                    {"minute": m.minute, "value": m.value, "why_not": m.why_not, "met": m.met}
+                    for m in minutes
+                ],
+                "met": sum(1 for m in minutes if m.met),
+            }
+        )
+        return JSONResponse(
+            {"valid": True, "invalid_field": None, "message": None, "rule": spec_body(spec),
+             "preview": preview}
+        )  # fmt: skip
+
+    @app.post(prefix + "/restore-defaults")
+    async def restore_default_alert_rules(
+        org: str, app_id: str = Path_(alias="app"), auth: Authorized = writing
+    ) -> JSONResponse:
+        return JSONResponse({"written": await rules.restore_defaults(app_id, auth.actor.user_id)})
+
+    @app.get(prefix + "/{rule}")
+    async def get_alert_rule(
+        org: str, rule: str, app_id: str = Path_(alias="app"), auth: Authorized = reading_rule
+    ) -> JSONResponse:
+        found = await store.get_rule(app_id, rule)
+        assert found is not None  # the resolver found it
+        return JSONResponse(_rule_view(found))
+
+    @app.put(prefix + "/{rule}")
+    async def update_alert_rule(
+        org: str,
+        rule: str,
+        body: RuleChangeBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = writing_rule,
+    ) -> JSONResponse:
+        changed = await rules.update(
+            app_id, rule, body.expected_version, body.rule, auth.actor.user_id
+        )
+        return JSONResponse(_rule_view(changed))
+
+    @app.post(prefix + "/{rule}/enable")
+    async def enable_alert_rule(
+        org: str,
+        rule: str,
+        body: RuleVersionBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = writing_rule,
+    ) -> JSONResponse:
+        changed = await rules.set_enabled(
+            app_id, rule, body.expected_version, True, auth.actor.user_id
+        )
+        return JSONResponse(_rule_view(changed))
+
+    @app.post(prefix + "/{rule}/disable")
+    async def disable_alert_rule(
+        org: str,
+        rule: str,
+        body: RuleVersionBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = writing_rule,
+    ) -> JSONResponse:
+        changed = await rules.set_enabled(
+            app_id, rule, body.expected_version, False, auth.actor.user_id
+        )
+        return JSONResponse(_rule_view(changed))
+
+    @app.delete(prefix + "/{rule}")
+    async def delete_alert_rule(
+        org: str,
+        rule: str,
+        body: RuleVersionBody,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = writing_rule,
+    ) -> JSONResponse:
+        await rules.delete(app_id, rule, body.expected_version, auth.actor.user_id)
+        return JSONResponse({"deleted": rule})
+
+
 def _settings_routes(
     app: FastAPI,
     accounts: AccountAccess,
@@ -2342,6 +2538,7 @@ def create_app(
     modes: ModeStore | None = None,
     max_hosted_attempts: int = DEFAULT_MAX_HOSTED_ATTEMPTS,
     settings: SettingsStore | None = None,
+    rules: RuleStore | None = None,
     local_destinations: LocalDestinations | None = None,
     counters: SharedCounters | None = None,
     startup_applications: Sequence[Application] | None = None,
@@ -2670,6 +2867,14 @@ def create_app(
     if accounts is not None:
         app.state.accounts = accounts
         _auth_routes(app, accounts)
+        # An application's alert rules (docs/44): in the durable store given, or in memory.
+        rule_service = RuleService(
+            rules if rules is not None else InMemoryRuleStore(),
+            accounts.service.audit,
+            epoch if epoch is not None else ClockEpoch(clock),
+            alert_rollups,
+            secrets.token_bytes,
+        )
         # Applications and keys over HTTP need both: a session to act, applications to act on.
         management = (
             ManagementService(
@@ -2678,6 +2883,8 @@ def create_app(
                 accounts.service.audit,
                 epoch if epoch is not None else ClockEpoch(clock),
                 limits=KeyLimits(),
+                # Each new application with its default alert rules, in its transaction.
+                on_created=rule_service.create_defaults,
             )
             if applications is not None
             else None
@@ -2703,6 +2910,8 @@ def create_app(
                 return frozenset()
             return frozenset(c.id for c in await providers.store.list_for(organization_id))
 
+        if management is not None and applications is not None:
+            _alert_rule_routes(app, accounts, rule_service)
         if management is not None and applications is not None and settings_store is not None:
             _settings_routes(
                 app,
@@ -4341,6 +4550,7 @@ def create_default_app() -> FastAPI:
         ),
         modes=state.modes,
         settings=state.settings,
+        rules=state.rules,
         local_destinations=local,
         counters=shared,
     )
@@ -4477,6 +4687,7 @@ def create_shared_app(environ: Mapping[str, str]) -> FastAPI:
         ),
         modes=state.modes,
         settings=state.settings,
+        rules=state.rules,
         local_destinations=local,
         counters=shared,
         readiness=db.ready,

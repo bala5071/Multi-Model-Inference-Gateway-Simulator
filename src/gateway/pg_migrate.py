@@ -99,6 +99,7 @@ ORDER_BY = {
     "modes": "scope_type, scope_id",
     "settings_current": "scope_type, scope_id",
     "settings_versions": "scope_type, scope_id, version",
+    "alert_rules": "id",
 }
 IN_ORDER = frozenset(t for t, order in ORDER_BY.items() if order in ("ord", "seq"))
 

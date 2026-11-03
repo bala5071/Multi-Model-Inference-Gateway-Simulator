@@ -103,6 +103,10 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `alertrollups.py` — `AlertRollups`, `InMemoryAlertRollups` (the recorder writes into it at
   once) and `RollupFlusher` (every 10 s to Valkey's `ValkeyAlertRollups`, one batch id applied
   once, kept 10 minutes, then dropped and the minutes marked incomplete) (docs/43) (exists)
+- `alertrules.py` — `validate_rule`, `DEFAULT_RULES` (ids from `default_rule_id`), `RuleStore`
+  on memory, SQLite (migration 15) and Postgres (schema 4), `RuleService` (versions, the cap
+  of 50, restore-defaults, the preview from the rollups, audited) and `resolve_rule`; channels
+  `[]` or `["organization defaults"]` until A4 (docs/44) (exists)
 - `signals.py` — the alert signals and their minimums, pure, from one application's rollups or
   durable values of its own; "too few to judge", never 0 (docs/43) (exists)
 - `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
@@ -207,7 +211,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   are not in it (exists)
 - `postgres.py` — every durable store on Postgres (asyncpg): `PG_BASELINE` (SQLite migrations
   1 to 13, plus `ord` where SQLite orders by rowid), `PG_SETTINGS` (schema version 3, migration
-  14, with `rollback_schema`), `PostgresSettingsStore`, `PostgresDatabase` with two pools (request,
+  14, with `rollback_schema`), `PG_ALERT_RULES` (schema version 4, migration 15 and its data
+  step), `PostgresSettingsStore`, `PostgresRuleStore`, `PostgresDatabase` with two pools (request,
   management), `write_transaction()` taking the global advisory `WRITE_LOCK` with a timeout that
   fails closed (`GATEWAY_STATE_LOCK_TIMEOUT_MS`), `request_transaction()` without it, the SQL
   clock `gateway_now_ms()` (its `StoreClock`), `ready()` for `/readyz`, and `postgres_state`;
@@ -225,7 +230,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `sessions`, 7 `audit_log`, 8 `role_assignments` and `app_roles` (a rebuild of `users` without
   `platform_admin`), 9 `sessions.step_up_until_ms`, 10 `provider_configs`, 11 `provider_keys`,
   12 `modes`, 13 the chat source columns of `usage_events`, 14 `settings_current` and
-  `settings_versions`. The default database is in the user's data folder,
+  `settings_versions`, 15 `alert_rules` (with a data step: every existing application's default
+  rules). The default database is in the user's data folder,
   owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
   `restore_database` use SQLite's backup API (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),

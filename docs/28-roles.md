@@ -107,6 +107,8 @@ planned in A2).
 | `settings.read` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@application_in_own_organization`, `viewer@own_application` | | settings S2 |
 | `settings.write` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | | settings S2 |
 | `settings.loosen_egress` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | consume | settings S3 |
+| `alert_rules.read` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@own_application`, `viewer@application_in_own_organization` | | alerts A2 |
+| `alert_rules.write` | application | `app_admin@own_application`, `org_admin@application_in_own_organization` | | alerts A2 |
 | `monitoring.read` | platform | `platform_admin@platform` | | A8 |
 | `control.write` | platform | `platform_admin@platform` | | A8 |
 | `playground.use` | platform | `platform_admin@platform` | | A8 |

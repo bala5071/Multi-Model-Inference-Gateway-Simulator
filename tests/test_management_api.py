@@ -223,7 +223,12 @@ async def test_the_routes_are_the_documented_endpoints() -> None:
     )
     routes = set()
     for route in app.routes:
-        if isinstance(route, APIRoute) and route.path.startswith("/v1/admin"):
+        # The alert rule routes are note 44's, checked against its table there.
+        if (
+            isinstance(route, APIRoute)
+            and route.path.startswith("/v1/admin")
+            and "/alert-rules" not in route.path
+        ):
             [declaration] = declaration_of(route)
             assert declaration.kind == "requires"
             for method in route.methods or ():

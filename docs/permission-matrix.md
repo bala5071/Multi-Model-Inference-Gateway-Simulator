@@ -420,6 +420,24 @@ The table it comes from, and what each relation means, are in docs/28-roles.md.
 | app_admin | n/a | n/a | n/a | allow | deny |
 | viewer | n/a | n/a | deny | deny | deny |
 
+## `alert_rules.read` (level application, wired alerts A2)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | n/a | allow | n/a | deny |
+| app_admin | n/a | n/a | n/a | allow | deny |
+| viewer | n/a | n/a | allow | allow | deny |
+
+## `alert_rules.write` (level application, wired alerts A2)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | n/a | allow | n/a | deny |
+| app_admin | n/a | n/a | n/a | allow | deny |
+| viewer | n/a | n/a | deny | deny | deny |
+
 ## `monitoring.read` (level platform, wired A8)
 
 | role | platform | own_organization | application_in_own_organization | own_application | other |

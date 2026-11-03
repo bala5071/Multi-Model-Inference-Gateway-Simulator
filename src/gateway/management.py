@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
@@ -226,7 +226,10 @@ class ManagementService:
         *,
         limits: KeyLimits | None = None,
         random_bytes: Callable[[int], bytes] = secrets.token_bytes,
+        on_created: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
+        # Told each new application's id inside its transaction: its default alert rules.
+        self._on_created = on_created
         self.keys = keys
         self.templates = templates
         self.audit = audit
@@ -310,6 +313,8 @@ class ManagementService:
                 created_at_ms=await self._now(),
             )
             await self.store.add_application(application)
+            if self._on_created is not None:
+                await self._on_created(application.id)
             who, acting = _who(actor)
             details: dict[str, object] = {
                 **acting,

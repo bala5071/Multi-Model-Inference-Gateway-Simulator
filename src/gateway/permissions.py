@@ -74,6 +74,7 @@ class Wired(StrEnum):
     A8 = "A8"  # monitoring and control: local only until then
     SETTINGS_S2 = "settings S2"  # the settings endpoints (docs/40)
     SETTINGS_S3 = "settings S3"  # a settings write that loosens where prompts go (docs/42)
+    ALERTS_A2 = "alerts A2"  # the alert rule endpoints (docs/44)
     LATER = "later"  # declared; no endpoint is planned in A2
 
 
@@ -201,6 +202,15 @@ def _rows() -> list[Permission]:
         ),
         ("settings.write", a, in_app, False, w.SETTINGS_S2),
         ("settings.loosen_egress", a, in_app, CONSUME, w.SETTINGS_S3),
+        # An application's alert rules (docs/44): no step-up; weakening one is audited.
+        (
+            "alert_rules.read",
+            a,
+            (*in_app, "viewer@own_application", "viewer@application_in_own_organization"),
+            False,
+            w.ALERTS_A2,
+        ),
+        ("alert_rules.write", a, in_app, False, w.ALERTS_A2),
         # Monitoring, control and the Playground: local only until A8.
         ("monitoring.read", p, (_PLATFORM,), False, w.A8),
         ("control.write", p, (_PLATFORM,), False, w.A8),

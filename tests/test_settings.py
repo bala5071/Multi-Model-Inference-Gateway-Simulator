@@ -910,11 +910,11 @@ def test_migration_14_adds_the_two_tables_and_its_rollback_takes_them_out() -> N
         return {r[0] for r in rows if r[0].startswith("settings_")}
 
     assert tables() == set()
-    assert runner.migrate() == (14,)
+    assert runner.migrate(14) == (14,)
     assert tables() == {"settings_current", "settings_versions"}
     assert runner.rollback(13) == (14,)
     assert tables() == set()
-    assert runner.migrate() == (14,)
+    assert runner.migrate(14) == (14,)
     connection.close()
 
 
@@ -925,15 +925,15 @@ async def test_postgres_schema_3_applies_and_rolls_back() -> None:
 
     async with pg_world() as world:
         [db] = world.instances
-        assert SCHEMA_VERSION == 3
+        assert SCHEMA_VERSION == 4  # 4: alert rules (docs/44), above settings
         settings = "SELECT count(*) FROM pg_tables WHERE schemaname = $1 AND tablename LIKE $2"
         assert (await world.rows(settings, world.schema, "settings_%")) == [(2,)]
-        assert await rollback_schema(db, 2) == (3,)
+        assert await rollback_schema(db, 2) == (4, 3)
         assert (await world.rows(settings, world.schema, "settings_%")) == [(0,)]
         assert await world.rows("SELECT max(version) FROM gateway_schema") == [(2,)]
         with pytest.raises(RuntimeError, match="no way back"):
             await rollback_schema(db, 1)
-        assert await apply_schema(db) == 3
+        assert await apply_schema(db) == 4
         assert (await world.rows(settings, world.schema, "settings_%")) == [(2,)]
 
 

@@ -78,6 +78,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+from gateway.alertrules import RuleService
 from gateway.apikeys import ApiKeyService, load_pepper
 from gateway.app import default_platform_settings
 from gateway.applications import (
@@ -305,7 +306,10 @@ def _management(
     keys = ApiKeyService(
         state.applications, pepper if pepper is not None else secrets.token_bytes(32), epoch
     )
-    return ManagementService(keys, templates, AuditLog(state.audit), epoch)
+    audit = AuditLog(state.audit)
+    # A new application gets its default alert rules, as over HTTP (docs/44).
+    rules = RuleService(state.rules, audit, epoch, None, secrets.token_bytes)
+    return ManagementService(keys, templates, audit, epoch, on_created=rules.create_defaults)
 
 
 async def _rotate_vault_key(

@@ -19,7 +19,7 @@ import ipaddress
 import sqlite3
 from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from urllib.parse import parse_qs, urlsplit
 
 from gateway.applications import ApplicationStore, SqliteApplicationStore
@@ -31,6 +31,9 @@ from gateway.roles import RoleStore, SqliteRoleStore
 from gateway.settings import SettingsStore, SqliteSettingsStore
 from gateway.usage import SqliteUsageStore, UsageStore
 from gateway.users import AccountStore, SqliteAccountStore
+
+if TYPE_CHECKING:
+    from gateway.alertrules import RuleStore
 
 T = TypeVar("T")
 
@@ -160,7 +163,15 @@ class StateBackend:
     providers: ProviderStore
     modes: ModeStore
     settings: SettingsStore
+    rules: RuleStore
     clock: StoreClock
+
+
+def _sqlite_rules(connection: sqlite3.Connection) -> RuleStore:
+    # Imported here: the rules module imports this one (docs/44).
+    from gateway.alertrules import SqliteRuleStore
+
+    return SqliteRuleStore(connection)
 
 
 def sqlite_state(connection: sqlite3.Connection, epoch: EpochSource) -> StateBackend:
@@ -174,5 +185,6 @@ def sqlite_state(connection: sqlite3.Connection, epoch: EpochSource) -> StateBac
         providers=SqliteProviderStore(connection),
         modes=SqliteModeStore(connection),
         settings=SqliteSettingsStore(connection),
+        rules=_sqlite_rules(connection),
         clock=EpochStoreClock(epoch),
     )
