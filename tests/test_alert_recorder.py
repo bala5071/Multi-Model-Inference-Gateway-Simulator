@@ -677,7 +677,6 @@ async def test_valkey_rollups_refuse_when_valkey_cannot_be_reached() -> None:
     await counters.aclose()
 
 
-@pytest.mark.valkey
 async def _scan(client: Any, match: str) -> str:
     """Every key under ``match``, and every hash field, value and string in it."""
     stored: list[str] = []
@@ -691,6 +690,7 @@ async def _scan(client: Any, match: str) -> str:
     return "\n".join(stored)
 
 
+@pytest.mark.valkey
 async def test_no_rollup_key_or_value_holds_an_id_a_prompt_or_a_key() -> None:
     """A request with a planted prompt and key is recorded and flushed into Valkey; every key,
     field and value under the test's prefix is scanned for them and for the application id.
