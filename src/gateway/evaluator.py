@@ -10,6 +10,14 @@ its lease writes nothing, the heartbeat included.
 transition, every one its own fenced compare-and-set (``IncidentStore.apply``). What each value
 means for an incident is decided by one pure function, ``decide``.
 
+**Its cost** (the plan's section 11.7): the applications with enabled rules are evaluated in
+pages of ``APPLICATION_PAGE``, each page's durable values, rollups and recently resolved
+incidents read once for the page (``BulkSignals``), so a cycle's store calls grow with the
+pages. A cycle starts no application ``CYCLE_BUDGET_MS`` after it began (always after at least
+one), and the next starts with the first one not reached (the fair resume). Between two
+applications it gives the event loop back, so a store whose calls never suspend (SQLite) holds
+a request up by one application at most.
+
 **The heartbeat** is the lease row's ``last_cycle_completed_at_ms``, written with the renewal at
 the end of each completed cycle. Every instance keeps the row its last attempt read, and
 ``Heartbeat.state`` judges it from that memory alone: health and metrics make no store call.
@@ -20,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
 
@@ -59,6 +67,10 @@ OK_WITHIN_MS = 90_000.0
 STALE_IF_NONE_AFTER_MS = 120_000.0
 UNKNOWN_AFTER_MS = 30_000.0
 PAGE = 200
+# The cycle's cost (section 11.7): applications a page, and when a cycle stops starting them.
+APPLICATION_PAGE = 200
+CYCLE_BUDGET_MS = 20_000.0
+UNAVAILABLE = SignalValue(None, "unavailable")
 
 _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
@@ -339,6 +351,70 @@ class DurableSignals(Protocol):
     async def reservation_expired(self, application_id: str) -> SignalValue: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ApplicationSignals:
+    """One application's durable values for one page of a cycle: its organization (None: the
+    application is gone, and its rules are not judged) and the values its rules asked for."""
+
+    organization_id: str | None
+    budget_used: SignalValue = UNAVAILABLE
+    circuit_open: Mapping[str, SignalValue] = field(default_factory=dict)
+    key_expires_in: Mapping[str, SignalValue] = field(default_factory=dict)
+    reservation_expired: SignalValue = UNAVAILABLE
+
+
+class BulkSignals(Protocol):
+    """The durable signals of a page of applications, each kind read once for the page (the
+    server's, in ``app.py``)."""
+
+    async def read_many(
+        self, wanted: Mapping[str, frozenset[str]]
+    ) -> Mapping[str, ApplicationSignals]:
+        """For each application id, the durable signals (by name) its enabled rules use; every
+        id asked is in the answer."""
+        ...
+
+
+class PerApplicationSignals:
+    """``BulkSignals`` from one-application reads, one application at a time: what an
+    evaluator given ``organization_of`` and ``DurableSignals`` reads through."""
+
+    def __init__(
+        self, organization_of: Callable[[str], Awaitable[str | None]], durable: DurableSignals
+    ) -> None:
+        self._organization_of = organization_of
+        self._durable = durable
+
+    async def read_many(
+        self, wanted: Mapping[str, frozenset[str]]
+    ) -> Mapping[str, ApplicationSignals]:
+        found: dict[str, ApplicationSignals] = {}
+        d = self._durable
+        for application_id, signals in wanted.items():
+            organization_id = await self._organization_of(application_id)
+            if organization_id is None:
+                found[application_id] = ApplicationSignals(None)
+                continue
+            budget = (
+                await d.budget_used(application_id) if "budget_used" in signals else UNAVAILABLE
+            )
+            circuit = (
+                await d.circuit_open(organization_id, application_id)
+                if "circuit_open" in signals
+                else {}
+            )
+            keys = await d.key_expires_in(application_id) if "key_expires_in" in signals else {}
+            expired = (
+                await d.reservation_expired(application_id)
+                if "reservation_expired" in signals
+                else UNAVAILABLE
+            )
+            found[application_id] = ApplicationSignals(
+                organization_id, budget, circuit, keys, expired
+            )
+        return found
+
+
 # --- the heartbeat --------------------------------------------------------------------------------
 
 
@@ -439,18 +515,24 @@ class AlertEvaluator:
         incidents: IncidentStore,
         rules: RuleStore,
         rollups: AlertRollups | None,
-        organization_of: Callable[[str], Awaitable[str | None]],
-        durable: DurableSignals,
+        organization_of: Callable[[str], Awaitable[str | None]] | None = None,
+        durable: DurableSignals | None = None,
+        signals: BulkSignals | None = None,
         clock: Clock,
         holder: str,
         random_bytes: Callable[[int], bytes],
         on_heartbeat_change: Callable[[HeartbeatState, HeartbeatState], None] | None = None,
     ) -> None:
+        """The durable signals come from ``signals`` (a page at a time), or else one
+        application at a time from ``organization_of`` and ``durable``."""
+        if signals is None:
+            if organization_of is None or durable is None:
+                raise ValueError("give signals, or organization_of and durable")
+            signals = PerApplicationSignals(organization_of, durable)
         self.incidents = incidents
         self._rules = rules
         self._rollups = rollups
-        self._organization_of = organization_of
-        self._durable = durable
+        self._signals = signals
         self._clock = clock
         self.holder = holder
         self._random_bytes = random_bytes
@@ -460,6 +542,10 @@ class AlertEvaluator:
         self.failures = 0
         # When this evaluator first saw each provider's breaker open: circuit_open's minutes.
         self._open_since: dict[tuple[str, str], float] = {}
+        # The fair resume: the last application a cycle cut short reached (None: start at the
+        # first). How many cycles the time box has cut.
+        self._resume_after: str | None = None
+        self.cut_short = 0
 
     def status(self) -> EvaluatorStatus:
         return EvaluatorStatus(
@@ -526,43 +612,62 @@ class AlertEvaluator:
                 return found
             after = page[-1].id
 
-    async def _window(self, rule: AlertRule, now_ms: float) -> list[MinuteRollup] | None:
-        assert rule.spec.window is not None
-        last = int((now_ms - COMPLETE_AFTER_MS) // MINUTE_MS) - 1
+    def _out_of_time(self, started: float) -> bool:
+        return self._clock.now_ms() - started >= CYCLE_BUDGET_MS
+
+    async def _windows(
+        self, rules: Sequence[AlertRule], now_ms: float
+    ) -> dict[str, list[MinuteRollup]] | None:
+        """The rollups of each application with a rollup rule, read once over its longest
+        window (each rule takes its own last minutes of it); None if they cannot be read."""
+        longest: dict[str, int] = {}
+        for rule in rules:
+            assert rule.spec.window is not None
+            longest[rule.application_id] = max(
+                rule.spec.window, longest.get(rule.application_id, 0)
+            )
         if self._rollups is None:
             return None
+        if not longest:
+            return {}
+        last = int((now_ms - COMPLETE_AFTER_MS) // MINUTE_MS) - 1
+        wanted = [(a, range(last - n + 1, last + 1)) for a, n in sorted(longest.items())]
         try:
-            return await self._rollups.read(
-                rule.application_id, range(last - rule.spec.window + 1, last + 1)
-            )
+            read = await self._rollups.read_many(wanted)
         except StateUnavailableError:
             return None  # Valkey down: those minutes are incomplete
+        return {a: minutes for (a, _), minutes in zip(wanted, read, strict=True)}
 
-    async def _values(
-        self, rule: AlertRule, organization_id: str, now_ms: float
+    def _values(
+        self,
+        rule: AlertRule,
+        signals: ApplicationSignals,
+        windows: Mapping[str, list[MinuteRollup]] | None,
+        now_ms: float,
     ) -> dict[str, SignalValue]:
         spec: RuleSpec = rule.spec
         if spec.signal in FROM_ROLLUPS:
-            window = await self._window(rule, now_ms)
-            if window is None:
+            assert spec.window is not None
+            if windows is None:
                 return {"": INCOMPLETE}
+            window = windows[rule.application_id][-spec.window :]
             return {
                 "": evaluate(
-                    spec.signal, rule.application_id, window, window=spec.window or 0,
+                    spec.signal, rule.application_id, window, window=spec.window,
                     parameter=spec.parameter,
                 )
             }  # fmt: skip
         if spec.signal == "budget_used":
-            return {"": await self._durable.budget_used(rule.application_id)}
+            return {"": signals.budget_used}
         if spec.signal == "key_expires_in":
-            return await self._durable.key_expires_in(rule.application_id)
+            return dict(signals.key_expires_in)
         if spec.signal == "reservation_expired":
-            return {"": await self._durable.reservation_expired(rule.application_id)}
+            return {"": signals.reservation_expired}
         assert spec.signal == "circuit_open"
-        states = await self._durable.circuit_open(organization_id, rule.application_id)
+        assert signals.organization_id is not None
         values: dict[str, SignalValue] = {}
-        for provider, open_now in states.items():
-            key = (organization_id, provider)
+        for provider, open_now in signals.circuit_open.items():
+            key = (signals.organization_id, provider)
             if open_now.value is None:
                 values[provider] = open_now
             elif open_now.value > 0:
@@ -573,8 +678,63 @@ class AlertEvaluator:
                 values[provider] = SignalValue(0.0)
         return values
 
+    def _order(self, application_ids: Sequence[str]) -> list[str]:
+        """The applications in id order, starting after the last one a cut cycle reached."""
+        ordered = sorted(application_ids)
+        after = self._resume_after
+        if after is None:
+            return ordered
+        return [a for a in ordered if a > after] + [a for a in ordered if a <= after]
+
+    async def _read_page(
+        self,
+        page: Sequence[str],
+        by_application: Mapping[str, list[AlertRule]],
+        open_by_series: Mapping[tuple[str, str], Incident],
+        now_ms: float,
+    ) -> tuple[
+        Mapping[str, ApplicationSignals],
+        dict[str, dict[str, SignalValue]],
+        Mapping[tuple[str, str], Incident],
+    ]:
+        """A page's reads, each once for the page: the durable values, the rollups, and the
+        last resolved incident of each series with none open."""
+        signals = await self._signals.read_many(
+            {
+                a: frozenset(
+                    r.spec.signal for r in by_application[a] if r.spec.signal not in FROM_ROLLUPS
+                )
+                for a in page
+            }
+        )
+        live = [
+            r for a in page if signals[a].organization_id is not None for r in by_application[a]
+        ]
+        windows = await self._windows([r for r in live if r.spec.signal in FROM_ROLLUPS], now_ms)
+        values: dict[str, dict[str, SignalValue]] = {}
+        for rule in live:
+            found = self._values(rule, signals[rule.application_id], windows, now_ms)
+            # A series whose key is gone (a key revoked, a provider removed) is not judgeable.
+            for key in [k for (r, k) in open_by_series if r == rule.id and k not in found]:
+                found[key] = SignalValue(None, "too_few")
+            values[rule.id] = found
+        unopened = [
+            (rule_id, key)
+            for rule_id, found in values.items()
+            for key in found
+            if (rule_id, key) not in open_by_series
+        ]
+        if not unopened:
+            return signals, values, {}
+        # Resolved before the page's longest cooldown, an incident cannot be reopened (its last
+        # notification is older still), so it is not read.
+        longest = max(r.spec.cooldown_minutes for r in live)
+        recent = await self.incidents.recent_resolved_many(unopened, now_ms - longest * MINUTE_MS)
+        return signals, values, recent
+
     async def cycle(self, fence: Fence, now_ms: float) -> None:
         """One evaluation at the store's time ``now_ms``, every write fenced."""
+        started = self._clock.now_ms()
         store = self.incidents
         rules = {r.id: r for r in await self._enabled_rules()}
         open_by_series: dict[tuple[str, str], Incident] = {}
@@ -587,25 +747,44 @@ class AlertEvaluator:
                 await store.apply(fence, change)
             else:
                 open_by_series[(incident.rule_id, incident.series_key)] = incident
+        by_application: dict[str, list[AlertRule]] = {}
         for rule in rules.values():
-            organization_id = await self._organization_of(rule.application_id)
-            if organization_id is None:
-                continue
-            values = await self._values(rule, organization_id, now_ms)
-            # A series whose key is gone (a key revoked, a provider removed) is not judgeable.
-            for key in [k for (r, k) in open_by_series if r == rule.id and k not in values]:
-                values[key] = SignalValue(None, "too_few")
-            for series_key, value in sorted(values.items()):
-                current = open_by_series.get((rule.id, series_key))
-                recent = (
-                    await store.recent_resolved(rule.id, series_key) if current is None else None
-                )
-                change = decide(
-                    Series(rule, organization_id, series_key, value), current, recent, now_ms,
-                    self._new_id,
-                )  # fmt: skip
-                if change is not None:
-                    await store.apply(fence, change)
+            by_application.setdefault(rule.application_id, []).append(rule)
+        order = self._order(list(by_application))
+        reached: str | None = None  # the last application this cycle evaluated
+        cut = False
+        for start in range(0, len(order), APPLICATION_PAGE):
+            page = order[start : start + APPLICATION_PAGE]
+            signals, values, recent = await self._read_page(
+                page, by_application, open_by_series, now_ms
+            )
+            for application_id in page:
+                # The time box: no application started past it, but always one a cycle.
+                if reached is not None and self._out_of_time(started):
+                    cut = True
+                    break
+                organization_id = signals[application_id].organization_id
+                if organization_id is not None:
+                    for rule in by_application[application_id]:
+                        for series_key, value in sorted(values[rule.id].items()):
+                            current = open_by_series.get((rule.id, series_key))
+                            change = decide(
+                                Series(rule, organization_id, series_key, value), current,
+                                recent.get((rule.id, series_key)) if current is None else None,
+                                now_ms, self._new_id,
+                            )  # fmt: skip
+                            if change is not None:
+                                await store.apply(fence, change)
+                reached = application_id
+                # The event loop back between two applications (section 11.7).
+                await self._clock.sleep_ms(0.0)
+            if cut:
+                break
+        # The fair resume: a cut cycle's successor starts after the last application it reached.
+        self._resume_after = reached if cut else None
+        if cut:
+            self.cut_short += 1
+            LOG.warning("alert evaluator: a cycle reached its time box; the next one resumes")
         # Quiet hours over: one summary for each incident with held notifications.
         for incident, held in (await self._held()).values():
             rule = rules.get(incident.rule_id) or await self._rules.get_rule(
@@ -618,10 +797,13 @@ class AlertEvaluator:
     async def _held(self) -> Mapping[str, tuple[Incident, int]]:
         found: dict[str, tuple[Incident, int]] = {}
         for notification in await self.incidents.held_notifications():
+            known = found.get(notification.incident_id)
+            if known is not None:
+                found[notification.incident_id] = (known[0], known[1] + 1)
+                continue
             incident = await self.incidents.get_incident(
                 notification.application_id, notification.incident_id
             )
             if incident is not None:
-                count = found.get(incident.id, (incident, 0))[1]
-                found[incident.id] = (incident, count + 1)
+                found[incident.id] = (incident, 1)
         return found

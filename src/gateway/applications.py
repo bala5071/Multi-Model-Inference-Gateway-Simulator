@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Collection, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
@@ -145,6 +145,11 @@ class ApplicationStore(Protocol):
 
     async def get_application(self, application_id: str) -> Application | None: ...
 
+    async def get_applications(self, application_ids: Collection[str]) -> dict[str, Application]:
+        """Each of these applications that exists, by id, in one read (the alert evaluator's,
+        a page at a time; docs/45)."""
+        ...
+
     async def list_applications(self, organization_id: str | None = None) -> list[Application]:
         """Every application (or every one of an organization), in the order they were
         added."""
@@ -169,6 +174,11 @@ class ApplicationStore(Protocol):
         ...
 
     async def list_keys(self, application_id: str) -> list[ApiKeyRecord]: ...
+
+    async def keys_of(self, application_ids: Collection[str]) -> dict[str, list[ApiKeyRecord]]:
+        """Each application's keys as ``list_keys`` gives them, in one read; every id asked is
+        in the answer."""
+        ...
 
     async def page_keys(
         self, application_id: str, after: str | None, limit: int
@@ -254,6 +264,9 @@ class InMemoryApplicationStore:
     async def get_application(self, application_id: str) -> Application | None:
         return self._applications.get(application_id)
 
+    async def get_applications(self, application_ids: Collection[str]) -> dict[str, Application]:
+        return {i: self._applications[i] for i in application_ids if i in self._applications}
+
     async def list_applications(self, organization_id: str | None = None) -> list[Application]:
         return [
             a
@@ -295,6 +308,13 @@ class InMemoryApplicationStore:
 
     async def list_keys(self, application_id: str) -> list[ApiKeyRecord]:
         return [k for k in self._keys.values() if k.application_id == application_id]
+
+    async def keys_of(self, application_ids: Collection[str]) -> dict[str, list[ApiKeyRecord]]:
+        found: dict[str, list[ApiKeyRecord]] = {i: [] for i in application_ids}
+        for k in self._keys.values():
+            if k.application_id in found:
+                found[k.application_id].append(k)
+        return found
 
     async def page_keys(
         self, application_id: str, after: str | None, limit: int
@@ -465,6 +485,17 @@ class SqliteApplicationStore:
         ).fetchone()
         return _application(row) if row is not None else None
 
+    async def get_applications(self, application_ids: Collection[str]) -> dict[str, Application]:
+        ids = sorted(set(application_ids))
+        if not ids:
+            return {}
+        rows = self._connection.execute(
+            f"SELECT {_APP_COLUMNS} FROM applications WHERE id IN ({', '.join('?' * len(ids))})",
+            ids,
+        ).fetchall()
+        found = {a.id: a for a in map(_application, rows)}
+        return {i: found[i] for i in application_ids if i in found}
+
     async def list_applications(self, organization_id: str | None = None) -> list[Application]:
         if organization_id is None:
             rows = self._connection.execute(
@@ -542,6 +573,20 @@ class SqliteApplicationStore:
             (application_id,),
         ).fetchall()
         return [_key(row) for row in rows]
+
+    async def keys_of(self, application_ids: Collection[str]) -> dict[str, list[ApiKeyRecord]]:
+        found: dict[str, list[ApiKeyRecord]] = {i: [] for i in application_ids}
+        ids = sorted(found)
+        if not ids:
+            return found
+        rows = self._connection.execute(
+            f"SELECT {_KEY_COLUMNS} FROM api_keys"
+            f" WHERE application_id IN ({', '.join('?' * len(ids))}) ORDER BY rowid",
+            ids,
+        ).fetchall()
+        for key in map(_key, rows):
+            found[key.application_id].append(key)
+        return found
 
     async def page_keys(
         self, application_id: str, after: str | None, limit: int

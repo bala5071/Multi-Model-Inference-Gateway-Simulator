@@ -560,6 +560,8 @@ async def _scenario(s: StateBackend) -> list[Any]:
     await a.revoke_key("key2")
     await a.record_last_used({"key0": 30.0, "key1": 31.0})
     out.append(await a.list_keys("app0"))
+    out.append(await a.keys_of(["app0", "app1", "nope"]))
+    out.append(await a.get_applications(["app1", "app0", "nope"]))
     # Usage.
     seqs = [
         await u.append(UsageEvent("app0", f"req{i}", "economy", 10, 2, 5, 0.25, 0.5, 100.0 + i))
@@ -570,6 +572,7 @@ async def _scenario(s: StateBackend) -> list[Any]:
         seqs,
         await u.usage_by_model("app0", 0.0, 102.0),
         await u.usage_by_model_for(["app0", "app1"], 0.0, 1e3),
+        await u.usage_by_application(["app0", "app1", "nope"], 0.0, 1e3),
         await u.events("app1"),
         await u.prune(102.0, limit=1),
         await u.prune(102.0),
@@ -735,6 +738,7 @@ async def _scenario(s: StateBackend) -> list[Any]:
     out += [
         await st.current(Scope.ORGANIZATION, "north"),
         await st.current(Scope.APPLICATION, "app0"),
+        await st.current_many(Scope.APPLICATION, ["app0", "app1", "nope"]),
         await st.versions(Scope.APPLICATION, "app0", 5),
         await st.version(Scope.APPLICATION, "app0", 1),
         await st.version(Scope.APPLICATION, "app0", 7),
@@ -805,6 +809,7 @@ async def _scenario(s: StateBackend) -> list[Any]:
             "north", application_id="app0", state=IncidentState.FIRING, limit=5, after=None
         ),
         await inc.recent_resolved(rule.id, ""),
+        await inc.recent_resolved_many([(rule.id, ""), (rule.id, "nope")], 0.0),
     ]
     return out
 

@@ -1,13 +1,15 @@
-"""What one alert evaluation cycle costs, for 1, 100 and 1,000 applications (the plan's
-section 20; docs/45).
+"""What one alert evaluation cycle costs, for 1, 100, 1,000 and 5,000 applications (the plan's
+sections 11.7 and 20; docs/45).
 
 MEASURED on the machine it runs on: real time, a SQLite file and a real Postgres, beside the
 server (never on a request). Each application has the default rules of note 44 (five enabled)
 and one key expiring in 60 days; its rollups are in memory, with one application in ten failing
 (its error rate over the threshold) and one in twenty refused for budget, so a cycle has
-transitions to make. The cycle is ``AlertEvaluator.cycle`` with the server's own durable signals
-(``gateway.app``'s), fenced as the holder: first the cycle that opens the incidents, then three
-steady cycles 30 s later each (on the store's clock), each timed and its store calls counted.
+transitions to make. The cycle is ``AlertEvaluator.cycle`` with the server's own reads
+(``gateway.app``'s durable signals and settings, a page at a time; on Postgres in the
+evaluator's own pool), fenced as the holder: first the cycle that opens the incidents, then
+three steady cycles, each timed, its store calls counted, and its longest page's reads timed.
+Usage comes from a ``CostLedger`` on both stores, as in the first measurement.
 
     GATEWAY_POSTGRES_URL=... uv run python -m benchmarks.alert_evaluation
     GATEWAY_POSTGRES_URL=... uv run python -m benchmarks.alert_evaluation --sizes 1 100
@@ -34,8 +36,8 @@ from benchmarks.calibrate import describe_machine
 from gateway.alertrecorder import MINUTE_MS
 from gateway.alertrollups import InMemoryAlertRollups
 from gateway.alertrules import default_rules
-from gateway.app import _DurableSignals, default_platform_settings
-from gateway.applications import ApiKeyRecord, Application, application_from_template
+from gateway.app import _DurableSignals, alert_settings, default_platform_settings
+from gateway.applications import ApiKeyRecord, application_from_template
 from gateway.breaker import Breakers
 from gateway.clock import EpochSource, SystemEpoch, WallClock
 from gateway.database import open_database
@@ -45,10 +47,9 @@ from gateway.ledger import CostLedger
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.postgres import URL_ENV, PostgresDatabase, apply_schema, postgres_state
 from gateway.routing import load_plans
-from gateway.settings import DocumentCache, EffectiveSettings, Scope, StoredSettings, resolve
 from gateway.state import StateBackend, sqlite_state
 
-SIZES = (1, 100, 1000)
+SIZES = (1, 100, 1000, 5000)
 STEADY_CYCLES = 3
 ORG = "default"
 DAY_MS = 86_400_000.0
@@ -62,6 +63,8 @@ class CycleTimes:
     first_calls: int
     steady_ms: tuple[float, ...]
     steady_calls: int
+    longest_page_ms: float
+    cut_short: int
 
 
 class _Counting:
@@ -120,40 +123,40 @@ def _rollups(size: int, now_ms: float) -> InMemoryAlertRollups:
     return rollups
 
 
+class _TimedEvaluator(AlertEvaluator):
+    """The server's evaluator, its pages' reads timed (the time box's bound, section 11.7)."""
+
+    longest_page_ms = 0.0
+
+    async def _read_page(self, *args: Any, **kwargs: Any) -> Any:
+        started = self._clock.now_ms()
+        found = await super()._read_page(*args, **kwargs)
+        self.longest_page_ms = max(self.longest_page_ms, self._clock.now_ms() - started)
+        return found
+
+
 async def _measure(name: str, state: StateBackend, size: int) -> CycleTimes:
     clock, epoch = WallClock(), SystemEpoch()
     await _seed(state, size, epoch)
-    platform = default_platform_settings()
-    documents = DocumentCache()
     calls = [0]
     applications = _Counting(state.applications, calls)
-    settings = _Counting(state.settings, calls)
     ledger = CostLedger(clock, store=_Counting(state.usage, calls), epoch=epoch)
-
-    async def settings_of(application: Application) -> EffectiveSettings:
-        stored = StoredSettings(
-            await settings.current(Scope.ORGANIZATION, application.organization_id),
-            await settings.current(Scope.APPLICATION, application.id),
-        )
-        return resolve(platform, application, stored, documents)
-
-    async def organization_of(application_id: str) -> str | None:
-        found = await applications.get_application(application_id)
-        return found.organization_id if found is not None else None
-
+    settings_of, settings_many = alert_settings(
+        _Counting(state.settings, calls), default_platform_settings()
+    )
     incidents = _Counting(state.incidents, calls)
-    evaluator = AlertEvaluator(
+    evaluator = _TimedEvaluator(
         incidents=incidents,
         rules=_Counting(state.rules, calls),
         rollups=_Counting(_rollups(size, epoch.epoch_ms()), calls),
-        organization_of=organization_of,
-        durable=_DurableSignals(
-            applications, ledger.usage, settings_of, None, Breakers(clock), epoch
+        signals=_DurableSignals(
+            applications, ledger.usage, settings_of, None, Breakers(clock), epoch,
+            usage_many=ledger.usage_many, settings_many=settings_many,
         ),
         clock=clock,
         holder="bench",
         random_bytes=secrets.token_bytes,
-    )
+    )  # fmt: skip
 
     async def one() -> tuple[float, int]:
         lease = await state.incidents.attempt_lease("bench")
@@ -169,7 +172,10 @@ async def _measure(name: str, state: StateBackend, size: int) -> CycleTimes:
     for _ in range(STEADY_CYCLES):
         elapsed, steady_calls = await one()
         steady.append(elapsed)
-    return CycleTimes(name, size, first_ms, first_calls, tuple(steady), steady_calls)
+    return CycleTimes(
+        name, size, first_ms, first_calls, tuple(steady), steady_calls,
+        evaluator.longest_page_ms, evaluator.cut_short,
+    )  # fmt: skip
 
 
 async def run(sizes: Sequence[int], url: str, env: Mapping[str, str]) -> list[CycleTimes]:
@@ -191,7 +197,8 @@ async def run(sizes: Sequence[int], url: str, env: Mapping[str, str]) -> list[Cy
             db = await PostgresDatabase.connect(url, WallClock(), env=env, schema=schema)
             try:
                 await apply_schema(db)
-                results.append(await _measure("postgres", postgres_state(db), size))
+                async with db.evaluation():  # the evaluator's own pool, as the server's
+                    results.append(await _measure("postgres", postgres_state(db), size))
             finally:
                 await db.aclose()
         finally:
@@ -218,14 +225,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     print()
     print(
         f"{'store':<9} {'apps':>5} {'first ms':>10} {'calls':>7} "
-        f"{'steady ms (each)':>28} {'calls':>7}"
+        f"{'steady ms (each)':>28} {'calls':>7} {'page ms':>8} {'cut':>4}"
     )
     found: list[CycleTimes] = asyncio.run(run(args.sizes, url, os.environ))
     for r in found:
         steady = " ".join(f"{t:.1f}" for t in r.steady_ms)
         print(
             f"{r.store:<9} {r.applications:>5} {r.first_ms:>10.1f} {r.first_calls:>7} "
-            f"{steady:>28} {r.steady_calls:>7}"
+            f"{steady:>28} {r.steady_calls:>7} {r.longest_page_ms:>8.1f} {r.cut_short:>4}"
         )
 
 

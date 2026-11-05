@@ -50,6 +50,13 @@ class AlertRollups(Protocol):
         """One rollup per minute asked for, in order; a minute with nothing is empty."""
         ...
 
+    async def read_many(
+        self, wanted: Sequence[tuple[str, Sequence[int]]]
+    ) -> list[list[MinuteRollup]]:
+        """``read`` of each (application, minutes), in order, in one round trip (the
+        evaluator's, a page at a time; docs/45)."""
+        ...
+
 
 class SharedAlertRollups(AlertRollups, Protocol):
     """Rollups in a store every instance shares, which can restart and lose them."""
@@ -110,6 +117,11 @@ class InMemoryAlertRollups:
             )
             for minute in minutes
         ]
+
+    async def read_many(
+        self, wanted: Sequence[tuple[str, Sequence[int]]]
+    ) -> list[list[MinuteRollup]]:
+        return [await self.read(application_id, minutes) for application_id, minutes in wanted]
 
 
 @dataclass

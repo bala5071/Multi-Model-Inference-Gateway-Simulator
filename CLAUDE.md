@@ -112,7 +112,9 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   (schema 5): one open incident a series by a partial unique index, every change a fenced
   compare-and-set with its notifications in one transaction (docs/45) (exists)
 - `evaluator.py` — `AlertEvaluator` (the lease attempted every 10 s, a cycle every 30 s by the
-  holder, every write fenced by its epoch), `decide` (the one place the incident states are
+  holder, every write fenced by its epoch; the applications a page of 200 at a time, each
+  page's reads once through `BulkSignals`, a 20 s time box with the fair resume, the event
+  loop given back between applications), `decide` (the one place the incident states are
   decided: cooldown, reopening, reminders, no data, quiet hours), and `Heartbeat` (ok, stale,
   unknown, disabled, from memory: `/healthz`, metrics and the snapshot make no store call)
   (docs/45) (exists)
@@ -222,8 +224,9 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   1 to 13, plus `ord` where SQLite orders by rowid), `PG_SETTINGS` (schema version 3, migration
   14, with `rollback_schema`), `PG_ALERT_RULES` (schema version 4, migration 15 and its data
   step), `PG_INCIDENTS` (schema version 5, migration 16), `PostgresSettingsStore`,
-  `PostgresRuleStore`, `PostgresIncidentStore`, `PostgresDatabase` with two pools (request,
-  management), `write_transaction()` taking the global advisory `WRITE_LOCK` with a timeout that
+  `PostgresRuleStore`, `PostgresIncidentStore`, `PostgresDatabase` with three pools (request,
+  management, and the alert evaluator's, which its task takes under `evaluation()`),
+  `write_transaction()` taking the global advisory `WRITE_LOCK` with a timeout that
   fails closed (`GATEWAY_STATE_LOCK_TIMEOUT_MS`), `request_transaction()` without it, the SQL
   clock `gateway_now_ms()` (its `StoreClock`), `ready()` for `/readyz`, and `postgres_state`;
   `PostgresBudgets` (schema version 2: the reservation, Q1, the sweep, settles kept while the
@@ -338,8 +341,9 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   statement timeout, COMMIT, the pool's reset) counted and timed as made (needs
   `GATEWAY_POSTGRES_URL`); the numbers in `docs/38` (exists)
 - `benchmarks/alert_recorder.py` — one alert recorder call; the numbers in `docs/43` (exists)
-- `benchmarks/alert_evaluation.py` — one alert evaluation cycle for 1, 100 and 1,000
-  applications, on SQLite and Postgres, timed and its store calls counted (needs
+- `benchmarks/alert_evaluation.py` — one alert evaluation cycle for 1, 100, 1,000 and 5,000
+  applications, on SQLite and Postgres, timed, its store calls counted and its longest page's
+  reads timed (needs
   `GATEWAY_POSTGRES_URL`); the numbers in `docs/45` (exists)
 - `benchmarks/management_requests.py` — management reads and key writes on the running
   server, beside `/healthz` and `/v1/auth/me`; the numbers in `docs/30` (exists)

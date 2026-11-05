@@ -30,7 +30,7 @@ import json
 import re
 import sqlite3
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Collection, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -778,6 +778,13 @@ class SettingsStore(Protocol):
 
     async def current(self, scope: Scope, scope_id: str) -> SettingsRow | None: ...
 
+    async def current_many(
+        self, scope: Scope, scope_ids: Collection[str]
+    ) -> dict[str, SettingsRow]:
+        """The current row of each of these that has one, in one read (the alert evaluator's;
+        docs/45). An id with no row is not in the answer."""
+        ...
+
     async def versions(
         self, scope: Scope, scope_id: str, limit: int, *, before: int | None = None
     ) -> list[SettingsVersion]:
@@ -829,6 +836,12 @@ class InMemorySettingsStore:
 
     async def current(self, scope: Scope, scope_id: str) -> SettingsRow | None:
         return self._current.get((Scope(scope), scope_id))
+
+    async def current_many(
+        self, scope: Scope, scope_ids: Collection[str]
+    ) -> dict[str, SettingsRow]:
+        scope = Scope(scope)
+        return {i: self._current[(scope, i)] for i in scope_ids if (scope, i) in self._current}
 
     async def versions(
         self, scope: Scope, scope_id: str, limit: int, *, before: int | None = None
@@ -948,6 +961,19 @@ class SqliteSettingsStore:
             (Scope(scope).value, scope_id),
         ).fetchone()
         return settings_row(row) if row is not None else None
+
+    async def current_many(
+        self, scope: Scope, scope_ids: Collection[str]
+    ) -> dict[str, SettingsRow]:
+        ids = sorted(set(scope_ids))
+        if not ids:
+            return {}
+        rows = self._connection.execute(
+            f"SELECT {_ROW_COLUMNS} FROM settings_current"
+            f" WHERE scope_type = ? AND scope_id IN ({', '.join('?' * len(ids))})",
+            (Scope(scope).value, *ids),
+        ).fetchall()
+        return {r.scope_id: r for r in map(settings_row, rows)}
 
     async def versions(
         self, scope: Scope, scope_id: str, limit: int, *, before: int | None = None
