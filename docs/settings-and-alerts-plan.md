@@ -759,8 +759,46 @@ therefore read low by up to that, and the note will say so.
 | A cycle takes longer than 30 s | the next starts when it ends; no overlap on one instance | `gateway_alert_evaluation_ms`, the lag in the console |
 
 The evaluator never blocks a request: it runs beside the server, like the reservation sweep,
-on the request pool's transactions (never the management write lock), and a slow cycle delays
-only alerts.
+never under the management write lock, and a slow cycle delays only alerts. On Postgres it
+reads and writes on a pool of its own (section 11.7), never the request pool; on SQLite it
+gives the event loop back between applications.
+
+#### 11.7 One cycle's cost: bulk reads, the time box, its own pool (decided 2026-11-05)
+
+Measured before A4 (note 45): a cycle made about 15 store calls per application, one at a
+time, so on Postgres 1,000 applications took 13 to 16 s, half the lease, and reads shared the
+request pool. Decided then, before delivery is built on the cycle:
+
+- **Bulk reads.** The applications with enabled rules are evaluated in pages of 200, in id
+  order. Each page makes one read of each kind for the whole page: the applications (and so
+  their organizations), both settings rows of each, the period's usage, the keys, the rollups
+  (one Valkey pipeline), the last resolved incident of each series that has none open (only
+  those resolved inside the page's longest cooldown: an older one cannot be reopened), and
+  each organization's providers and their breakers once. A cycle's store calls then grow with
+  the pages, not the applications, plus one write per transition. What each value means is
+  unchanged: the same `decide`, the same values, read at the start of the page instead of
+  rule by rule.
+- **The time box.** A cycle stops starting applications 20 s after it began (on the injected
+  clock), always after at least one, and completes as usual (the heartbeat is written). The
+  next cycle starts with the first application not reached, wrapping round, so every
+  application is evaluated within a bounded number of cycles and none is skipped for ever (the
+  fair resume). The open incidents' rule check and the quiet-hours summaries are not cut: they
+  are bounded by the open incidents, not the applications. A cycle cut short logs a line.
+  An instance that takes the lease over starts from the first application.
+- **No renewal inside a cycle,** unless the time box alone cannot hold a cycle inside the
+  30 s lease. It can when one page's reads and one application's writes take well under the
+  10 s left: measured with the cycle (note 45).
+- **Its own pool.** On Postgres the evaluator has a third pool, `evaluator`, of 2 connections
+  per instance, beside the request pool (10) and the management pool (2). It does not share
+  the management pool: that pool holds the global write lock for management writes, so a long
+  cycle would delay settings and key changes, and a burst of those would stall alerts. A
+  context set around the evaluator's task sends its reads and its fenced writes there; the
+  request path never uses it. On SQLite (one connection, calls that never suspend) the cycle
+  gives the event loop back between applications, so a chat request waits at most one
+  application's work. Tests: a chat request served while the evaluator's pool is held by a
+  slow read, and a probe that runs between every two applications, each with its mutation.
+- **Measured again** at 1, 100, 1,000 and 5,000 applications on SQLite and Postgres, three
+  runs, with the store calls per cycle.
 
 #### 11.5 Operator signals (a later PR)
 
@@ -1273,6 +1311,12 @@ must be merged before S3.
 | C2 | `settings-alerts/c2` | Console: alert rules, channels, incidents | Frontend |
 
 S1 to S3 and A1 can go in either order after S0; A2 needs S2's permission work; A4 needs A3.
+
+**Before A4, as decided on 2026-11-05 (PR #37).** The cycle's measurement first, then
+section 11.7: bulk reads, the 20 s time box with the fair resume, the evaluator's own pool on
+Postgres and the yield on SQLite, measured again at 1 to 5,000 applications. Behaviour is
+unchanged: every existing evaluator and incident test passes as it is. No outbound connection.
+A4 itself waits for its own plan's approval.
 
 **A3, as agreed when it started (2026-11-03).** Its row above and nothing from A4 or later; no
 outbound connection, no new secret. Where the row and sections 8 to 11 meet A4's outbox, the
