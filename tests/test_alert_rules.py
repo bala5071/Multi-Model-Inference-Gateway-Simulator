@@ -506,7 +506,7 @@ def test_migration_15_gives_every_existing_application_the_default_rules(tmp_pat
                 )
             )
         )  # fmt: skip
-    assert runner.migrate() == (15,)
+    assert runner.migrate(15) == (15,)
     rows = connection.execute("SELECT id, application_id, version FROM alert_rules").fetchall()
     assert sorted(r[0] for r in rows) == sorted(_default_ids("acme") + _default_ids("globex"))
     assert {r[2] for r in rows} == {1}
@@ -534,7 +534,7 @@ async def test_postgres_schema_4_gives_every_existing_application_the_default_ru
 
     async with pg_world() as world:
         [db] = world.instances
-        assert await rollback_schema(db, 3) == (4,)
+        assert await rollback_schema(db, 3) == (5, 4)
         state = postgres_state(db)
         await state.applications.add_organization(
             new_organization("north", "North", "business", created_at_ms=0)
@@ -544,7 +544,7 @@ async def test_postgres_schema_4_gives_every_existing_application_the_default_ru
                 "app1", "Shop", load_plans(), "pro", organization_id="north", created_at_ms=1.0
             )
         )
-        assert await apply_schema(db) == 4
+        assert await apply_schema(db) == 5
         rows = await world.rows(f"SELECT {COLUMNS} FROM alert_rules ORDER BY id")
     assert sorted(r[0] for r in rows) == _default_ids("app1")
     by_key = {rule_from_row(r).default_key: rule_from_row(r) for r in rows}
@@ -673,3 +673,40 @@ async def test_the_store_writes_a_rule_only_at_the_version_named(kind: str, tmp_
         await store.delete_rule("app2", rule.id, 2)  # another application's
     await store.delete_rule("app1", rule.id, 2)
     assert await store.get_rule("app1", rule.id) is None
+
+
+@pytest.mark.postgres
+async def test_postgres_holds_the_cap_of_fifty_across_two_instances() -> None:
+    """The cap is a count inside the write's transaction (the global write lock on Postgres):
+    two instances creating the last rules at once store exactly fifty, the rest refused."""
+    import asyncio
+    import random as _random
+
+    from gateway.alertrules import RuleService
+    from gateway.audit import AuditLog
+    from gateway.management import ManagementRefusal
+    from gateway.postgres import PostgresAuditStore, PostgresRuleStore
+    from postgres_helpers import pg_world
+
+    async with pg_world(instances=2) as world:
+        services = [
+            RuleService(
+                PostgresRuleStore(db), AuditLog(PostgresAuditStore(db)), SystemEpoch(), None,
+                _random.Random(n).randbytes,
+            )
+            for n, db in enumerate(world.instances)
+        ]  # fmt: skip
+        for i in range(MAX_RULES - 2):
+            await services[i % 2].create("app1", {**RULE, "name": f"Rule {i}"}, None)
+
+        async def one(n: int) -> str:
+            try:
+                await services[n % 2].create("app1", {**RULE, "name": f"Last {n}"}, None)
+            except ManagementRefusal as exc:
+                return exc.reason.value
+            return "created"
+
+        outcomes = await asyncio.gather(*(one(n) for n in range(6)))
+        count = await world.rows("SELECT count(*) FROM alert_rules WHERE application_id = 'app1'")
+    assert sorted(outcomes) == ["created"] * 2 + ["rule_limit"] * 4
+    assert count == [(MAX_RULES,)]

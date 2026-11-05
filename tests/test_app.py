@@ -247,8 +247,19 @@ async def test_healthz_reports_ok_and_uptime_on_the_injected_clock(gateway: Gate
     after = await gateway.client.get("/healthz")
 
     assert before.status_code == 200
-    assert before.json() == {"status": "ok", "models": 2, "uptime_ms": 0.0}
-    assert after.json() == {"status": "ok", "models": 2, "uptime_ms": 17.0}
+    # No incident store: no alert evaluator here (docs/45).
+    assert before.json() == {
+        "status": "ok",
+        "models": 2,
+        "uptime_ms": 0.0,
+        "alert_evaluator": "disabled",
+    }
+    assert after.json() == {
+        "status": "ok",
+        "models": 2,
+        "uptime_ms": 17.0,
+        "alert_evaluator": "disabled",
+    }
 
 
 async def test_metrics_are_empty_before_any_request(gateway: Gateway) -> None:

@@ -46,6 +46,8 @@ NO_EVENTS = {
     "circuit_breaker": 0,
     "state_store_restarted": 0,
     "reservation_expired": 0,
+    "alert_evaluator_stale": 0,
+    "alert_evaluator_recovered": 0,
 }
 UNAVAILABLE = {
     "queue": {"available": False, "length": None},
@@ -266,6 +268,15 @@ async def test_snapshot_of_one_request_has_exact_values() -> None:
         "breakers": {
             "available": True,
             "reports_dropped": {"queue_full": 0, "flush_timeout": 0, "unavailable": 0},
+        },
+        # No incident store here: no evaluator (docs/45).
+        "alert_evaluator": {
+            "available": True,
+            "state": "disabled",
+            "last_cycle_age_ms": None,
+            "holder": False,
+            "last_evaluation_ms": None,
+            "evaluation_failures": 0,
         },
     }
     # Prefill ends at 5 ms; the tokens come at 9, 13 and 17 ms.
@@ -1011,11 +1022,25 @@ gateway_events_total{type="budget_exhausted"} 0
 gateway_events_total{type="circuit_breaker"} 0
 gateway_events_total{type="state_store_restarted"} 0
 gateway_events_total{type="reservation_expired"} 0
+gateway_events_total{type="alert_evaluator_stale"} 0
+gateway_events_total{type="alert_evaluator_recovered"} 0
 # HELP gateway_breaker_reports_dropped_total Breaker reports this instance dropped, by reason.
 # TYPE gateway_breaker_reports_dropped_total counter
 gateway_breaker_reports_dropped_total{reason="queue_full"} 0
 gateway_breaker_reports_dropped_total{reason="flush_timeout"} 0
 gateway_breaker_reports_dropped_total{reason="unavailable"} 0
+# HELP gateway_alert_evaluator_state Alert evaluator heartbeat here: 1 for the current state.
+# TYPE gateway_alert_evaluator_state gauge
+gateway_alert_evaluator_state{state="ok"} 0
+gateway_alert_evaluator_state{state="stale"} 0
+gateway_alert_evaluator_state{state="unknown"} 0
+gateway_alert_evaluator_state{state="disabled"} 1
+# HELP gateway_alert_evaluator_holder 1 on the instance holding the alert evaluator's lease.
+# TYPE gateway_alert_evaluator_holder gauge
+gateway_alert_evaluator_holder 0
+# HELP gateway_alert_evaluation_failures_total Alert evaluation cycles that did not complete.
+# TYPE gateway_alert_evaluation_failures_total counter
+gateway_alert_evaluation_failures_total 0
 """
 
 SAMPLE_LINE = re.compile(r'^[a-z_]+(\{[a-z]+="[^"]*"(,[a-z]+="[^"]*")*\})? -?[0-9.e+-]+$')

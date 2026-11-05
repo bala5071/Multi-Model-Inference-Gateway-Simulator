@@ -61,10 +61,20 @@ from gateway.apikeys import (
 from gateway.applications import (
     ApiKeyRecord,
     Application,
+    ApplicationStore,
     InMemoryApplicationStore,
     seed_demo_applications,
 )
-from gateway.audit import DEFAULT_UNKNOWN_USER_ROWS_PER_MINUTE, AuditLog, Reason
+from gateway.audit import (
+    DEFAULT_UNKNOWN_USER_ROWS_PER_MINUTE,
+    INCIDENT_ID_PATTERN,
+    AuditAction,
+    AuditEvent,
+    AuditLog,
+    Outcome,
+    Reason,
+    TargetType,
+)
 from gateway.auth import (
     ADMIN_PASSWORD_ENV,
     ADMIN_USERNAME_ENV,
@@ -102,7 +112,7 @@ from gateway.backend_config import (
     load_backend_config,
 )
 from gateway.backends import Backend, BackendError
-from gateway.breaker import Breakers, BreakerStore, SlowWarnings, Transition
+from gateway.breaker import Breakers, BreakerState, BreakerStore, SlowWarnings, Transition
 from gateway.breakerreports import BreakerReports
 from gateway.chat import (
     TOOL_NAME_PATTERN,
@@ -147,8 +157,16 @@ from gateway.egress import (
     provider_tls_context,
     system_resolver,
 )
+from gateway.evaluator import AlertEvaluator, HeartbeatState
 from gateway.events import EventBus
+from gateway.incidents import (
+    Incident,
+    IncidentState,
+    IncidentStore,
+    InMemoryIncidentStore,
+)
 from gateway.ledger import (
+    ApplicationUsage,
     BudgetExceededError,
     Budgets,
     CostLedger,
@@ -197,7 +215,13 @@ from gateway.modes import (
     ModeStore,
     effective_mode,
 )
-from gateway.monitoring import Monitor, Snapshot, render_prometheus
+from gateway.monitoring import (
+    DISABLED_EVALUATOR,
+    AlertEvaluatorGroup,
+    Monitor,
+    Snapshot,
+    render_prometheus,
+)
 from gateway.organizations import MAX_NAME_LENGTH
 from gateway.overload import (
     OverloadPolicy,
@@ -241,6 +265,7 @@ from gateway.routing import ModelNotAllowedError, Quality, Router, load_plans, p
 from gateway.schema import GenerateRequest, RequestResult
 from gateway.settings import (
     CATALOGUE,
+    NO_SETTINGS,
     DocumentCache,
     EffectiveSettings,
     InMemorySettingsStore,
@@ -259,6 +284,8 @@ from gateway.settings import (
 )
 from gateway.settings import PRESETS as SETTINGS_PRESETS
 from gateway.settingsservice import SettingsChange, SettingsService, SettingsValidation
+from gateway.signals import SignalValue
+from gateway.signals import budget_used as signal_budget_used
 from gateway.state import (
     POSTGRES_URL_ENV,
     STATE_ENV,
@@ -353,6 +380,8 @@ class Health(BaseModel):
     status: str
     models: int
     uptime_ms: float
+    # The alert evaluator's heartbeat, one word (docs/45): ok, stale, unknown or disabled.
+    alert_evaluator: str
 
 
 class PercentilePair(BaseModel):
@@ -1205,6 +1234,78 @@ class NoStoreMiddleware:
         await self.app(scope, receive, no_store)
 
 
+class _DurableSignals:
+    """The signals the evaluator reads from the stores (docs/45), for one application: its
+    budget used, each allowed provider's breaker, each active key's expiry. A store that cannot
+    answer gives "unavailable", never a value."""
+
+    def __init__(
+        self,
+        applications: ApplicationStore,
+        usage: Callable[[str], Awaitable[ApplicationUsage]],
+        settings_of: Callable[[Application], Awaitable[EffectiveSettings]],
+        providers: ProviderService | None,
+        breakers: BreakerStore,
+        epoch: EpochSource,
+    ) -> None:
+        self._applications = applications
+        self._usage = usage
+        self._settings_of = settings_of
+        self._providers = providers
+        self._breakers = breakers
+        self._epoch = epoch
+
+    async def budget_used(self, application_id: str) -> SignalValue:
+        application = await self._applications.get_application(application_id)
+        if application is None:
+            return SignalValue(None, "unavailable")
+        try:
+            settings = await self._settings_of(application)
+        except SettingsUnreadableError:
+            return SignalValue(None, "unavailable")
+        usage = await self._usage(application_id)
+        return signal_budget_used(usage.total.billed_tokens, settings.monthly_token_budget)
+
+    async def circuit_open(
+        self, organization_id: str, application_id: str
+    ) -> dict[str, SignalValue]:
+        """1 for a breaker open or half-open, 0 for closed; the evaluator turns that into the
+        minutes it has seen it so."""
+        if self._providers is None:
+            return {}
+        application = await self._applications.get_application(application_id)
+        if application is None:
+            return {}
+        try:
+            allowed = (await self._settings_of(application)).allowed_providers
+        except SettingsUnreadableError:
+            allowed = None
+        found: dict[str, SignalValue] = {}
+        for config in await self._providers.store.list_for(organization_id):
+            if not config.enabled or (allowed is not None and config.id not in allowed):
+                continue
+            try:
+                state = await self._breakers.state(organization_id, config.id)
+            except StateUnavailableError:
+                found[config.id] = SignalValue(None, "unavailable")
+                continue
+            found[config.id] = SignalValue(0.0 if state is BreakerState.CLOSED else 1.0)
+        return found
+
+    async def key_expires_in(self, application_id: str) -> dict[str, SignalValue]:
+        now = self._epoch.epoch_ms()
+        return {
+            key.key_id: SignalValue((key.expires_at_ms - now) / 86_400_000.0)
+            for key in await self._applications.list_keys(application_id)
+            if not key.revoked and key.expires_at_ms is not None
+        }
+
+    async def reservation_expired(self, application_id: str) -> SignalValue:
+        # Counted by each instance's own sweep, so no instance knows the whole count: not
+        # judged in A3 (docs/45); the default rule is off.
+        return SignalValue(None, "unavailable")
+
+
 @dataclass
 class AlertNote:
     """What the handlers learn about one request for the alert recorder (docs/43): whose it
@@ -1691,6 +1792,152 @@ def _rule_view(rule: AlertRule) -> dict[str, object]:
         "created_at_ms": rule.created_at_ms,
         "updated_at_ms": rule.updated_at_ms,
     }
+
+
+def _incident_view(incident: Incident) -> dict[str, object]:
+    return {
+        "id": incident.id,
+        "application_id": incident.application_id,
+        "rule_id": incident.rule_id,
+        "rule_version": incident.rule_version,
+        # A provider id or a key id where the signal has series.
+        "series": incident.series_key or None,
+        "state": incident.state.value,
+        "severity": incident.severity,
+        "value": incident.value,
+        "opened_at_ms": incident.opened_at_ms,
+        "pending_since_ms": incident.pending_since_ms,
+        "fired_at_ms": incident.fired_at_ms,
+        "acknowledged_at_ms": incident.acknowledged_at_ms,
+        "acknowledged_by": incident.acknowledged_by,
+        "resolved_at_ms": incident.resolved_at_ms,
+        "resolve_reason": incident.resolve_reason.value
+        if incident.resolve_reason is not None
+        else None,
+        "no_data_since_ms": incident.no_data_since_ms,
+        "reopened": incident.reopened,
+    }
+
+
+def _incident_state(state: str | None) -> IncidentState | None:
+    if state is None:
+        return None
+    try:
+        return IncidentState(state)
+    except ValueError:
+        raise RequestValidationError(
+            [{"loc": ("query", "state"), "msg": "not an incident state", "type": "value_error"}]
+        ) from None
+
+
+def _incident_routes(
+    app: FastAPI, accounts: AccountAccess, incidents: IncidentStore, epoch: EpochSource
+) -> None:
+    """The incident endpoints (docs/45), each through ``requires``, with resolvers that answer
+    an application outside the path's organization, or an incident outside the path's
+    application (or an id not in an incident id's form), as missing."""
+    requires = app.state.requires
+    service = accounts.service
+    stores = Stores(service.organizations, service.store)
+
+    async def organization(request: Request) -> Resource | None:
+        return await resolve_organization(stores, request.path_params["org"])
+
+    async def application(request: Request) -> Resource | None:
+        p = request.path_params
+        return await resolve_application(stores, p["org"], p["app"])
+
+    async def incident(request: Request) -> Resource | None:
+        p = request.path_params
+        resource = await resolve_application(stores, p["org"], p["app"])
+        if resource is None or not INCIDENT_ID_PATTERN.fullmatch(p["incident"]):
+            return None
+        found = await incidents.get_incident(p["app"], p["incident"])
+        return resource if found is not None else None
+
+    reading_organization = requires("incidents.read_organization", organization)
+    reading = requires("incidents.read", application)
+    reading_incident = requires("incidents.read", incident)
+    acknowledging = requires("incidents.acknowledge", incident)
+    prefix = ORG_PREFIX + "/applications/{app}/incidents"
+
+    def page(found: list[Incident], limit: int) -> dict[str, object]:
+        return {
+            "incidents": [_incident_view(i) for i in found],
+            "next": found[-1].id if len(found) == limit else None,
+        }
+
+    @app.get(ORG_PREFIX + "/incidents")
+    async def list_organization_incidents(
+        org: str,
+        state: str | None = Query(default=None, max_length=20),
+        application_id: str | None = Query(default=None, alias="application", max_length=64),
+        limit: int = Query(default=50, ge=1, le=100),
+        after: str | None = Query(default=None, max_length=20),
+        auth: Authorized = reading_organization,
+    ) -> JSONResponse:
+        found = await incidents.list_incidents(
+            org, application_id=application_id, state=_incident_state(state), limit=limit,
+            after=after,
+        )  # fmt: skip
+        return JSONResponse(page(found, limit))
+
+    @app.get(prefix)
+    async def list_application_incidents(
+        org: str,
+        app_id: str = Path_(alias="app"),
+        state: str | None = Query(default=None, max_length=20),
+        limit: int = Query(default=50, ge=1, le=100),
+        after: str | None = Query(default=None, max_length=20),
+        auth: Authorized = reading,
+    ) -> JSONResponse:
+        found = await incidents.list_incidents(
+            org, application_id=app_id, state=_incident_state(state), limit=limit, after=after
+        )
+        return JSONResponse(page(found, limit))
+
+    @app.get(prefix + "/{incident}")
+    async def get_application_incident(
+        org: str,
+        incident: str,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = reading_incident,
+    ) -> JSONResponse:
+        found = await incidents.get_incident(app_id, incident)
+        assert found is not None  # the resolver found it
+        notifications = await incidents.notifications(incident)
+        return JSONResponse(
+            {
+                **_incident_view(found),
+                # Recorded here; delivered to the rule's channels from A4.
+                "notifications": [
+                    {"kind": n.kind.value, "state": n.state.value, "at_ms": n.at_ms,
+                     "reason": n.reason}
+                    for n in notifications
+                ],
+            }
+        )  # fmt: skip
+
+    @app.post(prefix + "/{incident}/acknowledge")
+    async def acknowledge_incident(
+        org: str,
+        incident: str,
+        app_id: str = Path_(alias="app"),
+        auth: Authorized = acknowledging,
+    ) -> JSONResponse:
+        done = await incidents.acknowledge(app_id, incident, auth.actor.user_id, epoch.epoch_ms())
+        if done is None:
+            raise ManagementRefusal(
+                Reason.INCIDENT_NOT_OPEN, "only a firing incident can be acknowledged"
+            )
+        await service.audit.write(
+            AuditEvent(
+                AuditAction.INCIDENT_ACKNOWLEDGED, Outcome.SUCCESS, TargetType.INCIDENT,
+                incident, auth.actor.user_id, {"application_id": app_id},
+            ),
+            epoch.epoch_ms(),
+        )  # fmt: skip
+        return JSONResponse(_incident_view(done))
 
 
 def _alert_rule_routes(app: FastAPI, accounts: AccountAccess, rules: RuleService) -> None:
@@ -2539,6 +2786,7 @@ def create_app(
     max_hosted_attempts: int = DEFAULT_MAX_HOSTED_ATTEMPTS,
     settings: SettingsStore | None = None,
     rules: RuleStore | None = None,
+    incidents: IncidentStore | None = None,
     local_destinations: LocalDestinations | None = None,
     counters: SharedCounters | None = None,
     startup_applications: Sequence[Application] | None = None,
@@ -2767,6 +3015,73 @@ def create_app(
     # Filled in further down, once the generate handler it sends through exists.
     load: LoadController | None = None
 
+    # The alert rules, and with an incident store the evaluator (docs/45): one at a time across
+    # instances by the lease; without one the heartbeat is "disabled" (simulated live mode).
+    rule_store: RuleStore = rules if rules is not None else InMemoryRuleStore()
+    evaluator: AlertEvaluator | None = None
+    if incidents is not None and applications is not None:
+        app_store = applications.store
+        documents_for_alerts = DocumentCache()
+
+        async def settings_of(application: Application) -> EffectiveSettings:
+            if settings_store is None:
+                return resolve(settings_platform, application, NO_SETTINGS, documents_for_alerts)
+            stored = StoredSettings(
+                await settings_store.current(Scope.ORGANIZATION, application.organization_id),
+                await settings_store.current(Scope.APPLICATION, application.id),
+            )
+            return resolve(settings_platform, application, stored, documents_for_alerts)
+
+        async def organization_of(application_id: str) -> str | None:
+            found = await app_store.get_application(application_id)
+            return found.organization_id if found is not None else None
+
+        def heartbeat_moved(was: HeartbeatState, now: HeartbeatState) -> None:
+            # An event and a log line at each change, for an operator without Prometheus.
+            if now in (HeartbeatState.STALE, HeartbeatState.UNKNOWN):
+                bus.publish("alert_evaluator_stale", state=now.value)
+                logging.getLogger("gateway.alerts").warning(
+                    "alert evaluator heartbeat: %s (was %s)", now.value, was.value
+                )
+            elif was in (HeartbeatState.STALE, HeartbeatState.UNKNOWN):
+                bus.publish("alert_evaluator_recovered", state=now.value)
+                logging.getLogger("gateway.alerts").warning(
+                    "alert evaluator heartbeat: %s (was %s)", now.value, was.value
+                )
+
+        evaluator = AlertEvaluator(
+            incidents=incidents,
+            rules=rule_store,
+            rollups=alert_rollups,
+            organization_of=organization_of,
+            durable=_DurableSignals(
+                app_store,
+                (budgets if budgets is not None else ledger).usage,
+                settings_of,
+                providers,
+                breakers,
+                epoch if epoch is not None else ClockEpoch(clock),
+            ),
+            clock=clock,
+            holder=secrets.token_hex(8),
+            random_bytes=secrets.token_bytes,
+            on_heartbeat_change=heartbeat_moved,
+        )
+
+    def alert_status() -> AlertEvaluatorGroup:
+        """The heartbeat from the evaluator's memory: no store call (docs/45)."""
+        if evaluator is None:
+            return DISABLED_EVALUATOR
+        status = evaluator.status()
+        return AlertEvaluatorGroup(
+            available=status.state is not HeartbeatState.UNKNOWN,
+            state=status.state.value,
+            last_cycle_age_ms=status.last_cycle_age_ms,
+            holder=status.holder,
+            last_evaluation_ms=status.last_evaluation_ms,
+            evaluation_failures=status.failures,
+        )
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         # Shared counters are checked before anything is served: a store that could lose a
@@ -2800,6 +3115,7 @@ def create_app(
         if load is not None and autostart_load is not None:
             await load.start(autostart_load, seed)
         flushing = asyncio.create_task(flusher.run()) if flusher is not None else None
+        evaluating = asyncio.create_task(evaluator.run()) if evaluator is not None else None
         # Retention runs beside the server, never on a request (docs/21).
         retainer = budgets if budgets is not None else ledger
         retention = (
@@ -2842,6 +3158,8 @@ def create_app(
         # Before the counters' client closes: what is queued is sent within the limit, the
         # rest dropped and counted (docs/41).
         await reports.flush()
+        if evaluating is not None:
+            evaluating.cancel()
         if flushing is not None:
             flushing.cancel()
         if flusher is not None:
@@ -2860,6 +3178,7 @@ def create_app(
     app.state.alert_recorder = alert_recorder
     app.state.alert_rollups = alert_rollups
     app.state.alert_flusher = flusher
+    app.state.alert_evaluator = evaluator
     if alert_recorder is not None:
         app.add_middleware(AlertOutcomeMiddleware, recorder=alert_recorder, note=alert_note)
     if local_only is not None:
@@ -2869,7 +3188,7 @@ def create_app(
         _auth_routes(app, accounts)
         # An application's alert rules (docs/44): in the durable store given, or in memory.
         rule_service = RuleService(
-            rules if rules is not None else InMemoryRuleStore(),
+            rule_store,
             accounts.service.audit,
             epoch if epoch is not None else ClockEpoch(clock),
             alert_rollups,
@@ -2912,6 +3231,14 @@ def create_app(
 
         if management is not None and applications is not None:
             _alert_rule_routes(app, accounts, rule_service)
+            _incident_routes(
+                app,
+                accounts,
+                incidents
+                if incidents is not None
+                else InMemoryIncidentStore(epoch if epoch is not None else ClockEpoch(clock)),
+                epoch if epoch is not None else ClockEpoch(clock),
+            )
         if management is not None and applications is not None and settings_store is not None:
             _settings_routes(
                 app,
@@ -3988,7 +4315,10 @@ def create_app(
     @public_route("health")
     async def healthz() -> Health:
         return Health(
-            status="ok", models=len(registry.names), uptime_ms=clock.now_ms() - started_ms
+            status="ok",
+            models=len(registry.names),
+            uptime_ms=clock.now_ms() - started_ms,
+            alert_evaluator=alert_status().state,
         )
 
     @app.get("/readyz")
@@ -4201,7 +4531,10 @@ def create_app(
             {name: monitor.health(name) for name in registry.names} if monitor is not None else None
         )
         return await monitoring.snapshot(
-            history_ms=history_ms, recent_events=recent_events, health=health
+            history_ms=history_ms,
+            recent_events=recent_events,
+            health=health,
+            alert_evaluator=alert_status(),
         )
 
     @app.get("/v1/monitor/snapshot")
@@ -4551,6 +4884,7 @@ def create_default_app() -> FastAPI:
         modes=state.modes,
         settings=state.settings,
         rules=state.rules,
+        incidents=state.incidents,
         local_destinations=local,
         counters=shared,
     )
@@ -4688,6 +5022,7 @@ def create_shared_app(environ: Mapping[str, str]) -> FastAPI:
         modes=state.modes,
         settings=state.settings,
         rules=state.rules,
+        incidents=state.incidents,
         local_destinations=local,
         counters=shared,
         readiness=db.ready,

@@ -228,6 +228,7 @@ async def test_the_routes_are_the_documented_endpoints() -> None:
             isinstance(route, APIRoute)
             and route.path.startswith("/v1/admin")
             and "/alert-rules" not in route.path
+            and "/incidents" not in route.path  # note 45's, checked against its table there
         ):
             [declaration] = declaration_of(route)
             assert declaration.kind == "requires"

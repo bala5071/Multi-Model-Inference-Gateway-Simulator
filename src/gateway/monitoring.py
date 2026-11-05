@@ -183,6 +183,29 @@ class BreakersGroup:
     reports_dropped: dict[str, int]
 
 
+# The alert evaluator's heartbeat states (gateway.evaluator.HeartbeatState), named here so
+# monitoring imports nothing of the evaluator.
+ALERT_EVALUATOR_STATES = ("ok", "stale", "unknown", "disabled")
+
+
+@dataclass(frozen=True, slots=True)
+class AlertEvaluatorGroup:
+    """The alert evaluator's heartbeat as this instance last read it (docs/45): its state, the
+    age of the last completed cycle (absent while ``unknown``, never 0), whether this instance
+    holds the lease, the last cycle's time and the failed cycles. ``available`` is false while
+    ``unknown``. Read from the evaluator's memory: no store call, and it decides nothing."""
+
+    available: bool
+    state: str
+    last_cycle_age_ms: float | None
+    holder: bool
+    last_evaluation_ms: float | None
+    evaluation_failures: int
+
+
+DISABLED_EVALUATOR = AlertEvaluatorGroup(True, "disabled", None, False, None, 0)
+
+
 @dataclass(frozen=True, slots=True)
 class Snapshot:
     at_ms: float
@@ -192,6 +215,7 @@ class Snapshot:
     applications: ApplicationsGroup
     events: EventsGroup
     breakers: BreakersGroup
+    alert_evaluator: AlertEvaluatorGroup
 
 
 def _quantiles(distribution: Distribution | None) -> Quantiles | None:
@@ -362,6 +386,7 @@ class Monitor:
         history_ms: float = 0.0,
         recent_events: int = 0,
         health: Mapping[str, ModelHealth] | None = None,
+        alert_evaluator: AlertEvaluatorGroup = DISABLED_EVALUATOR,
     ) -> Snapshot:
         """Everything now, with each series going back ``history_ms``.
 
@@ -383,6 +408,7 @@ class Monitor:
                 recent=self._events.recent(recent_events),
             ),
             breakers=BreakersGroup(available=True, reports_dropped=dict(self._reports_dropped)),
+            alert_evaluator=alert_evaluator,
         )
 
     def _observe(self, model: str) -> None:
@@ -753,6 +779,49 @@ def render_prometheus(snapshot: Snapshot) -> str:
         ),
     ]
 
+    evaluator = snapshot.alert_evaluator
+    families += [
+        (
+            "gateway_alert_evaluator_state",
+            "gauge",
+            "Alert evaluator heartbeat here: 1 for the current state.",
+            [
+                ({"state": state}, 1 if state == evaluator.state else 0)
+                for state in ALERT_EVALUATOR_STATES
+            ],
+        ),
+        (
+            "gateway_alert_evaluator_last_cycle_age_seconds",
+            "gauge",
+            "Seconds since the alert evaluator last completed a cycle; absent while unknown.",
+            [
+                (
+                    {},
+                    evaluator.last_cycle_age_ms / 1000.0
+                    if evaluator.last_cycle_age_ms is not None
+                    else None,
+                )
+            ],
+        ),
+        (
+            "gateway_alert_evaluator_holder",
+            "gauge",
+            "1 on the instance holding the alert evaluator's lease.",
+            [({}, 1 if evaluator.holder else 0)],
+        ),
+        (
+            "gateway_alert_evaluation_ms",
+            "gauge",
+            "How long this instance's last alert evaluation cycle took, in milliseconds.",
+            [({}, evaluator.last_evaluation_ms)],
+        ),
+        (
+            "gateway_alert_evaluation_failures_total",
+            "counter",
+            "Alert evaluation cycles that did not complete.",
+            [({}, evaluator.evaluation_failures)],
+        ),
+    ]
     lines: list[str] = []
     for name, kind, text, samples in families:
         lines += _family(name, kind, text, samples)

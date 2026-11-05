@@ -52,6 +52,21 @@ from gateway.applications import (
 )
 from gateway.audit import AuditEntry, AuditEvent, Reason, _entry
 from gateway.clock import Clock
+from gateway.incidents import (
+    INCIDENT_COLUMNS,
+    LEASE_MS,
+    NOTIFICATION_COLUMNS,
+    Change,
+    Fence,
+    Incident,
+    IncidentState,
+    LeaseView,
+    Notification,
+    incident_from_row,
+    incident_row,
+    notification_from_row,
+    notification_row,
+)
 from gateway.ledger import ApplicationUsage, BudgetExceededError, Expired, Reservation
 from gateway.management import ManagementRefusal
 from gateway.modes import (
@@ -121,7 +136,7 @@ LOCK_POLL_MS = 20.0
 # The advisory lock keys: management writes, and applying the schema. Fixed, distinct.
 WRITE_LOCK = 0x6777_5752_4954_4531  # "gwWRITE1"
 SCHEMA_LOCK = 0x6777_5343_4845_4D31  # "gwSCHEM1"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 # How long a settled reservation's id is kept, so that a settle tried again is not charged twice
 # (docs/37).
 SETTLED_KEEP_MS = 24 * 60 * 60 * 1000.0
@@ -368,13 +383,72 @@ FROM applications a CROSS JOIN (VALUES
 
 PG_ALERT_RULES = _alert_rules_schema()
 
+# Version 5 (docs/45): the evaluator's lease, incidents and their notifications, the tables
+# of SQLite migration 16.
+PG_INCIDENTS = """
+CREATE TABLE alert_lease (
+  id integer PRIMARY KEY CHECK (id = 1),
+  holder text,
+  epoch integer NOT NULL,
+  expires_at_ms double precision NOT NULL,
+  last_cycle_completed_at_ms double precision,
+  last_cycle_epoch integer);
+
+CREATE TABLE incidents (
+  id text PRIMARY KEY,
+  organization_id text NOT NULL,
+  application_id text NOT NULL,
+  rule_id text NOT NULL,
+  rule_version integer NOT NULL,
+  series_key text NOT NULL,
+  state text NOT NULL CHECK (state IN ('pending', 'firing', 'acknowledged', 'resolved')),
+  severity text NOT NULL,
+  opened_at_ms double precision NOT NULL,
+  pending_since_ms double precision,
+  fired_at_ms double precision,
+  acknowledged_at_ms double precision,
+  acknowledged_by text,
+  resolved_at_ms double precision,
+  resolve_reason text,
+  value double precision,
+  false_count integer NOT NULL,
+  no_data_since_ms double precision,
+  last_notified_at_ms double precision,
+  last_reminder_at_ms double precision,
+  firing_sent integer NOT NULL,
+  firing_again_due integer NOT NULL,
+  reopened integer NOT NULL,
+  revision integer NOT NULL,
+  updated_at_ms double precision NOT NULL);
+CREATE UNIQUE INDEX incidents_one_open ON incidents (rule_id, series_key)
+  WHERE state <> 'resolved';
+CREATE INDEX incidents_by_organization ON incidents (organization_id, id);
+
+CREATE TABLE incident_notifications (
+  id text PRIMARY KEY,
+  incident_id text NOT NULL,
+  application_id text NOT NULL,
+  kind text NOT NULL,
+  state text NOT NULL CHECK (state IN ('recorded', 'held', 'released')),
+  at_ms double precision NOT NULL,
+  reason text);
+CREATE INDEX incident_notifications_by_incident ON incident_notifications (incident_id);
+"""
+
 # Each version and what it adds, applied in order to a database that has an earlier one.
-SCHEMA = ((1, PG_BASELINE), (2, PG_BUDGETS), (3, PG_SETTINGS), (4, PG_ALERT_RULES))
+SCHEMA = (
+    (1, PG_BASELINE),
+    (2, PG_BUDGETS),
+    (3, PG_SETTINGS),
+    (4, PG_ALERT_RULES),
+    (5, PG_INCIDENTS),
+)
 # What takes a version back out, for the versions that can be (``rollback_schema``). Versions 1
 # and 2 have none: ``migrate-to-sqlite`` is their way back.
 SCHEMA_DOWN = {
     3: "DROP TABLE settings_versions; DROP TABLE settings_current;",
     4: "DROP TABLE alert_rules;",
+    5: "DROP TABLE incident_notifications; DROP TABLE incidents; DROP TABLE alert_lease;",
 }
 
 # The tables of PG_BUDGETS: Postgres only, never copied to or from SQLite.
@@ -397,6 +471,9 @@ TABLES = (
     "settings_current",
     "settings_versions",
     "alert_rules",
+    "alert_lease",
+    "incidents",
+    "incident_notifications",
 )
 
 
@@ -1956,6 +2033,15 @@ class PostgresRuleStore(_Store):
         )
         return rule_from_row(tuple(row.values())) if row is not None else None
 
+    async def list_enabled_rules(self, limit: int, after: str | None = None) -> list[AlertRule]:
+        rows = await self._fetch(
+            f"SELECT {RULE_COLUMNS} FROM alert_rules WHERE enabled = 1 AND id > $1"
+            " ORDER BY id LIMIT $2",
+            after or "",
+            limit,
+        )
+        return [rule_from_row(tuple(r.values())) for r in rows]
+
     async def count_rules(self, application_id: str) -> int:
         return int(
             await self._value(
@@ -2015,6 +2101,176 @@ class PostgresRuleStore(_Store):
             raise RuleVersionConflictError(None)
 
 
+_FENCE_PG = (
+    "EXISTS (SELECT 1 FROM alert_lease WHERE id = 1 AND holder = $h AND epoch = $e"
+    " AND expires_at_ms > gateway_now_ms())"
+)
+
+
+def _numbered(sql: str, first: int) -> str:
+    """``_FENCE_PG`` with its holder and epoch as parameters ``first`` and ``first + 1``."""
+    return sql.replace("$h", f"${first}").replace("$e", f"${first + 1}")
+
+
+class PostgresIncidentStore(_Store):
+    """The lease, incidents and notifications in the tables of schema version 5 (docs/45),
+    timed on the database's clock (``gateway_now_ms()``), for every instance alike."""
+
+    async def attempt_lease(self, holder: str) -> LeaseView:
+        async with self._db.request_transaction():
+            # The one row, made by the first attempt (a fresh database has no rows).
+            await self._execute(
+                "INSERT INTO alert_lease (id, epoch, expires_at_ms) VALUES (1, 0, 0)"
+                " ON CONFLICT (id) DO NOTHING"
+            )
+            await self._execute(
+                "UPDATE alert_lease SET"
+                " epoch = CASE WHEN holder IS NOT DISTINCT FROM $1 THEN epoch ELSE epoch + 1 END,"
+                " holder = $1, expires_at_ms = gateway_now_ms() + $2"
+                " WHERE id = 1 AND (expires_at_ms <= gateway_now_ms()"
+                " OR holder IS NOT DISTINCT FROM $1)",
+                holder,
+                LEASE_MS,
+            )
+            row = await self._row(
+                "SELECT holder, epoch, expires_at_ms, last_cycle_completed_at_ms,"
+                " last_cycle_epoch, gateway_now_ms() FROM alert_lease WHERE id = 1"
+            )
+        assert row is not None
+        return LeaseView(row[0], int(row[1]), float(row[2]), row[3], row[4], float(row[5]))
+
+    async def complete_cycle(self, fence: Fence) -> bool:
+        done = await self._execute(
+            "UPDATE alert_lease SET last_cycle_completed_at_ms = gateway_now_ms(),"
+            " last_cycle_epoch = $2, expires_at_ms = gateway_now_ms() + $3"
+            " WHERE id = 1 AND holder = $1 AND epoch = $2 AND expires_at_ms > gateway_now_ms()",
+            fence.holder,
+            fence.epoch,
+            LEASE_MS,
+        )
+        return done == 1
+
+    async def apply(self, fence: Fence, change: Change) -> bool:
+        new = change.incident
+        row = incident_row(new)
+        n = len(row)
+        try:
+            async with self._db.request_transaction():
+                if change.expected_state is None:
+                    done = await self._execute(
+                        f"INSERT INTO incidents ({', '.join(INCIDENT_COLUMNS)})"
+                        f" SELECT {_placeholders(n)} WHERE {_numbered(_FENCE_PG, n + 1)}",
+                        *row,
+                        fence.holder,
+                        fence.epoch,
+                    )
+                else:
+                    columns = INCIDENT_COLUMNS[1:]
+                    sets = ", ".join(f"{c} = ${i + 1}" for i, c in enumerate(columns))
+                    k = len(columns)
+                    done = await self._execute(
+                        f"UPDATE incidents SET {sets} WHERE id = ${k + 1} AND state = ${k + 2}"
+                        f" AND revision = ${k + 3} AND {_numbered(_FENCE_PG, k + 4)}",
+                        *row[1:],
+                        new.id,
+                        change.expected_state.value,
+                        change.expected_revision,
+                        fence.holder,
+                        fence.epoch,
+                    )
+                if done != 1:
+                    return False
+                if change.release_held:
+                    await self._execute(
+                        "UPDATE incident_notifications SET state = 'released'"
+                        " WHERE incident_id = $1 AND state = 'held'",
+                        new.id,
+                    )
+                for notification in change.notifications:
+                    await self._execute(
+                        f"INSERT INTO incident_notifications ({', '.join(NOTIFICATION_COLUMNS)})"
+                        f" VALUES ({_placeholders(len(NOTIFICATION_COLUMNS))})",
+                        *notification_row(notification),
+                    )
+        except asyncpg.UniqueViolationError:  # one open incident a series, by the index
+            return False
+        return True
+
+    async def acknowledge(
+        self, application_id: str, incident_id: str, user_id: str, at_ms: float
+    ) -> Incident | None:
+        done = await self._execute(
+            "UPDATE incidents SET state = 'acknowledged', acknowledged_at_ms = $1,"
+            " acknowledged_by = $2, revision = revision + 1, updated_at_ms = $1"
+            " WHERE id = $3 AND application_id = $4 AND state = 'firing'",
+            at_ms,
+            user_id,
+            incident_id,
+            application_id,
+        )
+        if done != 1:
+            return None
+        return await self.get_incident(application_id, incident_id)
+
+    async def _incidents(self, where: str, *args: Any) -> list[Incident]:
+        rows = await self._fetch(
+            f"SELECT {', '.join(INCIDENT_COLUMNS)} FROM incidents WHERE {where}", *args
+        )
+        return [incident_from_row(tuple(r.values())) for r in rows]
+
+    async def open_incidents(self) -> list[Incident]:
+        return await self._incidents("state <> 'resolved' ORDER BY id")
+
+    async def recent_resolved(self, rule_id: str, series_key: str) -> Incident | None:
+        found = await self._incidents(
+            "rule_id = $1 AND series_key = $2 AND state = 'resolved'"
+            " ORDER BY resolved_at_ms DESC, id DESC LIMIT 1",
+            rule_id,
+            series_key,
+        )
+        return found[0] if found else None
+
+    async def get_incident(self, application_id: str, incident_id: str) -> Incident | None:
+        found = await self._incidents(
+            "id = $1 AND application_id = $2", incident_id, application_id
+        )
+        return found[0] if found else None
+
+    async def list_incidents(
+        self,
+        organization_id: str,
+        *,
+        application_id: str | None,
+        state: IncidentState | None,
+        limit: int,
+        after: str | None,
+    ) -> list[Incident]:
+        return await self._incidents(
+            "organization_id = $1 AND id > $2 AND ($3::text IS NULL OR application_id = $3)"
+            " AND ($4::text IS NULL OR state = $4) ORDER BY id LIMIT $5",
+            organization_id,
+            after or "",
+            application_id,
+            state.value if state is not None else None,
+            limit,
+        )
+
+    async def notifications(self, incident_id: str) -> list[Notification]:
+        rows = await self._fetch(
+            f"SELECT {', '.join(NOTIFICATION_COLUMNS)} FROM incident_notifications"
+            " WHERE incident_id = $1 ORDER BY at_ms, id",
+            incident_id,
+        )
+        return [notification_from_row(tuple(r.values())) for r in rows]
+
+    async def held_notifications(self) -> list[Notification]:
+        rows = await self._fetch(
+            f"SELECT {', '.join(NOTIFICATION_COLUMNS)} FROM incident_notifications"
+            " WHERE state = 'held' ORDER BY incident_id, at_ms, id"
+        )
+        return [notification_from_row(tuple(r.values())) for r in rows]
+
+
 def postgres_state(db: PostgresDatabase) -> StateBackend:
     """Every store over one Postgres database; windows on its clock."""
     return StateBackend(
@@ -2027,5 +2283,6 @@ def postgres_state(db: PostgresDatabase) -> StateBackend:
         modes=PostgresModeStore(db),
         settings=PostgresSettingsStore(db),
         rules=PostgresRuleStore(db),
+        incidents=PostgresIncidentStore(db),
         clock=db,
     )

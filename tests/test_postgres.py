@@ -52,6 +52,8 @@ from gateway.auth import (
 from gateway.clock import ClockEpoch, SimClock, SystemEpoch, WallClock
 from gateway.continuous import build_continuous_registry
 from gateway.database import open_database
+from gateway.evaluator import Series, decide
+from gateway.incidents import Fence, IncidentState, SqliteIncidentStore
 from gateway.localonly import LocalOnlyPolicy
 from gateway.management import KeyLimits, ManagementRefusal, ManagementService
 from gateway.migrations import MIGRATIONS, MigrationRunner
@@ -71,6 +73,7 @@ from gateway.postgres import (
     NO_PASSWORD_FOR_TESTS_ENV,
     PG_ALERT_RULES,
     PG_BASELINE,
+    PG_INCIDENTS,
     PG_SETTINGS,
     TABLES,
     WRITE_LOCK,
@@ -91,6 +94,7 @@ from gateway.providers import (
 from gateway.redaction import Redactor
 from gateway.routing import load_plans
 from gateway.settings import Scope, SettingsVersionConflictError
+from gateway.signals import SignalValue
 from gateway.state import (
     STATE_ENV,
     SharedStateRefusedError,
@@ -131,7 +135,7 @@ def _postgres_columns() -> dict[str, list[str]]:
     """Each table's columns, read from the text of the baseline, of version 3 (settings) and
     of version 4 (alert rules)."""
     found: dict[str, list[str]] = {}
-    text = PG_BASELINE + PG_SETTINGS + PG_ALERT_RULES
+    text = PG_BASELINE + PG_SETTINGS + PG_ALERT_RULES + PG_INCIDENTS
     for match in re.finditer(r"CREATE TABLE (\w+) \((.*?)\);\n", text, re.S):
         depth, part, parts = 0, "", []
         for char in match.group(2):
@@ -761,6 +765,47 @@ async def _scenario(s: StateBackend) -> list[Any]:
     ]
     await r.delete_rule("app0", default_rules("app0", NOW)[-1].id, 1)
     out.append(await r.count_rules("app0"))
+    out.append(await r.list_enabled_rules(3))
+    # The evaluator's lease and incidents (docs/45). The lease's times are the database's on
+    # Postgres and the instance's epoch on SQLite: only what does not depend on them is kept.
+    inc = s.incidents
+    async with inc.write_transaction():
+        out.append(await inc.open_incidents())
+    lease = await inc.attempt_lease("inst1")
+    out.append((lease.holder, lease.epoch, lease.last_cycle_completed_at_ms))
+    other = await inc.attempt_lease("inst2")
+    out.append((other.holder, other.epoch))
+    fence = Fence("inst1", lease.epoch)
+    out.append(await inc.complete_cycle(fence))
+    out.append(await inc.complete_cycle(Fence("inst2", lease.epoch)))
+    rule = default_rules("app0", NOW)[2]
+    ids = iter(f"{prefix}{n:016x}" for n, prefix in enumerate(["inc_", "ntf_"] * 4, start=1))
+    opened = decide(Series(rule, "north", "", SignalValue(9.0)), None, None, NOW,
+                    lambda prefix: next(ids))  # fmt: skip
+    assert opened is not None
+    out += [await inc.apply(fence, opened), await inc.apply(fence, opened)]
+    [pending] = await inc.open_incidents()
+    fired = decide(Series(rule, "north", "", SignalValue(9.0)), pending, None, NOW + 300_000,
+                   lambda prefix: next(ids))  # fmt: skip
+    assert fired is not None
+    out += [
+        await inc.apply(Fence("inst2", lease.epoch), fired),
+        await inc.apply(fence, fired),
+        await inc.apply(fence, fired),
+        await inc.open_incidents(),
+        await inc.notifications(pending.id),
+        await inc.held_notifications(),
+        await inc.acknowledge("app0", pending.id, "usr_00000000000000aa", NOW),
+        await inc.acknowledge("app0", pending.id, "usr_00000000000000aa", NOW),
+        await inc.acknowledge("app9", pending.id, "usr_00000000000000aa", NOW),
+        await inc.get_incident("app0", pending.id),
+        await inc.get_incident("app9", pending.id),
+        await inc.list_incidents("north", application_id=None, state=None, limit=5, after=None),
+        await inc.list_incidents(
+            "north", application_id="app0", state=IncidentState.FIRING, limit=5, after=None
+        ),
+        await inc.recent_resolved(rule.id, ""),
+    ]
     return out
 
 
@@ -768,6 +813,7 @@ def _protocol_methods() -> set[str]:
     from gateway.alertrules import RuleStore
     from gateway.applications import ApplicationStore
     from gateway.audit import AuditStore
+    from gateway.incidents import IncidentStore
     from gateway.modes import ModeStore
     from gateway.providers import ProviderStore
     from gateway.roles import RoleStore
@@ -785,6 +831,7 @@ def _protocol_methods() -> set[str]:
         UsageStore: "PostgresUsageStore",
         SettingsStore: "PostgresSettingsStore",
         RuleStore: "PostgresRuleStore",
+        IncidentStore: "PostgresIncidentStore",
     }
     return {
         f"{store}.{name}"
@@ -797,7 +844,10 @@ def _protocol_methods() -> set[str]:
 def _sqlite_world() -> tuple[sqlite3.Connection, StateBackend]:
     connection = open_database(":memory:")
     MigrationRunner(connection, MIGRATIONS, ClockEpoch(SimClock())).migrate()
-    return connection, sqlite_state(connection, ClockEpoch(SimClock()))
+    state = sqlite_state(connection, ClockEpoch(SimClock()))
+    # The lease is timed on the store's clock: on Postgres the database's (NOW in these tests).
+    incidents = SqliteIncidentStore(connection, ClockEpoch(SimClock(), NOW))
+    return connection, dataclasses.replace(state, incidents=incidents)
 
 
 @postgres

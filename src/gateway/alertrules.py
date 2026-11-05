@@ -290,6 +290,11 @@ class RuleStore(Protocol):
 
     async def get_rule(self, application_id: str, rule_id: str) -> AlertRule | None: ...
 
+    async def list_enabled_rules(self, limit: int, after: str | None = None) -> list[AlertRule]:
+        """A page of every application's enabled rules, by id, after ``after``: the
+        evaluator's read (docs/45)."""
+        ...
+
     async def count_rules(self, application_id: str) -> int: ...
 
     async def insert_rule(self, rule: AlertRule) -> None:
@@ -363,6 +368,10 @@ class InMemoryRuleStore:
         rule = self._rules.get(rule_id)
         return rule if rule is not None and rule.application_id == application_id else None
 
+    async def list_enabled_rules(self, limit: int, after: str | None = None) -> list[AlertRule]:
+        found = sorted((r for r in self._rules.values() if r.spec.enabled), key=lambda r: r.id)
+        return [r for r in found if after is None or r.id > after][:limit]
+
     async def count_rules(self, application_id: str) -> int:
         return sum(1 for r in self._rules.values() if r.application_id == application_id)
 
@@ -409,6 +418,13 @@ class SqliteRuleStore:
             (application_id, rule_id),
         ).fetchone()
         return rule_from_row(row) if row is not None else None
+
+    async def list_enabled_rules(self, limit: int, after: str | None = None) -> list[AlertRule]:
+        rows = self._db.execute(
+            f"SELECT {COLUMNS} FROM alert_rules WHERE enabled = 1 AND id > ? ORDER BY id LIMIT ?",
+            (after or "", limit),
+        ).fetchall()
+        return [rule_from_row(r) for r in rows]
 
     async def count_rules(self, application_id: str) -> int:
         row = self._db.execute(
