@@ -879,3 +879,77 @@ async def test_two_instances_firing_one_incident_from_the_same_read_make_one_cha
     assert sorted(made) == [False, True]
     assert notes == [("firing",)]
     assert state == ("firing", pending.revision + 1)
+
+
+# --- the start-up grace and the first acquisition (confirmed on #36's approval) ------------------
+
+
+async def test_the_start_up_grace_is_bounded_both_ways() -> None:
+    """An instance that has never read the lease row (its store down from the start) is ``ok``
+    only until 30 s, then ``unknown``; one that reads it but never completes a cycle (every cycle
+    failing, or no evaluator taking the lease) is ``ok`` only until 120 s after it started, then
+    ``stale``. Neither grace can last."""
+    world = World()
+    never_read = world.evaluator("a")
+
+    async def down(holder: str) -> Any:
+        raise StateUnavailableError("timeout")
+
+    world.incidents.attempt_lease = down  # type: ignore[method-assign]
+    await never_read.step()
+    assert never_read.status().state == "ok"
+    await world.clock.sleep_ms(29_999.0)
+    assert never_read.status().state == "ok"
+    await world.clock.sleep_ms(1.0)
+    assert never_read.status().state == "unknown"
+
+    world2 = World()
+    no_cycle = world2.evaluator("b")
+
+    async def failing(fence: Fence, now_ms: float) -> None:
+        raise StateUnavailableError("timeout")
+
+    no_cycle.cycle = failing  # type: ignore[method-assign]
+    await no_cycle.step()
+    for _ in range(11):  # reads at 10, 20, ..., 110 s: always fresh, never a cycle
+        await world2.clock.sleep_ms(10_000.0)
+        await no_cycle.step()
+    await world2.clock.sleep_ms(9_999.0)
+    assert (world2.clock.now_ms(), no_cycle.status().state) == (119_999.0, "ok")
+    await world2.clock.sleep_ms(1.0)
+    assert (world2.clock.now_ms(), no_cycle.status().state) == (120_000.0, "stale")
+
+
+async def test_three_sqlite_connections_racing_for_the_first_lease_make_one_row_and_one_holder(
+    tmp_path: Path,
+) -> None:
+    epoch = Epoch()
+    first = _sqlite(tmp_path, epoch)
+    others = [SqliteIncidentStore(open_database(tmp_path / "gateway.db"), epoch) for _ in range(2)]
+    views = await asyncio.gather(
+        *(s.attempt_lease(f"i{n}") for n, s in enumerate([first, *others]))
+    )
+    rows = first._db.execute("SELECT holder, epoch FROM alert_lease").fetchall()
+    assert [v.held_by(f"i{n}") for n, v in enumerate(views)].count(True) == 1
+    assert rows == [(views[0].holder, 1)]
+    assert {v.holder for v in views} == {views[0].holder}
+
+
+@pytest.mark.postgres
+async def test_three_postgres_instances_racing_for_the_first_lease_make_one_holder() -> None:
+    """On a fresh schema (no lease row yet), three instances' first attempts at once: the
+    race-tolerant insert makes exactly one row, exactly one instance holds it at epoch 1, and
+    every instance reads the same holder."""
+    from gateway.postgres import PostgresIncidentStore
+    from postgres_helpers import pg_world
+
+    async with pg_world(instances=3) as world:
+        await world.set_time(T0)
+        assert await world.rows("SELECT count(*) FROM alert_lease") == [(0,)]
+        stores = [PostgresIncidentStore(db) for db in world.instances]
+        views = await asyncio.gather(*(s.attempt_lease(f"i{n}") for n, s in enumerate(stores)))
+        rows = await world.rows("SELECT holder, epoch FROM alert_lease")
+    holders = [v.held_by(f"i{n}") for n, v in enumerate(views)]
+    assert holders.count(True) == 1
+    assert rows == [(f"i{holders.index(True)}", 1)]
+    assert {v.holder for v in views} == {rows[0][0]}
