@@ -138,5 +138,30 @@ three passes of 300 requests) and three of `uv run python -m benchmarks.key_chec
 
 Postgres round trips per request unchanged (22 and 36). The key check: p50 0.024 to 0.026 ms
 before, 0.024 to 0.029 ms after. Nothing of A3 adds a store call to a request; a cycle's own
-time is `gateway_alert_evaluation_ms`. The plan's measurement of one cycle beside the server
-for 1, 100 and 1,000 applications (its section 20) is not made in this PR.
+time is `gateway_alert_evaluation_ms`, measured below.
+
+## One cycle's time (added before A4)
+
+MEASURED on the same machine, at `208b54c` (main after A3), three runs of
+`GATEWAY_POSTGRES_URL=... uv run python -m benchmarks.alert_evaluation`. Each application has
+the default rules (five enabled) and one key; one in ten fails, one in twenty is refused for
+budget; rollups in memory; the server's own durable signals. The first cycle opens the
+incidents; then three steady cycles each run.
+
+| Applications | Store | First cycle ms (3 runs) | Steady cycle ms (9 cycles) | Store calls (first, steady) |
+|---|---|---|---|---|
+| 1 | SQLite | 1.7 to 2.0 | 0.3 to 0.8 | 21, 18 |
+| 1 | Postgres | 30.9 to 33.8 | 15.4 to 20.1 | 21, 18 |
+| 100 | SQLite | 31.8 to 38.7 | 21.4 to 29.6 | 1,621, 1,491 |
+| 100 | Postgres | 1,496.8 to 1,539.5 | 1,312.5 to 1,340.4 | 1,621, 1,491 |
+| 1,000 | SQLite | 334.1 to 366.6 | 256.1 to 328.1 | 16,179, 14,879 |
+| 1,000 | Postgres | 14,713.5 to 16,262.0 | 13,165.6 to 15,379.7 | 16,179, 14,879 |
+
+A cycle makes about 15 store calls per application, one at a time (the application, both
+settings rows, the period's usage, the keys, the last resolved incident of each series without
+an open one), so its time grows with the applications: on Postgres about 0.9 ms a call, 13 to
+16 s for 1,000. That is half of the 30 s lease, which a cycle does not renew while it runs
+(the renewal is the attempt every 10 s, between cycles, and `complete_cycle` at the end), and
+the reads go through the request pool. At some 2,000 applications a cycle would outlive its
+own lease and be fenced out every time: no evaluation, a stale heartbeat. See the A4 PR for
+what this asks of the design before delivery is built on top.

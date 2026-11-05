@@ -338,6 +338,9 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   statement timeout, COMMIT, the pool's reset) counted and timed as made (needs
   `GATEWAY_POSTGRES_URL`); the numbers in `docs/38` (exists)
 - `benchmarks/alert_recorder.py` — one alert recorder call; the numbers in `docs/43` (exists)
+- `benchmarks/alert_evaluation.py` — one alert evaluation cycle for 1, 100 and 1,000
+  applications, on SQLite and Postgres, timed and its store calls counted (needs
+  `GATEWAY_POSTGRES_URL`); the numbers in `docs/45` (exists)
 - `benchmarks/management_requests.py` — management reads and key writes on the running
   server, beside `/healthz` and `/v1/auth/me`; the numbers in `docs/30` (exists)
 
