@@ -17,7 +17,7 @@ import math
 import os
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -157,7 +157,7 @@ from gateway.egress import (
     provider_tls_context,
     system_resolver,
 )
-from gateway.evaluator import AlertEvaluator, HeartbeatState
+from gateway.evaluator import AlertEvaluator, ApplicationSignals, HeartbeatState
 from gateway.events import EventBus
 from gateway.incidents import (
     Incident,
@@ -169,6 +169,7 @@ from gateway.ledger import (
     ApplicationUsage,
     BudgetExceededError,
     Budgets,
+    BulkUsage,
     CostLedger,
     Expired,
     ModelUsage,
@@ -272,6 +273,7 @@ from gateway.settings import (
     PlatformSettings,
     Scope,
     SettingsInvalidError,
+    SettingsRow,
     SettingsStore,
     SettingsUnreadableError,
     SettingsVersion,
@@ -1247,13 +1249,21 @@ class _DurableSignals:
         providers: ProviderService | None,
         breakers: BreakerStore,
         epoch: EpochSource,
+        *,
+        usage_many: Callable[[Sequence[str]], Awaitable[dict[str, ApplicationUsage]]] | None = None,
+        settings_many: Callable[[Sequence[Application]], Awaitable[dict[str, EffectiveSettings]]]
+        | None = None,
     ) -> None:
+        """``usage_many`` and ``settings_many`` read a page at once; without them ``read_many``
+        reads each application with ``usage`` and ``settings_of``."""
         self._applications = applications
         self._usage = usage
         self._settings_of = settings_of
         self._providers = providers
         self._breakers = breakers
         self._epoch = epoch
+        self._usage_many_of = usage_many
+        self._settings_many_of = settings_many
 
     async def budget_used(self, application_id: str) -> SignalValue:
         application = await self._applications.get_application(application_id)
@@ -1304,6 +1314,138 @@ class _DurableSignals:
         # Counted by each instance's own sweep, so no instance knows the whole count: not
         # judged in A3 (docs/45); the default rule is off.
         return SignalValue(None, "unavailable")
+
+    async def read_many(
+        self, wanted: Mapping[str, frozenset[str]]
+    ) -> dict[str, ApplicationSignals]:
+        """``BulkSignals``: the values above for a page of applications, each kind read once for
+        the page (the plan's section 11.7): the applications, both settings rows of each, the
+        usage, the keys, and each organization's providers and their breakers once."""
+        ids = list(wanted)
+        applications = await self._applications.get_applications(ids)
+        live = [a for a in ids if a in applications]
+
+        def asking(signal: str) -> list[str]:
+            return [a for a in live if signal in wanted[a]]
+
+        budget_ids, circuit_ids, key_ids = (
+            asking("budget_used"),
+            asking("circuit_open") if self._providers is not None else [],
+            asking("key_expires_in"),
+        )
+        settings = await self._settings_many(
+            [applications[a] for a in dict.fromkeys(budget_ids + circuit_ids)]
+        )
+        usage = await self._usage_many(budget_ids) if budget_ids else {}
+        keys = await self._applications.keys_of(key_ids) if key_ids else {}
+        providers: dict[str, list[ProviderConfig]] = {}
+        breakers: dict[tuple[str, str], SignalValue] = {}
+        now = self._epoch.epoch_ms()
+        found: dict[str, ApplicationSignals] = {}
+        for application_id in ids:
+            application = applications.get(application_id)
+            if application is None:
+                found[application_id] = ApplicationSignals(None)
+                continue
+            organization_id = application.organization_id
+            effective = settings.get(application_id)
+            budget = SignalValue(None, "unavailable")
+            if application_id in usage and effective is not None:
+                budget = signal_budget_used(
+                    usage[application_id].total.billed_tokens, effective.monthly_token_budget
+                )
+            circuit: dict[str, SignalValue] = {}
+            if application_id in circuit_ids:
+                assert self._providers is not None
+                allowed = effective.allowed_providers if effective is not None else None
+                if organization_id not in providers:
+                    providers[organization_id] = await self._providers.store.list_for(
+                        organization_id
+                    )
+                for config in providers[organization_id]:
+                    if not config.enabled or (allowed is not None and config.id not in allowed):
+                        continue
+                    if (organization_id, config.id) not in breakers:
+                        breakers[(organization_id, config.id)] = await self._breaker(
+                            organization_id, config.id
+                        )
+                    circuit[config.id] = breakers[(organization_id, config.id)]
+            expiries = {
+                key.key_id: SignalValue((key.expires_at_ms - now) / 86_400_000.0)
+                for key in keys.get(application_id, [])
+                if not key.revoked and key.expires_at_ms is not None
+            }
+            found[application_id] = ApplicationSignals(
+                organization_id, budget, circuit, expiries, SignalValue(None, "unavailable")
+            )
+        return found
+
+    async def _breaker(self, organization_id: str, provider_id: str) -> SignalValue:
+        try:
+            state = await self._breakers.state(organization_id, provider_id)
+        except StateUnavailableError:
+            return SignalValue(None, "unavailable")
+        return SignalValue(0.0 if state is BreakerState.CLOSED else 1.0)
+
+    async def _settings_many(
+        self, applications: Sequence[Application]
+    ) -> dict[str, EffectiveSettings]:
+        """Each application's effective settings; one that cannot be judged is left out (its
+        values are "unavailable", as ``budget_used`` and ``circuit_open`` say)."""
+        if not applications:
+            return {}
+        if self._settings_many_of is not None:
+            return await self._settings_many_of(applications)
+        found: dict[str, EffectiveSettings] = {}
+        for application in applications:
+            with suppress(SettingsUnreadableError):
+                found[application.id] = await self._settings_of(application)
+        return found
+
+    async def _usage_many(self, application_ids: Sequence[str]) -> dict[str, ApplicationUsage]:
+        if self._usage_many_of is not None:
+            return await self._usage_many_of(application_ids)
+        return {a: await self._usage(a) for a in application_ids}
+
+
+SettingsOf = Callable[[Application], Awaitable[EffectiveSettings]]
+SettingsMany = Callable[[Sequence[Application]], Awaitable[dict[str, EffectiveSettings]]]
+
+
+def alert_settings(
+    store: SettingsStore | None, platform: PlatformSettings
+) -> tuple[SettingsOf, SettingsMany]:
+    """The alert evaluator's settings reads (docs/45): one application's effective settings,
+    and a page's (both scopes' rows in two reads, one that cannot be judged left out)."""
+    documents = DocumentCache()
+
+    async def settings_of(application: Application) -> EffectiveSettings:
+        if store is None:
+            return resolve(platform, application, NO_SETTINGS, documents)
+        stored = StoredSettings(
+            await store.current(Scope.ORGANIZATION, application.organization_id),
+            await store.current(Scope.APPLICATION, application.id),
+        )
+        return resolve(platform, application, stored, documents)
+
+    async def settings_many(applications: Sequence[Application]) -> dict[str, EffectiveSettings]:
+        organizations: dict[str, SettingsRow] = {}
+        own: dict[str, SettingsRow] = {}
+        if store is not None:
+            organizations = await store.current_many(
+                Scope.ORGANIZATION, {a.organization_id for a in applications}
+            )
+            own = await store.current_many(Scope.APPLICATION, [a.id for a in applications])
+        found: dict[str, EffectiveSettings] = {}
+        for application in applications:
+            stored = StoredSettings(
+                organizations.get(application.organization_id), own.get(application.id)
+            )
+            with suppress(SettingsUnreadableError):
+                found[application.id] = resolve(platform, application, stored, documents)
+        return found
+
+    return settings_of, settings_many
 
 
 @dataclass
@@ -2794,6 +2936,7 @@ def create_app(
     budgets: SharedBudgets | None = None,
     reservation_bounds: Mapping[str, TierBudget] | None = None,
     durable: Durable | None = None,
+    evaluator_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     on_start: Sequence[Callable[[], Awaitable[None]]] = (),
 ) -> FastAPI:
     """Build the API around an already wired registry.
@@ -2867,6 +3010,10 @@ def create_app(
     ``durable`` is a store that must be opened on the server's event loop (Postgres): the
     lifespan opens it first, then checks the stored applications' plans and runs ``on_start``
     (the bootstrap admin), before anything else; it is closed last.
+
+    ``evaluator_context`` is entered around the alert evaluator's task: on Postgres,
+    ``PostgresDatabase.evaluation``, so the evaluator never takes a request-pool connection
+    (the plan's section 11.7).
     """
     if metrics is None:
         metrics = MetricsStore(clock)
@@ -3021,20 +3168,9 @@ def create_app(
     evaluator: AlertEvaluator | None = None
     if incidents is not None and applications is not None:
         app_store = applications.store
-        documents_for_alerts = DocumentCache()
+        settings_of, settings_many = alert_settings(settings_store, settings_platform)
 
-        async def settings_of(application: Application) -> EffectiveSettings:
-            if settings_store is None:
-                return resolve(settings_platform, application, NO_SETTINGS, documents_for_alerts)
-            stored = StoredSettings(
-                await settings_store.current(Scope.ORGANIZATION, application.organization_id),
-                await settings_store.current(Scope.APPLICATION, application.id),
-            )
-            return resolve(settings_platform, application, stored, documents_for_alerts)
-
-        async def organization_of(application_id: str) -> str | None:
-            found = await app_store.get_application(application_id)
-            return found.organization_id if found is not None else None
+        usage_source: Budgets = budgets if budgets is not None else ledger
 
         def heartbeat_moved(was: HeartbeatState, now: HeartbeatState) -> None:
             # An event and a log line at each change, for an operator without Prometheus.
@@ -3053,20 +3189,32 @@ def create_app(
             incidents=incidents,
             rules=rule_store,
             rollups=alert_rollups,
-            organization_of=organization_of,
-            durable=_DurableSignals(
+            signals=_DurableSignals(
                 app_store,
-                (budgets if budgets is not None else ledger).usage,
+                usage_source.usage,
                 settings_of,
                 providers,
                 breakers,
                 epoch if epoch is not None else ClockEpoch(clock),
+                usage_many=(
+                    usage_source.usage_many if isinstance(usage_source, BulkUsage) else None
+                ),
+                settings_many=settings_many,
             ),
             clock=clock,
             holder=secrets.token_hex(8),
             random_bytes=secrets.token_bytes,
             on_heartbeat_change=heartbeat_moved,
         )
+
+    async def evaluate() -> None:
+        """The evaluator's task, in its own context (its own pool on Postgres)."""
+        assert evaluator is not None
+        if evaluator_context is None:
+            await evaluator.run()
+            return
+        async with evaluator_context():
+            await evaluator.run()
 
     def alert_status() -> AlertEvaluatorGroup:
         """The heartbeat from the evaluator's memory: no store call (docs/45)."""
@@ -3115,7 +3263,7 @@ def create_app(
         if load is not None and autostart_load is not None:
             await load.start(autostart_load, seed)
         flushing = asyncio.create_task(flusher.run()) if flusher is not None else None
-        evaluating = asyncio.create_task(evaluator.run()) if evaluator is not None else None
+        evaluating = asyncio.create_task(evaluate()) if evaluator is not None else None
         # Retention runs beside the server, never on a request (docs/21).
         retainer = budgets if budgets is not None else ledger
         retention = (
@@ -5029,5 +5177,6 @@ def create_shared_app(environ: Mapping[str, str]) -> FastAPI:
         budgets=PostgresBudgets(db, clock, retention_ms=usage_retention_ms(environ)),
         reservation_bounds={tier.value: b for tier, b in backends.budgets.items()},
         durable=_PostgresLifecycle(db),
+        evaluator_context=db.evaluation,
         on_start=[bootstrap],
     )

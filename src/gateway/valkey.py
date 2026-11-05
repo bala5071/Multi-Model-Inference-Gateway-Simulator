@@ -647,22 +647,36 @@ class ValkeyAlertRollups:
         )
 
     async def read(self, application_id: str, minutes: Sequence[int]) -> list[MinuteRollup]:
+        [rollups] = await self.read_many([(application_id, minutes)])
+        return rollups
+
+    async def read_many(
+        self, wanted: Sequence[tuple[str, Sequence[int]]]
+    ) -> list[list[MinuteRollup]]:
+        """One pipeline for every (application, minute) asked, and the restart mark once."""
+
         async def fetch() -> list[Any]:
             async with self._c.client.pipeline(transaction=False) as pipe:
-                for minute in minutes:
-                    pipe.hgetall(self._key(application_id, minute))
+                for application_id, minutes in wanted:
+                    for minute in minutes:
+                        pipe.hgetall(self._key(application_id, minute))
                 pipe.get(self._restart)
                 found: list[Any] = await pipe.execute()
                 return found
 
         *found, restart = await self._c.call(fetch)
         restarted = int(restart) if restart is not None else -1
-        rollups = []
-        for minute, fields in zip(minutes, found, strict=True):
-            counts = {str(k): int(v) for k, v in fields.items() if k != INCOMPLETE}
-            incomplete = INCOMPLETE in fields or minute <= restarted
-            rollups.append(MinuteRollup(application_id, minute, counts, incomplete))
-        return rollups
+        answers = iter(found)
+        result = []
+        for application_id, minutes in wanted:
+            rollups = []
+            for minute in minutes:
+                fields = next(answers)
+                counts = {str(k): int(v) for k, v in fields.items() if k != INCOMPLETE}
+                incomplete = INCOMPLETE in fields or minute <= restarted
+                rollups.append(MinuteRollup(application_id, minute, counts, incomplete))
+            result.append(rollups)
+        return result
 
 
 class ValkeyWatch:

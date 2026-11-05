@@ -16,9 +16,9 @@ implementation is ``gateway.postgres.PostgresBudgets``.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from gateway.clock import Clock, ClockEpoch, EpochSource
 from gateway.periods import BudgetPeriods, CalendarMonthsUTC
@@ -175,6 +175,16 @@ class Budgets(Protocol):
     async def usage(self, application_id: str) -> ApplicationUsage: ...
 
 
+@runtime_checkable
+class BulkUsage(Protocol):
+    """Budgets that read many applications' usage at once (the alert evaluator, a page at a
+    time; docs/45): ``CostLedger`` and ``PostgresBudgets``."""
+
+    async def usage_many(self, application_ids: Collection[str]) -> dict[str, ApplicationUsage]:
+        """``usage`` of each of these applications; every id asked is in the answer."""
+        ...
+
+
 class SharedBudgets(Budgets, Protocol):
     """Budgets every instance shares (``PostgresBudgets``): reservations that outlive a dead
     instance until they expire, settles held back while the store is down, and retention."""
@@ -259,6 +269,23 @@ class CostLedger:
             total=account.total,
             by_model=dict(account.by_model),
         )
+
+    async def usage_many(self, application_ids: Collection[str]) -> dict[str, ApplicationUsage]:
+        """``usage`` of each: the accounts this ledger holds, and one store read for the rest."""
+        start_ms, end_ms = self._periods.bounds(self._epoch.epoch_ms())
+        ids = list(dict.fromkeys(application_ids))
+        missing = [
+            i for i in ids if (a := self._accounts.get(i)) is None or a.period_start_ms != start_ms
+        ]
+        if missing:
+            read = await self._store.usage_by_application(missing, start_ms, end_ms)
+            for application_id in missing:
+                by_model = read[application_id]
+                total = ModelUsage()
+                for usage in by_model.values():
+                    total = _add(total, usage)
+                self._accounts[application_id] = _Account(start_ms, end_ms, total, by_model)
+        return {i: await self.usage(i) for i in ids}
 
     async def organization_usage(
         self, organization_id: str, budgets: Mapping[str, int]

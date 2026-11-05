@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Collection, Iterable, Sequence
 from dataclasses import dataclass, field, fields, replace
 from enum import StrEnum
 from typing import Any, Protocol
@@ -186,6 +186,14 @@ class IncidentStore(Protocol):
         """The most recently resolved incident of a series, for the cooldown."""
         ...
 
+    async def recent_resolved_many(
+        self, series: Collection[tuple[str, str]], since_ms: float
+    ) -> dict[tuple[str, str], Incident]:
+        """``recent_resolved`` of each (rule id, series key), in one read, among the incidents
+        resolved at or after ``since_ms`` (an older one is past every cooldown: the evaluator
+        passes its page's longest); a series with none is not in the answer."""
+        ...
+
     async def get_incident(self, application_id: str, incident_id: str) -> Incident | None: ...
 
     async def list_incidents(
@@ -232,6 +240,18 @@ def incident_from_row(row: Sequence[Any]) -> Incident:
     for name in ("rule_version", "false_count", "reopened", "revision"):
         found[name] = int(found[name])
     return Incident(**found)
+
+
+def latest_resolved(incidents: Iterable[Incident]) -> dict[tuple[str, str], Incident]:
+    """The most recently resolved of each series (``recent_resolved``'s order: the resolution
+    time, then the id)."""
+    found: dict[tuple[str, str], Incident] = {}
+    for i in incidents:
+        key = (i.rule_id, i.series_key)
+        best = found.get(key)
+        if best is None or (i.resolved_at_ms or 0.0, i.id) > (best.resolved_at_ms or 0.0, best.id):
+            found[key] = i
+    return found
 
 
 def notification_row(notification: Notification) -> tuple[Any, ...]:
@@ -347,6 +367,18 @@ class InMemoryIncidentStore:
             if not i.open and i.rule_id == rule_id and i.series_key == series_key
         ]
         return max(resolved, key=lambda i: (i.resolved_at_ms or 0.0, i.id), default=None)
+
+    async def recent_resolved_many(
+        self, series: Collection[tuple[str, str]], since_ms: float
+    ) -> dict[tuple[str, str], Incident]:
+        wanted = set(series)
+        return latest_resolved(
+            i
+            for i in self._incidents.values()
+            if not i.open
+            and (i.rule_id, i.series_key) in wanted
+            and (i.resolved_at_ms or 0.0) >= since_ms
+        )
 
     async def get_incident(self, application_id: str, incident_id: str) -> Incident | None:
         found = self._incidents.get(incident_id)
@@ -499,6 +531,20 @@ class SqliteIncidentStore:
             (rule_id, series_key),
         )
         return found[0] if found else None
+
+    async def recent_resolved_many(
+        self, series: Collection[tuple[str, str]], since_ms: float
+    ) -> dict[tuple[str, str], Incident]:
+        wanted = set(series)
+        rules = sorted({rule_id for rule_id, _ in wanted})
+        if not rules:
+            return {}
+        found = self._incidents(
+            f"rule_id IN ({', '.join('?' * len(rules))}) AND state = 'resolved'"
+            " AND resolved_at_ms >= ?",
+            (*rules, since_ms),
+        )
+        return latest_resolved(i for i in found if (i.rule_id, i.series_key) in wanted)
 
     async def get_incident(self, application_id: str, incident_id: str) -> Incident | None:
         found = self._incidents("id = ? AND application_id = ?", (incident_id, application_id))

@@ -144,6 +144,13 @@ class UsageStore(Protocol):
         organization's), summed in ``seq`` order. No application ids, no events."""
         ...
 
+    async def usage_by_application(
+        self, application_ids: Collection[str], start_ms: float, end_ms: float
+    ) -> dict[str, dict[str, ModelUsage]]:
+        """``usage_by_model`` of each of these applications, in one read (the alert
+        evaluator's; docs/45); every id asked is in the answer."""
+        ...
+
     async def events(self, application_id: str | None = None) -> list[StoredUsageEvent]:
         """Stored events in ``seq`` order, for one application or all of them."""
         ...
@@ -159,6 +166,18 @@ def _totals(events: Iterable[UsageEvent]) -> dict[str, ModelUsage]:
     for event in events:
         by_model[event.model] = by_model.get(event.model, ModelUsage()).plus_event(event)
     return by_model
+
+
+def totals_by_application(
+    application_ids: Collection[str], events: Iterable[UsageEvent]
+) -> dict[str, dict[str, ModelUsage]]:
+    """``_totals`` of each application's events, each summed in the order given (``seq``), so
+    every application's totals are the ones ``usage_by_model`` gives it."""
+    found: dict[str, dict[str, ModelUsage]] = {i: {} for i in application_ids}
+    for event in events:
+        by_model = found[event.application_id]
+        by_model[event.model] = by_model.get(event.model, ModelUsage()).plus_event(event)
+    return found
 
 
 class InMemoryUsageStore:
@@ -200,6 +219,19 @@ class InMemoryUsageStore:
             s.event
             for s in self._events
             if s.event.application_id in wanted and start_ms <= s.event.occurred_at_ms < end_ms
+        )
+
+    async def usage_by_application(
+        self, application_ids: Collection[str], start_ms: float, end_ms: float
+    ) -> dict[str, dict[str, ModelUsage]]:
+        wanted = frozenset(application_ids)
+        return totals_by_application(
+            sorted(wanted),
+            (
+                s.event
+                for s in self._events
+                if s.event.application_id in wanted and start_ms <= s.event.occurred_at_ms < end_ms
+            ),
         )
 
     async def events(self, application_id: str | None = None) -> list[StoredUsageEvent]:
@@ -318,6 +350,20 @@ class SqliteUsageStore:
             (*ids, start_ms, end_ms),
         )
         return _totals(_event(row) for row in rows)
+
+    async def usage_by_application(
+        self, application_ids: Collection[str], start_ms: float, end_ms: float
+    ) -> dict[str, dict[str, ModelUsage]]:
+        ids = sorted(set(application_ids))
+        if not ids:
+            return {}
+        rows = self._connection.execute(
+            f"SELECT {_COLUMNS} FROM usage_events"
+            f" WHERE application_id IN ({', '.join('?' * len(ids))})"
+            " AND occurred_at_ms >= ? AND occurred_at_ms < ? ORDER BY seq",
+            (*ids, start_ms, end_ms),
+        )
+        return totals_by_application(ids, (_event(row) for row in rows))
 
     async def events(self, application_id: str | None = None) -> list[StoredUsageEvent]:
         query = f"SELECT seq, {_COLUMNS} FROM usage_events"

@@ -37,6 +37,28 @@ A lease row in the durable store (`alert_lease`, SQLite migration 16, Postgres s
 4. Quiet hours over: one `quiet_hours_summary` per incident with held notifications.
 5. The heartbeat, with the renewal, in one conditional statement.
 
+**A page at a time** (the plan's section 11.7, decided before A4): step 2 takes the
+applications with enabled rules in pages of 200, in id order. Each page reads once for the
+whole page: the applications, both settings rows of each, the usage, the keys
+(`_DurableSignals.read_many`), the rollups over each application's longest window (one Valkey
+pipeline), and the last resolved incident of every series with none open, back to the page's
+longest cooldown (an incident resolved before that cannot be reopened, since its last
+notification is older still). Each organization's providers and each provider's breaker are
+read once a page. The values, and `decide`, are those of the one-application reads: a test
+runs 24 cycles both ways and compares every incident and notification.
+
+**The time box.** A cycle starts no application 20 s after it began (the injected clock), but
+always at least one; it then completes as usual, and the next starts after the last
+application reached, wrapping round (the fair resume). The open incidents' rule check and the
+quiet-hours summaries are not cut: they are bounded by the open incidents. A cut cycle logs a
+line. An instance that takes the lease over starts at the first application.
+
+**Off the request path.** On Postgres the evaluator's task runs under
+`PostgresDatabase.evaluation()`, so its reads and fenced writes take a pool of its own (2
+connections), never the request pool (10) or the management pool (2), which holds the write
+lock for management writes. On SQLite, whose calls never suspend, the cycle gives the event
+loop back between two applications.
+
 Valkey down: the rollup minutes cannot be read and are incomplete (too few to judge); durable
 signals are still judged. The durable store down: no lease, no cycle, no transition.
 
@@ -138,5 +160,61 @@ three passes of 300 requests) and three of `uv run python -m benchmarks.key_chec
 
 Postgres round trips per request unchanged (22 and 36). The key check: p50 0.024 to 0.026 ms
 before, 0.024 to 0.029 ms after. Nothing of A3 adds a store call to a request; a cycle's own
-time is `gateway_alert_evaluation_ms`. The plan's measurement of one cycle beside the server
-for 1, 100 and 1,000 applications (its section 20) is not made in this PR.
+time is `gateway_alert_evaluation_ms`, measured below.
+
+## One cycle's time (added before A4)
+
+MEASURED on the same machine, at `208b54c` (main after A3), three runs of
+`GATEWAY_POSTGRES_URL=... uv run python -m benchmarks.alert_evaluation`. Each application has
+the default rules (five enabled) and one key; one in ten fails, one in twenty is refused for
+budget; rollups in memory; the server's own durable signals. The first cycle opens the
+incidents; then three steady cycles each run.
+
+| Applications | Store | First cycle ms (3 runs) | Steady cycle ms (9 cycles) | Store calls (first, steady) |
+|---|---|---|---|---|
+| 1 | SQLite | 1.7 to 2.0 | 0.3 to 0.8 | 21, 18 |
+| 1 | Postgres | 30.9 to 33.8 | 15.4 to 20.1 | 21, 18 |
+| 100 | SQLite | 31.8 to 38.7 | 21.4 to 29.6 | 1,621, 1,491 |
+| 100 | Postgres | 1,496.8 to 1,539.5 | 1,312.5 to 1,340.4 | 1,621, 1,491 |
+| 1,000 | SQLite | 334.1 to 366.6 | 256.1 to 328.1 | 16,179, 14,879 |
+| 1,000 | Postgres | 14,713.5 to 16,262.0 | 13,165.6 to 15,379.7 | 16,179, 14,879 |
+
+A cycle makes about 15 store calls per application, one at a time (the application, both
+settings rows, the period's usage, the keys, the last resolved incident of each series without
+an open one), so its time grows with the applications: on Postgres about 0.9 ms a call, 13 to
+16 s for 1,000. That is half of the 30 s lease, which a cycle does not renew while it runs
+(the renewal is the attempt every 10 s, between cycles, and `complete_cycle` at the end), and
+the reads go through the request pool. At some 2,000 applications a cycle would outlive its
+own lease and be fenced out every time: no evaluation, a stale heartbeat. Decided from this
+(section 11.7): read a page at a time, time-box the cycle, give the evaluator its own pool.
+
+## One cycle's time, a page at a time
+
+MEASURED on the same machine, on the tree committed after `9e6a8fb` (the section 11.7 plan),
+three runs of `GATEWAY_POSTGRES_URL=... uv run python -m benchmarks.alert_evaluation`: the same
+applications, rules and rollups as above, the server's reads a page at a time, on Postgres in the
+evaluator's own pool. "Longest page" is the longest time one page's reads took, over every
+cycle of the three runs.
+
+| Applications | Store | First cycle ms (3 runs) | Steady cycle ms (9 cycles) | Store calls (first, steady) | Longest page ms |
+|---|---|---|---|---|---|
+| 1 | SQLite | 1.8 to 3.5 | 0.8 to 1.8 | 12, 10 | 0.7 |
+| 1 | Postgres | 25.3 to 32.5 | 10.5 to 15.1 | 12, 10 | 16.4 |
+| 100 | SQLite | 25.1 to 30.8 | 12.9 to 21.4 | 28, 12 | 8.9 |
+| 100 | Postgres | 82.2 to 95.5 | 28.4 to 113.4 | 28, 12 | 94.1 |
+| 1,000 | SQLite | 323.7 to 364.0 | 149.2 to 286.8 | 214, 59 | 105.7 |
+| 1,000 | Postgres | 762.9 to 875.1 | 252.3 to 399.6 | 214, 59 | 114.0 |
+| 5,000 | SQLite | 1,627.0 to 1,907.1 | 1,994.9 to 2,283.5 | 1,054, 279 | 174.5 |
+| 5,000 | Postgres | 3,647.9 to 4,786.9 | 1,959.8 to 2,423.5 | 1,054, 279 | 177.1 |
+
+- **Store calls** grow with the pages and with the rules listed (200 rules a page, 8 an
+  application), not one by one: 59 a steady cycle at 1,000 applications against 14,879 before.
+  The first cycle's extra calls are its transitions, one write each.
+- **No cycle reached the time box** (20 s): the longest, 4.8 s, is the first cycle at 5,000 on
+  Postgres. The 1,000-application cycle on Postgres went from 13.2 to 15.4 s to 0.25 to 0.40 s.
+- **No renewal inside a cycle is needed:** a time-boxed cycle ends within one page's reads and
+  one application's writes of 20 s, and the longest page read was 177 ms, far inside the 10 s
+  left of the 30 s lease.
+- SQLite at 5,000 is CPU-bound (about 0.4 ms an application, the event loop given back between
+  each), and the cycle runs beside the server, so it delays alerts only.
+- Not measured: the old code at 5,000 applications.

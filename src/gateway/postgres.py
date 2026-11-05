@@ -64,6 +64,7 @@ from gateway.incidents import (
     Notification,
     incident_from_row,
     incident_row,
+    latest_resolved,
     notification_from_row,
     notification_row,
 )
@@ -107,6 +108,7 @@ from gateway.usage import (
     UsageEvent,
     _event,
     _totals,
+    totals_by_application,
 )
 from gateway.users import (
     _SESSION_COLUMNS,
@@ -550,16 +552,26 @@ class PostgresDatabase:
         clock: Clock,
         *,
         lock_timeout_ms: float = DEFAULT_LOCK_TIMEOUT_MS,
+        evaluator: asyncpg.Pool | None = None,
     ) -> None:
+        """``evaluator`` is the alert evaluator's pool (the plan's section 11.7); a database
+        built on two pools alone (tests) gives the evaluator the request pool."""
         self.requests = requests
         self.management = management
+        self.evaluator = evaluator
+        # The pool this task's calls take (``evaluation``): the request pool unless set.
+        self._pool: contextvars.ContextVar[asyncpg.Pool | None] = contextvars.ContextVar(
+            "gateway_pg_pool", default=None
+        )
         self._clock = clock
         self._lock_timeout_ms = lock_timeout_ms
         self._in_transaction: contextvars.ContextVar[asyncpg.Connection | None] = (
             contextvars.ContextVar("gateway_pg_transaction", default=None)
         )
 
-        self._opener: Callable[[], Awaitable[tuple[asyncpg.Pool, asyncpg.Pool]]] | None = None
+        self._opener: (
+            Callable[[], Awaitable[tuple[asyncpg.Pool, asyncpg.Pool, asyncpg.Pool]]] | None
+        ) = None
 
     def __repr__(self) -> str:
         return "PostgresDatabase(<pools and address redacted>)"
@@ -574,6 +586,7 @@ class PostgresDatabase:
         schema: str | None = None,
         request_pool_size: int = 10,
         management_pool_size: int = 2,
+        evaluator_pool_size: int = 2,
         lock_timeout_ms: float = DEFAULT_LOCK_TIMEOUT_MS,
     ) -> PostgresDatabase:
         """A database whose pools are made by ``open`` (in the server's lifespan, on its event
@@ -584,38 +597,36 @@ class PostgresDatabase:
         settings = {"search_path": schema} if schema is not None else None
 
         # A closure, so the address is in no attribute and in no repr.
-        async def pools() -> tuple[asyncpg.Pool, asyncpg.Pool]:
-            requests = await asyncpg.create_pool(
-                url,
-                min_size=1,
-                max_size=request_pool_size,
-                command_timeout=COMMAND_TIMEOUT_S,
-                server_settings=settings,
-            )
+        async def pools() -> tuple[asyncpg.Pool, asyncpg.Pool, asyncpg.Pool]:
+            made: list[asyncpg.Pool] = []
             try:
-                management = await asyncpg.create_pool(
-                    url,
-                    min_size=1,
-                    max_size=management_pool_size,
-                    command_timeout=COMMAND_TIMEOUT_S,
-                    server_settings=settings,
-                )
+                for size in (request_pool_size, management_pool_size, evaluator_pool_size):
+                    made.append(
+                        await asyncpg.create_pool(
+                            url,
+                            min_size=1,
+                            max_size=size,
+                            command_timeout=COMMAND_TIMEOUT_S,
+                            server_settings=settings,
+                        )
+                    )
             except BaseException:
-                await requests.close()
+                for pool in made:
+                    await pool.close()
                 raise
-            return requests, management
+            return made[0], made[1], made[2]
 
         closed = cast(asyncpg.Pool, _NotOpen())
-        db = cls(closed, closed, clock, lock_timeout_ms=lock_timeout_ms)
+        db = cls(closed, closed, clock, lock_timeout_ms=lock_timeout_ms, evaluator=closed)
         db._opener = pools
         return db
 
     async def open(self) -> None:
-        """Both pools, or ``StateUnavailableError`` (never the address or the password)."""
+        """The three pools, or ``StateUnavailableError`` (never the address or the password)."""
         if self._opener is None:
             raise RuntimeError("this database was built on its pools: there is nothing to open")
         try:
-            self.requests, self.management = await self._opener()
+            self.requests, self.management, self.evaluator = await self._opener()
         except _UNAVAILABLE as exc:
             raise StateUnavailableError(type(exc).__name__) from None
 
@@ -629,9 +640,10 @@ class PostgresDatabase:
         schema: str | None = None,
         request_pool_size: int = 10,
         management_pool_size: int = 2,
+        evaluator_pool_size: int = 2,
         lock_timeout_ms: float = DEFAULT_LOCK_TIMEOUT_MS,
     ) -> PostgresDatabase:
-        """``unopened`` and ``open``: both pools now."""
+        """``unopened`` and ``open``: the pools now."""
         db = cls.unopened(
             url,
             clock,
@@ -639,6 +651,7 @@ class PostgresDatabase:
             schema=schema,
             request_pool_size=request_pool_size,
             management_pool_size=management_pool_size,
+            evaluator_pool_size=evaluator_pool_size,
             lock_timeout_ms=lock_timeout_ms,
         )
         await db.open()
@@ -647,16 +660,33 @@ class PostgresDatabase:
     async def aclose(self) -> None:
         await self.requests.close()
         await self.management.close()
+        if self.evaluator is not None:
+            await self.evaluator.close()
+
+    def _task_pool(self) -> asyncpg.Pool:
+        pool = self._pool.get()
+        return pool if pool is not None else self.requests
+
+    @asynccontextmanager
+    async def evaluation(self) -> AsyncIterator[None]:
+        """Around the alert evaluator's task: its reads and its fenced writes take the
+        evaluator's pool, never the request pool (the plan's section 11.7)."""
+        token = self._pool.set(self.evaluator if self.evaluator is not None else self.requests)
+        try:
+            yield
+        finally:
+            self._pool.reset(token)
 
     @asynccontextmanager
     async def connection(self) -> AsyncIterator[asyncpg.Connection]:
-        """The current write transaction's connection, or one from the request pool."""
+        """The current transaction's connection, or one from this task's pool (the request
+        pool, or the evaluator's under ``evaluation``)."""
         held = self._in_transaction.get()
         if held is not None:
             yield held
             return
         try:
-            async with self.requests.acquire(timeout=COMMAND_TIMEOUT_S) as connection:
+            async with self._task_pool().acquire(timeout=COMMAND_TIMEOUT_S) as connection:
                 yield connection
         except _UNAVAILABLE as exc:
             raise StateUnavailableError(type(exc).__name__) from None
@@ -687,14 +717,14 @@ class PostgresDatabase:
 
     @asynccontextmanager
     async def request_transaction(self) -> AsyncIterator[None]:
-        """A request's own writes, together or not at all: a connection of the request pool and
+        """A request's own writes, together or not at all: a connection of this task's pool and
         a transaction, without the write lock (section 3.6). Each statement in it that decides
         something locks its own row."""
         if self._in_transaction.get() is not None:
             raise RuntimeError("a transaction is already open")
         try:
             async with (
-                self.requests.acquire(timeout=COMMAND_TIMEOUT_S) as connection,
+                self._task_pool().acquire(timeout=COMMAND_TIMEOUT_S) as connection,
                 connection.transaction(),
             ):
                 await connection.execute(f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}")
@@ -894,6 +924,21 @@ class PostgresUsageStore(_Store):
         )
         return _totals(_event(tuple(r.values())) for r in rows)
 
+    async def usage_by_application(
+        self, application_ids: Collection[str], start_ms: float, end_ms: float
+    ) -> dict[str, dict[str, ModelUsage]]:
+        ids = sorted(set(application_ids))
+        if not ids:
+            return {}
+        rows = await self._fetch(
+            f"SELECT {_USAGE_COLUMNS} FROM usage_events WHERE application_id = ANY($1::text[])"
+            " AND occurred_at_ms >= $2 AND occurred_at_ms < $3 ORDER BY seq",
+            ids,
+            start_ms,
+            end_ms,
+        )
+        return totals_by_application(ids, (_event(tuple(r.values())) for r in rows))
+
     async def events(self, application_id: str | None = None) -> list[StoredUsageEvent]:
         sql = f"SELECT seq, {_USAGE_COLUMNS} FROM usage_events"
         rows = (
@@ -988,6 +1033,16 @@ class PostgresApplicationStore(_Store):
         )
         return _application(tuple(row.values())) if row is not None else None
 
+    async def get_applications(self, application_ids: Collection[str]) -> dict[str, Application]:
+        ids = sorted(set(application_ids))
+        if not ids:
+            return {}
+        rows = await self._fetch(
+            f"SELECT {_APP_COLUMNS} FROM applications WHERE id = ANY($1::text[])", ids
+        )
+        found = {a.id: a for a in (_application(tuple(r.values())) for r in rows)}
+        return {i: found[i] for i in application_ids if i in found}
+
     async def list_applications(self, organization_id: str | None = None) -> list[Application]:
         if organization_id is None:
             rows = await self._fetch(f"SELECT {_APP_COLUMNS} FROM applications ORDER BY ord")
@@ -1070,6 +1125,19 @@ class PostgresApplicationStore(_Store):
             application_id,
         )
         return [_key(tuple(r.values())) for r in rows]
+
+    async def keys_of(self, application_ids: Collection[str]) -> dict[str, list[ApiKeyRecord]]:
+        found: dict[str, list[ApiKeyRecord]] = {i: [] for i in application_ids}
+        if not found:
+            return found
+        rows = await self._fetch(
+            f"SELECT {_KEY_COLUMNS} FROM api_keys WHERE application_id = ANY($1::text[])"
+            " ORDER BY ord",
+            sorted(found),
+        )
+        for key in (_key(tuple(r.values())) for r in rows):
+            found[key.application_id].append(key)
+        return found
 
     async def page_keys(
         self, application_id: str, after: str | None, limit: int
@@ -1630,6 +1698,20 @@ class PostgresSettingsStore(_Store):
         )
         return settings_row(tuple(row.values())) if row is not None else None
 
+    async def current_many(
+        self, scope: Scope, scope_ids: Collection[str]
+    ) -> dict[str, SettingsRow]:
+        ids = sorted(set(scope_ids))
+        if not ids:
+            return {}
+        rows = await self._fetch(
+            f"SELECT {_SETTINGS_ROW} FROM settings_current"
+            " WHERE scope_type = $1 AND scope_id = ANY($2::text[])",
+            Scope(scope).value,
+            ids,
+        )
+        return {r.scope_id: r for r in (settings_row(tuple(x.values())) for x in rows)}
+
     async def versions(
         self, scope: Scope, scope_id: str, limit: int, *, before: int | None = None
     ) -> list[SettingsVersion]:
@@ -1745,6 +1827,22 @@ _COMMIT = (
     "UPDATE budget_counters SET committed_tokens = committed_tokens + $3"
     " WHERE application_id = $1 AND period_start_ms = $2"
 )
+
+
+def _application_usage(
+    application_id: str, start: float, end: float, by_model: dict[str, ModelUsage]
+) -> ApplicationUsage:
+    total = ModelUsage()
+    for usage in by_model.values():
+        total = ModelUsage(
+            requests=total.requests + usage.requests,
+            prompt_tokens=total.prompt_tokens + usage.prompt_tokens,
+            cached_tokens=total.cached_tokens + usage.cached_tokens,
+            completion_tokens=total.completion_tokens + usage.completion_tokens,
+            base_cost_usd=total.base_cost_usd + usage.base_cost_usd,
+            billed_cost_usd=total.billed_cost_usd + usage.billed_cost_usd,
+        )
+    return ApplicationUsage(application_id, start, end, total, by_model)
 
 
 class PostgresBudgets:
@@ -1977,17 +2075,13 @@ class PostgresBudgets:
         """The period's usage, from its events: what every instance has charged."""
         start, end = self._periods.bounds(await self._now())
         by_model = await self._usage.usage_by_model(application_id, start, end)
-        total = ModelUsage()
-        for usage in by_model.values():
-            total = ModelUsage(
-                requests=total.requests + usage.requests,
-                prompt_tokens=total.prompt_tokens + usage.prompt_tokens,
-                cached_tokens=total.cached_tokens + usage.cached_tokens,
-                completion_tokens=total.completion_tokens + usage.completion_tokens,
-                base_cost_usd=total.base_cost_usd + usage.base_cost_usd,
-                billed_cost_usd=total.billed_cost_usd + usage.billed_cost_usd,
-            )
-        return ApplicationUsage(application_id, start, end, total, by_model)
+        return _application_usage(application_id, start, end, by_model)
+
+    async def usage_many(self, application_ids: Collection[str]) -> dict[str, ApplicationUsage]:
+        """``usage`` of each of these applications, in two reads (the clock and the events)."""
+        start, end = self._periods.bounds(await self._now())
+        found = await self._usage.usage_by_application(application_ids, start, end)
+        return {i: _application_usage(i, start, end, m) for i, m in found.items()}
 
     async def prune(self, limit: int | None = None) -> int:
         """Usage events older than the retention, never the current period's (``CostLedger``)."""
@@ -2229,6 +2323,20 @@ class PostgresIncidentStore(_Store):
             series_key,
         )
         return found[0] if found else None
+
+    async def recent_resolved_many(
+        self, series: Collection[tuple[str, str]], since_ms: float
+    ) -> dict[tuple[str, str], Incident]:
+        wanted = set(series)
+        rules = sorted({rule_id for rule_id, _ in wanted})
+        if not rules:
+            return {}
+        found = await self._incidents(
+            "rule_id = ANY($1::text[]) AND state = 'resolved' AND resolved_at_ms >= $2",
+            rules,
+            since_ms,
+        )
+        return latest_resolved(i for i in found if (i.rule_id, i.series_key) in wanted)
 
     async def get_incident(self, application_id: str, incident_id: str) -> Incident | None:
         found = await self._incidents(
