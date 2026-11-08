@@ -6,7 +6,8 @@ first, and any conflict with the main plan is decided by the reviewer.
 
 **Status:** proposed 2026-11-05. The reviewer's decisions of 2026-11-08 are applied
 throughout (section 1), and section 4.2 checks the webhook path against the reviewer's list.
-Not yet approved.
+**Approved 2026-11-08** (#38 merged), with the additions of section 21; built in the two groups
+of section 22.
 
 **Scope.** Part F's A4 row, the four items moved to A4 when A2 started, and nothing from A5 or
 later:
@@ -546,3 +547,46 @@ None block A4. For your objection if any:
 - The console's channel and incident screens: C2.
 - Slack-style formats.
 - A link to confirm anything.
+
+## 21. Additions on approval (2026-11-08)
+
+1. **The empty application id is refused on every path an application can appear:** the HTTP
+   management endpoint, `scripts/manage.py create-application`, the bootstrap (the plans file's
+   demo applications), and the SQLite-to-Postgres copy (and the copy back). No path renames an
+   application today; if one is added it must call the same check. Migration 17 (and Postgres
+   schema 6) refuse to apply while any application has an empty id, and the migration preview
+   reports it as a conflict. A test per path, and a mutation of the shared check.
+2. **Numeric host forms** refused when the URL is stored include the decimal and hexadecimal
+   whole-number forms: `2130706433` and `0x7f000001`, beside `0177.0.0.1`, `127.1` and
+   `0x7f.1`.
+3. **A reference verification snippet for receivers** in note 46, with a test that runs that
+   snippet, as written in the note, on a real delivery's request: it verifies it, and rejects
+   a stale timestamp and a repeated delivery id.
+4. **Delivery tests inject the resolver and the network** (`FakeResolver`, `ScriptedNetwork`);
+   no production guard is relaxed for a test.
+5. **Cap defaults are well below their maximums, and no cap can be disabled:** each range
+   starts at 1 (0, a negative number, an empty value or anything not a whole number refuses
+   the start), and each default is at most a sixth of its maximum (6 of 60, 60 of 600, 10 of
+   60, 30 of 300).
+
+## 22. Order of work: two groups in one PR
+
+One draft PR, two groups of commits, one report with a section for each.
+
+- **Group 1, nothing that opens an outbound connection:** migration 17 and Postgres schema 6
+  (every table of section 12, so group 2 needs no further migration); channels, the vault's
+  channel scope and the signing key; the channel endpoints that make no connection (all of
+  section 9 but `/test`) and the four permission rows; the empty application id refusal
+  (section 21.1); `check_webhook_url` (section 4.1, with 21.2); a rule's channel ids checked
+  at write (M15); the `rule_weakened` notice and the `channel_removed` notice, queued in the
+  outbox in their write's transaction (sent by group 2); step-up for creating, changing,
+  re-enabling and rotating; the payload allowlist and its 8 KiB bound.
+- **Group 2, delivery:** `webhook_client()` and its connection rules (section 4.2), the
+  delivery worker and the pool rule (section 5), the evaluator queueing its notifications with
+  the incident's first channels, retries, the caps and the suppressed summary (section 7),
+  test send, `channel_delivery_failing` (section 8.1), the leak scans of section 15, and note
+  46's receiver recipe with its test.
+
+Work stops at the end of group 1 if anything blocks group 2: a conflict with this plan, a
+surviving mutation of a real, untested rule, or a failed check. A conflict touching
+authentication, step-up, secrets or where data can go is never resolved by the builder.
