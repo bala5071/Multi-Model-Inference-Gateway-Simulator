@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from gateway.organizations import check_application_id
 from gateway.registry import ModelRegistry
 
 if TYPE_CHECKING:
@@ -173,6 +174,10 @@ def parse_plans(data: object) -> PlansConfig:
 
     applications: dict[str, DemoApplication] = {}
     for app_id, raw in raw_applications.items():
+        try:
+            check_application_id(str(app_id))
+        except ValueError as exc:
+            raise PlansConfigError(str(exc)) from None
         if not isinstance(raw, dict) or not isinstance(raw.get("name"), str) or not raw["name"]:
             raise PlansConfigError(f"application {app_id!r} needs a 'name'")
         plan_name = raw.get("plan")

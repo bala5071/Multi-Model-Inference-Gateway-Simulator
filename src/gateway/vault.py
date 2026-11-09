@@ -15,6 +15,11 @@ See docs/32-provider-settings-and-vault.md and docs/provider-plan.md, section 3.
   that key is not loaded, the row is ``key_unreadable`` and no other key is tried.
 - What is stored: ``key_id``, ``nonce``, ``ciphertext``, and ``last4`` only for keys of 20 or
   more characters. Decryption gives a ``Secret``.
+- **Scopes** (docs/46, the settings-and-alerts plan's section 9.1). A provider key is bound by
+  ``Binding`` (``vault-v1|...``, unchanged: no provider row is resealed); an alert channel's
+  secrets (its webhook URL and signing keys) by ``ChannelBinding``
+  (``vault-channel-v1|organization|channel|kind|origin|key_id``). The first field names the
+  scope, so a channel ciphertext never opens as a provider key, nor the reverse.
 """
 
 from __future__ import annotations
@@ -121,6 +126,41 @@ class Binding:
     base_url: str
 
 
+# What an alert channel's secret is: its kinds, each sealed apart (docs/46).
+CHANNEL_SECRET_KINDS = frozenset(
+    {"webhook_url", "webhook_signing_key", "webhook_signing_key_previous"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelBinding:
+    """Where an alert channel's secret may be used: its organization, the channel, which of its
+    secrets it is, and the origin of its webhook URL (docs/46). A secret copied to another
+    channel's row, or left behind when the URL's origin changed, does not decrypt."""
+
+    organization_id: str
+    channel_id: str
+    kind: str
+    url_origin: str
+
+    def __post_init__(self) -> None:
+        if self.kind not in CHANNEL_SECRET_KINDS:
+            raise ValueError("not a kind of channel secret")
+
+
+def channel_binding(
+    organization_id: str, channel_id: str, kind: str, url_origin: str, key_id: str
+) -> bytes:
+    """The associated data a channel secret is bound to. Its first field names the scope, so
+    no channel binding's bytes equal a provider binding's."""
+    return "|".join(
+        ("vault-channel-v1", organization_id, channel_id, kind, url_origin.lower(), key_id)
+    ).encode()
+
+
+AnyBinding = Binding | ChannelBinding
+
+
 class Vault:
     """Seals and opens provider keys. ``master`` encrypts; ``previous``, during a rotation,
     only decrypts."""
@@ -152,7 +192,7 @@ class Vault:
     def readable(self, sealed: SealedKey) -> bool:
         return sealed.key_id in self._keys
 
-    def seal(self, plaintext: str, where: Binding) -> SealedKey:
+    def seal(self, plaintext: str, where: AnyBinding) -> SealedKey:
         """Encrypt a key as it arrived (the admin endpoint's body) under the current master
         key. The plaintext is never wrapped and unwrapped here: ``Secret.reveal()`` keeps its
         one call site (the adapters' header builder)."""
@@ -160,15 +200,20 @@ class Vault:
         ciphertext = AESGCM(self._keys[self.current_key_id]).encrypt(
             nonce, plaintext.encode(), self._aad(where, self.current_key_id)
         )
-        last4 = plaintext[-4:] if len(plaintext) >= LAST4_MIN_LENGTH else None
+        # A channel secret keeps no last four characters: a webhook URL's are its token's end.
+        last4 = (
+            plaintext[-4:]
+            if len(plaintext) >= LAST4_MIN_LENGTH and not isinstance(where, ChannelBinding)
+            else None
+        )
         return SealedKey(self.current_key_id, nonce, ciphertext, last4)
 
-    def open(self, sealed: SealedKey, where: Binding) -> Secret:
+    def open(self, sealed: SealedKey, where: AnyBinding) -> Secret:
         """The key, decrypted with the master key ``sealed`` names and no other."""
         return Secret(self._decrypt(sealed, where).decode())
 
     @contextmanager
-    def lease(self, sealed: SealedKey, where: Binding, redactor: Redactor) -> Iterator[Secret]:
+    def lease(self, sealed: SealedKey, where: AnyBinding, redactor: Redactor) -> Iterator[Secret]:
         """The key for one use (docs/32): decrypted at the last moment, scrubbed from every log
         record while the block runs, and no reference kept after it. Python cannot erase the
         string; nothing here holds it once the block ends."""
@@ -177,7 +222,7 @@ class Vault:
             yield Secret(plaintext)
         del plaintext
 
-    def reseal(self, sealed: SealedKey, where: Binding) -> SealedKey:
+    def reseal(self, sealed: SealedKey, where: AnyBinding) -> SealedKey:
         """The same key under the current master key (rotation), keeping its ``last4``."""
         plaintext = self._decrypt(sealed, where)
         nonce = self._random_bytes(NONCE_BYTES)
@@ -186,13 +231,27 @@ class Vault:
         )
         return SealedKey(self.current_key_id, nonce, ciphertext, sealed.last4)
 
+    def rebind(self, sealed: SealedKey, was: AnyBinding, now: AnyBinding) -> SealedKey:
+        """The same secret under the current master key, bound to ``now`` instead of ``was``
+        (a channel whose URL's origin changed keeps its signing key, docs/46)."""
+        plaintext = self._decrypt(sealed, was)
+        nonce = self._random_bytes(NONCE_BYTES)
+        ciphertext = AESGCM(self._keys[self.current_key_id]).encrypt(
+            nonce, plaintext, self._aad(now, self.current_key_id)
+        )
+        return SealedKey(self.current_key_id, nonce, ciphertext, sealed.last4)
+
     @staticmethod
-    def _aad(where: Binding, key_id: str) -> bytes:
+    def _aad(where: AnyBinding, key_id: str) -> bytes:
+        if isinstance(where, ChannelBinding):
+            return channel_binding(
+                where.organization_id, where.channel_id, where.kind, where.url_origin, key_id
+            )
         return binding(
             where.organization_id, where.provider_id, where.provider_type, where.base_url, key_id
         )
 
-    def _decrypt(self, sealed: SealedKey, where: Binding) -> bytes:
+    def _decrypt(self, sealed: SealedKey, where: AnyBinding) -> bytes:
         master = self._keys.get(sealed.key_id)
         if master is None:
             raise KeyUnreadableError(sealed.key_id)

@@ -76,6 +76,7 @@ class Wired(StrEnum):
     SETTINGS_S3 = "settings S3"  # a settings write that loosens where prompts go (docs/42)
     ALERTS_A2 = "alerts A2"  # the alert rule endpoints (docs/44)
     ALERTS_A3 = "alerts A3"  # the incident endpoints (docs/45)
+    ALERTS_A4 = "alerts A4"  # the alert channel endpoints (docs/46)
     LATER = "later"  # declared; no endpoint is planned in A2
 
 
@@ -173,6 +174,13 @@ def _rows() -> list[Permission]:
             False,
             w.ALERTS_A3,
         ),
+        # An organization's alert channels (docs/46): its org_admin only. Creating one,
+        # changing its target or default, re-enabling it and rotating its key need step-up,
+        # used up by one change; disabling or deleting narrows where data goes and needs none.
+        ("alert_channels.read", o, (_ORG_ADMIN,), False, w.ALERTS_A4),
+        ("alert_channels.write", o, (_ORG_ADMIN,), CONSUME, w.ALERTS_A4),
+        ("alert_channels.disable", o, (_ORG_ADMIN,), False, w.ALERTS_A4),
+        ("alert_channels.test", o, (_ORG_ADMIN,), False, w.ALERTS_A4),
         # The audit log: organization-, user-, role- and login-level entries.
         ("audit.read_organization", o, (_PLATFORM, _ORG_ADMIN), False, w.LATER),
         # Inside an application: never platform_admin.

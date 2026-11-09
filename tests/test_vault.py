@@ -230,6 +230,8 @@ def test_only_the_provider_service_the_wiring_and_the_cli_hold_the_vault() -> No
         "providers.py",
         "app.py",
         "manage.py",
+        # The alert channels' secrets, in the vault's channel scope (docs/46).
+        "channels.py",
     }
 
 

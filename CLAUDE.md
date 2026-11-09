@@ -58,7 +58,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `vault.py` — `Vault`: provider keys sealed with AES-256-GCM under `GATEWAY_VAULT_KEY` (the
   server refuses to start without it; `GATEWAY_VAULT_KEY_PREVIOUS` during a rotation), bound to
   organization, provider, type and URL origin; no trial decryption; `lease()` decrypts for one
-  use (exists)
+  use; `ChannelBinding`, the channel scope (`vault-channel-v1|...`), for alert channels'
+  secrets, with no last four characters kept (docs/46) (exists)
 - `redaction.py` — `Redactor` and `install`: a log-record factory that scrubs leased key values
   and credential patterns from every record; installed by the server's lifespan (exists)
 - `egress.py` — the egress guard for organization providers: https only, every resolved address
@@ -107,6 +108,18 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   on memory, SQLite (migration 15) and Postgres (schema 4), `RuleService` (versions, the cap
   of 50, restore-defaults, the preview from the rollups, audited) and `resolve_rule`; channels
   `[]` or `["organization defaults"]` until A4 (docs/44) (exists)
+- `alerts/` — A4 (docs/46). `channels.py`: `Channel`, `check_webhook_url` (the URL when stored:
+  https, no user info, fragment, control character, whitespace or backslash, a public name or
+  address, no numeric host form but the dotted quad, port 443 or `GATEWAY_ALERT_WEBHOOK_PORTS`),
+  `ChannelStore` on memory and SQLite (migration 17) with `channel_secrets` read nowhere else,
+  `resolve_channel`, and `ChannelService` (at most 20 an organization under the write lock, the
+  URL and the signing key sealed in the vault's channel scope, the key shown once, rotation
+  keeping the previous key 24 hours on the store clock, `reseal_all`); `outbox.py`: `Delivery`,
+  `OutboxStore` (one row per notification and channel, the caps' conditional count, one summary
+  an organization an hour); `payload.py`: `AlertPayload`, the `json-v1` allowlist, at most
+  8 KiB, never cut short; `weakening.py`: `weakened_fields`, each rule field's direction (M29);
+  `notices.py`: `Notices` (where a notification goes, checked at queue time; `rule_weakened`
+  and `channel_removed` queued in their write's transaction) (exists)
 - `incidents.py` — `Incident`, the notifications recorded on it (A4 delivers them), the lease
   (`LeaseView`, `Fence`), and `IncidentStore` on memory, SQLite (migration 16) and Postgres
   (schema 5): one open incident a series by a partial unique index, every change a fenced
@@ -146,7 +159,9 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `plans.yaml` — the packaged plan templates and demo applications; never keys (exists)
 - `organizations.py` — `Organization`, `OrganizationKind` (`individual`, `business`),
   `normalize_name` (NFC, exact comparison, no control or zero-width characters, at most 100),
-  and the pure `membership_decision` (an individual organization takes one member) that
+  `check_application_id` (never empty: the built-in `channel_delivery_failing` keeps its
+  incidents under the empty application id; every store, the management service, the plans
+  file and the copy between databases call it, docs/46), and the pure `membership_decision` (an individual organization takes one member) that
   step 4 wires into user creation (exists)
 - `applications.py` — `Application` (its own copy of a template's plan settings and limits,
   and its `organization_id`), `ApiKeyRecord`, `KeyLookup` (key, application and organization
@@ -223,8 +238,10 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `postgres.py` — every durable store on Postgres (asyncpg): `PG_BASELINE` (SQLite migrations
   1 to 13, plus `ord` where SQLite orders by rowid), `PG_SETTINGS` (schema version 3, migration
   14, with `rollback_schema`), `PG_ALERT_RULES` (schema version 4, migration 15 and its data
-  step), `PG_INCIDENTS` (schema version 5, migration 16), `PostgresSettingsStore`,
-  `PostgresRuleStore`, `PostgresIncidentStore`, `PostgresDatabase` with three pools (request,
+  step), `PG_INCIDENTS` (schema version 5, migration 16), `PG_CHANNELS` (schema version 6,
+  migration 17, refused while an application has an empty id), `PostgresSettingsStore`,
+  `PostgresRuleStore`, `PostgresIncidentStore`, `PostgresChannelStore`, `PostgresOutboxStore`,
+  `PostgresDatabase` with three pools (request,
   management, and the alert evaluator's, which its task takes under `evaluation()`),
   `write_transaction()` taking the global advisory `WRITE_LOCK` with a timeout that
   fails closed (`GATEWAY_STATE_LOCK_TIMEOUT_MS`), `request_transaction()` without it, the SQL
@@ -244,7 +261,10 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `platform_admin`), 9 `sessions.step_up_until_ms`, 10 `provider_configs`, 11 `provider_keys`,
   12 `modes`, 13 the chat source columns of `usage_events`, 14 `settings_current` and
   `settings_versions`, 15 `alert_rules` (with a data step: every existing application's default
-  rules), 16 `alert_lease`, `incidents` and `incident_notifications`. The default database is in the user's data folder,
+  rules), 16 `alert_lease`, `incidents` and `incident_notifications`, 17 `alert_channels`,
+  `channel_secrets`, `notification_deliveries`, `notification_caps`, `suppression_summaries`
+  and `incidents.notify_channels` (refused while an application has an empty id). The default
+  database is in the user's data folder,
   owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
   `restore_database` use SQLite's backup API (exists)
 - `overload.py` — `run_with_timeout`, `SloMonitor` (sliding-window p99 with hysteresis),

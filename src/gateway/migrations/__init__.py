@@ -19,6 +19,7 @@ from gateway.migrations import (
     m0014_settings,
     m0015_alert_rules,
     m0016_incidents,
+    m0017_alert_channels,
 )
 from gateway.migrations.runner import (
     Migration,
@@ -46,6 +47,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     m0014_settings.MIGRATION,
     m0015_alert_rules.MIGRATION,
     m0016_incidents.MIGRATION,
+    m0017_alert_channels.MIGRATION,
 )
 
 __all__ = [

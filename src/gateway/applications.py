@@ -27,6 +27,7 @@ from gateway.organizations import (
     DEFAULT_ORGANIZATION_NAME,
     Organization,
     OrganizationKind,
+    check_application_id,
     normalize_name,
 )
 from gateway.routing import Plan, PlansConfig
@@ -139,8 +140,9 @@ class ApplicationStore(Protocol):
         ...
 
     async def add_application(self, application: Application) -> None:
-        """Raise ``ValueError`` if an application with that id exists, the name is used in
-        its organization, or the organization does not exist or is disabled."""
+        """Raise ``ValueError`` if its id is empty (``EmptyApplicationIdError``, docs/46), an
+        application with that id exists, the name is used in its organization, or the
+        organization does not exist or is disabled."""
         ...
 
     async def get_application(self, application_id: str) -> Application | None: ...
@@ -250,6 +252,7 @@ class InMemoryApplicationStore:
         self._organizations[organization_id] = replace(organization, disabled=disabled)
 
     async def add_application(self, application: Application) -> None:
+        check_application_id(application.id)
         _checked_name(application.name)
         if application.id in self._applications:
             raise ValueError(f"application {application.id!r} exists")
@@ -453,6 +456,7 @@ class SqliteApplicationStore:
 
     async def add_application(self, application: Application) -> None:
         a = application
+        check_application_id(a.id)
         _checked_name(a.name)
         if await self.get_application(a.id) is not None:
             raise ValueError(f"application {a.id!r} exists")

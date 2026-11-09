@@ -30,6 +30,13 @@ from benchmarks import durable_calls
 
 from accounts_helpers import PASSWORD, cookie, with_csrf
 from gateway.alertrules import DEFAULT_RULES, AlertRule, RuleVersionConflictError, default_rules
+from gateway.alerts.channels import (
+    Channel,
+    ChannelNameTakenError,
+    ChannelVersionConflictError,
+    StoredSecret,
+)
+from gateway.alerts.outbox import Delivery, DeliveryState
 from gateway.apikeys import ApiKeyService, ApplicationAccess, InvalidApiKeyError
 from gateway.app import create_app, create_default_app
 from gateway.applications import (
@@ -73,6 +80,7 @@ from gateway.postgres import (
     NO_PASSWORD_FOR_TESTS_ENV,
     PG_ALERT_RULES,
     PG_BASELINE,
+    PG_CHANNELS,
     PG_INCIDENTS,
     PG_SETTINGS,
     TABLES,
@@ -135,7 +143,7 @@ def _postgres_columns() -> dict[str, list[str]]:
     """Each table's columns, read from the text of the baseline, of version 3 (settings) and
     of version 4 (alert rules)."""
     found: dict[str, list[str]] = {}
-    text = PG_BASELINE + PG_SETTINGS + PG_ALERT_RULES + PG_INCIDENTS
+    text = PG_BASELINE + PG_SETTINGS + PG_ALERT_RULES + PG_INCIDENTS + PG_CHANNELS
     for match in re.finditer(r"CREATE TABLE (\w+) \((.*?)\);\n", text, re.S):
         depth, part, parts = 0, "", []
         for char in match.group(2):
@@ -150,6 +158,9 @@ def _postgres_columns() -> dict[str, list[str]]:
         found[match.group(1)] = [
             n for n in names if n not in ("CHECK", "UNIQUE", "PRIMARY", "FOREIGN", "CONSTRAINT")
         ]
+    # A column added in place (version 6's incidents.notify_channels), as SQLite's ALTER does.
+    for match in re.finditer(r"ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+)", text):
+        found[match.group(1)].append(match.group(2))
     return found
 
 
@@ -476,7 +487,10 @@ class _Counting:
 async def _outcome(call: Awaitable[Any]) -> Any:
     try:
         return ("ok", await call)
-    except (ValueError, KeyError, SettingsVersionConflictError, RuleVersionConflictError) as exc:
+    except (
+        ValueError, KeyError, SettingsVersionConflictError, RuleVersionConflictError,
+        ChannelNameTakenError, ChannelVersionConflictError,
+    ) as exc:  # fmt: skip
         return (type(exc).__name__, str(exc))
 
 
@@ -811,11 +825,87 @@ async def _scenario(s: StateBackend) -> list[Any]:
         await inc.recent_resolved(rule.id, ""),
         await inc.recent_resolved_many([(rule.id, ""), (rule.id, "nope")], 0.0),
     ]
+    # Alert channels, their sealed secrets, the outbox, the caps and the summaries (docs/46).
+    ch = s.channels
+    first = Channel("chn_00000000000000a1", "north", "Ops", "webhook", True, True,
+                    "https://hooks.example.com", 1, NOW, NOW)  # fmt: skip
+    second = dataclasses.replace(first, id="chn_00000000000000a2", name="Pager", is_default=False)
+    async with ch.write_transaction():
+        await ch.insert_channel(first)
+    await ch.insert_channel(second)
+    out += [
+        await _outcome(ch.insert_channel(dataclasses.replace(second, id="chn_00000000000000a3"))),
+        await _outcome(ch.insert_channel(second)),
+    ]
+    renamed = dataclasses.replace(second, name="Pager 2", version=2, consecutive_failures=3)
+    await ch.put_channel(renamed, 1)
+    out += [
+        await _outcome(ch.put_channel(renamed, 1)),
+        await _outcome(ch.put_channel(dataclasses.replace(renamed, name="Ops", version=3), 2)),
+    ]
+    sealed = SealedKey("k1", b"\x00" * 12, b"\x01\x02\x03", None)
+    await ch.put_secret(StoredSecret(first.id, "webhook_url", sealed))
+    await ch.put_secret(StoredSecret(first.id, "webhook_signing_key", sealed))
+    await ch.put_secret(
+        StoredSecret(first.id, "webhook_signing_key_previous", sealed, NOW + 86_400_000)
+    )
+    await ch.put_secret(StoredSecret(second.id, "webhook_url", sealed))
+    await ch.delete_secret(first.id, "webhook_signing_key_previous")
+    out += [
+        await ch.get_channel(first.id),
+        await ch.get_channel("chn_00000000000000ff"),
+        await ch.list_channels("north", 1),
+        await ch.list_channels("north", 5, after=first.id),
+        await ch.organization_channels("north"),
+        await ch.organization_channels("south"),
+        await ch.count_channels("north"),
+        await ch.secrets(first.id),
+        await ch.all_secrets(),
+    ]
+    ob = s.outbox
+    deliveries = [
+        Delivery(
+            f"dlv_{n:016x}",
+            f"ntf_{n % 2:016x}",
+            channel.id,
+            "north",
+            DeliveryState.QUEUED,
+            0,
+            NOW,
+            None,
+            None,
+            None,
+            '{"kind":"test"}',
+            NOW,
+            NOW,
+        )
+        for n, channel in enumerate((first, second, first), start=1)
+    ]
+    async with ob.write_transaction():
+        out.append(await ob.queue(deliveries))
+    out += [
+        await ob.queue(deliveries[:1]),
+        await ob.channel_deliveries(first.id, 1),
+        await ob.channel_deliveries(first.id, 5, after="dlv_0000000000000001"),
+        await ob.notification_deliveries(["ntf_0000000000000001", "ntf_0000000000000000"]),
+        await ob.notification_deliveries([]),
+        await ob.fail_channel(second.id, "channel_gone", NOW),
+        await ob.channel_deliveries(second.id, 5),
+        [await ob.count_notification("rule", "rul_00000000000000aa", 7, 2) for _ in range(3)],
+        await ob.count_notification("organization", "north", 7, 2),
+        await ob.add_summary("north", 7, "ntf_00000000000000ee", NOW),
+        await ob.add_summary("north", 7, "ntf_00000000000000ef", NOW),
+        await ch.delete_channel(second.id),
+        await ch.delete_channel(second.id),
+        await ch.secrets(second.id),
+    ]
     return out
 
 
 def _protocol_methods() -> set[str]:
     from gateway.alertrules import RuleStore
+    from gateway.alerts.channels import ChannelStore
+    from gateway.alerts.outbox import OutboxStore
     from gateway.applications import ApplicationStore
     from gateway.audit import AuditStore
     from gateway.incidents import IncidentStore
@@ -837,6 +927,8 @@ def _protocol_methods() -> set[str]:
         SettingsStore: "PostgresSettingsStore",
         RuleStore: "PostgresRuleStore",
         IncidentStore: "PostgresIncidentStore",
+        ChannelStore: "PostgresChannelStore",
+        OutboxStore: "PostgresOutboxStore",
     }
     return {
         f"{store}.{name}"

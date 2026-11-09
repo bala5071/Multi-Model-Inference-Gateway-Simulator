@@ -294,6 +294,42 @@ The table it comes from, and what each relation means, are in docs/28-roles.md.
 | app_admin | n/a | n/a | n/a | n/a | deny |
 | viewer | n/a | allow | n/a | n/a | deny |
 
+## `alert_channels.read` (level organization, wired alerts A4)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
+## `alert_channels.write` (level organization, wired alerts A4, step-up, consume)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
+## `alert_channels.disable` (level organization, wired alerts A4)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
+## `alert_channels.test` (level organization, wired alerts A4)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
 ## `audit.read_organization` (level organization, wired later)
 
 | role | platform | own_organization | application_in_own_organization | own_application | other |

@@ -6,8 +6,12 @@ a threshold in the signal's unit, a window, how long the condition must hold, a 
 channels, a cooldown, an optional reminder and quiet hours, and whether it is enabled. Nothing
 evaluates rules yet (A3) and nothing is sent (A4).
 
-**Channels until A4** are an empty list or ``["organization defaults"]``, stored as a plain
-list with no link to a table (the plan, as agreed when A2 started).
+**Channels** (A4, docs/46): ``[]``, ``["organization defaults"]``, or up to ``MAX_RULE_CHANNELS``
+channel ids. The ids are checked at write to be channels **of the rule's own organization**: an
+id of another organization's channel is refused exactly as one that does not exist (M15).
+
+**A write that makes an enabled rule fire less** (``gateway.alerts.weakening``) queues a
+``rule_weakened`` notice to the rule's channels as they were before it, in its transaction.
 
 **Default rules are real rows,** created with each application and, for the applications that
 already exist, by migration 15's data step (Postgres schema 4). Their ids are derived from the
@@ -24,7 +28,7 @@ import re
 import sqlite3
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from gateway.alertrecorder import EDGES, MINUTE_MS, snap
 from gateway.alertrollups import AlertRollups
@@ -35,10 +39,20 @@ from gateway.management import ManagementRefusal, Stores, resolve_application
 from gateway.permissions import Resource
 from gateway.signals import FROM_ROLLUPS, SIGNALS, evaluate
 
+if TYPE_CHECKING:
+    from gateway.alerts.notices import Notices
+
 RULE_ID_PREFIX = "rul_"
 RULE_ID = re.compile(r"rul_[0-9a-f]{16}")
 MAX_RULES = 50
 ORGANIZATION_DEFAULTS = "organization defaults"
+MAX_RULE_CHANNELS = 5
+CHANNEL_ID = re.compile(r"chn_[0-9a-f]{16}")
+# One message for a channel id that does not exist and one of another organization (M15).
+CHANNELS_MESSAGE = (
+    f'must be [], ["{ORGANIZATION_DEFAULTS}"], or 1 to {MAX_RULE_CHANNELS} different channel ids '
+    "of this organization"
+)
 COMPARISONS = (">", ">=", "<", "<=")
 SEVERITIES = ("info", "warning", "critical")
 NAME = re.compile(r"[A-Za-z0-9 ._-]{1,64}")
@@ -159,9 +173,15 @@ def validate_rule(body: Mapping[str, Any]) -> RuleSpec:
     if severity not in SEVERITIES:
         raise RuleInvalidError("severity", "must be info, warning or critical")
     channels = body.get("channels", [ORGANIZATION_DEFAULTS])
-    if not isinstance(channels, list) or channels not in ([], [ORGANIZATION_DEFAULTS]):
-        # Until A4: no channel table exists to name one from (docs/44).
-        raise RuleInvalidError("channels", f'must be [] or ["{ORGANIZATION_DEFAULTS}"] until A4')
+    if not isinstance(channels, list) or not (
+        channels in ([], [ORGANIZATION_DEFAULTS])
+        or (
+            1 <= len(channels) <= MAX_RULE_CHANNELS
+            and len(set(channels)) == len(channels)
+            and all(isinstance(c, str) and CHANNEL_ID.fullmatch(c) for c in channels)
+        )
+    ):
+        raise RuleInvalidError("channels", CHANNELS_MESSAGE)
     cooldown = _int(body, "cooldown_minutes", 5, 1440, 30)
     repeat = _int(body, "repeat_every_minutes", 60, 1440, None)
     quiet = _quiet_hours(body.get("quiet_hours"))
@@ -500,12 +520,45 @@ class RuleService:
         epoch: EpochSource,
         rollups: AlertRollups | None,
         random_bytes: Callable[[int], bytes],
+        *,
+        notices: Notices | None = None,
     ) -> None:
+        """``notices`` (docs/46) checks a rule's channel ids against the organization's channels
+        and queues the ``rule_weakened`` notice; without it (the CLI, which only creates default
+        rules) a rule may name no channel id, and no rule has channels to tell."""
         self.store = store
         self._audit = audit
         self._epoch = epoch
         self._rollups = rollups
         self._random_bytes = random_bytes
+        self._notices = notices
+
+    async def check_channels(self, application_id: str, spec: RuleSpec) -> None:
+        """A rule's channel ids are channels of its application's organization, or
+        ``RuleInvalidError`` with one message whether an id is missing or another
+        organization's (M15). In the caller's transaction when it writes."""
+        ids = [c for c in spec.channels if c != ORGANIZATION_DEFAULTS]
+        if not ids:
+            return
+        notices = self._notices
+        if notices is None:
+            raise RuleInvalidError("channels", CHANNELS_MESSAGE)
+        organization_id = await notices.organization_of(application_id)
+        for channel_id in ids:
+            found = await notices.channels.get_channel(channel_id)
+            if found is None or found.organization_id != organization_id:
+                raise RuleInvalidError("channels", CHANNELS_MESSAGE)
+
+    async def _weakened(
+        self, application_id: str, before: AlertRule, after: RuleSpec | None
+    ) -> None:
+        """The ``rule_weakened`` notice, if ``after`` (None: deleted) makes the enabled rule
+        ``before`` fire less: to its channels as they were, in the caller's transaction."""
+        from gateway.alerts.weakening import weakened_fields
+
+        fields = weakened_fields(before.spec, after)
+        if fields and self._notices is not None:
+            await self._notices.rule_weakened(application_id, before, fields, deleted=after is None)
 
     async def _record(
         self,
@@ -535,6 +588,7 @@ class RuleService:
     ) -> AlertRule:
         spec = validate_rule(body)
         async with self.store.write_transaction():
+            await self.check_channels(application_id, spec)
             if await self.store.count_rules(application_id) >= MAX_RULES:
                 raise ManagementRefusal(
                     Reason.RULE_LIMIT, f"an application has at most {MAX_RULES} rules"
@@ -568,6 +622,9 @@ class RuleService:
             changed = [field for field in after if after[field] != before[field]]
             if not changed:
                 return found
+            if "channels" in changed:
+                await self.check_channels(application_id, spec)
+            await self._weakened(application_id, found, spec)
             rule = replace(found, spec=spec, version=found.version + 1,
                            updated_at_ms=self._epoch.epoch_ms())  # fmt: skip
             try:
@@ -611,11 +668,14 @@ class RuleService:
         self, application_id: str, rule_id: str, expected_version: int, actor_user_id: str | None
     ) -> None:
         async with self.store.write_transaction():
+            before = await self.store.get_rule(application_id, rule_id)
             try:
                 await self.store.delete_rule(application_id, rule_id, expected_version)
             except RuleVersionConflictError:
                 found = await self.store.get_rule(application_id, rule_id)
                 raise _conflict(found.version if found else None, expected_version) from None
+            assert before is not None  # deleted at its version: it was there
+            await self._weakened(application_id, before, None)
             await self._record(AuditAction.ALERT_RULE_DELETED, rule_id, application_id,
                                actor_user_id)  # fmt: skip
 
@@ -632,6 +692,8 @@ class RuleService:
                 if found is not None:
                     rule = replace(rule, version=found.version + 1,
                                    created_at_ms=found.created_at_ms)  # fmt: skip
+                    # Restoring can make an edited rule fire less: told, as any write is.
+                    await self._weakened(application_id, found, rule.spec)
                 await self.store.put_rule(rule, None)
                 written += 1
             await self._audit.write(

@@ -79,6 +79,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from gateway.alertrules import RuleService
+from gateway.alerts.channels import ChannelService
 from gateway.apikeys import ApiKeyService, load_pepper
 from gateway.app import default_platform_settings
 from gateway.applications import (
@@ -315,9 +316,9 @@ def _management(
 async def _rotate_vault_key(
     connection: sqlite3.Connection, state: StateBackend, database: Path, env: dict[str, str]
 ) -> str:
-    """Re-seal every provider key sealed under the previous master key under the current one,
-    in one transaction, after a backup (docs/32). Keys under neither are left as they are and
-    reported: they are unreadable."""
+    """Re-seal every provider key and alert channel secret sealed under the previous master key
+    under the current one, in one transaction, after a backup (docs/32, docs/46). Secrets under
+    neither are left as they are and reported: they are unreadable."""
     vault = Vault(*load_master_keys(env))
     if not env.get(VAULT_KEY_PREVIOUS_ENV):
         raise ValueError(
@@ -341,9 +342,22 @@ async def _rotate_vault_key(
                 stored.provider_id, vault.reseal(stored.sealed, config.binding), epoch.epoch_ms()
             )
             resealed += 1
-    note = f"backed up to {target}; re-sealed {resealed} provider key(s) under the new master key"
+        # The alert channels' secrets (docs/46), in the same transaction.
+        channels = ChannelService(
+            state.channels, vault, AuditLog(state.audit), epoch, secrets.token_bytes
+        )
+        channel_secrets, unreadable_channels = await channels.reseal_all()
+    note = (
+        f"backed up to {target}; re-sealed {resealed} provider key(s) and {channel_secrets} "
+        "alert channel secret(s) under the new master key"
+    )
     if unreadable:
         note += f"; unreadable, left as they were: {', '.join(unreadable)}"
+    if unreadable_channels:
+        note += (
+            f"; channels with unreadable secrets, left as they were (their deliveries fail as "
+            f"channel_secret_unreadable): {', '.join(unreadable_channels)}"
+        )
     return note + f". Remove {VAULT_KEY_PREVIOUS_ENV} and restart the server."
 
 
