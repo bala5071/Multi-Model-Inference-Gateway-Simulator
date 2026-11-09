@@ -6,8 +6,8 @@ operator's SMTP server) and a migration that rebuilds a table, so plan approval 
 and any conflict with the main plan or with A4 as built is decided by the reviewer.
 
 **Status:** proposed 2026-11-09; the reviewer's decisions of 2026-11-09 on the six questions
-are applied (section 16). One question remains open before the build (section 16, Q7: name
-resolution and the hard deadline). A4 (#39) is merged; this plan builds on it as built
+are applied (section 16), and question 7 (name resolution) was decided the same day: (a),
+with a cap on abandoned lookups. A4 (#39) is merged; this plan builds on it as built
 (`docs/46-alert-channels.md`).
 
 **Scope.** Part F's A5 row, and nothing from A6 or later:
@@ -33,7 +33,7 @@ Each was put to the reviewer; the column on the right is what was decided (secti
 |---|---|---|
 | 1 | **`alert_channels.type` is `CHECK (type IN ('webhook'))`** (migration 17). SQLite changes a `CHECK` only by rebuilding the table, and `url_origin` is `NOT NULL`, which an email channel does not have. The main plan did not foresee a rebuild here. | **Migration 18 rebuilds `alert_channels`** with `type IN ('webhook', 'email')` and `url_origin` nullable (`CHECK ((type = 'webhook') = (url_origin IS NOT NULL))`). It is a table rebuild, so it follows note 26's path: the server refuses it on a database with data, and `scripts/manage.py migrate` backs up first, with `--dry-run`. Postgres schema 7 changes the constraint in place. Tested on a populated database (section 9). Decided: the rebuild, not a separate `email_channels` table (Q1). |
 | 2 | **The main plan renames `Binding` to `ProviderBinding`.** A4 kept `Binding` and added `ChannelBinding` beside it. | **Keep `Binding`**, add `PlatformBinding`. No caller changes; the scopes are told apart by their associated data and their key, which is what the tests check. |
-| 3 | **Timeouts.** A4 bounds each webhook stage on the injected clock. The main plan puts SMTP on `smtplib` in a thread, whose timeouts are socket timeouts in real time. | **`smtplib` on a thread, with a hard 10 s deadline for the whole attempt:** a subclass sets the socket's timeout to what is left of the attempt's budget before every blocking socket call (section 7). A hung attempt's thread keeps its delivery slot until it finishes (Q4). Name resolution cannot take a timeout: open question Q7. |
+| 3 | **Timeouts.** A4 bounds each webhook stage on the injected clock. The main plan puts SMTP on `smtplib` in a thread, whose timeouts are socket timeouts in real time. | **`smtplib` on a thread, with a hard 10 s deadline for the whole attempt:** a subclass sets the socket's timeout to what is left of the attempt's budget before every blocking socket call (section 7). A hung attempt's thread keeps its delivery slot until it finishes (Q4). Name resolution runs on the event loop, bounded on the injected clock, with its abandoned lookups capped (Q7). |
 | 4 | **The main plan's platform scope also holds A6's operator webhook secrets.** | A5 builds the scope with one kind, `smtp_password`. A6 adds its kinds. |
 | 5 | **Several recipients in one delivery.** A4's outbox has one row per (notification, channel); an email channel has up to 10 recipients. The main plan does not say whether they see each other. | **One message per recipient,** each its own delivery row (notification, channel, recipient), with `To:` that recipient alone, so no recipient sees another's address and one recipient's failure is its own. **The caps count per recipient** (section 7). (Q2) |
 
@@ -216,8 +216,26 @@ answer refuses. A confirmation goes to one address, so each cap counts one per r
   - **A hung attempt's thread keeps its delivery slot until it finishes:** the worker's limit of
     4 at once is released when the thread returns, not when the attempt is declared `timeout`.
     With the deadline, that is at most the budget.
-  - **Name resolution** (`getaddrinfo`) has no timeout in Python and cannot be bounded this way
-    (Q7, open).
+  - **Name resolution (Q7):** `getaddrinfo` takes no timeout in Python, so the lookup is not
+    made by the SMTP thread. It runs first, on the event loop (`loop.getaddrinfo` on an executor
+    of its own), bounded on the injected clock by the attempt's budget. The SMTP thread is then
+    handed the address to connect to, and the certificate is still checked against
+    `GATEWAY_SMTP_HOST`. What is left of the budget after the lookup is the thread's deadline.
+  - **A lookup past the budget is abandoned:** the attempt ends `timeout` and frees its delivery
+    slot, and the lookup's thread runs on until the system resolver gives up. It holds no
+    delivery slot, socket or credential: the password is leased only after the lookup.
+  - **The abandoned lookups are capped by a small fixed pool:** `SmtpResolver` owns
+    `LOOKUP_THREADS = 4` threads (the worker's limit of 4 at once, so a live attempt always finds
+    one free unless abandoned lookups hold them). An attempt takes a thread without waiting.
+    **When every thread is held, the attempt is refused before any lookup:**
+    - code `resolver_busy`, a counted failure: it counts toward the channel's
+      `consecutive_failures` (so the built-in `channel_delivery_failing` can fire) and is retried
+      on A4's schedule, as `timeout` is;
+    - the metric `gateway_alert_deliveries_total{channel_type="email", result="resolver_busy"}`,
+      and a gauge of the lookups abandoned and still running,
+      `gateway_alert_smtp_lookups_abandoned`;
+    - the event `alert_smtp_resolver_busy` (the channel id, never an address).
+    A thread comes back to the pool when its lookup ends, answered or not.
   - Tested without real time: a scripted clock that moves on at each socket call, and a test
     server that sends one byte per read, show the attempt ends `timeout` once the budget is
     spent, whatever the server does.
@@ -315,7 +333,12 @@ Every store test on memory, SQLite and Postgres; Valkey ones marked `valkey`.
   byte-at-a-time server (section 7), and the slot held until the thread returns; no store
   connection held while the thread sends (A4's guard); the subject and headers with a rule or
   application name holding quotes, a backslash, a brace and non-ASCII letters; the
-  `Message-ID` the same across retries; one message per recipient, each naming only its own
+  `Message-ID` the same across retries; **a resolver that never answers** (an injected lookup
+  that blocks until the test releases it): each attempt ends `timeout` at the budget on the
+  injected clock and frees its slot; after `LOOKUP_THREADS` of them the next attempt is
+  refused `resolver_busy` with no lookup made, counted toward the channel's health, with the
+  metric and the event; releasing the resolver gives the threads back and the next attempt
+  proceeds; one message per recipient, each naming only its own
   recipient; the caps counting per recipient; a recipient removed after queueing cancelled;
   SMTP without a login still refused without TLS.
 - **Permissions:** every new endpoint's cross-organization test (the same 403 bytes as missing);
@@ -372,6 +395,8 @@ surviving mutation of a real, untested rule stops the work for your decision.
 | A5-22 | Exact domains | match the allowlist as a suffix |
 | A5-23 | TLS required without a login | skip STARTTLS when no username is set |
 | A5-24 | The rebuild keeps every row | drop one column from the copy's `INSERT ... SELECT` (the populated-database test fails) |
+| A5-25 | Abandoned lookups capped | remove the cap: take no pool thread, start every lookup (the never-answering resolver test fails: more lookups than `LOOKUP_THREADS` start, and none is refused) |
+| A5-26 | A refused attempt is a counted failure | refuse `resolver_busy` without counting it toward health (and, separately, without the metric and the event) |
 
 **One per new permission row:** `alert_channels.confirm_recipient` granted to app_admin, so its
 refusal test fails.
@@ -422,8 +447,11 @@ New with this plan:
 - **The SMTP conversation in a log** (`smtplib`'s debug output prints `AUTH`): the debug level is
   never set, and the scan forces it on to show nothing reaches a log.
 - **A slow SMTP server tying up the worker:** the hard 10 s deadline for every socket call of
-  the attempt, a byte-at-a-time server included, and at most 4 deliveries at once. A slow
-  resolver is Q7.
+  the attempt, a byte-at-a-time server included, and at most 4 deliveries at once.
+- **A resolver that never answers** piling up threads: the lookup is bounded on the injected
+  clock and abandoned past it; at most `LOOKUP_THREADS` (4) abandoned lookups run at once, and
+  past that each attempt is refused `resolver_busy`, counted, with a metric and an event, so an
+  operator sees it and the built-in `channel_delivery_failing` fires.
 - **An open relay made of the operator's relay:** SMTP without a login is documented for the
   operator's own relay, which should take mail only from the gateway's hosts; the gateway sends
   only to verified recipients in exact allowed domains either way.
@@ -469,6 +497,10 @@ Numbered, so they can be objected to.
     ignored** (section 5).
 14. **`notification_deliveries`' unique index uses `COALESCE(recipient_id, '')`,** since both
     databases treat `NULL`s as distinct.
+15. **`LOOKUP_THREADS` is 4,** the worker's limit, fixed (not a setting): a live attempt always
+    finds a thread unless abandoned lookups hold them all. The cap was decided (Q7).
+16. **`resolver_busy` is retried on A4's schedule and counts toward the channel's health,** as
+    `timeout` does: a refusal is still a delivery that did not happen.
 
 ## 16. Questions
 
@@ -487,9 +519,12 @@ Numbered, so they can be objected to.
    documented as for an operator's own relay (section 2).
 6. **Exact domains only** (section 2).
 
-**Open, for the reviewer before the build:**
+7. **Name resolution: (a),** resolve on the event loop, bounded on the injected clock, with the
+   abandoned lookup threads capped by a small fixed pool; when it is full, the attempt is refused
+   as a counted failure with a metric and an event; a test with a resolver that never answers,
+   and a mutation that removes the cap (section 7, A5-25 and A5-26). The question as it was put:
 
-7. **Name resolution and the hard deadline.** Every socket call can be held to the budget (section
+   **Name resolution and the hard deadline.** Every socket call can be held to the budget (section
    7), but the host name's lookup (`getaddrinfo`, which `smtplib` calls through
    `socket.create_connection`) takes no timeout in Python: a resolver that hangs holds the thread
    for as long as the system resolver's own timeouts allow (often 5 to 30 s, set by the
@@ -507,7 +542,7 @@ Numbered, so they can be objected to.
      and connect to the last good address. No lookup in the attempt at all, but a change of
      address is seen up to 10 s late, and a name with several addresses uses one.
 
-   The plan proposes (a): the attempt and its slot are within the deadline, and what runs past
+   The plan proposed (a): the attempt and its slot are within the deadline, and what runs past
    it holds nothing.
 
 ## 17. Not built in A5
