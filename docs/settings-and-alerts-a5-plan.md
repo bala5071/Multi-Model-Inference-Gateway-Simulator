@@ -5,7 +5,9 @@ code, for approval. A5 adds a stored secret (the SMTP password), a new outbound 
 operator's SMTP server) and a migration that rebuilds a table, so plan approval comes first,
 and any conflict with the main plan or with A4 as built is decided by the reviewer.
 
-**Status:** proposed 2026-11-09. A4 (#39) is merged; this plan builds on it as built
+**Status:** proposed 2026-11-09; the reviewer's decisions of 2026-11-09 on the six questions
+are applied (section 16). One question remains open before the build (section 16, Q7: name
+resolution and the hard deadline). A4 (#39) is merged; this plan builds on it as built
 (`docs/46-alert-channels.md`).
 
 **Scope.** Part F's A5 row, and nothing from A6 or later:
@@ -25,15 +27,15 @@ the console's channel screens (C2), HTML mail.
 
 ## 1. Conflicts with the main plan and with A4 as built
 
-Each needs the reviewer's decision. The proposal is given; nothing here is built until decided.
+Each was put to the reviewer; the column on the right is what was decided (section 16).
 
-| # | Conflict | Proposal |
+| # | Conflict | Decided |
 |---|---|---|
-| 1 | **`alert_channels.type` is `CHECK (type IN ('webhook'))`** (migration 17). SQLite changes a `CHECK` only by rebuilding the table, and `url_origin` is `NOT NULL`, which an email channel does not have. The main plan did not foresee a rebuild here. | **Migration 18 rebuilds `alert_channels`** with `type IN ('webhook', 'email')` and `url_origin` nullable (`CHECK ((type = 'webhook') = (url_origin IS NOT NULL))`). It is a table rebuild, so it follows note 26's path: the server refuses it on a database with data, and `scripts/manage.py migrate` backs up first, with `--dry-run`. Postgres schema 7 changes the constraint in place. The alternative, a separate `email_channels` table, splits the cap of 20, the listing and every resolver in two (question 1). |
+| 1 | **`alert_channels.type` is `CHECK (type IN ('webhook'))`** (migration 17). SQLite changes a `CHECK` only by rebuilding the table, and `url_origin` is `NOT NULL`, which an email channel does not have. The main plan did not foresee a rebuild here. | **Migration 18 rebuilds `alert_channels`** with `type IN ('webhook', 'email')` and `url_origin` nullable (`CHECK ((type = 'webhook') = (url_origin IS NOT NULL))`). It is a table rebuild, so it follows note 26's path: the server refuses it on a database with data, and `scripts/manage.py migrate` backs up first, with `--dry-run`. Postgres schema 7 changes the constraint in place. Tested on a populated database (section 9). Decided: the rebuild, not a separate `email_channels` table (Q1). |
 | 2 | **The main plan renames `Binding` to `ProviderBinding`.** A4 kept `Binding` and added `ChannelBinding` beside it. | **Keep `Binding`**, add `PlatformBinding`. No caller changes; the scopes are told apart by their associated data and their key, which is what the tests check. |
-| 3 | **Timeouts.** A4 bounds each webhook stage on the injected clock. The main plan puts SMTP on `smtplib` in a thread, whose timeouts are socket timeouts in real time. | **`smtplib` on a thread**, with a 10 s socket timeout, and the whole attempt bounded on the injected clock by `run_with_timeout`: past it the attempt is `timeout`, and the thread finishes at its own socket timeout, its result discarded. A thread cannot be cancelled. The alternative, an asyncio SMTP client written here, is more code to trust than `smtplib` (question 4). |
+| 3 | **Timeouts.** A4 bounds each webhook stage on the injected clock. The main plan puts SMTP on `smtplib` in a thread, whose timeouts are socket timeouts in real time. | **`smtplib` on a thread, with a hard 10 s deadline for the whole attempt:** a subclass sets the socket's timeout to what is left of the attempt's budget before every blocking socket call (section 7). A hung attempt's thread keeps its delivery slot until it finishes (Q4). Name resolution cannot take a timeout: open question Q7. |
 | 4 | **The main plan's platform scope also holds A6's operator webhook secrets.** | A5 builds the scope with one kind, `smtp_password`. A6 adds its kinds. |
-| 5 | **Several recipients in one delivery.** A4's outbox has one row per (notification, channel); an email channel has up to 10 recipients. The main plan does not say whether they see each other. | **One message per delivery, one envelope recipient per verified address, and `To: undisclosed-recipients:;`**, so no recipient sees another's address. One delivery row stays one row (question 2). |
+| 5 | **Several recipients in one delivery.** A4's outbox has one row per (notification, channel); an email channel has up to 10 recipients. The main plan does not say whether they see each other. | **One message per recipient,** each its own delivery row (notification, channel, recipient), with `To:` that recipient alone, so no recipient sees another's address and one recipient's failure is its own. **The caps count per recipient** (section 7). (Q2) |
 
 ## 2. The operator's settings
 
@@ -44,9 +46,9 @@ variable.
 |---|---|
 | `GATEWAY_SMTP_HOST`, `GATEWAY_SMTP_PORT` | The SMTP server. Unset: email channels cannot be created (422), and none exist to deliver. |
 | `GATEWAY_SMTP_TLS` | `starttls` (default) or `implicit`. There is no plain option. |
-| `GATEWAY_SMTP_USERNAME` | The login. Unset: no `AUTH` (question 5). Set: the password must be in the vault, or every delivery fails `smtp_credential_unreadable`. |
+| `GATEWAY_SMTP_USERNAME` | The login. Unset: no `AUTH`, for an operator's own relay; TLS is still required (Q5). Set: the password must be in the vault, or every delivery fails `smtp_credential_unreadable`. |
 | `GATEWAY_SMTP_FROM` | The envelope sender and the `From` header: one address, checked as a recipient is. |
-| `GATEWAY_ALERT_EMAIL_DOMAINS` | The recipient domains allowed, comma-separated, each an exact domain (no wildcard, question 6). Empty: email channels cannot be created. |
+| `GATEWAY_ALERT_EMAIL_DOMAINS` | The recipient domains allowed, comma-separated, each an exact domain: `example.com` allows `ops@example.com` and not `ops@eu.example.com`; a `*` anywhere refuses the start (Q6). Empty: email channels cannot be created. |
 
 - **The SMTP password** is never an environment variable the server reads. The operator sets it
   with `scripts/manage.py set-smtp-password`: typed at a prompt with no echo, or read from an
@@ -59,6 +61,11 @@ variable.
 - **STARTTLS is required when chosen:** a server that does not offer it fails the delivery with
   `tls` before any credential or message is sent. `smtplib`'s `starttls` is called with the
   pinned context, and `ehlo` is sent again after it.
+- **SMTP without a login** (no `GATEWAY_SMTP_USERNAME`) is for an operator's own relay, one that
+  accepts mail from the gateway's address without `AUTH`. TLS is required all the same, with the
+  certificate verified: there is no setting that sends mail in the clear, logged in or not. The
+  operator's note says so, and that such a relay should accept mail only from the gateway's
+  hosts.
 
 ## 3. The vault's platform scope
 
@@ -118,9 +125,21 @@ As the main plan's section 9 sets them out:
 
 - **An added address is `unverified`** and is sent one confirmation: plain text, naming the
   organization (its name in quotes and its id) that asked to send it alerts, saying nothing else
-  will be sent unless the code is entered, and a 10-character code (base32, 50 bits, from the
-  injected random source).
+  will be sent unless the code is entered, and a 10-character code.
 - **Until the code is entered,** the address gets no notification, no test send and no summary.
+- **The code's alphabet and entropy:**
+  - 10 characters from RFC 4648's base32 alphabet, `ABCDEFGHIJKLMNOPQRSTUVWXYZ234567` (32
+    symbols, 5 bits each): **50 bits**, 2^50 (about 1.1 x 10^15) codes. The alphabet has no
+    `0`, `1`, `8` or `9`, so `O`/`0` and `I`/`1` cannot be confused.
+  - Each character drawn uniformly with `rng.randrange(32)` from the injected random source; the
+    server injects `random.SystemRandom` (the operating system's generator), tests a seeded
+    `random.Random`. A test checks the server's wiring passes `SystemRandom`, and the mutation
+    A5-18 replaces it with a seeded one.
+  - Shown as two groups of five (`ABCDE-FGH23`); entered in any case, with spaces and hyphens
+    ignored; anything else after that (a wrong length, a character outside the alphabet) is a
+    wrong entry, answered as every refusal is.
+  - Guessing: at most 15 guesses a day reach one address (section 6), so the chance of a guess
+    landing in a day is at most 15 / 2^50, about 1.3 x 10^-14.
 - **The code:**
   - stored only as an HMAC under a new derived key (`KeyPurpose.EMAIL_CONFIRMATION`), compared
     in constant time;
@@ -137,7 +156,7 @@ As the main plan's section 9 sets them out:
 ## 6. The confirmation caps
 
 A send over any cap answers 429 `confirmation_limited` and sends nothing. A counter that cannot
-answer refuses.
+answer refuses. A confirmation goes to one address, so each cap counts one per recipient.
 
 | Cap | Default | Range | Held in |
 |---|---|---|---|
@@ -148,8 +167,13 @@ answer refuses.
 
 - **Each is an environment variable** (`GATEWAY_EMAIL_CONFIRMATIONS_PER_ADDRESS`,
   `..._PER_CHANNEL`, `..._PER_ORGANIZATION`, `..._PER_INSTANCE`), as A4's caps are, and A4's rule
-  holds: each range starts at 1 (no cap can be turned off), and each default is at most a sixth
-  of its maximum. The ranges are this plan's proposal (question 3).
+  holds (Q3):
+  - **none can be turned off:** each range starts at 1, and 0, a negative, an empty value or a
+    word refuses the start, naming the variable; so does a value past the maximum;
+  - **conservative defaults:** each default is at most a sixth of its maximum, and the defaults
+    are the main plan's numbers;
+  - the four values join A4's ceilings row (`instance_ceilings`), so instances that differ are
+    reported, as A4's caps are.
 - **The normalised address** for the per-address digest is NFC, stripped and lowercased whole
   (stricter than mail servers: two spellings that may be one mailbox count together).
 - **Guessing is bounded by the code, not by a new counter:** 5 wrong entries void a code, and
@@ -158,16 +182,45 @@ answer refuses.
 
 ## 7. Delivery by email
 
-- **Through A4's outbox and worker,** unchanged in shape: one row per (notification, channel),
-  the claim, the read, the attempt with no store connection held, the compare-and-set outcome,
-  the channel's health, the caps of A4 counted per notification. The worker sends by the
-  channel's type.
-- **The attempt** (`SmtpSender`, on a thread of its own pool of 2):
-  - connect with a 10 s socket timeout; STARTTLS (or implicit TLS) with the pinned context;
+- **Through A4's outbox and worker,** one row per (notification, channel, **recipient**) for an
+  email channel (Q2): the claim, the read, the attempt with no store connection held, the
+  compare-and-set outcome, the channel's health. The worker sends by the channel's type.
+  - `notification_deliveries` gains `recipient_id` (`NULL` for a webhook), and its unique index
+    becomes (notification, channel, `COALESCE(recipient_id, '')`), since SQLite and Postgres
+    both treat `NULL`s as distinct in a unique index.
+  - **Rows are made at queue time for the verified recipients only,** in the change's
+    transaction (A4's `then`). A recipient removed or no longer verified by the time its row is
+    claimed is not sent to: the row ends `cancelled`, code `recipient_not_verified`, not counted
+    toward the channel's health. An email channel with no verified recipient at queue time gets
+    one row with no recipient, which fails `no_verified_recipient` and counts toward its health,
+    so the built-in `channel_delivery_failing` says that alerts reach no one.
+- **The caps count per recipient:** A4's per-rule and per-organization notification caps count
+  each recipient's message as one, so a notification to a channel of 10 verified recipients
+  takes 10. A4's test-send caps count per recipient too. Suppression and the hourly summary work
+  per row, as in A4.
+- **The attempt** (`SmtpSender`, on a thread of its own pool of 2), one message to one
+  recipient:
+  - connect; STARTTLS (or implicit TLS) with the pinned context;
   - `AUTH` with the password leased from the platform scope, if a username is set;
-  - one message: `MAIL FROM` the operator's address, one `RCPT TO` per **verified** recipient
-    (an email channel with none fails `no_verified_recipient`), `To: undisclosed-recipients:;`;
-  - the whole attempt bounded at 10 s on the injected clock (conflict 3).
+  - `MAIL FROM` the operator's address, one `RCPT TO` the recipient, `To:` that recipient.
+- **The hard deadline (Q4):** the whole attempt within 10 s.
+  - `DeadlineSMTP`, a subclass of `smtplib.SMTP` (and of `SMTP_SSL` for implicit TLS), wraps its
+    socket so that **before every blocking socket call** (connect, each `send` and `recv`, the TLS
+    handshake) it sets the socket's timeout to what is left of the budget, read from the injected
+    clock, and raises `timeout` if nothing is left. Setting it once per SMTP command would not be
+    enough: one reply is read with several `recv` calls, and a server sending a byte at a time
+    could take a full timeout for each.
+  - CPython bounds one blocking call, the TLS handshake included, by the timeout in force when
+    it starts, so the attempt ends within the budget plus the time of the last call's own
+    non-blocking work.
+  - **A hung attempt's thread keeps its delivery slot until it finishes:** the worker's limit of
+    4 at once is released when the thread returns, not when the attempt is declared `timeout`.
+    With the deadline, that is at most the budget.
+  - **Name resolution** (`getaddrinfo`) has no timeout in Python and cannot be bounded this way
+    (Q7, open).
+  - Tested without real time: a scripted clock that moves on at each socket call, and a test
+    server that sends one byte per read, show the attempt ends `timeout` once the budget is
+    spent, whatever the server does.
 - **The message:** plain text, UTF-8, built with the standard library's `EmailMessage` under the
   SMTP policy (which refuses a CR or LF in a header); no HTML, no images, no tracking, no link.
   Subject `[gateway] FIRING warning: <rule> on <application>` (and the other kinds' words),
@@ -177,11 +230,10 @@ answer refuses.
   user.
 - **Codes:** `delivered`; `tls` (no STARTTLS offered, a handshake that fails), `timeout`,
   `connect_failed`, `smtp_4xx` (retried on A4's schedule), `smtp_5xx` (permanent),
-  `smtp_credential_unreadable`, `no_verified_recipient`. A server that accepts some recipients
-  and refuses others is `delivered` if any was accepted, with the refused ones counted on their
-  recipient (decision 7).
-- **Test send** (A4's endpoint): one `test` message to the verified recipients only, capped as
-  A4's test sends are; `no_verified_recipient` if none.
+  `smtp_credential_unreadable`, `no_verified_recipient`, `recipient_not_verified`
+  (cancelled, above).
+- **Test send** (A4's endpoint): one `test` message to each verified recipient, each its own row,
+  each counted by A4's test-send caps; `no_verified_recipient` if none.
 - **The built-in `channel_delivery_failing`** applies to email channels as to webhooks.
 - **Metrics and events:** `gateway_alert_deliveries_total{channel_type="email", result}` and
   `alert_delivery_failed`, as A4's.
@@ -212,11 +264,26 @@ check on writes, missing equal to forbidden. A4's endpoints take email channels 
 ## 9. Migration 18 and Postgres schema 7
 
 - **SQLite migration 18:** rebuilds `alert_channels` (conflict 1; `rebuilds_tables`, with its
-  preview, and the foreign keys checked around it); creates `alert_recipients`,
-  `confirmation_caps` and `platform_secrets`. Reversing it drops the new tables and rebuilds
-  `alert_channels` back, refused while an email channel exists.
-- **Postgres schema 7:** the same tables; the type constraint replaced in place; the rollback
-  drops the tables, refused while an email channel exists.
+  preview, and the foreign keys checked around it); adds `notification_deliveries.recipient_id`
+  and replaces its unique index (section 7); adds the four confirmation caps to
+  `instance_ceilings` (section 6); creates `alert_recipients`, `confirmation_caps` and
+  `platform_secrets`. Reversing it drops the new tables, the column and the index, and rebuilds
+  `alert_channels` back, refused while an email channel or a recipient's delivery exists.
+- **Postgres schema 7:** the same tables, column and index; the type constraint replaced in
+  place; the rollback refused as on SQLite.
+- **Tested on a populated database (Q1),** on SQLite and its Postgres equivalent: before the
+  migration, two organizations with webhook channels, their secrets, deliveries in every state,
+  caps rows, summaries, incidents with `notify_channels`, and rules naming the channels.
+  - **Rows:** every row of every table read before and after, compared column by column.
+  - **Ids:** every channel keeps its id, and the next channel created gets a new one.
+  - **Foreign keys:** `PRAGMA foreign_key_check` empty after the rebuild, and the foreign keys
+    on again (`PRAGMA foreign_keys` is 1); on Postgres, every constraint present and validated.
+  - **Counts:** each table's row count equal before and after.
+  - **Rollback:** a failure planted after the copy (a raising step) leaves the database exactly
+    as it was, compared the same way; and the reverse migration, run on the populated database,
+    gives back the version 17 schema and every row.
+  - The server refuses the rebuild on this database at start, and `scripts/manage.py migrate`
+    backs it up first; `--dry-run` writes nothing.
 - **The copy between databases** (`migrate-to-postgres` and back) copies and compares the new
   tables.
 
@@ -235,7 +302,8 @@ Every store test on memory, SQLite and Postgres; Valkey ones marked `valkey`.
 - **Verified only:** an unverified address gets only its confirmation (the test server's mailbox
   checked after a firing, a test send and a summary); the right code verifies; wrong, expired,
   used, voided and another organization's codes answer one way, byte for byte, after the same
-  steps; five wrong entries void it.
+  steps; five wrong entries void it; the code's alphabet, length and the `SystemRandom` wiring
+  (section 5).
 - **Caps:** the per-address cap across two organizations and two instances, and after a Valkey
   restart; per channel, per organization and per instance; a counter that cannot answer refuses;
   each variable at its bounds and one past each refusing the start.
@@ -243,15 +311,18 @@ Every store test on memory, SQLite and Postgres; Valkey ones marked `valkey`.
   derived labels apart, rotation resealing all three scopes, the SQL grep for
   `platform_secrets`.
 - **Delivery:** a firing, a resolved and a summary delivered to the verified recipients only;
-  4xx retried on the schedule, 5xx not; a hanging server ends at the bound on the injected
-  clock; no store connection held while the thread sends (A4's guard); the subject and headers
-  with a rule or application name holding quotes, a backslash, a brace and non-ASCII letters;
-  the `Message-ID` the same across retries; `To` never names a recipient.
+  4xx retried on the schedule, 5xx not; the hard deadline against a hanging server and a
+  byte-at-a-time server (section 7), and the slot held until the thread returns; no store
+  connection held while the thread sends (A4's guard); the subject and headers with a rule or
+  application name holding quotes, a backslash, a brace and non-ASCII letters; the
+  `Message-ID` the same across retries; one message per recipient, each naming only its own
+  recipient; the caps counting per recipient; a recipient removed after queueing cancelled;
+  SMTP without a login still refused without TLS.
 - **Permissions:** every new endpoint's cross-organization test (the same 403 bytes as missing);
   viewers and app_admins refused; step-up consumed on adding a recipient; the route walk.
-- **Migration:** the rebuild on a database with webhook channels and deliveries keeps every
-  row; the server refuses it on a database with data; the CLI backs up first; `--dry-run`;
-  Postgres schema 7 and the copy both ways.
+- **Migration:** section 9's populated-database tests (rows, ids, foreign keys, counts,
+  rollback) on SQLite and Postgres; the server refuses it on a database with data; the CLI backs
+  up first; `--dry-run`; the copy both ways.
 - **Postgres constraints,** each reached by a test of its own: one address once per channel
   (two ids), the per-address cap's conditional update from two instances at the cap, the
   channel type and `url_origin` check by raw inserts.
@@ -285,7 +356,7 @@ surviving mutation of a real, untested rule stops the work for your decision.
 | A5-6 | Void after 5 wrong entries | no count |
 | A5-7 | A confirmation bound to (channel, address) | look the code up by recipient id alone |
 | A5-8 | The confirmation caps | skip each of the per-channel, per-organization and per-instance counts (three) |
-| A5-9 | No recipient sees another | put the recipients in `To` |
+| A5-9 | One message per recipient, naming only that recipient | send one message with every verified recipient in the envelope and `To` |
 | A5-10 | Headers refuse injection | build the subject by string formatting into raw headers |
 | A5-11 | `platform_secrets` read only by `SmtpSender` and the CLI | a provider store query reading it (the grep's planted control) |
 | A5-12 | Rotation reseals the platform scope | skip it in `rotate-vault-key` |
@@ -294,6 +365,13 @@ surviving mutation of a real, untested rule stops the work for your decision.
 | A5-15 | The rebuild refused on a database with data at server start | skip the refusal |
 | A5-16 | An email channel's address checks (no display name, no CR or LF) | drop the character check |
 | A5-17 | No store connection held while the thread sends | send inside the claim's transaction |
+| A5-18 | The code from the operating system's generator | the server wired with a seeded `random.Random` |
+| A5-19 | The hard deadline | set the socket timeout once per SMTP command instead of before every socket call (the byte-at-a-time test fails) |
+| A5-20 | The slot held until the thread returns | release the slot when the attempt is declared `timeout` |
+| A5-21 | The caps count per recipient | count one per notification and channel |
+| A5-22 | Exact domains | match the allowlist as a suffix |
+| A5-23 | TLS required without a login | skip STARTTLS when no username is set |
+| A5-24 | The rebuild keeps every row | drop one column from the copy's `INSERT ... SELECT` (the populated-database test fails) |
 
 **One per new permission row:** `alert_channels.confirm_recipient` granted to app_admin, so its
 refusal test fails.
@@ -340,11 +418,15 @@ New with this plan:
   delivery fails before the password or the message is sent.
 - **Header injection** through a rule or application name in the subject: the library's SMTP
   policy refuses CR and LF, and names already refuse control characters.
-- **Recipients learning each other's addresses:** `To: undisclosed-recipients:;`.
+- **Recipients learning each other's addresses:** one message per recipient, naming only it.
 - **The SMTP conversation in a log** (`smtplib`'s debug output prints `AUTH`): the debug level is
   never set, and the scan forces it on to show nothing reaches a log.
-- **A slow SMTP server tying up the worker:** the attempt bounded at 10 s on the injected clock,
-  the thread at its socket timeout, at most 4 deliveries at once.
+- **A slow SMTP server tying up the worker:** the hard 10 s deadline for every socket call of
+  the attempt, a byte-at-a-time server included, and at most 4 deliveries at once. A slow
+  resolver is Q7.
+- **An open relay made of the operator's relay:** SMTP without a login is documented for the
+  operator's own relay, which should take mail only from the gateway's hosts; the gateway sends
+  only to verified recipients in exact allowed domains either way.
 - **A table rebuild losing rows:** the CLI's backup, the dry run, and the test that every row
   survives.
 
@@ -365,15 +447,17 @@ No number is written before it is run.
 Numbered, so they can be objected to.
 
 1. **Keep `Binding`; add `PlatformBinding`** (conflict 2).
-2. **Migration 18 rebuilds `alert_channels`** rather than adding a second channels table
-   (conflict 1).
-3. **`smtplib` on a thread, the attempt bounded on the injected clock** (conflict 3).
+2. **The populated-database tests' content** (section 9): which tables are seeded, and the
+   planted failure for the rollback. Migration 18 rebuilding the table was decided (Q1).
+3. **The deadline is enforced before every socket call,** not once per SMTP command, since one
+   reply takes several reads (section 7). `smtplib` on a thread was decided (Q4).
 4. **The platform scope holds `smtp_password` only** in A5 (conflict 4).
-5. **One message per delivery, `To: undisclosed-recipients:;`** (conflict 5).
-6. **The confirmation caps are environment variables** with ranges, A4's rule applied: no cap
-   off, each default at most a sixth of its maximum.
-7. **A server that accepts some recipients is `delivered`,** the refused ones counted on their
-   recipient row (`last_refused_at_ms`), not retried apart.
+5. **A recipient no longer verified when its row is claimed is cancelled,** not sent to and not
+   counted toward health; **a channel with no verified recipient gets one failing row,** counted,
+   so the built-in fires. One message per recipient was decided (Q2).
+6. **The confirmation caps join A4's ceilings row** so instances that differ are reported.
+   Environment variables with ranges was decided (Q3).
+7. **A4's test-send caps count per recipient too,** as the notification caps do.
 8. **The normalised address for the cap is lowercased whole,** stricter than mail servers.
 9. **The SMTP password is set only through the CLI,** never read by the server from the
    environment.
@@ -381,21 +465,50 @@ Numbered, so they can be objected to.
 11. **The thread pool for SMTP is 2,** as the password hasher's.
 12. **Unset `GATEWAY_SMTP_HOST` or allowlist means no email channel can be created**, and the
     start does not fail: a gateway without email is valid.
+13. **The code is shown as two groups of five, entered in any case with spaces and hyphens
+    ignored** (section 5).
+14. **`notification_deliveries`' unique index uses `COALESCE(recipient_id, '')`,** since both
+    databases treat `NULL`s as distinct.
 
 ## 16. Questions
 
-1. **The rebuild** of `alert_channels` (migration 18), with note 26's path: the server refuses it
-   on a database with data, and the operator runs `scripts/manage.py migrate`, which backs up
-   first. Or a separate `email_channels` table?
-2. **Recipients in one message** with `To: undisclosed-recipients:;`, or one message per
-   recipient (one delivery row each, so one recipient's failure is its own)?
-3. **The confirmation caps' ranges** of section 6 (and whether they should be settable at all,
-   or fixed at the main plan's numbers).
-4. **SMTP timeouts** as socket timeouts in a thread, bounded on the injected clock as a whole,
-   or an asyncio client written here so every stage is on the injected clock as for webhooks?
-5. **SMTP without `AUTH`** when no username is set (a relay on the operator's network), or always
-   require a login?
-6. **Exact domains only** in the allowlist, or a subdomain form (`*.example.com`)?
+**Decided by the reviewer, 2026-11-09:**
+
+1. **Migration 18 rebuilds `alert_channels`** on note 26's path, tested on a populated database:
+   rows, ids, foreign keys, counts, rollback, and the Postgres equivalent (section 9).
+2. **One message per recipient;** the caps count per recipient (section 7).
+3. **The confirmation caps are environment variables** with ranges and conservative defaults;
+   none can be turned off (section 6).
+4. **`smtplib` on a thread,** with a subclass setting the socket timeout from what is left of the
+   attempt's budget, to keep a whole attempt within 10 s; a hung attempt's thread keeps its
+   delivery slot until it finishes. If a hard deadline is not feasible, the work stops for the
+   reviewer (Q7).
+5. **SMTP without a login is allowed** when no username is set; TLS is still required;
+   documented as for an operator's own relay (section 2).
+6. **Exact domains only** (section 2).
+
+**Open, for the reviewer before the build:**
+
+7. **Name resolution and the hard deadline.** Every socket call can be held to the budget (section
+   7), but the host name's lookup (`getaddrinfo`, which `smtplib` calls through
+   `socket.create_connection`) takes no timeout in Python: a resolver that hangs holds the thread
+   for as long as the system resolver's own timeouts allow (often 5 to 30 s, set by the
+   operating system, not by the gateway). So the deadline is hard for everything after the lookup,
+   and not for the lookup itself. The choices:
+   - (a) **Resolve on the event loop**, bounded on the injected clock by the attempt's budget,
+     then hand the thread the address to connect to (the certificate still checked against
+     `GATEWAY_SMTP_HOST`). The attempt then ends within 10 s, always. If the lookup hangs, the
+     lookup's own thread, in the loop's default pool, runs on until the resolver gives up. It
+     holds no delivery slot, socket or credential (the password is leased only after the
+     lookup). This departs from "the thread keeps its slot" for the lookup alone.
+   - (b) **Resolve in the SMTP thread**, keeping the slot through it. The 10 s deadline is then
+     hard only after the lookup, and the lookup is bounded only by the operating system.
+   - (c) **Resolve once at start and at each lease attempt** (every 10 s), in the background,
+     and connect to the last good address. No lookup in the attempt at all, but a change of
+     address is seen up to 10 s late, and a name with several addresses uses one.
+
+   The plan proposes (a): the attempt and its slot are within the deadline, and what runs past
+   it holds nothing.
 
 ## 17. Not built in A5
 
@@ -405,3 +518,4 @@ Numbered, so they can be objected to.
 - The console's channel and recipient screens: C2.
 - HTML mail, attachments, a per-channel subject template.
 - DKIM signing: the operator's SMTP server's.
+- A subdomain form of the allowlist (decided: exact domains only).
