@@ -499,7 +499,7 @@ async def test_two_keys_sign_during_a_rotation() -> None:
 async def test_names_with_quotes_backslashes_braces_and_unicode_stay_in_the_json_body() -> None:
     """A4-15's body half: user text reaches the request only inside ``json.dumps``; the
     headers are the gateway's own."""
-    name = 'Sh"op\\ } été ☃ "x": 1'
+    name = 'Sh"op\\ } \u00e9t\u00e9 \u2603 "x": 1'
     payload = AlertPayload(
         DELIVERY,
         "firing",
