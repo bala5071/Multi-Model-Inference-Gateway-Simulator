@@ -11,11 +11,14 @@ limit, and the store is watched: its clock against the instance's, and its resta
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from gateway.alertrollups import SharedAlertRollups
 from gateway.breaker import BreakerStore, Transition
 from gateway.ratelimit import RateLimiter
+
+if TYPE_CHECKING:
+    from gateway.providers import ConnectionTestCounter
 
 # Told the store's new run id when the store has restarted (its counters are empty).
 OnRestart = Callable[[str], Awaitable[None]]
@@ -47,5 +50,11 @@ class SharedCounters(Protocol):
     def breakers(self, on_transition: Callable[[Transition], None]) -> BreakerStore: ...
 
     def alert_rollups(self) -> SharedAlertRollups: ...
+
+    def channel_tests(
+        self, per_channel_hour: int, per_organization_hour: int
+    ) -> ConnectionTestCounter:
+        """An alert channel's test sends, per channel and per organization an hour (docs/46)."""
+        ...
 
     async def aclose(self) -> None: ...

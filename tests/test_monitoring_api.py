@@ -20,7 +20,7 @@ from gateway.clock import SimClock
 from gateway.continuous import ContinuousBatchingWorker
 from gateway.events import EventBus
 from gateway.metrics import MetricsStore
-from gateway.monitoring import Monitor, SchedulerView, render_prometheus
+from gateway.monitoring import ALERT_DELIVERY_RESULTS, Monitor, SchedulerView, render_prometheus
 from gateway.overload import OverloadPolicy, SloPolicy
 from gateway.passthrough import PassthroughWorker
 from gateway.prefix_cache import PrefixCache
@@ -48,6 +48,8 @@ NO_EVENTS = {
     "reservation_expired": 0,
     "alert_evaluator_stale": 0,
     "alert_evaluator_recovered": 0,
+    "alert_delivery_failed": 0,
+    "alert_caps_differ": 0,
 }
 UNAVAILABLE = {
     "queue": {"available": False, "length": None},
@@ -277,6 +279,11 @@ async def test_snapshot_of_one_request_has_exact_values() -> None:
             "holder": False,
             "last_evaluation_ms": None,
             "evaluation_failures": 0,
+        },
+        # No channels here: nothing delivered (docs/46).
+        "alert_deliveries": {
+            "available": True,
+            "attempts": {"webhook": dict.fromkeys(ALERT_DELIVERY_RESULTS, 0)},
         },
     }
     # Prefill ends at 5 ms; the tokens come at 9, 13 and 17 ms.
@@ -1024,6 +1031,8 @@ gateway_events_total{type="state_store_restarted"} 0
 gateway_events_total{type="reservation_expired"} 0
 gateway_events_total{type="alert_evaluator_stale"} 0
 gateway_events_total{type="alert_evaluator_recovered"} 0
+gateway_events_total{type="alert_delivery_failed"} 0
+gateway_events_total{type="alert_caps_differ"} 0
 # HELP gateway_breaker_reports_dropped_total Breaker reports this instance dropped, by reason.
 # TYPE gateway_breaker_reports_dropped_total counter
 gateway_breaker_reports_dropped_total{reason="queue_full"} 0
@@ -1041,9 +1050,27 @@ gateway_alert_evaluator_holder 0
 # HELP gateway_alert_evaluation_failures_total Alert evaluation cycles that did not complete.
 # TYPE gateway_alert_evaluation_failures_total counter
 gateway_alert_evaluation_failures_total 0
+# HELP gateway_alert_deliveries_total Webhook attempts this instance recorded, by type and result.
+# TYPE gateway_alert_deliveries_total counter
+gateway_alert_deliveries_total{channel_type="webhook",result="delivered"} 0
+gateway_alert_deliveries_total{channel_type="webhook",result="egress_refused"} 0
+gateway_alert_deliveries_total{channel_type="webhook",result="port_refused"} 0
+gateway_alert_deliveries_total{channel_type="webhook",result="dns_failure"} 0
+gateway_alert_deliveries_total{channel_type="webhook",result="timeout"} 0
+gateway_alert_deliveries_total{channel_type="webhook",result="connect_failed"} 0
+gateway_alert_deliveries_total{channel_type="webhook",result="tls"} 0
+gateway_alert_deliveries_total{channel_type="webhook",result="http_3xx"} 0
+gateway_alert_deliveries_total{channel_type="webhook",result="http_4xx"} 0
+gateway_alert_deliveries_total{channel_type="webhook",result="http_5xx"} 0
+gateway_alert_deliveries_total{channel_type="webhook",result="channel_secret_unreadable"} 0
+gateway_alert_deliveries_total{channel_type="webhook",result="channel_gone"} 0
+gateway_alert_deliveries_total{channel_type="webhook",result="channel_disabled"} 0
 """
 
-SAMPLE_LINE = re.compile(r'^[a-z_]+(\{[a-z]+="[^"]*"(,[a-z]+="[^"]*")*\})? -?[0-9.e+-]+$')
+# Label names as Prometheus allows them: a letter, then letters and underscores.
+SAMPLE_LINE = re.compile(
+    r'^[a-z_]+(\{[a-z][a-z_]*="[^"]*"(,[a-z][a-z_]*="[^"]*")*\})? -?[0-9.e+-]+$'
+)
 
 
 async def test_metrics_endpoint_is_exact_prometheus_text_for_one_request() -> None:

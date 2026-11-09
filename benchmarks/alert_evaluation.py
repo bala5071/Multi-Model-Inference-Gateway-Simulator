@@ -11,6 +11,11 @@ evaluator's own pool), fenced as the holder: first the cycle that opens the inci
 three steady cycles, each timed, its store calls counted, and its longest page's reads timed.
 Usage comes from a ``CostLedger`` on both stores, as in the first measurement.
 
+From A4 (docs/46) the organization has one default webhook channel and the evaluator queues its
+notifications in the outbox (``Notices``, with the default caps), in each transition's
+transaction, as the server's does: the first cycle's firings (the budget rule's, one
+application in twenty) are outbox inserts, counted in the store calls. No delivery is sent.
+
     GATEWAY_POSTGRES_URL=... uv run python -m benchmarks.alert_evaluation
     GATEWAY_POSTGRES_URL=... uv run python -m benchmarks.alert_evaluation --sizes 1 100
 
@@ -36,8 +41,12 @@ from benchmarks.calibrate import describe_machine
 from gateway.alertrecorder import MINUTE_MS
 from gateway.alertrollups import InMemoryAlertRollups
 from gateway.alertrules import default_rules
+from gateway.alerts.caps import AlertCaps
+from gateway.alerts.channels import ChannelService
+from gateway.alerts.notices import Notices, builtin_rule_ids
 from gateway.app import _DurableSignals, alert_settings, default_platform_settings
 from gateway.applications import ApiKeyRecord, application_from_template
+from gateway.audit import AuditLog
 from gateway.breaker import Breakers
 from gateway.clock import EpochSource, SystemEpoch, WallClock
 from gateway.database import open_database
@@ -45,9 +54,12 @@ from gateway.evaluator import AlertEvaluator
 from gateway.incidents import Fence
 from gateway.ledger import CostLedger
 from gateway.migrations import MIGRATIONS, MigrationRunner
+from gateway.organizations import new_organization
+from gateway.permissions import Actor
 from gateway.postgres import URL_ENV, PostgresDatabase, apply_schema, postgres_state
 from gateway.routing import load_plans
 from gateway.state import StateBackend, sqlite_state
+from gateway.vault import Vault
 
 SIZES = (1, 100, 1000, 5000)
 STEADY_CYCLES = 3
@@ -65,6 +77,7 @@ class CycleTimes:
     steady_calls: int
     longest_page_ms: float
     cut_short: int
+    queued: int
 
 
 class _Counting:
@@ -86,8 +99,17 @@ class _Counting:
         return counted
 
 
+class _Marker:
+    def changed(self) -> None:
+        return None
+
+
 async def _seed(state: StateBackend, size: int, epoch: EpochSource) -> None:
     now = epoch.epoch_ms()
+    if await state.applications.get_organization(ORG) is None:
+        await state.applications.add_organization(
+            new_organization(ORG, "Default", "business", created_at_ms=now)
+        )
     async with state.applications.write_transaction():
         for i in range(size):
             app_id = f"app{i:05d}"
@@ -145,6 +167,19 @@ async def _measure(name: str, state: StateBackend, size: int) -> CycleTimes:
         _Counting(state.settings, calls), default_platform_settings()
     )
     incidents = _Counting(state.incidents, calls)
+    vault = Vault(secrets.token_bytes(32))
+    notices = Notices(
+        _Counting(state.channels, calls), _Counting(state.outbox, calls), state.applications,
+        epoch, secrets.token_bytes, caps=AlertCaps(), store_clock=state.clock,
+        builtin_rule_id=builtin_rule_ids(secrets.token_bytes(32)),
+    )  # fmt: skip
+    await ChannelService(
+        state.channels, vault, AuditLog(state.audit), epoch, secrets.token_bytes,
+        notices=notices, store_clock=state.clock,
+    ).create(
+        ORG, name="Bench", url="https://hooks.bench.example/hook", is_default=True,
+        channel_type="webhook", actor=Actor("usr_00000000000000b1", ORG, ()), marker=_Marker(),
+    )  # fmt: skip
     evaluator = _TimedEvaluator(
         incidents=incidents,
         rules=_Counting(state.rules, calls),
@@ -156,6 +191,7 @@ async def _measure(name: str, state: StateBackend, size: int) -> CycleTimes:
         clock=clock,
         holder="bench",
         random_bytes=secrets.token_bytes,
+        notices=notices,
     )  # fmt: skip
 
     async def one() -> tuple[float, int]:
@@ -172,9 +208,11 @@ async def _measure(name: str, state: StateBackend, size: int) -> CycleTimes:
     for _ in range(STEADY_CYCLES):
         elapsed, steady_calls = await one()
         steady.append(elapsed)
+    [channel] = await state.channels.organization_channels(ORG)
+    queued = len(await state.outbox.channel_deliveries(channel.id, 100_000))
     return CycleTimes(
         name, size, first_ms, first_calls, tuple(steady), steady_calls,
-        evaluator.longest_page_ms, evaluator.cut_short,
+        evaluator.longest_page_ms, evaluator.cut_short, queued,
     )  # fmt: skip
 
 
@@ -222,10 +260,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     for key in ("cpu", "logical_cores", "ram_gb", "os", "python"):
         print(f"{key}: {machine[key]}")
     print(f"default rules per application: 8 (5 enabled); steady cycles: {STEADY_CYCLES}")
+    print("one default channel; notifications queued in the outbox, nothing sent")
     print()
     print(
         f"{'store':<9} {'apps':>5} {'first ms':>10} {'calls':>7} "
-        f"{'steady ms (each)':>28} {'calls':>7} {'page ms':>8} {'cut':>4}"
+        f"{'steady ms (each)':>28} {'calls':>7} {'page ms':>8} {'cut':>4} {'queued':>7}"
     )
     found: list[CycleTimes] = asyncio.run(run(args.sizes, url, os.environ))
     for r in found:
@@ -233,6 +272,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(
             f"{r.store:<9} {r.applications:>5} {r.first_ms:>10.1f} {r.first_calls:>7} "
             f"{steady:>28} {r.steady_calls:>7} {r.longest_page_ms:>8.1f} {r.cut_short:>4}"
+            f" {r.queued:>7}"
         )
 
 

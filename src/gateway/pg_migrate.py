@@ -103,6 +103,12 @@ ORDER_BY = {
     "alert_lease": "id",
     "incidents": "id",
     "incident_notifications": "id",
+    "alert_channels": "id",
+    "channel_secrets": "channel_id, kind",
+    "notification_deliveries": "id",
+    "notification_caps": "scope, scope_id, hour",
+    "suppression_summaries": "organization_id, hour",
+    "instance_ceilings": "instance_id",
 }
 IN_ORDER = frozenset(t for t, order in ORDER_BY.items() if order in ("ord", "seq"))
 
@@ -139,6 +145,20 @@ async def _check_postgres_fresh(connection: Any) -> None:
         raise MigrationRefused("the Postgres database is not new (an unexpected organization)")
 
 
+def refuse_empty_application_ids(
+    columns: dict[str, tuple[str, ...]], source: dict[str, list[tuple[Any, ...]]]
+) -> None:
+    """No application with an empty id is copied, either way: the built-in
+    ``channel_delivery_failing`` keeps its incidents under the empty application id (docs/46,
+    the plan's section 21.1). Checked before anything is written."""
+    at = columns["applications"].index("id")
+    if any(row[at] == "" for row in source["applications"]):
+        raise MigrationRefused(
+            "an application has an empty id, which no application may have (docs/46): "
+            "nothing was copied"
+        )
+
+
 def _compare(
     expected: dict[str, list[tuple[Any, ...]]], found: dict[str, list[tuple[Any, ...]]]
 ) -> None:
@@ -167,6 +187,7 @@ async def migrate_to_postgres(
     _check_sqlite_current(sqlite_connection)
     source = {t: _sqlite_rows(sqlite_connection, t) for t in TABLES}
     columns = {t: columns_of(sqlite_connection, t) for t in TABLES}
+    refuse_empty_application_ids(columns, source)
     report = MigrationReport(
         "SQLite to Postgres",
         dry_run,
@@ -280,6 +301,7 @@ async def migrate_to_sqlite(
         connection.transaction(isolation="repeatable_read", readonly=True),
     ):
         source = {t: await _postgres_rows(connection, t, columns[t]) for t in TABLES}
+    refuse_empty_application_ids(columns, source)
     _write_sqlite(None if dry_run else target, columns, source)
     return MigrationReport(
         "Postgres to SQLite",

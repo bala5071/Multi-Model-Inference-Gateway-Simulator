@@ -41,6 +41,9 @@ RULE_FIELDS = frozenset(
     }
 )  # fmt: skip
 RULE_ID_PATTERN = re.compile(r"rul_[0-9a-f]{16}")
+# An alert channel (docs/46), and the fields a change of one names (never a value).
+CHANNEL_ID_PATTERN = re.compile(r"chn_[0-9a-f]{16}")
+CHANNEL_FIELDS = frozenset({"name", "url", "default", "enabled"})
 INCIDENT_ID_PATTERN = re.compile(r"inc_[0-9a-f]{16}")
 
 MINUTE_MS = 60_000.0
@@ -109,6 +112,15 @@ class AuditAction(StrEnum):
     ALERT_RULES_RESTORED = "alert_rules_restored"
     # A firing incident acknowledged by a user (docs/45).
     INCIDENT_ACKNOWLEDGED = "incident_acknowledged"
+    # An organization's alert channels (docs/46): the channel id and the names of the fields
+    # changed, never a URL, an origin or a key.
+    ALERT_CHANNEL_CREATED = "alert_channel_created"
+    ALERT_CHANNEL_CHANGED = "alert_channel_changed"
+    ALERT_CHANNEL_ENABLED = "alert_channel_enabled"
+    ALERT_CHANNEL_DISABLED = "alert_channel_disabled"
+    ALERT_CHANNEL_DELETED = "alert_channel_deleted"
+    ALERT_CHANNEL_KEY_ROTATED = "alert_channel_key_rotated"
+    ALERT_CHANNEL_TESTED = "alert_channel_tested"
 
 
 class Outcome(StrEnum):
@@ -129,6 +141,7 @@ class TargetType(StrEnum):
     PROVIDER = "provider"
     ALERT_RULE = "alert_rule"
     INCIDENT = "incident"
+    ALERT_CHANNEL = "alert_channel"
 
 
 class Reason(StrEnum):
@@ -170,6 +183,11 @@ class Reason(StrEnum):
     RULE_VERSION_CONFLICT = "rule_version_conflict"
     RULE_LIMIT = "rule_limit"
     INCIDENT_NOT_OPEN = "incident_not_open"
+    CHANNEL_LIMIT = "channel_limit"
+    CHANNEL_VERSION_CONFLICT = "channel_version_conflict"
+    CHANNEL_NAME_TAKEN = "channel_name_taken"
+    TEST_SEND_LIMITED = "test_send_limited"
+    CHANNEL_DISABLED = "channel_disabled"
 
 
 # The only keys ``details`` may have, and the type of each value.
@@ -212,6 +230,11 @@ DETAIL_FIELDS: Mapping[str, type] = {
     "changed_fields": list,
     # A list of an alert rule's field names (RULE_FIELDS).
     "rule_fields": list,
+    # A list of an alert channel's field names (CHANNEL_FIELDS), and its type (docs/46).
+    "channel_fields": list,
+    "channel_type": str,
+    # A test send's outcome: "delivered" or a delivery's failure code (docs/46).
+    "delivery_code": str,
 }
 # gateway.egress.refusal's reasons for an address.
 _ADDRESS_REFUSALS = (
@@ -235,6 +258,26 @@ FIXED_VALUES: Mapping[str, frozenset[str]] = {
     "old_mode": _MODES,
     "new_mode": _MODES,
     "preset": frozenset(_PRESETS),
+    "channel_type": frozenset({"webhook"}),
+    # The delivery codes of the A4 plan's section 4.3, and "delivered".
+    "delivery_code": frozenset(
+        {
+            "delivered",
+            "egress_refused",
+            "port_refused",
+            "dns_failure",
+            "timeout",
+            "connect_failed",
+            "tls",
+            "http_3xx",
+            "http_4xx",
+            "http_5xx",
+            "payload_too_large",
+            "channel_secret_unreadable",
+            "channel_disabled",
+            "channel_gone",
+        }
+    ),
     # "ok", or the code a provider failure or refusal maps to (gateway.chat, docs/32).
     "outcome_code": frozenset(
         {
@@ -280,7 +323,9 @@ def _checked_details(details: Mapping[str, object]) -> dict[str, object]:
         if kind is Reason:
             checked[key] = Reason(str(value)).value  # only the fixed reasons
         elif kind is list:
-            allowed = RULE_FIELDS if key == "rule_fields" else SETTING_NAMES
+            allowed = {"rule_fields": RULE_FIELDS, "channel_fields": CHANNEL_FIELDS}.get(
+                key, SETTING_NAMES
+            )
             names = list(value) if isinstance(value, (list, tuple)) else None
             if names is None or not all(n in allowed for n in names):
                 raise ValueError(f"audit detail {key!r} must list field names")
@@ -344,6 +389,7 @@ _TARGET_PATTERNS: Mapping[TargetType, re.Pattern[str]] = {
     TargetType.PROVIDER: PROVIDER_ID_PATTERN,
     TargetType.ALERT_RULE: RULE_ID_PATTERN,
     TargetType.INCIDENT: INCIDENT_ID_PATTERN,
+    TargetType.ALERT_CHANNEL: CHANNEL_ID_PATTERN,
 }
 
 

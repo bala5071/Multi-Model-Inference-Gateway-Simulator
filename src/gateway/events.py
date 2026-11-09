@@ -27,6 +27,10 @@ EVENT_TYPES = (
     # The alert evaluator's heartbeat went stale or unknown, and came back (docs/45).
     "alert_evaluator_stale",
     "alert_evaluator_recovered",
+    # A webhook delivery attempt failed, with the channel id and the code (docs/46).
+    "alert_delivery_failed",
+    # A live instance's alert caps differ from this one's: reported, never refused (docs/46).
+    "alert_caps_differ",
 )
 
 

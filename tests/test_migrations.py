@@ -237,12 +237,15 @@ def test_the_gateway_migrations_create_exactly_their_tables(tmp_path: Path) -> N
     # Migrations 5 to 9: users, sessions, the audit log, roles, step-up (docs/27 to 29);
     # 10 and 11: providers and their sealed keys (docs/32); 12 modes and 13 where a chat
     # answer came from, in usage_events (docs/33); 14 settings and their versions (docs/39);
-    # 15 alert rules (docs/44); 16 the evaluator's lease and incidents (docs/45).
-    assert runner.migrate() == (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+    # 15 alert rules (docs/44); 16 the evaluator's lease and incidents (docs/45); 17 alert
+    # channels, their secrets, the outbox, the caps and the summaries (docs/46).
+    assert runner.migrate() == (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
     accounts = {"users", "sessions", "audit_log", "role_assignments", "app_roles"}
     accounts |= {"provider_configs", "provider_keys", "modes"}
     accounts |= {"settings_current", "settings_versions", "alert_rules"}
     accounts |= {"alert_lease", "incidents", "incident_notifications"}
+    accounts |= {"alert_channels", "channel_secrets", "notification_deliveries"}
+    accounts |= {"notification_caps", "suppression_summaries", "instance_ceilings"}
     assert _tables(db) == every_table | {"organizations"} | accounts
     assert _columns(db, "usage_events")[10:] == [
         "provider",
@@ -252,9 +255,9 @@ def test_the_gateway_migrations_create_exactly_their_tables(tmp_path: Path) -> N
         "usage_estimated",
     ]
 
-    assert runner.rollback(1) == (16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2)
+    assert runner.rollback(1) == (17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2)
     assert _tables(db) == {"schema_migrations", "usage_events"}
     assert runner.rollback(0) == (1,)
     assert _tables(db) == {"schema_migrations"}
-    assert runner.migrate() == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+    assert runner.migrate() == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
     assert _tables(db) == every_table | {"organizations"} | accounts

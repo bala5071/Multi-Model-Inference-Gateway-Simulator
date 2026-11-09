@@ -102,6 +102,7 @@ async def test_a_backup_restores_the_database_exactly_as_it_was(tmp_path: Path) 
         14,
         15,
         16,
+        17,
     )
     restored.close()
 

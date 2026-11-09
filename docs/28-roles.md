@@ -93,6 +93,10 @@ planned in A2).
 | `org_settings.write` | organization | `org_admin@own_organization` | | settings S2 |
 | `org_settings.loosen_egress` | organization | `org_admin@own_organization` | consume | settings S3 |
 | `incidents.read_organization` | organization | `org_admin@own_organization`, `viewer@own_organization` | | alerts A3 |
+| `alert_channels.read` | organization | `org_admin@own_organization` | | alerts A4 |
+| `alert_channels.write` | organization | `org_admin@own_organization` | consume | alerts A4 |
+| `alert_channels.disable` | organization | `org_admin@own_organization` | | alerts A4 |
+| `alert_channels.test` | organization | `org_admin@own_organization` | | alerts A4 |
 | `audit.read_organization` | organization | `org_admin@own_organization`, `platform_admin@platform` | | later |
 | `applications.read` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@application_in_own_organization`, `viewer@own_application` | | step 7 |
 | `usage.read_application` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@application_in_own_organization`, `viewer@own_application` | | later |

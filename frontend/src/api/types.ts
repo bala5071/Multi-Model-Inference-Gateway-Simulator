@@ -158,6 +158,8 @@ export const EVENT_TYPES = [
   "reservation_expired",
   "alert_evaluator_stale",
   "alert_evaluator_recovered",
+  "alert_delivery_failed",
+  "alert_caps_differ",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];
@@ -205,6 +207,14 @@ export interface AlertEvaluatorGroup {
   evaluation_failures: number;
 }
 
+// Webhook attempts this instance recorded since it started, by channel type and result
+// (docs/46). Counts only: no organization, channel or target.
+export interface AlertDeliveriesGroup {
+  available: boolean;
+  // Strings, not fixed unions: a newer gateway may report a type or result this build does not know.
+  attempts: Record<string, Record<string, number>>;
+}
+
 export interface Snapshot {
   at_ms: number;
   resolution_ms: number;
@@ -214,4 +224,5 @@ export interface Snapshot {
   events: EventsGroup;
   breakers: BreakersGroup;
   alert_evaluator: AlertEvaluatorGroup;
+  alert_deliveries: AlertDeliveriesGroup;
 }

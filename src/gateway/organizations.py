@@ -67,6 +67,28 @@ def normalize_name(name: str) -> str:
     return normalized
 
 
+class EmptyApplicationIdError(ValueError):
+    """An application with an empty id: refused everywhere one can be made (docs/46)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "an application's id may not be empty: the empty application id holds the "
+            "built-in channel_delivery_failing's incidents (docs/46)"
+        )
+
+
+def check_application_id(application_id: str) -> str:
+    """An application id as every path that makes or copies one checks it: never empty. The
+    built-in ``channel_delivery_failing`` keeps its incidents under the empty application id,
+    which must belong to no application, so an application-scoped endpoint can never reach
+    them (the A4 plan, sections 8.1 and 21.1). Returns it, or raises
+    ``EmptyApplicationIdError``. Here, with no dependencies, so the plans file, the stores,
+    the management service and the copy between databases all call this one check."""
+    if application_id == "":
+        raise EmptyApplicationIdError()
+    return application_id
+
+
 def new_organization(
     organization_id: str, name: str, kind: str, *, created_at_ms: float
 ) -> Organization:

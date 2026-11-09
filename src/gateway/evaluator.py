@@ -22,6 +22,13 @@ a request up by one application at most.
 the end of each completed cycle. Every instance keeps the row its last attempt read, and
 ``Heartbeat.state`` judges it from that memory alone: health and metrics make no store call.
 Monitoring decides nothing: the heartbeat never chooses who evaluates (the lease does).
+
+**From A4** (docs/46), with ``notices``: each change's recorded notifications are queued in the
+outbox in the change's own transaction (``Notices.prepare`` and ``apply``'s ``then``); the
+holder's cycle also runs the built-in ``channel_delivery_failing`` (``builtin_changes``),
+queues each organization's ``suppressed_summary`` once an hour has ended, and drops previous
+signing keys past their 24 hours. With ``ceilings``, every lease attempt compares this
+instance's alert caps with the other live instances' (reported, never refused).
 """
 
 from __future__ import annotations
@@ -35,6 +42,9 @@ from typing import Protocol
 from gateway.alertrecorder import MINUTE_MS
 from gateway.alertrollups import AlertRollups, MinuteRollup
 from gateway.alertrules import AlertRule, QuietHours, RuleSpec, RuleStore
+from gateway.alerts.caps import CeilingsWatch
+from gateway.alerts.channels import Channel
+from gateway.alerts.notices import HOUR_MS, Notices
 from gateway.clock import Clock
 from gateway.incidents import (
     INCIDENT_ID_PREFIX,
@@ -333,6 +343,60 @@ def quiet_hours_over(
     return Change(after, incident.state, incident.revision, (summary,), release_held=True)
 
 
+# The built-in channel_delivery_failing fires at this many consecutive failed attempts.
+FAILING_AFTER = 3
+
+
+def builtin_changes(
+    failing: Sequence[Channel],
+    open_builtin: Sequence[Incident],
+    channels: Mapping[str, Channel | None],
+    rule_id_of: Callable[[str], str],
+    now_ms: float,
+    new_id: IdMaker,
+) -> list[Change]:
+    """The built-in ``channel_delivery_failing`` (docs/46, the plan's section 8.1): one series
+    per channel, under its organization's own rule id, stored with the empty application id.
+    A channel with ``FAILING_AFTER`` consecutive failures and no open incident fires one
+    (warning); an open one resolves when its channel delivers (``consecutive_failures`` back to
+    0) or is deleted. ``channels``: each open incident's channel as it is now (None: gone)."""
+    changes: list[Change] = []
+    open_keys = {(i.rule_id, i.series_key) for i in open_builtin}
+    for channel in failing:
+        rule_id = rule_id_of(channel.organization_id)
+        if (rule_id, channel.id) in open_keys:
+            continue
+        incident = Incident(
+            new_id(INCIDENT_ID_PREFIX), channel.organization_id, "", rule_id, 1, channel.id,
+            IncidentState.FIRING, "warning", now_ms, fired_at_ms=now_ms,
+            value=float(channel.consecutive_failures), last_notified_at_ms=now_ms,
+            firing_sent=True, updated_at_ms=now_ms,
+        )  # fmt: skip
+        note = Notification(
+            new_id(NOTIFICATION_ID_PREFIX), incident.id, "", NotificationKind.FIRING,
+            NotificationState.RECORDED, now_ms,
+        )  # fmt: skip
+        changes.append(Change(incident, None, None, (note,)))
+    for incident in open_builtin:
+        now = channels.get(incident.series_key)
+        if now is None:
+            reason = ResolveReason.CHANNEL_DELETED
+        elif now.consecutive_failures == 0:
+            reason = ResolveReason.CHANNEL_DELIVERED
+        else:
+            continue
+        done = replace(
+            incident, state=IncidentState.RESOLVED, resolved_at_ms=now_ms, resolve_reason=reason,
+            revision=incident.revision + 1, updated_at_ms=now_ms,
+        )  # fmt: skip
+        note = Notification(
+            new_id(NOTIFICATION_ID_PREFIX), incident.id, "", NotificationKind.RESOLVED,
+            NotificationState.RECORDED, now_ms, reason.value,
+        )  # fmt: skip
+        changes.append(Change(done, incident.state, incident.revision, (note,)))
+    return changes
+
+
 # --- the durable signals, as the evaluator reads them ---------------------------------------------
 
 
@@ -522,9 +586,13 @@ class AlertEvaluator:
         holder: str,
         random_bytes: Callable[[int], bytes],
         on_heartbeat_change: Callable[[HeartbeatState, HeartbeatState], None] | None = None,
+        notices: Notices | None = None,
+        ceilings: CeilingsWatch | None = None,
     ) -> None:
         """The durable signals come from ``signals`` (a page at a time), or else one
-        application at a time from ``organization_of`` and ``durable``."""
+        application at a time from ``organization_of`` and ``durable``. ``notices``: where the
+        notifications are queued (None: recorded only, as before A4). ``ceilings``: the caps'
+        comparison on each lease attempt."""
         if signals is None:
             if organization_of is None or durable is None:
                 raise ValueError("give signals, or organization_of and durable")
@@ -546,6 +614,10 @@ class AlertEvaluator:
         # first). How many cycles the time box has cut.
         self._resume_after: str | None = None
         self.cut_short = 0
+        self.notices = notices
+        self.ceilings = ceilings
+        # The last hour whose suppressed summaries this evaluator queued (once an hour).
+        self._summarised_hour: int | None = None
 
     def status(self) -> EvaluatorStatus:
         return EvaluatorStatus(
@@ -569,6 +641,11 @@ class AlertEvaluator:
             self.heartbeat.failed()
             return None
         self.heartbeat.read(view)
+        if self.ceilings is not None:
+            try:
+                await self.ceilings.check()
+            except (StateUnavailableError, OSError, RuntimeError) as exc:
+                LOG.warning("alert caps: the comparison failed (%s)", type(exc).__name__)
         return view
 
     async def step(self) -> bool:
@@ -732,19 +809,32 @@ class AlertEvaluator:
         recent = await self.incidents.recent_resolved_many(unopened, now_ms - longest * MINUTE_MS)
         return signals, values, recent
 
+    async def _apply(
+        self, fence: Fence, change: Change, rule: AlertRule | None, now_ms: float
+    ) -> bool:
+        """One fenced change, its notifications' deliveries queued in its transaction (M22)."""
+        if self.notices is None:
+            return await self.incidents.apply(fence, change)
+        change, then = await self.notices.prepare(change, rule, now_ms)
+        return await self.incidents.apply(fence, change, then)
+
     async def cycle(self, fence: Fence, now_ms: float) -> None:
         """One evaluation at the store's time ``now_ms``, every write fenced."""
         started = self._clock.now_ms()
         store = self.incidents
         rules = {r.id: r for r in await self._enabled_rules()}
         open_by_series: dict[tuple[str, str], Incident] = {}
+        open_builtin: list[Incident] = []
         for incident in await store.open_incidents():
+            if incident.application_id == "":
+                open_builtin.append(incident)  # the built-in's: no rule row (docs/46)
+                continue
             rule = rules.get(incident.rule_id) or await self._rules.get_rule(
                 incident.application_id, incident.rule_id
             )
             change = rule_gone(incident, rule, now_ms, self._new_id)
             if change is not None:
-                await store.apply(fence, change)
+                await self._apply(fence, change, rule, now_ms)
             else:
                 open_by_series[(incident.rule_id, incident.series_key)] = incident
         by_application: dict[str, list[AlertRule]] = {}
@@ -774,7 +864,7 @@ class AlertEvaluator:
                                 now_ms, self._new_id,
                             )  # fmt: skip
                             if change is not None:
-                                await store.apply(fence, change)
+                                await self._apply(fence, change, rule, now_ms)
                 reached = application_id
                 # The event loop back between two applications (section 11.7).
                 await self._clock.sleep_ms(0.0)
@@ -792,7 +882,29 @@ class AlertEvaluator:
             )
             change = quiet_hours_over(incident, rule, held, now_ms, self._new_id)
             if change is not None:
-                await store.apply(fence, change)
+                await self._apply(fence, change, rule, now_ms)
+        if self.notices is not None:
+            await self._deliveries(fence, open_builtin, now_ms)
+
+    async def _deliveries(self, fence: Fence, open_builtin: list[Incident], now_ms: float) -> None:
+        """The holder's delivery duties of a cycle: the built-in, the summaries of the hour
+        just ended (once), and previous signing keys past their 24 hours."""
+        notices = self.notices
+        assert notices is not None
+        if notices.builtin_rule_id is not None:
+            failing = await notices.channels.failing_channels(FAILING_AFTER)
+            channels = {
+                i.series_key: await notices.channels.get_channel(i.series_key) for i in open_builtin
+            }
+            for change in builtin_changes(
+                failing, open_builtin, channels, notices.builtin_rule_id, now_ms, self._new_id
+            ):
+                await self._apply(fence, change, None, now_ms)
+        hour = int(now_ms // HOUR_MS) - 1
+        if self._summarised_hour != hour:
+            await notices.summaries(hour, now_ms)
+            self._summarised_hour = hour
+        await notices.channels.drop_expired_previous_keys(now_ms)
 
     async def _held(self) -> Mapping[str, tuple[Incident, int]]:
         found: dict[str, tuple[Incident, int]] = {}

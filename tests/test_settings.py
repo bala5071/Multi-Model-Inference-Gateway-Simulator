@@ -925,15 +925,16 @@ async def test_postgres_schema_3_applies_and_rolls_back() -> None:
 
     async with pg_world() as world:
         [db] = world.instances
-        assert SCHEMA_VERSION == 5  # 4 alert rules (docs/44), 5 incidents (docs/45)
+        # 4 alert rules (docs/44), 5 incidents (docs/45), 6 alert channels (docs/46)
+        assert SCHEMA_VERSION == 6
         settings = "SELECT count(*) FROM pg_tables WHERE schemaname = $1 AND tablename LIKE $2"
         assert (await world.rows(settings, world.schema, "settings_%")) == [(2,)]
-        assert await rollback_schema(db, 2) == (5, 4, 3)
+        assert await rollback_schema(db, 2) == (6, 5, 4, 3)
         assert (await world.rows(settings, world.schema, "settings_%")) == [(0,)]
         assert await world.rows("SELECT max(version) FROM gateway_schema") == [(2,)]
         with pytest.raises(RuntimeError, match="no way back"):
             await rollback_schema(db, 1)
-        assert await apply_schema(db) == 5
+        assert await apply_schema(db) == 6
         assert (await world.rows(settings, world.schema, "settings_%")) == [(2,)]
 
 

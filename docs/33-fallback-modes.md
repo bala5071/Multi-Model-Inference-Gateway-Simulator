@@ -145,7 +145,8 @@ certificates verified, host names checked, httpx's own trust store (`certifi`), 
 environment ignored (`SSL_CERT_FILE` and `SSL_CERT_DIR` cannot replace it, as no proxy setting
 can), and nothing per organization. The client factory takes no argument and no provider field
 is a TLS setting. A test fails if any of these changes. The operator's adapters get the same
-context by default.
+context by default. From PR #39 it also requires TLS 1.2 or higher itself, rather than leaving
+the floor to the platform's OpenSSL defaults (docs/release-notes.md, note 46).
 
 **The test that local_only reaches nothing hosted**: hosted providers configured for the tier, the
 local tier failing every way that would be a trigger in another mode (refused, 5xx, no first

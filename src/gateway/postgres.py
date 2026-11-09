@@ -36,6 +36,20 @@ import asyncpg
 
 from gateway.alertrules import COLUMNS as RULE_COLUMNS
 from gateway.alertrules import AlertRule, RuleVersionConflictError, rule_from_row, rule_row
+from gateway.alerts.channels import _SECRET_COLUMNS as _CHANNEL_SECRET_COLUMNS
+from gateway.alerts.channels import COLUMNS as _CHANNEL_COLUMNS
+from gateway.alerts.channels import (
+    PREVIOUS_KIND,
+    Channel,
+    ChannelNameTakenError,
+    ChannelVersionConflictError,
+    StoredSecret,
+    channel_from_row,
+    channel_row,
+    secret_from_row,
+)
+from gateway.alerts.outbox import COLUMNS as _DELIVERY_COLUMNS
+from gateway.alerts.outbox import Delivery, Outcome, Suppressed, delivery_from_row, delivery_row
 from gateway.applications import (
     _APP_COLUMNS,
     _KEY_COLUMNS,
@@ -56,17 +70,21 @@ from gateway.incidents import (
     INCIDENT_COLUMNS,
     LEASE_MS,
     NOTIFICATION_COLUMNS,
+    UPDATE_COLUMNS,
     Change,
     Fence,
     Incident,
     IncidentState,
     LeaseView,
     Notification,
+    Then,
+    channels_text,
     incident_from_row,
     incident_row,
     latest_resolved,
     notification_from_row,
     notification_row,
+    update_row,
 )
 from gateway.ledger import ApplicationUsage, BudgetExceededError, Expired, Reservation
 from gateway.management import ManagementRefusal
@@ -77,7 +95,7 @@ from gateway.modes import (
     Mode,
     hosted_policy_from,
 )
-from gateway.organizations import Organization, normalize_name
+from gateway.organizations import Organization, check_application_id, normalize_name
 from gateway.periods import BudgetPeriods, CalendarMonthsUTC
 from gateway.permissions import Assignment, Role, ScopeType
 from gateway.providers import _COLUMNS as _PROVIDER_COLUMNS
@@ -138,7 +156,7 @@ LOCK_POLL_MS = 20.0
 # The advisory lock keys: management writes, and applying the schema. Fixed, distinct.
 WRITE_LOCK = 0x6777_5752_4954_4531  # "gwWRITE1"
 SCHEMA_LOCK = 0x6777_5343_4845_4D31  # "gwSCHEM1"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 # How long a settled reservation's id is kept, so that a settle tried again is not charged twice
 # (docs/37).
 SETTLED_KEEP_MS = 24 * 60 * 60 * 1000.0
@@ -437,6 +455,85 @@ CREATE TABLE incident_notifications (
 CREATE INDEX incident_notifications_by_incident ON incident_notifications (incident_id);
 """
 
+# Version 6 (docs/46): alert channels, their sealed secrets, the outbox, the caps, the summaries
+# and the incident's first channels: the tables of SQLite migration 17, and its refusal of an
+# application with an empty id (the built-in channel_delivery_failing's incidents use it).
+PG_CHANNELS = """
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM applications WHERE id = '') THEN
+    RAISE EXCEPTION 'schema 6 refused: an application has an empty id (docs/46)';
+  END IF;
+END $$;
+
+CREATE TABLE alert_channels (
+  id text PRIMARY KEY,
+  organization_id text NOT NULL,
+  name text NOT NULL,
+  type text NOT NULL CHECK (type IN ('webhook')),
+  enabled integer NOT NULL CHECK (enabled IN (0, 1)),
+  is_default integer NOT NULL CHECK (is_default IN (0, 1)),
+  url_origin text NOT NULL,
+  version integer NOT NULL CHECK (version >= 1),
+  created_at_ms double precision NOT NULL,
+  updated_at_ms double precision NOT NULL,
+  last_delivered_at_ms double precision,
+  last_failed_at_ms double precision,
+  consecutive_failures integer NOT NULL CHECK (consecutive_failures >= 0));
+CREATE UNIQUE INDEX alert_channels_name ON alert_channels (organization_id, name);
+
+CREATE TABLE channel_secrets (
+  channel_id text NOT NULL,
+  kind text NOT NULL CHECK (kind IN
+    ('webhook_url', 'webhook_signing_key', 'webhook_signing_key_previous')),
+  key_id text NOT NULL,
+  nonce bytea NOT NULL,
+  ciphertext bytea NOT NULL,
+  expires_at_ms double precision,
+  PRIMARY KEY (channel_id, kind));
+
+CREATE TABLE notification_deliveries (
+  id text PRIMARY KEY,
+  notification_id text NOT NULL,
+  channel_id text NOT NULL,
+  organization_id text NOT NULL,
+  state text NOT NULL CHECK (state IN
+    ('queued', 'sending', 'delivered', 'failed', 'suppressed')),
+  attempts integer NOT NULL CHECK (attempts >= 0),
+  next_attempt_at_ms double precision,
+  claimed_by text,
+  claim_expires_at_ms double precision,
+  last_code text,
+  payload text NOT NULL,
+  created_at_ms double precision NOT NULL,
+  updated_at_ms double precision NOT NULL);
+CREATE UNIQUE INDEX notification_deliveries_one ON notification_deliveries
+  (notification_id, channel_id);
+CREATE INDEX notification_deliveries_due ON notification_deliveries (state, next_attempt_at_ms);
+CREATE INDEX notification_deliveries_by_channel ON notification_deliveries (channel_id, id);
+
+CREATE TABLE notification_caps (
+  scope text NOT NULL CHECK (scope IN ('rule', 'organization')),
+  scope_id text NOT NULL,
+  hour integer NOT NULL,
+  sent integer NOT NULL CHECK (sent >= 0),
+  PRIMARY KEY (scope, scope_id, hour));
+
+CREATE TABLE suppression_summaries (
+  organization_id text NOT NULL,
+  hour integer NOT NULL,
+  notification_id text NOT NULL,
+  created_at_ms double precision NOT NULL);
+CREATE UNIQUE INDEX suppression_summaries_one ON suppression_summaries (organization_id, hour);
+
+CREATE TABLE instance_ceilings (
+  instance_id text PRIMARY KEY,
+  digest text NOT NULL,
+  ceilings text NOT NULL,
+  seen_at_ms double precision NOT NULL);
+
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS notify_channels text;
+"""
+
 # Each version and what it adds, applied in order to a database that has an earlier one.
 SCHEMA = (
     (1, PG_BASELINE),
@@ -444,6 +541,7 @@ SCHEMA = (
     (3, PG_SETTINGS),
     (4, PG_ALERT_RULES),
     (5, PG_INCIDENTS),
+    (6, PG_CHANNELS),
 )
 # What takes a version back out, for the versions that can be (``rollback_schema``). Versions 1
 # and 2 have none: ``migrate-to-sqlite`` is their way back.
@@ -451,6 +549,10 @@ SCHEMA_DOWN = {
     3: "DROP TABLE settings_versions; DROP TABLE settings_current;",
     4: "DROP TABLE alert_rules;",
     5: "DROP TABLE incident_notifications; DROP TABLE incidents; DROP TABLE alert_lease;",
+    # The column stays, unread, as on SQLite; applying 6 again leaves it (IF NOT EXISTS).
+    6: "DROP TABLE instance_ceilings; DROP TABLE suppression_summaries;"
+    " DROP TABLE notification_caps;"
+    " DROP TABLE notification_deliveries; DROP TABLE channel_secrets; DROP TABLE alert_channels;",
 }
 
 # The tables of PG_BUDGETS: Postgres only, never copied to or from SQLite.
@@ -476,6 +578,12 @@ TABLES = (
     "alert_lease",
     "incidents",
     "incident_notifications",
+    "alert_channels",
+    "channel_secrets",
+    "notification_deliveries",
+    "notification_caps",
+    "suppression_summaries",
+    "instance_ceilings",
 )
 
 
@@ -541,6 +649,11 @@ class _NotOpen:
         return None
 
 
+# The alert evaluator's pool, shared with the delivery worker (the A4 plan's section 5): 3
+# connections, none held during a network call.
+EVALUATOR_POOL_SIZE = 3
+
+
 class PostgresDatabase:
     """One gateway instance's Postgres: two pools, the write lock, and the clock of the
     database's windows (it is a ``StoreClock``)."""
@@ -586,7 +699,7 @@ class PostgresDatabase:
         schema: str | None = None,
         request_pool_size: int = 10,
         management_pool_size: int = 2,
-        evaluator_pool_size: int = 2,
+        evaluator_pool_size: int = EVALUATOR_POOL_SIZE,
         lock_timeout_ms: float = DEFAULT_LOCK_TIMEOUT_MS,
     ) -> PostgresDatabase:
         """A database whose pools are made by ``open`` (in the server's lifespan, on its event
@@ -640,7 +753,7 @@ class PostgresDatabase:
         schema: str | None = None,
         request_pool_size: int = 10,
         management_pool_size: int = 2,
-        evaluator_pool_size: int = 2,
+        evaluator_pool_size: int = EVALUATOR_POOL_SIZE,
         lock_timeout_ms: float = DEFAULT_LOCK_TIMEOUT_MS,
     ) -> PostgresDatabase:
         """``unopened`` and ``open``: the pools now."""
@@ -747,6 +860,10 @@ class PostgresDatabase:
         """``StoreClock``: the database's time (section 3.8)."""
         async with self.connection() as connection:
             return float(await connection.fetchval("SELECT gateway_now_ms()"))
+
+    def holds_transaction(self) -> bool:
+        """Whether this task is inside a transaction of this database now."""
+        return self._in_transaction.get() is not None
 
     async def ready(self) -> bool:
         """``/readyz``: a connection of the request pool answers now (``Readiness``)."""
@@ -1006,6 +1123,7 @@ class PostgresApplicationStore(_Store):
 
     async def add_application(self, application: Application) -> None:
         a = application
+        check_application_id(a.id)
         _checked_name(a.name)
         if await self.get_application(a.id) is not None:
             raise ValueError(f"application {a.id!r} exists")
@@ -2244,7 +2362,7 @@ class PostgresIncidentStore(_Store):
         )
         return done == 1
 
-    async def apply(self, fence: Fence, change: Change) -> bool:
+    async def apply(self, fence: Fence, change: Change, then: Then | None = None) -> bool:
         new = change.incident
         row = incident_row(new)
         n = len(row)
@@ -2259,13 +2377,12 @@ class PostgresIncidentStore(_Store):
                         fence.epoch,
                     )
                 else:
-                    columns = INCIDENT_COLUMNS[1:]
-                    sets = ", ".join(f"{c} = ${i + 1}" for i, c in enumerate(columns))
-                    k = len(columns)
+                    sets = ", ".join(f"{c} = ${i + 1}" for i, c in enumerate(UPDATE_COLUMNS))
+                    k = len(UPDATE_COLUMNS)
                     done = await self._execute(
                         f"UPDATE incidents SET {sets} WHERE id = ${k + 1} AND state = ${k + 2}"
                         f" AND revision = ${k + 3} AND {_numbered(_FENCE_PG, k + 4)}",
-                        *row[1:],
+                        *update_row(new),
                         new.id,
                         change.expected_state.value,
                         change.expected_revision,
@@ -2274,6 +2391,14 @@ class PostgresIncidentStore(_Store):
                     )
                 if done != 1:
                     return False
+                if change.expected_state is not None and new.notify_channels is not None:
+                    # The first channels, once: only while the incident has none.
+                    await self._execute(
+                        "UPDATE incidents SET notify_channels = $1"
+                        " WHERE id = $2 AND notify_channels IS NULL",
+                        channels_text(new.notify_channels),
+                        new.id,
+                    )
                 if change.release_held:
                     await self._execute(
                         "UPDATE incident_notifications SET state = 'released'"
@@ -2286,6 +2411,8 @@ class PostgresIncidentStore(_Store):
                         f" VALUES ({_placeholders(len(NOTIFICATION_COLUMNS))})",
                         *notification_row(notification),
                     )
+                if then is not None:
+                    await then()
         except asyncpg.UniqueViolationError:  # one open incident a series, by the index
             return False
         return True
@@ -2379,6 +2506,288 @@ class PostgresIncidentStore(_Store):
         return [notification_from_row(tuple(r.values())) for r in rows]
 
 
+class PostgresChannelStore(_Store):
+    """Alert channels and their sealed secrets, in the tables of schema version 6 (docs/46).
+    ``channel_secrets`` is read here and by no other store."""
+
+    async def _channels(self, where: str, *args: Any) -> list[Channel]:
+        rows = await self._fetch(
+            f"SELECT {_CHANNEL_COLUMNS} FROM alert_channels WHERE {where}", *args
+        )
+        return [channel_from_row(tuple(r.values())) for r in rows]
+
+    async def get_channel(self, channel_id: str) -> Channel | None:
+        found = await self._channels("id = $1", channel_id)
+        return found[0] if found else None
+
+    async def list_channels(
+        self, organization_id: str, limit: int, after: str | None = None
+    ) -> list[Channel]:
+        return await self._channels(
+            "organization_id = $1 AND id > $2 ORDER BY id LIMIT $3",
+            organization_id,
+            after or "",
+            limit,
+        )
+
+    async def organization_channels(self, organization_id: str) -> list[Channel]:
+        return await self._channels("organization_id = $1 ORDER BY id", organization_id)
+
+    async def count_channels(self, organization_id: str) -> int:
+        return int(
+            await self._value(
+                "SELECT count(*) FROM alert_channels WHERE organization_id = $1", organization_id
+            )
+        )
+
+    async def insert_channel(self, channel: Channel) -> None:
+        try:
+            await self._execute(
+                f"INSERT INTO alert_channels ({_CHANNEL_COLUMNS}) VALUES ({_placeholders(13)})",
+                *channel_row(channel),
+            )
+        except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name == "alert_channels_name":
+                raise ChannelNameTakenError() from None
+            raise ChannelVersionConflictError() from None
+
+    async def put_channel(self, channel: Channel, expected_version: int) -> None:
+        row = channel_row(channel)
+        try:
+            done = await self._execute(
+                "UPDATE alert_channels SET name = $1, type = $2, enabled = $3, is_default = $4,"
+                " url_origin = $5, version = $6, updated_at_ms = $7, last_delivered_at_ms = $8,"
+                " last_failed_at_ms = $9, consecutive_failures = $10"
+                " WHERE id = $11 AND organization_id = $12 AND version = $13",
+                *row[2:8],
+                *row[9:13],
+                channel.id,
+                channel.organization_id,
+                expected_version,
+            )
+        except asyncpg.UniqueViolationError:
+            raise ChannelNameTakenError() from None
+        if done != 1:
+            raise ChannelVersionConflictError()
+
+    async def delete_channel(self, channel_id: str) -> bool:
+        await self._execute("DELETE FROM channel_secrets WHERE channel_id = $1", channel_id)
+        return await self._execute("DELETE FROM alert_channels WHERE id = $1", channel_id) == 1
+
+    async def put_secret(self, secret: StoredSecret) -> None:
+        s = secret.sealed
+        await self._execute(
+            f"INSERT INTO channel_secrets ({_CHANNEL_SECRET_COLUMNS})"
+            " VALUES ($1, $2, $3, $4, $5, $6)"
+            " ON CONFLICT (channel_id, kind) DO UPDATE SET key_id = EXCLUDED.key_id,"
+            " nonce = EXCLUDED.nonce, ciphertext = EXCLUDED.ciphertext,"
+            " expires_at_ms = EXCLUDED.expires_at_ms",
+            secret.channel_id,
+            secret.kind,
+            s.key_id,
+            s.nonce,
+            s.ciphertext,
+            secret.expires_at_ms,
+        )
+
+    async def secrets(self, channel_id: str) -> dict[str, StoredSecret]:
+        rows = await self._fetch(
+            f"SELECT {_CHANNEL_SECRET_COLUMNS} FROM channel_secrets WHERE channel_id = $1",
+            channel_id,
+        )
+        return {r["kind"]: secret_from_row(tuple(r.values())) for r in rows}
+
+    async def delete_secret(self, channel_id: str, kind: str) -> None:
+        await self._execute(
+            "DELETE FROM channel_secrets WHERE channel_id = $1 AND kind = $2", channel_id, kind
+        )
+
+    async def all_secrets(self) -> list[StoredSecret]:
+        rows = await self._fetch(
+            f"SELECT {_CHANNEL_SECRET_COLUMNS} FROM channel_secrets ORDER BY channel_id, kind"
+        )
+        return [secret_from_row(tuple(r.values())) for r in rows]
+
+    async def record_health(self, channel_id: str, delivered: bool, at_ms: float) -> None:
+        if delivered:
+            await self._execute(
+                "UPDATE alert_channels SET last_delivered_at_ms = $1, consecutive_failures = 0"
+                " WHERE id = $2",
+                at_ms,
+                channel_id,
+            )
+        else:
+            await self._execute(
+                "UPDATE alert_channels SET last_failed_at_ms = $1,"
+                " consecutive_failures = consecutive_failures + 1 WHERE id = $2",
+                at_ms,
+                channel_id,
+            )
+
+    async def failing_channels(self, at_least: int) -> list[Channel]:
+        return await self._channels("consecutive_failures >= $1 ORDER BY id", at_least)
+
+    async def drop_expired_previous_keys(self, now_ms: float) -> int:
+        return await self._execute(
+            "DELETE FROM channel_secrets WHERE kind = $1 AND expires_at_ms <= $2",
+            PREVIOUS_KIND,
+            now_ms,
+        )
+
+
+class PostgresOutboxStore(_Store):
+    """The notification outbox in schema version 6's ``notification_deliveries`` (docs/46)."""
+
+    def delivery_transaction(self) -> AbstractAsyncContextManager[None]:
+        # On this task's pool (the evaluator's, under ``evaluation``), without the write lock.
+        return self._db.request_transaction()
+
+    def holds_transaction(self) -> bool:
+        return self._db.holds_transaction()
+
+    async def claim(
+        self, claim_id: str, limit: int, now_ms: float, claim_ms: float
+    ) -> list[Delivery]:
+        rows = await self._fetch(
+            "UPDATE notification_deliveries SET state = 'sending', claimed_by = $1,"
+            " claim_expires_at_ms = $2 + $3, attempts = attempts + 1, updated_at_ms = $2"
+            " WHERE id IN (SELECT id FROM notification_deliveries"
+            " WHERE (state = 'queued' AND next_attempt_at_ms <= $2)"
+            " OR (state = 'sending' AND claim_expires_at_ms <= $2)"
+            " ORDER BY next_attempt_at_ms, id LIMIT $4 FOR UPDATE SKIP LOCKED)"
+            f" RETURNING {_DELIVERY_COLUMNS}",
+            claim_id,
+            now_ms,
+            claim_ms,
+            limit,
+        )
+        return sorted((delivery_from_row(tuple(r.values())) for r in rows), key=lambda d: d.id)
+
+    async def record(self, delivery_id: str, claim_id: str, outcome: Outcome, at_ms: float) -> bool:
+        done = await self._execute(
+            "UPDATE notification_deliveries SET state = $1, last_code = $2,"
+            " next_attempt_at_ms = $3, claimed_by = NULL, claim_expires_at_ms = NULL,"
+            " updated_at_ms = $4 WHERE id = $5 AND state = 'sending' AND claimed_by = $6",
+            outcome.state.value,
+            outcome.code,
+            outcome.next_attempt_at_ms,
+            at_ms,
+            delivery_id,
+            claim_id,
+        )
+        return done == 1
+
+    async def suppressed(self, start_ms: float, end_ms: float) -> list[Suppressed]:
+        rows = await self._fetch(
+            "SELECT organization_id, count(DISTINCT notification_id),"
+            " count(DISTINCT (payload::json -> 'rule' ->> 'id'))"
+            " FROM notification_deliveries WHERE state = 'suppressed'"
+            " AND created_at_ms >= $1 AND created_at_ms < $2"
+            " GROUP BY organization_id ORDER BY organization_id",
+            start_ms,
+            end_ms,
+        )
+        return [Suppressed(r[0], int(r[1]), int(r[2])) for r in rows]
+
+    async def queue(self, deliveries: Sequence[Delivery]) -> int:
+        new = 0
+        for d in deliveries:
+            new += await self._execute(
+                f"INSERT INTO notification_deliveries ({_DELIVERY_COLUMNS})"
+                f" VALUES ({_placeholders(13)})"
+                " ON CONFLICT (notification_id, channel_id) DO NOTHING",
+                *delivery_row(d),
+            )
+        return new
+
+    async def _deliveries(self, where: str, *args: Any) -> list[Delivery]:
+        rows = await self._fetch(
+            f"SELECT {_DELIVERY_COLUMNS} FROM notification_deliveries WHERE {where}", *args
+        )
+        return [delivery_from_row(tuple(r.values())) for r in rows]
+
+    async def channel_deliveries(
+        self, channel_id: str, limit: int, after: str | None = None
+    ) -> list[Delivery]:
+        return await self._deliveries(
+            "channel_id = $1 AND id > $2 ORDER BY id LIMIT $3", channel_id, after or "", limit
+        )
+
+    async def notification_deliveries(self, notification_ids: Sequence[str]) -> list[Delivery]:
+        ids = list(dict.fromkeys(notification_ids))
+        if not ids:
+            return []
+        return await self._deliveries(
+            "notification_id = ANY($1::text[]) ORDER BY notification_id, channel_id", ids
+        )
+
+    async def fail_channel(self, channel_id: str, code: str, at_ms: float) -> int:
+        return await self._execute(
+            "UPDATE notification_deliveries SET state = 'failed', last_code = $1,"
+            " next_attempt_at_ms = NULL, updated_at_ms = $2"
+            " WHERE channel_id = $3 AND state = 'queued'",
+            code,
+            at_ms,
+            channel_id,
+        )
+
+    async def count_notification(self, scope: str, scope_id: str, hour: int, cap: int) -> bool:
+        found = await self._row(
+            "INSERT INTO notification_caps (scope, scope_id, hour, sent) VALUES ($1, $2, $3, 1)"
+            " ON CONFLICT (scope, scope_id, hour) DO UPDATE"
+            " SET sent = notification_caps.sent + 1 WHERE notification_caps.sent < $4"
+            " RETURNING sent",
+            scope,
+            scope_id,
+            hour,
+            cap,
+        )
+        return found is not None
+
+    async def add_summary(
+        self, organization_id: str, hour: int, notification_id: str, at_ms: float
+    ) -> bool:
+        return (
+            await self._execute(
+                "INSERT INTO suppression_summaries"
+                " (organization_id, hour, notification_id, created_at_ms)"
+                " VALUES ($1, $2, $3, $4) ON CONFLICT (organization_id, hour) DO NOTHING",
+                organization_id,
+                hour,
+                notification_id,
+                at_ms,
+            )
+            == 1
+        )
+
+
+class PostgresCeilingsStore(_Store):
+    """Each live instance's alert caps (``instance_ceilings``, schema version 6), on the
+    database's clock: written, pruned and read in one statement."""
+
+    async def report(
+        self, instance_id: str, digest: str, ceilings: str, live_ms: float, keep_ms: float
+    ) -> dict[str, str]:
+        # The SELECT reads the rows as they were before the writes of its WITH: this
+        # instance's own row is not among those it returns anyway.
+        rows = await self._fetch(
+            "WITH mine AS (INSERT INTO instance_ceilings"
+            " (instance_id, digest, ceilings, seen_at_ms) VALUES ($1, $2, $3, gateway_now_ms())"
+            " ON CONFLICT (instance_id) DO UPDATE SET digest = EXCLUDED.digest,"
+            " ceilings = EXCLUDED.ceilings, seen_at_ms = EXCLUDED.seen_at_ms),"
+            " gone AS (DELETE FROM instance_ceilings"
+            " WHERE seen_at_ms < gateway_now_ms() - $5 AND instance_id <> $1)"
+            " SELECT instance_id, ceilings FROM instance_ceilings WHERE instance_id <> $1"
+            " AND digest <> $2 AND seen_at_ms > gateway_now_ms() - $4 ORDER BY instance_id",
+            instance_id,
+            digest,
+            ceilings,
+            live_ms,
+            keep_ms,
+        )
+        return {r[0]: r[1] for r in rows}
+
+
 def postgres_state(db: PostgresDatabase) -> StateBackend:
     """Every store over one Postgres database; windows on its clock."""
     return StateBackend(
@@ -2392,5 +2801,8 @@ def postgres_state(db: PostgresDatabase) -> StateBackend:
         settings=PostgresSettingsStore(db),
         rules=PostgresRuleStore(db),
         incidents=PostgresIncidentStore(db),
+        channels=PostgresChannelStore(db),
+        outbox=PostgresOutboxStore(db),
+        ceilings=PostgresCeilingsStore(db),
         clock=db,
     )

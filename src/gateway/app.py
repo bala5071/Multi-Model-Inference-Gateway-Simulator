@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import random
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
@@ -49,6 +50,21 @@ from gateway.alertrules import (
     spec_body,
     validate_rule,
 )
+from gateway.alerts.caps import CeilingsWatch, caps_from
+from gateway.alerts.channels import (
+    WEBHOOK_PORTS_ENV,
+    Channel,
+    ChannelFieldError,
+    ChannelGoneError,
+    ChannelService,
+    NothingChangedError,
+    parse_webhook_ports,
+    resolve_channel,
+)
+from gateway.alerts.delivery import AttemptReport, DeliverySetup, DeliveryWorker, TestSends
+from gateway.alerts.notices import Notices, builtin_rule_ids
+from gateway.alerts.outbox import Delivery, OutboxStore
+from gateway.alerts.webhook import DELIVERED
 from gateway.apikeys import (
     INVALID_KEY_MESSAGE,
     ApiKeyRequiredError,
@@ -156,6 +172,7 @@ from gateway.egress import (
     organization_client,
     provider_tls_context,
     system_resolver,
+    webhook_client,
 )
 from gateway.evaluator import AlertEvaluator, ApplicationSignals, HeartbeatState
 from gateway.events import EventBus
@@ -165,6 +182,7 @@ from gateway.incidents import (
     IncidentStore,
     InMemoryIncidentStore,
 )
+from gateway.keyderivation import KeyPurpose, derive_key
 from gateway.ledger import (
     ApplicationUsage,
     BudgetExceededError,
@@ -252,6 +270,7 @@ from gateway.postgres import (
 )
 from gateway.profiles import PROFILES, Tier, load_calibrated_profiles
 from gateway.providers import (
+    InMemoryConnectionTestCounter,
     ProviderConfig,
     ProviderGoneError,
     ProviderService,
@@ -1051,7 +1070,9 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
                 authorized.resource.organization_id,
                 exc.reason,
             )
-        limited = (Reason.USER_CREATION_LIMITED, Reason.TEST_RATE_LIMITED)
+        limited = (
+            Reason.USER_CREATION_LIMITED, Reason.TEST_RATE_LIMITED, Reason.TEST_SEND_LIMITED
+        )  # fmt: skip
         status = 429 if exc.reason in limited else 409
         return _error(status, exc.reason.value, str(exc), headers=_NO_STORE)
 
@@ -1939,7 +1960,8 @@ def _rule_view(rule: AlertRule) -> dict[str, object]:
 def _incident_view(incident: Incident) -> dict[str, object]:
     return {
         "id": incident.id,
-        "application_id": incident.application_id,
+        # Null for the built-in channel_delivery_failing's, which no application owns (docs/46).
+        "application_id": incident.application_id or None,
         "rule_id": incident.rule_id,
         "rule_version": incident.rule_version,
         # A provider id or a key id where the signal has series.
@@ -1973,7 +1995,11 @@ def _incident_state(state: str | None) -> IncidentState | None:
 
 
 def _incident_routes(
-    app: FastAPI, accounts: AccountAccess, incidents: IncidentStore, epoch: EpochSource
+    app: FastAPI,
+    accounts: AccountAccess,
+    incidents: IncidentStore,
+    epoch: EpochSource,
+    outbox: OutboxStore | None = None,
 ) -> None:
     """The incident endpoints (docs/45), each through ``requires``, with resolvers that answer
     an application outside the path's organization, or an incident outside the path's
@@ -2048,13 +2074,20 @@ def _incident_routes(
         found = await incidents.get_incident(app_id, incident)
         assert found is not None  # the resolver found it
         notifications = await incidents.notifications(incident)
+        deliveries: dict[str, list[dict[str, object]]] = {}
+        if outbox is not None:
+            for d in await outbox.notification_deliveries([n.id for n in notifications]):
+                deliveries.setdefault(d.notification_id, []).append(
+                    {"channel_id": d.channel_id, "state": d.state.value, "attempts": d.attempts,
+                     "last_code": d.last_code}
+                )  # fmt: skip
         return JSONResponse(
             {
                 **_incident_view(found),
-                # Recorded here; delivered to the rule's channels from A4.
+                # Each notification's deliveries to its channels (docs/46): their state only.
                 "notifications": [
                     {"kind": n.kind.value, "state": n.state.value, "at_ms": n.at_ms,
-                     "reason": n.reason}
+                     "reason": n.reason, "deliveries": deliveries.get(n.id, [])}
                     for n in notifications
                 ],
             }
@@ -2152,6 +2185,9 @@ def _alert_rule_routes(app: FastAPI, accounts: AccountAccess, rules: RuleService
         the last hour from the rollups. Writes nothing."""
         try:
             spec = validate_rule(body)
+            # Channel ids checked as a write checks them (docs/46): the same answer for one of
+            # another organization as for one that does not exist.
+            await rules.check_channels(app_id, spec)
         except RuleInvalidError as exc:
             return JSONResponse(
                 {"valid": False, "invalid_field": exc.field, "message": str(exc), "rule": None,
@@ -2237,6 +2273,231 @@ def _alert_rule_routes(app: FastAPI, accounts: AccountAccess, rules: RuleService
     ) -> JSONResponse:
         await rules.delete(app_id, rule, body.expected_version, auth.actor.user_id)
         return JSONResponse({"deleted": rule})
+
+
+class CreateChannelBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Each checked by the channel service, whose refusal names the field and never repeats a
+    # URL (the URL is a secret: docs/46).
+    type: str = Field(max_length=20)
+    name: str = Field(max_length=200)
+    url: str = Field(max_length=4096)
+    default: bool = False
+
+
+class UpdateChannelBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1, le=999_999_999)
+    name: str | None = Field(default=None, max_length=200)
+    url: str | None = Field(default=None, max_length=4096)
+    default: bool | None = None
+    # Only true: re-enabling needs step-up (this route's action); disabling has its own route.
+    enabled: bool | None = None
+
+
+def _channel_view(channel: Channel) -> dict[str, object]:
+    """For the organization's admin: only the URL's origin, never the URL or a key."""
+    return {
+        "id": channel.id,
+        "name": channel.name,
+        "type": channel.type,
+        "enabled": channel.enabled,
+        "default": channel.is_default,
+        "url_origin": channel.url_origin,
+        "version": channel.version,
+        "created_at_ms": channel.created_at_ms,
+        "updated_at_ms": channel.updated_at_ms,
+        "health": {
+            "last_delivered_at_ms": channel.last_delivered_at_ms,
+            "last_failed_at_ms": channel.last_failed_at_ms,
+            "consecutive_failures": channel.consecutive_failures,
+        },
+    }
+
+
+def _channel_application_view(channel: Channel) -> dict[str, object]:
+    """For an application's readers: what a rule may name, never a target or its origin."""
+    return {
+        "id": channel.id,
+        "name": channel.name,
+        "type": channel.type,
+        "default": channel.is_default,
+        "enabled": channel.enabled,
+    }
+
+
+def _delivery_view(delivery: Delivery) -> dict[str, object]:
+    """A delivery's state, never its payload or anything a receiver answered."""
+    return {
+        "id": delivery.id,
+        "notification_id": delivery.notification_id,
+        "channel_id": delivery.channel_id,
+        "state": delivery.state.value,
+        "attempts": delivery.attempts,
+        "next_attempt_at_ms": delivery.next_attempt_at_ms,
+        "last_code": delivery.last_code,
+        "created_at_ms": delivery.created_at_ms,
+        "updated_at_ms": delivery.updated_at_ms,
+    }
+
+
+def _channel_routes(
+    app: FastAPI,
+    accounts: AccountAccess,
+    channels: ChannelService,
+    test_sends: TestSends | None = None,
+) -> None:
+    """The alert channel endpoints under /v1/admin/orgs/{org} (docs/46), each through
+    ``requires`` with a resolver that answers a channel outside the path's organization (or an
+    id not in a channel id's form) as missing. Creating, changing, re-enabling and rotating are
+    ``alert_channels.write``, consume-on-use step-up; disabling and deleting need none; a test
+    send is ``alert_channels.test`` (without ``test_sends``, nothing is delivered: 503)."""
+    requires = app.state.requires
+    stores = Stores(accounts.service.organizations, accounts.service.store)
+    store = channels.store
+    notices = channels.notices
+    assert notices is not None
+
+    async def organization(request: Request) -> Resource | None:
+        return await resolve_organization(stores, request.path_params["org"])
+
+    async def application(request: Request) -> Resource | None:
+        p = request.path_params
+        return await resolve_application(stores, p["org"], p["app"])
+
+    async def channel(request: Request) -> Resource | None:
+        p = request.path_params
+        return await resolve_channel(stores, store, p["org"], p["channel"])
+
+    reading_application = requires("alert_rules.read", application)
+    reading = requires("alert_channels.read", organization)
+    creating = requires("alert_channels.write", organization)
+    reading_channel = requires("alert_channels.read", channel)
+    writing_channel = requires("alert_channels.write", channel)
+    disabling_channel = requires("alert_channels.disable", channel)
+    testing_channel = requires("alert_channels.test", channel)
+    prefix = ORG_PREFIX + "/alert-channels"
+
+    @app.exception_handler(ChannelFieldError)
+    async def channel_invalid(_: Request, exc: ChannelFieldError) -> JSONResponse:
+        # Raised, not answered, so a claimed step-up window is given back (docs/32).
+        return _invalid(exc.field, str(exc))
+
+    @app.exception_handler(NothingChangedError)
+    async def nothing_changed(_: Request, exc: NothingChangedError) -> JSONResponse:
+        # Raised, so the step-up window this change claimed is given back.
+        return JSONResponse({**_channel_view(exc.channel), "changed": False})
+
+    @app.exception_handler(ChannelGoneError)
+    async def channel_gone(_: Request, exc: ChannelGoneError) -> JSONResponse:
+        # Resolved a moment ago, deleted since: missing, answered as forbidden.
+        return _error(403, "forbidden", "Not permitted, or not found.", headers=_NO_STORE)
+
+    @app.get(ORG_PREFIX + "/applications/{app}/alert-channels")
+    async def list_application_alert_channels(
+        org: str, app_id: str = Path_(alias="app"), auth: Authorized = reading_application
+    ) -> JSONResponse:
+        found = await store.organization_channels(org)
+        return JSONResponse({"channels": [_channel_application_view(c) for c in found]})
+
+    @app.get(prefix)
+    async def list_alert_channels(
+        org: str,
+        limit: int = Query(default=50, ge=1, le=100),
+        after: str | None = Query(default=None, max_length=20),
+        auth: Authorized = reading,
+    ) -> JSONResponse:
+        page = await store.list_channels(org, limit, after)
+        return JSONResponse(
+            {
+                "channels": [_channel_view(c) for c in page],
+                "next": page[-1].id if len(page) == limit else None,
+            }
+        )
+
+    @app.post(prefix, status_code=201)
+    async def create_alert_channel(
+        org: str, body: CreateChannelBody, auth: Authorized = creating
+    ) -> JSONResponse:
+        assert auth.consumed is not None
+        made = await channels.create(
+            org, name=body.name, url=body.url, is_default=body.default, channel_type=body.type,
+            actor=auth.actor, marker=auth.consumed,
+        )  # fmt: skip
+        # The signing key, this once (no-store, as every admin answer).
+        return JSONResponse(
+            {**_channel_view(made.channel), "signing_key": made.signing_key}, status_code=201
+        )
+
+    @app.get(prefix + "/{channel}")
+    async def get_alert_channel(
+        org: str, channel: str, auth: Authorized = reading_channel
+    ) -> JSONResponse:
+        found = await store.get_channel(channel)
+        if found is None:
+            raise ForbiddenError()
+        return JSONResponse(_channel_view(found))
+
+    @app.patch(prefix + "/{channel}")
+    async def update_alert_channel(
+        org: str, channel: str, body: UpdateChannelBody, auth: Authorized = writing_channel
+    ) -> JSONResponse:
+        assert auth.consumed is not None
+        changes = body.model_dump(exclude_unset=True)
+        expected = changes.pop("expected_version")
+        changed = await channels.update(
+            channel, expected, changes, actor=auth.actor, marker=auth.consumed
+        )
+        return JSONResponse({**_channel_view(changed), "changed": True})
+
+    @app.post(prefix + "/{channel}/disable")
+    async def disable_alert_channel(
+        org: str, channel: str, auth: Authorized = disabling_channel
+    ) -> JSONResponse:
+        return JSONResponse(_channel_view(await channels.disable(channel, actor=auth.actor)))
+
+    @app.delete(prefix + "/{channel}")
+    async def delete_alert_channel(
+        org: str, channel: str, auth: Authorized = disabling_channel
+    ) -> JSONResponse:
+        await channels.delete(channel, actor=auth.actor)
+        return JSONResponse({"deleted": channel})
+
+    @app.post(prefix + "/{channel}/rotate-key")
+    async def rotate_alert_channel_key(
+        org: str, channel: str, auth: Authorized = writing_channel
+    ) -> JSONResponse:
+        assert auth.consumed is not None
+        key = await channels.rotate_key(channel, actor=auth.actor, marker=auth.consumed)
+        return JSONResponse({"id": channel, "signing_key": key})
+
+    @app.post(prefix + "/{channel}/test")
+    async def test_alert_channel(
+        org: str, channel: str, auth: Authorized = testing_channel
+    ) -> JSONResponse:
+        if test_sends is None:
+            raise StateUnavailableError("delivery")
+        # The code alone: never anything the receiver answered.
+        code = await test_sends.send(org, channel, auth.actor)
+        return JSONResponse({"id": channel, "outcome": code, "delivered": code == DELIVERED})
+
+    @app.get(prefix + "/{channel}/deliveries")
+    async def list_alert_channel_deliveries(
+        org: str,
+        channel: str,
+        limit: int = Query(default=50, ge=1, le=100),
+        after: str | None = Query(default=None, max_length=20),
+        auth: Authorized = reading_channel,
+    ) -> JSONResponse:
+        page = await notices.outbox.channel_deliveries(channel, limit, after)
+        return JSONResponse(
+            {
+                "deliveries": [_delivery_view(d) for d in page],
+                "next": page[-1].id if len(page) == limit else None,
+            }
+        )
 
 
 def _settings_routes(
@@ -2938,6 +3199,7 @@ def create_app(
     durable: Durable | None = None,
     evaluator_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     on_start: Sequence[Callable[[], Awaitable[None]]] = (),
+    channels: ChannelService | None = None,
 ) -> FastAPI:
     """Build the API around an already wired registry.
 
@@ -3014,6 +3276,9 @@ def create_app(
     ``evaluator_context`` is entered around the alert evaluator's task: on Postgres,
     ``PostgresDatabase.evaluation``, so the evaluator never takes a request-pool connection
     (the plan's section 11.7).
+
+    ``channels`` are the organizations' alert channels (docs/46), with the notices their
+    changes and rule changes queue; without them a rule may name no channel id.
     """
     if metrics is None:
         metrics = MetricsStore(clock)
@@ -3166,6 +3431,65 @@ def create_app(
     # instances by the lease; without one the heartbeat is "disabled" (simulated live mode).
     rule_store: RuleStore = rules if rules is not None else InMemoryRuleStore()
     evaluator: AlertEvaluator | None = None
+    # Delivery (docs/46): with channels that deliver and an evaluator, every instance runs a
+    # worker, and test sends go through the same attempt.
+    delivery_worker: DeliveryWorker | None = None
+    test_sends: TestSends | None = None
+    ceilings: CeilingsWatch | None = None
+    instance_id = secrets.token_hex(8)
+    setup = channels.delivery if channels is not None else None
+    if (
+        setup is not None
+        and incidents is not None
+        and channels is not None
+        and channels.notices is not None
+    ):
+        alert_log = logging.getLogger("gateway.alerts")
+
+        def attempted(report: AttemptReport) -> None:
+            # A count, and for a failure an event and a log line: the channel id and the code.
+            monitoring.alert_delivery(report.channel_type, report.code)
+            if report.code != DELIVERED:
+                bus.publish("alert_delivery_failed", channel_id=report.channel_id,
+                            code=report.code)  # fmt: skip
+                alert_log.warning(
+                    "alert delivery failed: channel %s, %s", report.channel_id, report.code
+                )
+
+        def caps_differ(names: list[str]) -> None:
+            bus.publish("alert_caps_differ", caps=names)
+
+        delivery_worker = DeliveryWorker(
+            channels.notices.outbox,
+            channels.store,
+            channels.vault,
+            setup.redactor,
+            store_clock=channels.store_clock,
+            clock=clock,
+            epoch=epoch if epoch is not None else ClockEpoch(clock),
+            client=setup.client,
+            rng=random.Random(secrets.randbits(64)),
+            random_bytes=secrets.token_bytes,
+            on_attempt=attempted,
+        )
+        test_sends = TestSends(
+            delivery_worker,
+            counters.channel_tests(
+                setup.caps.test_sends_per_channel, setup.caps.test_sends_per_organization
+            )
+            if counters is not None
+            else InMemoryConnectionTestCounter(
+                clock,
+                setup.caps.test_sends_per_channel,
+                setup.caps.test_sends_per_organization,
+                reason=Reason.TEST_SEND_LIMITED,
+                what=("a channel", "an organization's channels"),
+            ),
+            channels.audit,
+            epoch if epoch is not None else ClockEpoch(clock),
+            secrets.token_bytes,
+        )
+        ceilings = CeilingsWatch(setup.ceilings, setup.caps, instance_id, on_differ=caps_differ)
     if incidents is not None and applications is not None:
         app_store = applications.store
         settings_of, settings_many = alert_settings(settings_store, settings_platform)
@@ -3202,9 +3526,12 @@ def create_app(
                 settings_many=settings_many,
             ),
             clock=clock,
-            holder=secrets.token_hex(8),
+            holder=instance_id,
             random_bytes=secrets.token_bytes,
             on_heartbeat_change=heartbeat_moved,
+            # Queued for delivery only where there is a worker to send them.
+            notices=channels.notices if delivery_worker is not None and channels else None,
+            ceilings=ceilings,
         )
 
     async def evaluate() -> None:
@@ -3215,6 +3542,16 @@ def create_app(
             return
         async with evaluator_context():
             await evaluator.run()
+
+    async def deliver() -> None:
+        """The delivery worker's task, on the evaluator's pool on Postgres (the A4 plan's
+        section 5): no connection held during a network call."""
+        assert delivery_worker is not None
+        if evaluator_context is None:
+            await delivery_worker.run()
+            return
+        async with evaluator_context():
+            await delivery_worker.run()
 
     def alert_status() -> AlertEvaluatorGroup:
         """The heartbeat from the evaluator's memory: no store call (docs/45)."""
@@ -3264,6 +3601,11 @@ def create_app(
             await load.start(autostart_load, seed)
         flushing = asyncio.create_task(flusher.run()) if flusher is not None else None
         evaluating = asyncio.create_task(evaluate()) if evaluator is not None else None
+        delivering = (
+            asyncio.create_task(deliver())
+            if delivery_worker is not None and evaluator is not None
+            else None
+        )
         # Retention runs beside the server, never on a request (docs/21).
         retainer = budgets if budgets is not None else ledger
         retention = (
@@ -3287,9 +3629,19 @@ def create_app(
         # Provider keys out of every log record while the server runs (docs/32), and a
         # warning for each key no loaded master key can read.
         remove_redaction = install_redaction(providers.redactor) if providers is not None else None
+        # Leased channel secrets too, when their redactor is not the providers' (docs/46).
+        remove_channel_redaction = (
+            install_redaction(setup.redactor)
+            if setup is not None and (providers is None or setup.redactor is not providers.redactor)
+            else None
+        )
         if providers is not None:
             await providers.warn_unreadable()
         yield
+        if delivering is not None:
+            delivering.cancel()
+        if remove_channel_redaction is not None:
+            remove_channel_redaction()
         if remove_redaction is not None:
             remove_redaction()
         if retention is not None:
@@ -3327,6 +3679,8 @@ def create_app(
     app.state.alert_rollups = alert_rollups
     app.state.alert_flusher = flusher
     app.state.alert_evaluator = evaluator
+    app.state.alert_delivery = delivery_worker
+    app.state.alert_test_sends = test_sends
     if alert_recorder is not None:
         app.add_middleware(AlertOutcomeMiddleware, recorder=alert_recorder, note=alert_note)
     if local_only is not None:
@@ -3341,6 +3695,7 @@ def create_app(
             epoch if epoch is not None else ClockEpoch(clock),
             alert_rollups,
             secrets.token_bytes,
+            notices=channels.notices if channels is not None else None,
         )
         # Applications and keys over HTTP need both: a session to act, applications to act on.
         management = (
@@ -3379,6 +3734,8 @@ def create_app(
 
         if management is not None and applications is not None:
             _alert_rule_routes(app, accounts, rule_service)
+            if channels is not None:
+                _channel_routes(app, accounts, channels, test_sends)
             _incident_routes(
                 app,
                 accounts,
@@ -3386,6 +3743,9 @@ def create_app(
                 if incidents is not None
                 else InMemoryIncidentStore(epoch if epoch is not None else ClockEpoch(clock)),
                 epoch if epoch is not None else ClockEpoch(clock),
+                channels.notices.outbox
+                if channels is not None and channels.notices is not None
+                else None,
             )
         if management is not None and applications is not None and settings_store is not None:
             _settings_routes(
@@ -4835,6 +5195,54 @@ def create_simulated_live_app(
     )
 
 
+def build_channels(
+    state: StateBackend,
+    vault: Vault,
+    audit: AuditLog,
+    epoch: EpochSource,
+    environ: Mapping[str, str],
+    *,
+    pepper: bytes,
+    redactor: Redactor,
+    clock: Clock,
+) -> ChannelService:
+    """The organizations' alert channels for a server (docs/46): sealed under the same vault as
+    provider keys, in their own scope; the webhook ports from ``GATEWAY_ALERT_WEBHOOK_PORTS``
+    and the caps from their four variables (a value out of range refuses the start); their
+    notices queued in the outbox on the state's clock; the built-in's rule ids under their own
+    key derived from the pepper; each attempt through a new ``webhook_client`` on the system
+    resolver, with one pinned TLS context, its leased secrets scrubbed by ``redactor``."""
+    caps = caps_from(environ)
+    ports = parse_webhook_ports(environ.get(WEBHOOK_PORTS_ENV))
+    notices = Notices(
+        state.channels,
+        state.outbox,
+        state.applications,
+        epoch,
+        secrets.token_bytes,
+        caps=caps,
+        store_clock=state.clock,
+        builtin_rule_id=builtin_rule_ids(derive_key(pepper, KeyPurpose.BUILTIN_RULE_ID)),
+    )
+    tls = provider_tls_context()
+    return ChannelService(
+        state.channels,
+        vault,
+        audit,
+        epoch,
+        secrets.token_bytes,
+        notices=notices,
+        ports=ports,
+        store_clock=state.clock,
+        delivery=DeliverySetup(
+            lambda: webhook_client(system_resolver, clock, ports, ssl_context=tls),
+            redactor,
+            caps,
+            state.ceilings,
+        ),
+    )
+
+
 def build_accounts(
     state: StateBackend,
     clock: Clock,
@@ -5003,6 +5411,10 @@ def create_default_app() -> FastAPI:
     registry, chat_adapters, local = _models(backends, clock, seed, os.environ)
     # One TLS context for every organization client (one is made per call, docs/33).
     tls = provider_tls_context()
+    # One vault for provider keys and alert channels' secrets, each in its own scope (docs/46),
+    # and one redactor for what either leases.
+    vault = Vault(master, previous_master)
+    redactor = Redactor()
     app = create_app(
         registry,
         clock,
@@ -5021,13 +5433,23 @@ def create_default_app() -> FastAPI:
         chat_adapters=chat_adapters,
         providers=ProviderService(
             state.providers,
-            Vault(master, previous_master),
+            vault,
             accounts.service.audit,
             clock,
             epoch,
-            Redactor(),
+            redactor,
             lambda: organization_client(system_resolver, ssl_context=tls),
             test_counter=shared.connection_tests() if shared is not None else None,
+        ),
+        channels=build_channels(
+            state,
+            vault,
+            accounts.service.audit,
+            epoch,
+            os.environ,
+            pepper=pepper,
+            redactor=redactor,
+            clock=clock,
         ),
         modes=state.modes,
         settings=state.settings,
@@ -5143,6 +5565,8 @@ def create_shared_app(environ: Mapping[str, str]) -> FastAPI:
 
     registry, chat_adapters, local = _models(backends, clock, seed, environ)
     tls = provider_tls_context()
+    vault = Vault(master, previous_master)
+    redactor = Redactor()
     return create_app(
         registry,
         clock,
@@ -5159,13 +5583,23 @@ def create_shared_app(environ: Mapping[str, str]) -> FastAPI:
         chat_adapters=chat_adapters,
         providers=ProviderService(
             state.providers,
-            Vault(master, previous_master),
+            vault,
             accounts.service.audit,
             clock,
             epoch,
-            Redactor(),
+            redactor,
             lambda: organization_client(system_resolver, ssl_context=tls),
             test_counter=shared.connection_tests(),
+        ),
+        channels=build_channels(
+            state,
+            vault,
+            accounts.service.audit,
+            epoch,
+            environ,
+            pepper=pepper,
+            redactor=redactor,
+            clock=clock,
         ),
         modes=state.modes,
         settings=state.settings,

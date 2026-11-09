@@ -29,6 +29,8 @@ class KeyPurpose(StrEnum):
     COUNTER_KEYS = "counter keys"
     # The names of the alert rollups in Valkey (docs/43): no application id appears there.
     ALERT_ROLLUPS = "alert rollups"
+    # The built-in channel_delivery_failing's rule id of an organization (docs/46).
+    BUILTIN_RULE_ID = "builtin rule id"
 
 
 def derive_key(secret: bytes, purpose: KeyPurpose) -> bytes:

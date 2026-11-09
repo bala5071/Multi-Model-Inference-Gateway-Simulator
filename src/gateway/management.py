@@ -40,7 +40,7 @@ from gateway.audit import (
     TargetType,
 )
 from gateway.clock import EpochSource
-from gateway.organizations import normalize_name
+from gateway.organizations import check_application_id, normalize_name
 from gateway.permissions import Actor, Resource, authorize
 from gateway.routing import PlansConfig
 from gateway.settings import Scope, SettingsStore
@@ -277,6 +277,9 @@ class ManagementService:
         """Create an application on a plan template, in an enabled organization, with a name
         not used there yet. Its id is generated unless one is given (the CLI)."""
         _require(actor, "applications.create", Resource.organization(organization_id))
+        if application_id is not None:
+            # A given id (the CLI's) is checked before anything else: never empty (docs/46).
+            check_application_id(application_id)
         # The checks and the insert in one transaction: the organization cannot be disabled,
         # nor the name taken, between them (docs/36).
         async with self.store.write_transaction():

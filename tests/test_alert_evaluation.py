@@ -675,7 +675,7 @@ def test_migration_16_adds_the_lease_and_the_incident_tables(tmp_path: Path) -> 
     connection = open_database(tmp_path / "gateway.db")
     runner = MigrationRunner(connection, MIGRATIONS, SystemEpoch())
     runner.migrate(15)
-    assert runner.migrate() == (16,)
+    assert runner.migrate(16) == (16,)
     tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"alert_lease", "incidents", "incident_notifications"} <= tables
     # The lease's row is made by the first attempt to take it.

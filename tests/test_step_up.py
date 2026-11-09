@@ -160,8 +160,9 @@ async def _window(accounts: Accounts, session: tuple[str, str]) -> float | None:
 
 
 async def test_every_flagged_action_needs_step_up_and_passes_with_it(accounts: Accounts) -> None:
-    # 24 before the settings plan, and its two loosen_egress rows (docs/40), declared for S3.
-    assert len(FLAGGED) == 26
+    # 24 before the settings plan, its two loosen_egress rows (docs/40), declared for S3, and
+    # alert_channels.write (docs/46).
+    assert len(FLAGGED) == 27
     async with console(accounts) as c:
         for action in FLAGGED:
             session = await c.login(_who(action))
@@ -494,6 +495,8 @@ def test_the_table_has_a_consume_column_and_it_always_means_step_up() -> None:
         # Loosening where prompts go (docs/40): declared in S2, reached from S3.
         "settings.loosen_egress",
         "org_settings.loosen_egress",
+        # Creating, changing, re-enabling an alert channel and rotating its key (docs/46).
+        "alert_channels.write",
     }
     assert all(PERMISSIONS[a].step_up for a in consumed)
 
