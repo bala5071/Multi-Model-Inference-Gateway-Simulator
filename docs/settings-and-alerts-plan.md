@@ -1318,6 +1318,25 @@ Postgres and the yield on SQLite, measured again at 1 to 5,000 applications. Beh
 unchanged: every existing evaluator and incident test passes as it is. No outbound connection.
 A4 itself waits for its own plan's approval.
 
+**C1, as agreed when it started (2026-11-09).** Its row above: the console's **Settings**
+(per application) and **Organization settings** screens of section 16, on the endpoints already
+merged, and nothing from C2. Frontend only: no backend change.
+
+- **Where it lives:** a second page of `frontend/`, `console.html` with its code in
+  `src/console/`, built beside the dashboard and served by the existing `/dashboard` mount at
+  `/dashboard/console.html`. The dashboard is unchanged. CLAUDE.md's rule for `frontend/` is
+  rewritten: the console logs in, sends the CSRF token and asks for step-up, but holds no rules
+  of its own.
+- **No secret in the browser's storage,** no step-up password kept, no inline script (a content
+  security policy on the built page). The CSRF token is held in memory only.
+- **Moved to C2,** with the screens they belong to: the test that a webhook URL is never
+  rendered (only its origin), and the evaluator-state banner. Where C2 needs the evaluator's
+  state it reads it from `/healthz`.
+- **E2e** runs a second Playwright server: the plain server on a temporary database, with its
+  test secrets generated at the start of the run, never committed or printed.
+- **Its mutations:** the plan names none for the console. C1 makes one for each rule it has
+  about who may do what and where a secret may go (note 47).
+
 **A3, as agreed when it started (2026-11-03).** Its row above and nothing from A4 or later; no
 outbound connection, no new secret. Where the row and sections 8 to 11 meet A4's outbox, the
 safe reading: **A3 records each notification on its incident** (`firing`, `firing_again`,
