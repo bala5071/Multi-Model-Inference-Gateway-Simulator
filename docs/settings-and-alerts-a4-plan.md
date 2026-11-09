@@ -7,7 +7,8 @@ first, and any conflict with the main plan is decided by the reviewer.
 **Status:** proposed 2026-11-05. The reviewer's decisions of 2026-11-08 are applied
 throughout (section 1), and section 4.2 checks the webhook path against the reviewer's list.
 **Approved 2026-11-08** (#38 merged), with the additions of section 21; built in the two groups
-of section 22.
+of section 22. Group 1 was accepted on 2026-11-08, with the reviewer's decisions for group 2 of
+section 23.
 
 **Scope.** Part F's A4 row, the four items moved to A4 when A2 started, and nothing from A5 or
 later:
@@ -196,7 +197,8 @@ else is permanent.
     holds a transaction raises.
   - **The test:** a webhook that never answers (the scripted network hangs after accepting).
     With 4 such deliveries running on one instance and the pool at 3, the evaluator's cycle
-    completes, and a fifth delivery's claim and outcome go through.
+    completes, chat requests finish, and a fifth delivery's claim and outcome go through on a
+    second worker over the same database and pool (an instance runs at most 4; section 23).
   - **The mutation (POOL-HOLD):** the HTTP call made inside the claim's transaction fails
     that test.
   - On SQLite the worker gives the event loop back between deliveries.
@@ -237,8 +239,10 @@ the variable.
   channels and does not count against the caps.
 - **Test sends** are counted in the window counters (Valkey or memory); a counter that cannot
   answer refuses.
-- **Instances must agree:** each instance hashes its four values into the ceilings row of the
-  main plan's decision 19, so a mismatch between instances is reported.
+- **Instances must agree** (section 23, decision 1): the main plan's decision 19 was never built,
+  so A4 builds its ceilings row for these four values only, in migration 17 and schema 6. Each
+  instance writes its values and their hash on every lease attempt and compares them with the
+  other live instances'; a difference is an event and a warning, and refuses nothing.
 
 ## 8. The four items moved from A2
 
@@ -590,3 +594,22 @@ One draft PR, two groups of commits, one report with a section for each.
 Work stops at the end of group 1 if anything blocks group 2: a conflict with this plan, a
 surviving mutation of a real, untested rule, or a failed check. A conflict touching
 authentication, step-up, secrets or where data can go is never resolved by the builder.
+
+## 23. The reviewer's decisions for group 2 (2026-11-08)
+
+Group 1 stopped on one conflict: section 7 relied on "the ceilings row of the main plan's
+decision 19", which was never built.
+
+1. **The ceilings row is built in A4, for the four caps only,** in migration 17 and Postgres
+   schema 6 (unmerged, so no new migration). The comparison is an event and a warning log line,
+   and refuses nothing. Conditions:
+   - only live instances count: a dead instance's row stops counting after a stated time (60 s:
+     six missed lease attempts), with a test;
+   - the row and the event hold no secret or URL; the event may name the caps that differ;
+   - a two-instance test with differing caps, a matching case with no event, and a mutation that
+     removes the comparison.
+2. **The pool test** runs the fifth delivery on a second worker over the same database and pool,
+   and keeps the check that the evaluator completes cycles and chat requests finish while all
+   four slots hang.
+3. **Group 1 is accepted.** Group 2 is built on the same branch, with the `/test` endpoint, its
+   permission row's mutation and its tests, and one report with both groups' mutation tables.
