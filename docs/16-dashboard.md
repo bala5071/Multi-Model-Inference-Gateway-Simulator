@@ -19,6 +19,8 @@ Tests: `frontend/src/**/*.test.ts(x)` (Vitest), `tests/test_dashboard.py`.
   time on the calibrated profiles of note 01, with placeholder prices; with real models most of the Capacity tab is unavailable
   (note 15). The dashboard labels neither; note 12 still applies to how the numbers are read.
 - **The Playground tab is described in note 17**, which added it.
+- **The admin console is a second page of the same build** (`/dashboard/console.html`, note
+  47), with its own login. This note is about the dashboard, which it leaves unchanged.
 
 ## Running it
 

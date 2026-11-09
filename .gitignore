@@ -230,6 +230,8 @@ models/
 # Dashboard: dependencies and build output (npm run build in frontend/)
 frontend/node_modules/
 src/gateway/dashboard/
+# The admin console's e2e database, made afresh by frontend/e2e/console_server.py each run.
+frontend/e2e/.console-state/
 
 # Playwright output
 frontend/e2e/results/
