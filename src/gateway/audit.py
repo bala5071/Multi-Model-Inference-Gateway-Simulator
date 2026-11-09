@@ -187,6 +187,7 @@ class Reason(StrEnum):
     CHANNEL_VERSION_CONFLICT = "channel_version_conflict"
     CHANNEL_NAME_TAKEN = "channel_name_taken"
     TEST_SEND_LIMITED = "test_send_limited"
+    CHANNEL_DISABLED = "channel_disabled"
 
 
 # The only keys ``details`` may have, and the type of each value.
@@ -273,6 +274,7 @@ FIXED_VALUES: Mapping[str, frozenset[str]] = {
             "http_5xx",
             "payload_too_large",
             "channel_secret_unreadable",
+            "channel_disabled",
             "channel_gone",
         }
     ),

@@ -1,34 +1,58 @@
-"""The notices a change sends, queued in the outbox in that change's transaction (docs/46).
+"""What a notification is, where it goes, and how it is queued in the outbox: in the transaction
+of the change it belongs to (docs/46).
 
+- **An incident's notifications** (``prepare``): the evaluator's change and its recorded
+  notifications' deliveries, queued by ``apply``'s ``then`` in the change's transaction (M22).
+  The first one that is delivered fixes the incident's channels (``notify_channels``, ids only);
+  every later one goes to those that still exist and are enabled, never to the rule's channels
+  as they are now (A4-7). A held notification (quiet hours) gets no delivery: its summary does.
 - **``rule_weakened``** (M29): a write that makes an enabled rule fire less goes to the rule's
   channels **as they were before the write**, naming the rule and the fields, never the user.
 - **``channel_removed``**: disabling or deleting an enabled channel goes to the organization's
   other default channels.
+- **``suppressed_summary``** (``summaries``): once an hour has ended, one an organization for
+  the notifications the caps suppressed in it (a unique index, M26), to the default channels,
+  not counted.
+- **``channel_delivery_failing``**, the built-in (its incidents are the evaluator's): to every
+  default channel but the failing one (CDF-3), under the organization's own rule id
+  (``builtin_rule_ids``: an HMAC of the organization id under its own derived key).
 
 **Where a notification goes** (``destinations``): ``["organization defaults"]`` is the
 organization's enabled default channels; channel ids are those of them that exist **in the
 organization** now and are enabled, checked again here at queue time (M15's second check; the
 first is the rule write's). ``[]`` is nowhere.
 
-Group 1 queues; group 2's delivery worker sends, and counts these notices against the caps.
+**The caps** (``queue``): a notification, whatever its number of channels, counts once against
+its rule's hour and its organization's hour, by one conditional upsert each in the outbox's
+transaction (M25), the hour from the store clock. Over either, its deliveries are queued as
+``suppressed`` with ``rule_cap`` or ``organization_cap``. Counted in that order: one its
+organization refuses has counted against its rule.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import hashlib
+import hmac
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from gateway.alerts.caps import AlertCaps
 from gateway.alerts.channels import Channel, ChannelStore
 from gateway.alerts.outbox import DELIVERY_ID_PREFIX, Delivery, DeliveryState, OutboxStore
 from gateway.alerts.payload import (
     AlertPayload,
     PayloadApplication,
     PayloadDetails,
+    PayloadIncident,
     PayloadRule,
     PayloadTooLargeError,
+    iso,
 )
-from gateway.applications import ApplicationStore
-from gateway.clock import EpochSource
+from gateway.alerts.webhook import ORGANIZATION_CAP, RULE_CAP
+from gateway.applications import Application, ApplicationStore
+from gateway.clock import EpochSource, EpochStoreClock, StoreClock
+from gateway.incidents import Change, Incident, Notification, NotificationKind, NotificationState
 from gateway.signals import SIGNALS
 
 if TYPE_CHECKING:
@@ -38,6 +62,22 @@ ORGANIZATION_DEFAULTS = "organization defaults"
 NOTIFICATION_ID_PREFIX = "ntf_"
 PAYLOAD_TOO_LARGE = "payload_too_large"
 CHANNEL_GONE = "channel_gone"
+HOUR_MS = 60 * 60 * 1000.0
+BUILTIN_RULE_PREFIX = "rul_cdf_"
+# What the built-in's firing notification is, as a payload's kind.
+BUILTIN_KIND = "channel_delivery_failing"
+
+
+def builtin_rule_ids(key: bytes) -> Callable[[str], str]:
+    """The built-in's rule id of an organization: ``rul_cdf_`` and the first 16 hex characters
+    of an HMAC of its id under ``key`` (``KeyPurpose.BUILTIN_RULE_ID``): fixed per
+    organization, different for each, revealing nothing (the plan's decision 12)."""
+
+    def rule_id(organization_id: str) -> str:
+        digest = hmac.new(key, organization_id.encode(), hashlib.sha256).hexdigest()
+        return BUILTIN_RULE_PREFIX + digest[:16]
+
+    return rule_id
 
 
 def rule_payload(rule: AlertRule) -> PayloadRule:
@@ -63,6 +103,14 @@ def pick(
     return [c for c in found if c.id != exclude]
 
 
+def _held(reason: str | None) -> int | None:
+    # A quiet-hours summary's reason is "<n> held" (gateway.evaluator.quiet_hours_over).
+    if reason is None or not reason.endswith(" held"):
+        return None
+    count = reason.split(" ", 1)[0]
+    return int(count) if count.isdigit() else None
+
+
 class Notices:
     def __init__(
         self,
@@ -71,12 +119,25 @@ class Notices:
         applications: ApplicationStore,
         epoch: EpochSource,
         random_bytes: Callable[[int], bytes],
+        *,
+        caps: AlertCaps | None = None,
+        store_clock: StoreClock | None = None,
+        builtin_rule_id: Callable[[str], str] | None = None,
     ) -> None:
+        """``caps``: the caps counted when a notification is queued (None: none, as in the
+        tests of group 1). ``store_clock``: the time notifications are queued at and their
+        hour counted in (the database's where it is shared); ``epoch`` without it.
+        ``builtin_rule_id``: the built-in's rule id of an organization (None: no built-in)."""
         self.channels = channels
         self.outbox = outbox
         self._applications = applications
         self._epoch = epoch
         self._random_bytes = random_bytes
+        self.caps = caps
+        self.store_clock: StoreClock = (
+            store_clock if store_clock is not None else EpochStoreClock(epoch)
+        )
+        self.builtin_rule_id = builtin_rule_id
 
     def new_id(self, prefix: str) -> str:
         return prefix + self._random_bytes(8).hex()
@@ -92,18 +153,49 @@ class Notices:
             await self.channels.organization_channels(organization_id), wanted, exclude=exclude
         )
 
-    async def queue(self, payload: AlertPayload, channels: Sequence[Channel]) -> int:
-        """One delivery of ``payload`` per channel, in the caller's transaction. A body over the
-        size bound is queued as failed (``payload_too_large``), never cut short."""
+    async def _counted(
+        self, organization_id: str, rule_id: str | None, now_ms: float
+    ) -> str | None:
+        """Count one notification against its caps: None if under both, else the code."""
+        if self.caps is None:
+            return None
+        hour = int(now_ms // HOUR_MS)
+        if rule_id is not None and not await self.outbox.count_notification(
+            "rule", rule_id, hour, self.caps.per_rule
+        ):
+            return RULE_CAP
+        if not await self.outbox.count_notification(
+            "organization", organization_id, hour, self.caps.per_organization
+        ):
+            return ORGANIZATION_CAP
+        return None
+
+    async def queue(
+        self,
+        payload: AlertPayload,
+        channels: Sequence[Channel],
+        *,
+        rule_id: str | None = None,
+        counted: bool = True,
+        now_ms: float | None = None,
+    ) -> int:
+        """One delivery of ``payload`` per channel, in the caller's transaction: counted once
+        against the caps (unless ``counted`` is false: a summary), suppressed over them. A body
+        over the size bound is queued as failed (``payload_too_large``), never cut short.
+        ``now_ms``: the store's time, if the caller has it."""
         if not channels:
             return 0
-        now = self._epoch.epoch_ms()
+        now = now_ms if now_ms is not None else await self.store_clock.now_ms()
         state, code = DeliveryState.QUEUED, None
         attempt_at: float | None = now
         try:
             body = payload.body()
         except PayloadTooLargeError:
             body, state, code, attempt_at = "", DeliveryState.FAILED, PAYLOAD_TOO_LARGE, None
+        if state is DeliveryState.QUEUED and counted:
+            capped = await self._counted(payload.organization_id, rule_id, now)
+            if capped is not None:
+                state, code, attempt_at = DeliveryState.SUPPRESSED, capped, None
         return await self.outbox.queue(
             [
                 Delivery(
@@ -114,6 +206,115 @@ class Notices:
                 for c in channels
             ]
         )  # fmt: skip
+
+    # --- the evaluator's notifications ----------------------------------------------------------
+
+    def incident_payload(
+        self,
+        notification: Notification,
+        incident: Incident,
+        rule: AlertRule | None,
+        application: Application | None,
+    ) -> AlertPayload:
+        org = incident.organization_id
+        builtin = incident.application_id == ""
+        kind = notification.kind.value
+        if builtin and notification.kind is NotificationKind.FIRING:
+            kind = BUILTIN_KIND
+        console = (
+            f"/v1/admin/orgs/{org}/alert-channels/{incident.series_key}"
+            if builtin
+            else f"/v1/admin/orgs/{org}/applications/{incident.application_id}"
+            f"/incidents/{incident.id}"
+        )
+        details = None
+        if builtin:
+            details = PayloadDetails(channel=incident.series_key)
+        elif notification.kind is NotificationKind.QUIET_HOURS_SUMMARY:
+            details = PayloadDetails(held=_held(notification.reason))
+        return AlertPayload(
+            notification.id,
+            kind,
+            notification.at_ms,
+            org,
+            None if application is None else PayloadApplication(application.id, application.name),
+            None if rule is None or builtin else rule_payload(rule),
+            PayloadIncident(
+                incident.id, incident.state.value, incident.series_key or None, incident.value,
+                iso(incident.fired_at_ms), iso(incident.resolved_at_ms),
+                incident.resolve_reason.value if incident.resolve_reason is not None else None,
+            ),
+            console,
+            details,
+        )  # fmt: skip
+
+    async def prepare(
+        self, change: Change, rule: AlertRule | None, now_ms: float
+    ) -> tuple[Change, Callable[[], Awaitable[None]] | None]:
+        """``change`` with its incident's first channels fixed if this is its first delivered
+        notification, and what queues its recorded notifications' deliveries (``apply``'s
+        ``then``, in the change's transaction), or None if it has none. The reads (the
+        application, the channels) are made here, before the transaction."""
+        deliverable = [n for n in change.notifications if n.state is NotificationState.RECORDED]
+        if not deliverable:
+            return change, None
+        incident = change.incident
+        organization_id = incident.organization_id
+        builtin = incident.application_id == ""
+        # The built-in never sends to the channel that is failing (CDF-3).
+        exclude = incident.series_key if builtin else None
+        if incident.notify_channels is None:
+            wanted: Sequence[str] = (
+                [ORGANIZATION_DEFAULTS] if builtin else (rule.spec.channels if rule else [])
+            )
+            channels = await self.destinations(organization_id, wanted, exclude=exclude)
+            incident = replace(incident, notify_channels=tuple(c.id for c in channels))
+            change = replace(change, incident=incident)
+        else:
+            # Its first channels, those still in the organization and enabled (A4-7).
+            channels = await self.destinations(
+                organization_id, incident.notify_channels, exclude=exclude
+            )
+        application = (
+            None if builtin else await self._applications.get_application(incident.application_id)
+        )
+        payloads = [self.incident_payload(n, incident, rule, application) for n in deliverable]
+        rule_id = incident.rule_id
+
+        async def then() -> None:
+            for payload in payloads:
+                await self.queue(payload, channels, rule_id=rule_id, now_ms=now_ms)
+
+        return change, then
+
+    async def summaries(self, hour: int, now_ms: float) -> int:
+        """Each organization's ``suppressed_summary`` of ``hour`` (an hour since the epoch, on
+        the store clock), queued once (the unique index) to its default channels, not counted:
+        how many were queued here."""
+        start, end = hour * HOUR_MS, (hour + 1) * HOUR_MS
+        queued = 0
+        for found in await self.outbox.suppressed(start, end):
+            async with self.outbox.delivery_transaction():
+                notification_id = self.new_id(NOTIFICATION_ID_PREFIX)
+                if not await self.outbox.add_summary(
+                    found.organization_id, hour, notification_id, now_ms
+                ):
+                    continue  # another holder's (M26)
+                org = found.organization_id
+                payload = AlertPayload(
+                    notification_id, "suppressed_summary", now_ms, org,
+                    console_path=f"/v1/admin/orgs/{org}/alert-channels",
+                    details=PayloadDetails(
+                        notifications=found.notifications, rules=found.rules,
+                        period_start=iso(start), period_end=iso(end),
+                    ),
+                )  # fmt: skip
+                channels = await self.destinations(org, [ORGANIZATION_DEFAULTS])
+                await self.queue(payload, channels, counted=False, now_ms=now_ms)
+                queued += 1
+        return queued
+
+    # --- the notices of a change ----------------------------------------------------------------
 
     async def rule_weakened(
         self, application_id: str, before: AlertRule, fields: Sequence[str], *, deleted: bool
@@ -136,7 +337,7 @@ class Notices:
             f"/alert-rules/{before.id}",
             PayloadDetails(fields=tuple(fields), deleted=deleted),
         )
-        return await self.queue(payload, destinations)
+        return await self.queue(payload, destinations, rule_id=before.id)
 
     async def channel_removed(self, channel: Channel) -> None:
         destinations = await self.destinations(

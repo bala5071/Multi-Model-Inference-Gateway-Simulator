@@ -34,6 +34,7 @@ from gateway.users import AccountStore, SqliteAccountStore
 
 if TYPE_CHECKING:
     from gateway.alertrules import RuleStore
+    from gateway.alerts.caps import CeilingsStore
     from gateway.alerts.channels import ChannelStore
     from gateway.alerts.outbox import OutboxStore
     from gateway.incidents import IncidentStore
@@ -170,6 +171,8 @@ class StateBackend:
     incidents: IncidentStore
     channels: ChannelStore
     outbox: OutboxStore
+    # Each live instance's alert caps, compared (docs/46): reported, never refused.
+    ceilings: CeilingsStore
     clock: StoreClock
 
 
@@ -193,6 +196,12 @@ def _sqlite_channels(connection: sqlite3.Connection) -> tuple[ChannelStore, Outb
     return SqliteChannelStore(connection), SqliteOutboxStore(connection)
 
 
+def _sqlite_ceilings(connection: sqlite3.Connection, epoch: EpochSource) -> CeilingsStore:
+    from gateway.alerts.caps import SqliteCeilingsStore
+
+    return SqliteCeilingsStore(connection, epoch.epoch_ms)
+
+
 def sqlite_state(connection: sqlite3.Connection, epoch: EpochSource) -> StateBackend:
     """Every store over one migrated SQLite connection; windows on ``epoch``."""
     return StateBackend(
@@ -208,5 +217,6 @@ def sqlite_state(connection: sqlite3.Connection, epoch: EpochSource) -> StateBac
         incidents=_sqlite_incidents(connection, epoch),
         channels=_sqlite_channels(connection)[0],
         outbox=_sqlite_channels(connection)[1],
+        ceilings=_sqlite_ceilings(connection, epoch),
         clock=EpochStoreClock(epoch),
     )

@@ -333,21 +333,28 @@ class InMemoryConnectionTestCounter:
         clock: Clock,
         tests_per_hour: int = TESTS_PER_HOUR,
         tests_per_organization_hour: int = TESTS_PER_ORGANIZATION_HOUR,
+        *,
+        reason: Reason = Reason.TEST_RATE_LIMITED,
+        what: tuple[str, str] = ("a provider", "an organization's providers"),
     ) -> None:
+        """``reason`` and ``what``: the refusal's code and words (an alert channel's test sends
+        count the same way, docs/46)."""
         self._clock = clock
         self._tests_per_hour = tests_per_hour
         self._tests_per_organization_hour = tests_per_organization_hour
+        self._reason = reason
+        self._what = what
         self._tests: dict[str, deque[float]] = {}
         self._organization_tests: dict[str, deque[float]] = {}
 
     async def count(self, provider_id: str, organization_id: str) -> None:
         now = self._clock.now_ms()
         windows = (
-            (self._tests.setdefault(provider_id, deque()), self._tests_per_hour, "a provider"),
+            (self._tests.setdefault(provider_id, deque()), self._tests_per_hour, self._what[0]),
             (
                 self._organization_tests.setdefault(organization_id, deque()),
                 self._tests_per_organization_hour,
-                "an organization's providers",
+                self._what[1],
             ),
         )
         for times, limit, what in windows:
@@ -355,7 +362,7 @@ class InMemoryConnectionTestCounter:
                 times.popleft()
             if len(times) >= limit:
                 raise ManagementRefusal(
-                    Reason.TEST_RATE_LIMITED,
+                    self._reason,
                     f"at most {limit} tests of {what} an hour; try again later",
                 )
         for times, _, _ in windows:

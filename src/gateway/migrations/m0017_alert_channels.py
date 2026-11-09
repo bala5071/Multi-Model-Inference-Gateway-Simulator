@@ -1,5 +1,6 @@
-"""Migration 17: alert channels, their sealed secrets, the notification outbox, the caps and the
-suppression summaries, and the incident's first channels. See docs/46-alert-channels.md and
+"""Migration 17: alert channels, their sealed secrets, the notification outbox, the caps, the
+suppression summaries, each instance's cap values (``instance_ceilings``), and the incident's
+first channels. See docs/46-alert-channels.md and
 docs/settings-and-alerts-a4-plan.md, section 12.
 
 New tables only, and one column added in place (``incidents.notify_channels``): nothing is
@@ -93,7 +94,17 @@ SUMMARIES = (
 ONE_SUMMARY = (
     "CREATE UNIQUE INDEX suppression_summaries_one ON suppression_summaries (organization_id, hour)"
 )
-NOTIFY_CHANNELS = "ALTER TABLE incidents ADD COLUMN notify_channels TEXT NOT NULL DEFAULT '[]'"
+# Each live instance's four cap values and their digest, compared on every lease attempt; a
+# mismatch is reported, never refused (the main plan's decision 19, for the caps only).
+CEILINGS = (
+    "CREATE TABLE instance_ceilings ("
+    " instance_id TEXT PRIMARY KEY,"
+    " digest TEXT NOT NULL,"
+    " ceilings TEXT NOT NULL,"
+    " seen_at_ms REAL NOT NULL)"
+)
+# NULL until the incident first notifies: then the channel ids it went to, set once.
+NOTIFY_CHANNELS = "ALTER TABLE incidents ADD COLUMN notify_channels TEXT"
 
 EMPTY_ID_CONFLICT = (
     "an application has an empty id; the built-in channel_delivery_failing keeps its "
@@ -120,7 +131,7 @@ def _preview(connection: sqlite3.Connection) -> MigrationPreview:
     return MigrationPreview(
         changes=(
             "create tables alert_channels, channel_secrets, notification_deliveries, "
-            "notification_caps and suppression_summaries",
+            "notification_caps, suppression_summaries and instance_ceilings",
             "add column incidents.notify_channels",
         ),
         conflicts=_conflicts(connection),
@@ -137,7 +148,7 @@ def _up(connection: sqlite3.Connection) -> None:
         raise MigrationError("migration 17 refused, nothing was changed: " + "; ".join(conflicts))
     for statement in (
         CHANNELS, CHANNEL_NAMES, SECRETS, DELIVERIES, ONE_PER_CHANNEL, DUE, BY_CHANNEL, CAPS,
-        SUMMARIES, ONE_SUMMARY,
+        SUMMARIES, ONE_SUMMARY, CEILINGS,
     ):  # fmt: skip
         connection.execute(statement)
     # Applied again after a rollback, the column is there already (the rollback keeps it).
@@ -147,6 +158,7 @@ def _up(connection: sqlite3.Connection) -> None:
 
 def _down(connection: sqlite3.Connection) -> None:
     for table in (
+        "instance_ceilings",
         "suppression_summaries",
         "notification_caps",
         "notification_deliveries",

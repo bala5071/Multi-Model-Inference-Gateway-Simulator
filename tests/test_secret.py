@@ -67,9 +67,12 @@ def _reveal_calls() -> list[tuple[str, str]]:
 
 
 def test_reveal_is_called_only_by_the_header_builder() -> None:
+    """And, from A4 (docs/46, M36), by the webhook request's builder: the URL and the signing
+    keys, in one call."""
     assert _reveal_calls() == [
         ("adapters/http.py", "credential_headers"),
         ("adapters/http.py", "credential_headers"),
+        ("alerts/webhook.py", "build_request"),
     ]
 
 

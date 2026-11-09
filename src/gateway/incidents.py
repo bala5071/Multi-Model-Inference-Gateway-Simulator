@@ -12,16 +12,21 @@ changed only from the state and revision it was read at, so a change made twice 
 evaluators, a retried cycle) is made once. A notification is recorded in the same transaction
 as the change it belongs to: one rolled back records nothing.
 
-**Notifications go nowhere until A4.** They are recorded on the incident (``recorded``, or
-``held`` in quiet hours and ``released`` when their summary is recorded) and shown with it; A4
-delivers them.
+**Notifications are delivered from A4** (docs/46). They are recorded on the incident
+(``recorded``, or ``held`` in quiet hours and ``released`` when their summary is recorded), and a
+recorded one's deliveries are queued in the outbox **in the same transaction** (``apply``'s
+``then``). **An incident's first channels** (``notify_channels``) are the channel ids its first
+delivered notification went to: NULL until then, written once by the statement that records it
+(``WHERE notify_channels IS NULL``), and never by the compare-and-set update, which leaves the
+column out. Its later notifications go to those ids.
 """
 
 from __future__ import annotations
 
 import contextlib
+import json
 import sqlite3
-from collections.abc import AsyncIterator, Collection, Iterable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field, fields, replace
 from enum import StrEnum
 from typing import Any, Protocol
@@ -52,6 +57,9 @@ class ResolveReason(StrEnum):
     RULE_DISABLED = "rule_disabled"
     RULE_DELETED = "rule_deleted"
     RULE_CHANGED = "rule_changed"
+    # The built-in channel_delivery_failing (docs/46): the channel delivered, or was deleted.
+    CHANNEL_DELIVERED = "channel_delivered"
+    CHANNEL_DELETED = "channel_deleted"
 
 
 class NotificationKind(StrEnum):
@@ -101,6 +109,9 @@ class Incident:
     reopened: int = 0
     revision: int = 1
     updated_at_ms: float = 0.0
+    # The channel ids the first delivered notification went to (None: none yet). Set once;
+    # the compare-and-set update never writes it (A4-8).
+    notify_channels: tuple[str, ...] | None = None
 
     @property
     def open(self) -> bool:
@@ -167,10 +178,12 @@ class IncidentStore(Protocol):
         statement, only while ``fence`` still holds the lease."""
         ...
 
-    async def apply(self, fence: Fence, change: Change) -> bool:
+    async def apply(self, fence: Fence, change: Change, then: Then | None = None) -> bool:
         """Make ``change`` if ``fence`` holds the lease and the incident is still at the state
-        and revision it was read at (or, new, none is open for its rule and series): the change
-        and its notifications in one transaction. Whether it was made."""
+        and revision it was read at (or, new, none is open for its rule and series): the change,
+        its notifications, the incident's first channels (if it has none yet) and ``then`` (the
+        outbox: the notifications' deliveries and their caps, M22) in one transaction. Whether
+        it was made; ``then`` runs only if it was, and if it raises nothing is made."""
         ...
 
     async def acknowledge(
@@ -213,7 +226,12 @@ class IncidentStore(Protocol):
         ...
 
 
+# What runs inside ``apply``'s transaction once the incident is written: the outbox (M22).
+Then = Callable[[], Awaitable[None]]
 INCIDENT_COLUMNS = tuple(f.name for f in fields(Incident))
+# What the compare-and-set update writes: every column but the id and the first channels, which
+# are written once (A4-8).
+UPDATE_COLUMNS = tuple(c for c in INCIDENT_COLUMNS[1:] if c != "notify_channels")
 NOTIFICATION_COLUMNS = tuple(f.name for f in fields(Notification))
 
 
@@ -225,8 +243,29 @@ def incident_row(incident: Incident) -> tuple[Any, ...]:
             value = int(value)
         elif isinstance(value, StrEnum):
             value = value.value
+        elif name == "notify_channels" and value is not None:
+            value = channels_text(value)
         values.append(value)
     return tuple(values)
+
+
+def update_row(incident: Incident) -> tuple[Any, ...]:
+    """The values of ``UPDATE_COLUMNS``, in their order."""
+    row = dict(zip(INCIDENT_COLUMNS, incident_row(incident), strict=True))
+    return tuple(row[c] for c in UPDATE_COLUMNS)
+
+
+def channels_text(channels: Sequence[str]) -> str:
+    return json.dumps(list(channels), separators=(",", ":"))
+
+
+def channels_of(text: str | None) -> tuple[str, ...] | None:
+    if text is None:
+        return None
+    found = json.loads(text)
+    if not isinstance(found, list) or not all(isinstance(c, str) for c in found):
+        raise ValueError("an incident's first channels are a list of ids")
+    return tuple(found)
 
 
 def incident_from_row(row: Sequence[Any]) -> Incident:
@@ -239,6 +278,7 @@ def incident_from_row(row: Sequence[Any]) -> Incident:
         found[name] = bool(found[name])
     for name in ("rule_version", "false_count", "reopened", "revision"):
         found[name] = int(found[name])
+    found["notify_channels"] = channels_of(found["notify_channels"])
     return Incident(**found)
 
 
@@ -312,11 +352,14 @@ class InMemoryIncidentStore:
         )
         return True
 
-    async def apply(self, fence: Fence, change: Change) -> bool:
+    async def apply(self, fence: Fence, change: Change, then: Then | None = None) -> bool:
         if not self._fenced(fence, self._epoch.epoch_ms()):
             return False
         new = change.incident
         found = self._incidents.get(new.id)
+        if found is not None and found.notify_channels is not None:
+            # Set once: the update leaves them as they are (A4-8).
+            new = replace(new, notify_channels=found.notify_channels)
         if change.expected_state is None:
             if found is not None or any(
                 i.open and i.rule_id == new.rule_id and i.series_key == new.series_key
@@ -329,6 +372,8 @@ class InMemoryIncidentStore:
             or found.revision != change.expected_revision
         ):
             return False
+        if then is not None:
+            await then()  # before anything is kept: if it raises, nothing is made
         self._incidents[new.id] = new
         if change.release_held:
             self._notifications = [
@@ -462,7 +507,7 @@ class SqliteIncidentStore:
         )
         return done.rowcount == 1
 
-    async def apply(self, fence: Fence, change: Change) -> bool:
+    async def apply(self, fence: Fence, change: Change, then: Then | None = None) -> bool:
         now = self._epoch.epoch_ms()
         new = change.incident
         row = incident_row(new)
@@ -477,17 +522,23 @@ class SqliteIncidentStore:
                 except sqlite3.IntegrityError:  # one open incident a series, by the index
                     return False
             else:
-                columns = INCIDENT_COLUMNS[1:]
                 done = self._db.execute(
-                    f"UPDATE incidents SET {', '.join(f'{c} = ?' for c in columns)}"
+                    f"UPDATE incidents SET {', '.join(f'{c} = ?' for c in UPDATE_COLUMNS)}"
                     f" WHERE id = ? AND state = ? AND revision = ? AND {_FENCE_SQLITE}",
                     (
-                        *row[1:], new.id, change.expected_state.value, change.expected_revision,
-                        fence.holder, fence.epoch, now,
+                        *update_row(new), new.id, change.expected_state.value,
+                        change.expected_revision, fence.holder, fence.epoch, now,
                     ),
                 )  # fmt: skip
             if done.rowcount != 1:
                 return False
+            if change.expected_state is not None and new.notify_channels is not None:
+                # The first channels, once: only while the incident has none.
+                self._db.execute(
+                    "UPDATE incidents SET notify_channels = ?"
+                    " WHERE id = ? AND notify_channels IS NULL",
+                    (channels_text(new.notify_channels), new.id),
+                )
             if change.release_held:
                 self._db.execute(
                     "UPDATE incident_notifications SET state = 'released'"
@@ -500,6 +551,8 @@ class SqliteIncidentStore:
                     f" VALUES ({', '.join('?' * len(NOTIFICATION_COLUMNS))})",
                     notification_row(notification),
                 )
+            if then is not None:
+                await then()
         return True
 
     async def acknowledge(

@@ -192,7 +192,7 @@ def _path(endpoint: Endpoint, org: str, channel: str = "chn_00000000000000ff") -
 
 
 async def test_each_channel_route_is_documented_and_declares_its_action() -> None:
-    assert len(ENDPOINTS) == 9
+    assert len(ENDPOINTS) == 10
     async with console() as c:
         declared = {}
         for route in c.app.routes:
@@ -435,7 +435,7 @@ async def test_nothing_crosses_organizations_and_missing_looks_forbidden() -> No
                     endpoint, path, answer.text,
                 )  # fmt: skip
                 checked += 1
-        assert checked == 36  # 6 channel routes x 5 tries, 3 organization-level x 2
+        assert checked == 41  # 7 channel routes x 5 tries, 3 organization-level x 2
         # And both channels are as they were.
         assert (await c.service.store.get_channel(north)) is not None
         assert (await c.service.store.get_channel(south)) is not None

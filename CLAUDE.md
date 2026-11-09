@@ -67,7 +67,10 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   rule (`LocalDestinations`, `GATEWAY_PROVIDER_LOCAL_ALLOW`): a hosted destination only under a
   request scope (`egress_scope`) that allows it when asked, at every request and connection;
   fail closed without one; `operator_client` for the operator's own adapters;
-  `provider_tls_context`, the one pinned TLS context (certifi, environment ignored) (exists)
+  `provider_tls_context`, the one pinned TLS context (certifi, environment ignored);
+  `webhook_client`, the only way a webhook is sent (the guard with no local destination, the
+  port rule at connect, each stage bounded on the injected clock: `StageTimeout`,
+  `TlsFailure`) (exists)
 - `providers.py` — `ProviderConfig`, `ProviderStore` over migrations 10 and 11, `ProviderService`
   (create, update, the organization's and the platform's switches, keys, test-connection with
   probing, `key_unreadable`) and `resolve_provider` (exists)
@@ -119,18 +122,30 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   an organization an hour); `payload.py`: `AlertPayload`, the `json-v1` allowlist, at most
   8 KiB, never cut short; `weakening.py`: `weakened_fields`, each rule field's direction (M29);
   `notices.py`: `Notices` (where a notification goes, checked at queue time; `rule_weakened`
-  and `channel_removed` queued in their write's transaction) (exists)
+  and `channel_removed` queued in their write's transaction; `prepare`, an incident change's
+  deliveries for `apply`'s `then`, its first channels fixed once; the caps counted at queue
+  time; `summaries`; `builtin_rule_ids`); `caps.py`: `AlertCaps`, `caps_from` (the four
+  `GATEWAY_ALERT_CAP_*`/`_TEST_SENDS_*` variables, each 1 to its maximum), `CeilingsWatch` and
+  the `instance_ceilings` stores (each live instance's caps compared, reported never refused);
+  `webhook.py`: `build_request` (the alert modules' one `reveal()`), the signature, `send` (one
+  attempt, the fixed `CODES`, the HTTP libraries' log records of it dropped); `delivery.py`:
+  `DeliveryWorker` (claim, read, send with no transaction held, compare-and-set outcome,
+  retries, at most 4 at once), `TestSends`, `DeliverySetup` (exists)
 - `incidents.py` — `Incident`, the notifications recorded on it (A4 delivers them), the lease
   (`LeaseView`, `Fence`), and `IncidentStore` on memory, SQLite (migration 16) and Postgres
   (schema 5): one open incident a series by a partial unique index, every change a fenced
-  compare-and-set with its notifications in one transaction (docs/45) (exists)
+  compare-and-set with its notifications in one transaction (docs/45); `apply`'s `then`
+  queues the deliveries in that transaction, and `notify_channels` is written once, never by
+  the compare-and-set update (docs/46) (exists)
 - `evaluator.py` — `AlertEvaluator` (the lease attempted every 10 s, a cycle every 30 s by the
   holder, every write fenced by its epoch; the applications a page of 200 at a time, each
   page's reads once through `BulkSignals`, a 20 s time box with the fair resume, the event
   loop given back between applications), `decide` (the one place the incident states are
   decided: cooldown, reopening, reminders, no data, quiet hours), and `Heartbeat` (ok, stale,
   unknown, disabled, from memory: `/healthz`, metrics and the snapshot make no store call)
-  (docs/45) (exists)
+  (docs/45); with `Notices`, the holder's cycle also runs the built-in
+  `channel_delivery_failing` (`builtin_changes`), the hourly suppressed summaries and the
+  expired previous keys, and every lease attempt compares the ceilings (docs/46) (exists)
 - `signals.py` — the alert signals and their minimums, pure, from one application's rollups or
   durable values of its own; "too few to judge", never 0 (docs/43) (exists)
 - `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
@@ -241,8 +256,9 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   step), `PG_INCIDENTS` (schema version 5, migration 16), `PG_CHANNELS` (schema version 6,
   migration 17, refused while an application has an empty id), `PostgresSettingsStore`,
   `PostgresRuleStore`, `PostgresIncidentStore`, `PostgresChannelStore`, `PostgresOutboxStore`,
-  `PostgresDatabase` with three pools (request,
-  management, and the alert evaluator's, which its task takes under `evaluation()`),
+  `PostgresCeilingsStore`, `PostgresDatabase` with three pools (request, management, and the
+  alert evaluator's, 3 connections, which its task and the delivery worker take under
+  `evaluation()`),
   `write_transaction()` taking the global advisory `WRITE_LOCK` with a timeout that
   fails closed (`GATEWAY_STATE_LOCK_TIMEOUT_MS`), `request_transaction()` without it, the SQL
   clock `gateway_now_ms()` (its `StoreClock`), `ready()` for `/readyz`, and `postgres_state`;
@@ -262,8 +278,9 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   12 `modes`, 13 the chat source columns of `usage_events`, 14 `settings_current` and
   `settings_versions`, 15 `alert_rules` (with a data step: every existing application's default
   rules), 16 `alert_lease`, `incidents` and `incident_notifications`, 17 `alert_channels`,
-  `channel_secrets`, `notification_deliveries`, `notification_caps`, `suppression_summaries`
-  and `incidents.notify_channels` (refused while an application has an empty id). The default
+  `channel_secrets`, `notification_deliveries`, `notification_caps`, `suppression_summaries`,
+  `instance_ceilings` and `incidents.notify_channels` (refused while an application has an
+  empty id). The default
   database is in the user's data folder,
   owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
   `restore_database` use SQLite's backup API (exists)
@@ -365,6 +382,9 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   applications, on SQLite and Postgres, timed, its store calls counted and its longest page's
   reads timed (needs
   `GATEWAY_POSTGRES_URL`); the numbers in `docs/45` (exists)
+- `benchmarks/alert_delivery.py` — one delivery in process (claim, read, sign, send on a
+  scripted network, outcome) on SQLite and Postgres (needs `GATEWAY_POSTGRES_URL`); the
+  numbers in `docs/46` (exists)
 - `benchmarks/management_requests.py` — management reads and key writes on the running
   server, beside `/healthz` and `/v1/auth/me`; the numbers in `docs/30` (exists)
 

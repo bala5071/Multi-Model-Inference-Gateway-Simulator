@@ -33,6 +33,12 @@ reads the mode again before each hosted attempt and refuses it if the mode was m
 destination (fail closed). The operator's own adapters go
 through ``operator_client``: local destinations as configured (any scheme, no address check:
 they are the operator's own), hosted ones under every rule above.
+
+**Webhooks** (docs/46) go through ``webhook_client`` only: the same guard with no local
+destination ever, under ``egress_scope(always_hosted)``, plus a port rule checked at connect
+(443, or a port the operator allows), and a bound on each stage on the injected clock (name
+resolution, connect, the TLS handshake, each write and each read: ``StageTimeout``). A failed
+handshake is ``TlsFailure``. Neither carries anything but the stage's name.
 """
 
 from __future__ import annotations
@@ -52,6 +58,8 @@ import httpcore
 import httpx
 
 from gateway.chat import ProviderError, ProviderErrorCode
+from gateway.clock import Clock
+from gateway.overload import RequestTimeoutError, run_with_timeout
 
 Resolver = Callable[[str, int], Awaitable[list[str]]]
 Address = ipaddress.IPv4Address | ipaddress.IPv6Address
@@ -67,6 +75,24 @@ class EgressRefused(ProviderError):
 
     def __init__(self, reason: str) -> None:
         super().__init__(ProviderErrorCode.EGRESS_REFUSED, detail=reason)
+
+
+# EgressRefused's detail for a port not allowed (webhooks: 443, or the operator's list).
+PORT_REFUSED = "port"
+
+
+class StageTimeout(Exception):
+    """A webhook stage (``resolve``, ``connect``, ``tls``, ``write``, ``read``) took longer than
+    its bound. Its message is the stage's name alone."""
+
+    def __init__(self, stage: str) -> None:
+        super().__init__(stage)
+        self.stage = stage
+
+
+class TlsFailure(Exception):
+    """A webhook's TLS handshake failed (a certificate not verified, a name not matching): a
+    permanent failure. It carries nothing of the cause."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,10 +263,13 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
         resolver: Resolver,
         inner: httpcore.AsyncNetworkBackend | None = None,
         local: LocalDestinations = NO_LOCAL_DESTINATIONS,
+        ports: frozenset[int] | None = None,
     ):
+        """``ports``: the only ports a hosted connection may use (webhooks); None, any."""
         self._resolver = resolver
         self._inner = inner if inner is not None else httpcore.AnyIOBackend()
         self._local = local
+        self._ports = ports
 
     async def connect_tcp(
         self,
@@ -262,6 +291,9 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
         # Hosted: refused before the name is even resolved unless the scope allows it now.
         if not await hosted_allowed():
             raise EgressRefused("local_only")
+        if self._ports is not None and port not in self._ports:
+            # The effective port of the URL being connected to, checked again here (A4-9).
+            raise EgressRefused(PORT_REFUSED)
         try:
             literal: Address | None = ipaddress.ip_address(host.strip("[]"))
         except ValueError:
@@ -319,6 +351,106 @@ def provider_tls_context() -> ssl.SSLContext:
     return httpx.create_ssl_context(trust_env=False)
 
 
+class StagedStream(httpcore.AsyncNetworkStream):
+    """A connection whose every write, read and TLS handshake is bounded on ``clock``."""
+
+    def __init__(self, inner: httpcore.AsyncNetworkStream, clock: Clock, bound_ms: float) -> None:
+        self._inner = inner
+        self._clock = clock
+        self._bound_ms = bound_ms
+
+    async def _bounded(self, stage: str, work: Awaitable[Any]) -> Any:
+        try:
+            return await run_with_timeout(self._clock, work, self._bound_ms)
+        except RequestTimeoutError:
+            raise StageTimeout(stage) from None
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:  # noqa: ASYNC109
+        found: bytes = await self._bounded("read", self._inner.read(max_bytes, None))
+        return found
+
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:  # noqa: ASYNC109
+        await self._bounded("write", self._inner.write(buffer, None))
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+    async def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> httpcore.AsyncNetworkStream:
+        try:
+            done = await self._bounded(
+                "tls", self._inner.start_tls(ssl_context, server_hostname, None)
+            )
+        except StageTimeout:
+            raise
+        except Exception:
+            # Whatever the handshake raised (httpcore maps ssl errors to ConnectError): a
+            # permanent ``tls``, its cause not carried.
+            raise TlsFailure() from None
+        return StagedStream(done, self._clock, self._bound_ms)
+
+    def get_extra_info(self, info: str) -> Any:
+        return self._inner.get_extra_info(info)
+
+
+class StagedBackend(httpcore.AsyncNetworkBackend):
+    """Connects through ``inner`` with the connect bounded on ``clock``, and bounds every stage
+    of the connection it returns (``StagedStream``)."""
+
+    def __init__(self, inner: httpcore.AsyncNetworkBackend, clock: Clock, bound_ms: float) -> None:
+        self._inner = inner
+        self._clock = clock
+        self._bound_ms = bound_ms
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,  # noqa: ASYNC109 (httpcore passes it by name)
+        local_address: str | None = None,
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        try:
+            stream = await run_with_timeout(
+                self._clock,
+                self._inner.connect_tcp(
+                    host, port, timeout=None, local_address=local_address,
+                    socket_options=socket_options,
+                ),
+                self._bound_ms,
+            )  # fmt: skip
+        except RequestTimeoutError:
+            raise StageTimeout("connect") from None
+        return StagedStream(stream, self._clock, self._bound_ms)
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,  # noqa: ASYNC109 (httpcore passes it by name)
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        raise EgressRefused("unix_socket")
+
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+
+def staged_resolver(resolver: Resolver, clock: Clock, bound_ms: float) -> Resolver:
+    """``resolver`` bounded on ``clock``: past the bound, ``StageTimeout("resolve")``."""
+
+    async def resolve(host: str, port: int) -> list[str]:
+        try:
+            return await run_with_timeout(clock, resolver(host, port), bound_ms)
+        except RequestTimeoutError:
+            raise StageTimeout("resolve") from None
+
+    return resolve
+
+
 class GuardedTransport(httpx.AsyncHTTPTransport):
     """httpx's transport, with every connection through ``GuardedBackend``. Each request is
     checked too, so a pooled connection never carries one past the locality rule: a hosted
@@ -330,7 +462,10 @@ class GuardedTransport(httpx.AsyncHTTPTransport):
         inner: httpcore.AsyncNetworkBackend | None = None,
         local: LocalDestinations = NO_LOCAL_DESTINATIONS,
         ssl_context: ssl.SSLContext | None = None,
+        network: httpcore.AsyncNetworkBackend | None = None,
     ) -> None:
+        """``network`` replaces the guarded backend built from the rest (``webhook_client``
+        builds its own, with the port rule and the stage bounds)."""
         # One TLS context, given to httpx's own setup too, which would otherwise build another:
         # building one loads the certificate bundle, which costs more than a whole request.
         tls = ssl_context if ssl_context is not None else provider_tls_context()
@@ -338,7 +473,9 @@ class GuardedTransport(httpx.AsyncHTTPTransport):
         self._local = local
         self._pool = httpcore.AsyncConnectionPool(
             ssl_context=tls,
-            network_backend=GuardedBackend(resolver, inner, local),
+            network_backend=(
+                network if network is not None else GuardedBackend(resolver, inner, local)
+            ),
         )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -394,6 +531,45 @@ def operator_client(
     return httpx.AsyncClient(
         transport=GuardedTransport(resolver, inner, local),
         timeout=httpx.Timeout(None, connect=connect_timeout_s),
+        trust_env=False,
+        follow_redirects=False,
+    )
+
+
+# Each webhook stage's bound (name resolution, connect, TLS handshake, each write and each read),
+# and the whole attempt's, on the injected clock (the A4 plan's section 4.2, decision 13).
+WEBHOOK_STAGE_MS = 5_000.0
+WEBHOOK_ATTEMPT_MS = 10_000.0
+
+
+def webhook_client(
+    resolver: Resolver,
+    clock: Clock,
+    ports: frozenset[int],
+    *,
+    inner: httpcore.AsyncNetworkBackend | None = None,
+    ssl_context: ssl.SSLContext | None = None,
+) -> httpx.AsyncClient:
+    """The only client a webhook is sent with (an AST test). Every connection resolved and
+    checked by ``GuardedBackend`` (no local destination, every address public, the socket to
+    the checked address), on a port in ``ports``; each stage bounded on ``clock``; TLS with the
+    pinned, verifying context (``provider_tls_context()``); no redirects; no proxy from the
+    environment. A new one for every delivery, so every delivery resolves and checks again
+    (M45): it keeps no connection."""
+    tls = ssl_context if ssl_context is not None else provider_tls_context()
+    network = GuardedBackend(
+        staged_resolver(resolver, clock, WEBHOOK_STAGE_MS),
+        StagedBackend(
+            inner if inner is not None else httpcore.AnyIOBackend(), clock, WEBHOOK_STAGE_MS
+        ),
+        NO_LOCAL_DESTINATIONS,
+        ports,
+    )
+    return httpx.AsyncClient(
+        transport=GuardedTransport(
+            resolver, ssl_context=tls, local=NO_LOCAL_DESTINATIONS, network=network
+        ),
+        timeout=httpx.Timeout(None),
         trust_env=False,
         follow_redirects=False,
     )

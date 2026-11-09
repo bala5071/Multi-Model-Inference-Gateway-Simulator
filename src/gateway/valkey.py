@@ -321,6 +321,17 @@ class ValkeyCounters:
     ) -> ValkeyConnectionTestCounter:
         return ValkeyConnectionTestCounter(self, tests_per_hour, tests_per_organization_hour)
 
+    def channel_tests(
+        self, per_channel_hour: int, per_organization_hour: int
+    ) -> ValkeyConnectionTestCounter:
+        """An alert channel's test sends (docs/46): per channel and per organization an hour,
+        in keys of their own."""
+        return ValkeyConnectionTestCounter(
+            self, per_channel_hour, per_organization_hour,
+            kinds=("channel-tests", "org-channel-tests"), reason=Reason.TEST_SEND_LIMITED,
+            what=("a channel", "an organization's channels"),
+        )  # fmt: skip
+
     def breakers(
         self,
         on_transition: Callable[[Transition], None] | None = None,
@@ -449,15 +460,27 @@ class ValkeyConnectionTestCounter:
     """Test-connections per provider and per organization an hour: both windows counted, or
     neither. Unavailable: ``StateUnavailableError`` (503), no test is run."""
 
-    def __init__(self, counters: ValkeyCounters, per_hour: int, per_organization_hour: int) -> None:
+    def __init__(
+        self,
+        counters: ValkeyCounters,
+        per_hour: int,
+        per_organization_hour: int,
+        *,
+        kinds: tuple[str, str] = ("tests", "org-tests"),
+        reason: Reason = Reason.TEST_RATE_LIMITED,
+        what: tuple[str, str] = ("a provider", "an organization's providers"),
+    ) -> None:
         self._counters = counters
         self._per_hour = per_hour
         self._per_organization_hour = per_organization_hour
+        self._kinds = kinds
+        self._reason = reason
+        self._what = what
 
     async def count(self, provider_id: str, organization_id: str) -> None:
         c = self._counters
         now = c.epoch.epoch_ms()
-        keys = [c.name("tests", provider_id), c.name("org-tests", organization_id)]
+        keys = [c.name(self._kinds[0], provider_id), c.name(self._kinds[1], organization_id)]
         args: list[str | float] = [
             now,
             c.member(now),
@@ -470,12 +493,12 @@ class ValkeyConnectionTestCounter:
         full = int(cast(list[Any], found)[0])
         if full:
             limit, what = (
-                (self._per_hour, "a provider")
+                (self._per_hour, self._what[0])
                 if full == 1
-                else (self._per_organization_hour, "an organization's providers")
+                else (self._per_organization_hour, self._what[1])
             )
             raise ManagementRefusal(
-                Reason.TEST_RATE_LIMITED,
+                self._reason,
                 f"at most {limit} tests of {what} an hour; try again later",
             )
 

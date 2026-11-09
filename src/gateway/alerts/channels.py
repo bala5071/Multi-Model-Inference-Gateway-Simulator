@@ -41,6 +41,7 @@ from gateway.providers import ChangeMarker
 from gateway.vault import ChannelBinding, SealedKey, Vault
 
 if TYPE_CHECKING:
+    from gateway.alerts.delivery import DeliverySetup
     from gateway.alerts.notices import Notices
 
 CHANNEL_ID_PREFIX = "chn_"
@@ -283,6 +284,21 @@ class ChannelStore(Protocol):
         """Every channel secret (``rotate-vault-key``)."""
         ...
 
+    async def record_health(self, channel_id: str, delivered: bool, at_ms: float) -> None:
+        """A delivery's outcome on the channel's health, in the caller's transaction: delivered
+        resets ``consecutive_failures``, a failed attempt adds one. The version is unchanged
+        (it covers what ``PATCH`` changes)."""
+        ...
+
+    async def failing_channels(self, at_least: int) -> list[Channel]:
+        """Every channel, of every organization, with ``consecutive_failures >= at_least``
+        (the built-in ``channel_delivery_failing``), by id."""
+        ...
+
+    async def drop_expired_previous_keys(self, now_ms: float) -> int:
+        """Every previous signing key past its 24 hours deleted; how many."""
+        ...
+
 
 class InMemoryChannelStore:
     def __init__(self) -> None:
@@ -349,6 +365,34 @@ class InMemoryChannelStore:
 
     async def all_secrets(self) -> list[StoredSecret]:
         return [self._secrets[k] for k in sorted(self._secrets)]
+
+    async def record_health(self, channel_id: str, delivered: bool, at_ms: float) -> None:
+        found = self._channels.get(channel_id)
+        if found is None:
+            return
+        self._channels[channel_id] = (
+            replace(found, last_delivered_at_ms=at_ms, consecutive_failures=0)
+            if delivered
+            else replace(
+                found, last_failed_at_ms=at_ms, consecutive_failures=found.consecutive_failures + 1
+            )
+        )
+
+    async def failing_channels(self, at_least: int) -> list[Channel]:
+        return sorted(
+            (c for c in self._channels.values() if c.consecutive_failures >= at_least),
+            key=lambda c: c.id,
+        )
+
+    async def drop_expired_previous_keys(self, now_ms: float) -> int:
+        gone = [
+            k
+            for k, s in self._secrets.items()
+            if k[1] == PREVIOUS_KIND and s.expires_at_ms is not None and s.expires_at_ms <= now_ms
+        ]
+        for key in gone:
+            del self._secrets[key]
+        return len(gone)
 
 
 _SECRET_COLUMNS = "channel_id, kind, key_id, nonce, ciphertext, expires_at_ms"
@@ -455,6 +499,30 @@ class SqliteChannelStore:
         ).fetchall()
         return [secret_from_row(r) for r in rows]
 
+    async def record_health(self, channel_id: str, delivered: bool, at_ms: float) -> None:
+        if delivered:
+            self._db.execute(
+                "UPDATE alert_channels SET last_delivered_at_ms = ?, consecutive_failures = 0"
+                " WHERE id = ?",
+                (at_ms, channel_id),
+            )
+        else:
+            self._db.execute(
+                "UPDATE alert_channels SET last_failed_at_ms = ?,"
+                " consecutive_failures = consecutive_failures + 1 WHERE id = ?",
+                (at_ms, channel_id),
+            )
+
+    async def failing_channels(self, at_least: int) -> list[Channel]:
+        return self._channels("consecutive_failures >= ? ORDER BY id", (at_least,))
+
+    async def drop_expired_previous_keys(self, now_ms: float) -> int:
+        done = self._db.execute(
+            "DELETE FROM channel_secrets WHERE kind = ? AND expires_at_ms <= ?",
+            (PREVIOUS_KIND, now_ms),
+        )
+        return done.rowcount
+
 
 async def resolve_channel(
     stores: Stores, channels: ChannelStore, organization_id: str, channel_id: str
@@ -509,9 +577,12 @@ class ChannelService:
         notices: Notices | None = None,
         ports: Collection[int] = (DEFAULT_WEBHOOK_PORT,),
         store_clock: StoreClock | None = None,
+        delivery: DeliverySetup | None = None,
     ) -> None:
         """``store_clock`` times the previous signing key's 24 hours (the database's clock
-        where it is shared, docs/37); ``epoch`` without it."""
+        where it is shared, docs/37); ``epoch`` without it. ``delivery``: what the server
+        delivers with (None: the outbox is filled and nothing is sent, as in group 1's
+        tests)."""
         self.store = store
         self.vault = vault
         self._audit = audit
@@ -524,9 +595,18 @@ class ChannelService:
         self.store_clock: StoreClock = (
             store_clock if store_clock is not None else EpochStoreClock(epoch)
         )
+        self.delivery = delivery
 
     def __repr__(self) -> str:
         return "ChannelService(<vault redacted>)"
+
+    @property
+    def audit(self) -> AuditLog:
+        return self._audit
+
+    @property
+    def epoch(self) -> EpochSource:
+        return self._epoch
 
     async def _record(
         self,

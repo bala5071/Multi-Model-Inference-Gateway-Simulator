@@ -88,12 +88,15 @@ one line in the real stream.)
              "counts": {"state_change": 0, "queue_full": 0, "timeout": 0, "downgrade": 0,
                         "budget_exhausted": 0, "circuit_breaker": 0,
                         "state_store_restarted": 0, "reservation_expired": 0,
-                        "alert_evaluator_stale": 0, "alert_evaluator_recovered": 0},
+                        "alert_evaluator_stale": 0, "alert_evaluator_recovered": 0,
+                        "alert_delivery_failed": 0, "alert_caps_differ": 0},
              "recent": []},
   "breakers": {"available": true,
                "reports_dropped": {"queue_full": 0, "flush_timeout": 0, "unavailable": 0}},
   "alert_evaluator": {"available": true, "state": "disabled", "last_cycle_age_ms": null,
-                      "holder": false, "last_evaluation_ms": null, "evaluation_failures": 0}
+                      "holder": false, "last_evaluation_ms": null, "evaluation_failures": 0},
+  "alert_deliveries": {"available": true,
+                       "attempts": {"webhook": {"delivered": 0, "egress_refused": 0, "...": 0}}}
 }
 ```
 
@@ -111,6 +114,12 @@ read it: `state` is `ok`, `stale`, `unknown` or `disabled` (no evaluator: simula
 the evaluator's lease; `last_evaluation_ms` is its own last cycle's time, and
 `evaluation_failures` its cycles that did not complete. Read from memory: no store call, and
 nothing decides from it.
+
+`alert_deliveries` (added by note 46) counts this instance's webhook attempts since it started,
+by channel type and result: `delivered`, or the fixed code of the failure (`egress_refused`,
+`port_refused`, `dns_failure`, `timeout`, `connect_failed`, `tls`, `http_3xx`, `http_4xx`,
+`http_5xx`, `channel_secret_unreadable`, `channel_gone`, `channel_disabled`), every one present
+at 0. No organization, channel or target: a count of what the instance did.
 
 ### Model groups: the state now
 
@@ -269,6 +278,9 @@ it creates no series (`test_applications_show_spend_tokens_against_budget_and_re
 | `circuit_breaker` | An organization provider's circuit breaker moved (docs/33) | `provider`, `state` (`open`, `half_open`, `closed`), `open_ms` (how long it stays open; `null` otherwise) |
 | `state_store_restarted` | The shared counter store came back empty after a restart (docs/35); only with `GATEWAY_COUNTERS=valkey` | `store` (`valkey`) |
 | `reservation_expired` | A shared budget reservation outlived its request and was released; its request's usage was not charged (docs/37); only with `GATEWAY_STATE=shared` | `tokens` (what it held) |
+| `alert_evaluator_stale`, `alert_evaluator_recovered` | The alert evaluator's heartbeat went stale or unknown, and came back (docs/45) | `state` |
+| `alert_delivery_failed` | A webhook attempt failed, retried or not (docs/46) | `channel_id`, `code` |
+| `alert_caps_differ` | A live instance's alert caps differ from this one's: reported, never refused (docs/46) | `caps` (the names of those that differ) |
 
 Every event has `seq`, `at_ms`, `type`, `model` and `application_id` (`null` without
 applications). A rate-limit refusal is a rejection, not an event: it never reached a model.
@@ -324,6 +336,7 @@ gateway_ttft_ms{model="premium",quantile="0.99"} 50.0
   `gateway_alert_evaluator_last_cycle_age_seconds` (absent while unknown),
   `gateway_alert_evaluator_holder`, `gateway_alert_evaluation_ms` and
   `gateway_alert_evaluation_failures_total` are `alert_evaluator` (note 45).
+- `gateway_alert_deliveries_total{channel_type=..., result=...}` is `alert_deliveries` (note 46).
 - The full output for one request is asserted in
   `test_metrics_endpoint_is_exact_prometheus_text_for_one_request`.
 

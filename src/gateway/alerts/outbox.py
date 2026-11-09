@@ -7,12 +7,18 @@ A row is ``queued`` (to be sent), ``sending`` (claimed by a delivery worker), ``
 when queued: a delivery sends exactly that. A unique index on (notification, channel) means a
 notification queued twice for one channel is queued once.
 
-Group 1 queues and lists; the delivery worker (group 2) claims and records outcomes.
+**Delivery** (group 2, ``gateway.alerts.delivery``): a worker **claims** due rows (queued and
+due, or sending with an expired claim: a dead instance's, taken again, so delivery is at least
+once), each claim a fresh ``claimed_by`` with an expiry; on Postgres ``FOR UPDATE SKIP LOCKED``,
+so two workers never claim one row. It **records** the outcome with a compare-and-set on its
+claim (``WHERE claimed_by = ?``): a worker whose claim was taken again writes nothing.
 """
 
 from __future__ import annotations
 
 import contextlib
+import contextvars
+import json
 import sqlite3
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, replace
@@ -77,8 +83,69 @@ def delivery_from_row(row: Sequence[Any]) -> Delivery:
     )  # fmt: skip
 
 
+@dataclass(frozen=True, slots=True)
+class Outcome:
+    """What a delivery attempt comes to, as the outbox records it: the state (``delivered``,
+    ``failed``, or ``queued`` again for a retry at ``next_attempt_at_ms``) and the fixed code."""
+
+    state: DeliveryState
+    code: str
+    next_attempt_at_ms: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Suppressed:
+    """An organization's notifications suppressed in an hour (its summary's counts)."""
+
+    organization_id: str
+    notifications: int
+    rules: int
+
+
+def rule_of(payload: str) -> str | None:
+    """The rule id a stored body names, if any (a summary counts the rules)."""
+    try:
+        rule = json.loads(payload).get("rule")
+    except (ValueError, AttributeError):
+        return None
+    return rule.get("id") if isinstance(rule, dict) else None
+
+
+class TransactionHeldError(RuntimeError):
+    """A network call entered while this task holds a store transaction (the pool rule)."""
+
+
 class OutboxStore(Protocol):
     def write_transaction(self) -> contextlib.AbstractAsyncContextManager[None]: ...
+
+    def delivery_transaction(self) -> contextlib.AbstractAsyncContextManager[None]:
+        """A short transaction of the delivery worker's (the claim, the outcome) or of a
+        summary: without the global write lock, on this task's pool (the evaluator's, on
+        Postgres)."""
+        ...
+
+    def holds_transaction(self) -> bool:
+        """Whether this task is inside a store transaction now (the delivery guard)."""
+        ...
+
+    async def claim(
+        self, claim_id: str, limit: int, now_ms: float, claim_ms: float
+    ) -> list[Delivery]:
+        """Up to ``limit`` due deliveries (queued with ``next_attempt_at_ms <= now_ms``, or
+        sending with an expired claim), each now sending under ``claim_id`` until
+        ``now_ms + claim_ms``, its attempts counted; by when they were due. Two workers never
+        claim one row (``SKIP LOCKED`` on Postgres)."""
+        ...
+
+    async def record(self, delivery_id: str, claim_id: str, outcome: Outcome, at_ms: float) -> bool:
+        """The outcome of an attempt, only while ``claim_id`` still holds the claim: whether it
+        was recorded (a stale worker's is not)."""
+        ...
+
+    async def suppressed(self, start_ms: float, end_ms: float) -> list[Suppressed]:
+        """Each organization's suppressed notifications queued in [start, end), by
+        organization."""
+        ...
 
     async def queue(self, deliveries: Sequence[Delivery]) -> int:
         """Insert each delivery whose (notification, channel) is not queued yet, in the
@@ -119,10 +186,80 @@ class InMemoryOutboxStore:
         self._rows: dict[str, Delivery] = {}
         self._caps: dict[tuple[str, str, int], int] = {}
         self._summaries: dict[tuple[str, int], tuple[str, float]] = {}
+        self._in_transaction: contextvars.ContextVar[bool] = contextvars.ContextVar(
+            "gateway_outbox_transaction", default=False
+        )
 
     @contextlib.asynccontextmanager
     async def write_transaction(self) -> AsyncIterator[None]:
-        yield
+        token = self._in_transaction.set(True)
+        try:
+            yield
+        finally:
+            self._in_transaction.reset(token)
+
+    def delivery_transaction(self) -> contextlib.AbstractAsyncContextManager[None]:
+        return self.write_transaction()
+
+    def holds_transaction(self) -> bool:
+        return self._in_transaction.get()
+
+    async def claim(
+        self, claim_id: str, limit: int, now_ms: float, claim_ms: float
+    ) -> list[Delivery]:
+        due = sorted(
+            (
+                r
+                for r in self._rows.values()
+                if (
+                    r.state is DeliveryState.QUEUED
+                    and r.next_attempt_at_ms is not None
+                    and r.next_attempt_at_ms <= now_ms
+                )
+                or (
+                    r.state is DeliveryState.SENDING
+                    and r.claim_expires_at_ms is not None
+                    and r.claim_expires_at_ms <= now_ms
+                )
+            ),
+            key=lambda r: (r.next_attempt_at_ms or 0.0, r.id),
+        )[:limit]
+        claimed = []
+        for r in due:
+            done = replace(
+                r, state=DeliveryState.SENDING, claimed_by=claim_id,
+                claim_expires_at_ms=now_ms + claim_ms, attempts=r.attempts + 1,
+                updated_at_ms=now_ms,
+            )  # fmt: skip
+            self._rows[r.id] = done
+            claimed.append(done)
+        return claimed
+
+    async def record(self, delivery_id: str, claim_id: str, outcome: Outcome, at_ms: float) -> bool:
+        found = self._rows.get(delivery_id)
+        if (
+            found is None
+            or found.state is not DeliveryState.SENDING
+            or found.claimed_by != claim_id
+        ):
+            return False
+        self._rows[delivery_id] = replace(
+            found, state=outcome.state, last_code=outcome.code,
+            next_attempt_at_ms=outcome.next_attempt_at_ms, claimed_by=None,
+            claim_expires_at_ms=None, updated_at_ms=at_ms,
+        )  # fmt: skip
+        return True
+
+    async def suppressed(self, start_ms: float, end_ms: float) -> list[Suppressed]:
+        found: dict[str, tuple[set[str], set[str]]] = {}
+        for r in self._rows.values():
+            if r.state is DeliveryState.SUPPRESSED and start_ms <= r.created_at_ms < end_ms:
+                notifications, rules = found.setdefault(r.organization_id, (set(), set()))
+                notifications.add(r.notification_id)
+                rule = rule_of(r.payload)
+                if rule is not None:
+                    rules.add(rule)
+        return [Suppressed(o, len(n), len(r)) for o, (n, r) in sorted(found.items())]
 
     async def queue(self, deliveries: Sequence[Delivery]) -> int:
         new = 0
@@ -187,6 +324,52 @@ class SqliteOutboxStore:
 
     def write_transaction(self) -> contextlib.AbstractAsyncContextManager[None]:
         return write_transaction(self._db)
+
+    def delivery_transaction(self) -> contextlib.AbstractAsyncContextManager[None]:
+        # One process: the write transaction, which never waits across an await.
+        return write_transaction(self._db)
+
+    def holds_transaction(self) -> bool:
+        return self._db.in_transaction
+
+    async def claim(
+        self, claim_id: str, limit: int, now_ms: float, claim_ms: float
+    ) -> list[Delivery]:
+        rows = self._db.execute(
+            "UPDATE notification_deliveries SET state = 'sending', claimed_by = ?,"
+            " claim_expires_at_ms = ?, attempts = attempts + 1, updated_at_ms = ?"
+            " WHERE id IN (SELECT id FROM notification_deliveries"
+            " WHERE (state = 'queued' AND next_attempt_at_ms <= ?)"
+            " OR (state = 'sending' AND claim_expires_at_ms <= ?)"
+            " ORDER BY next_attempt_at_ms, id LIMIT ?)"
+            f" RETURNING {COLUMNS}",
+            (claim_id, now_ms + claim_ms, now_ms, now_ms, now_ms, limit),
+        ).fetchall()
+        found = [delivery_from_row(r) for r in rows]
+        return sorted(found, key=lambda d: d.id)
+
+    async def record(self, delivery_id: str, claim_id: str, outcome: Outcome, at_ms: float) -> bool:
+        done = self._db.execute(
+            "UPDATE notification_deliveries SET state = ?, last_code = ?,"
+            " next_attempt_at_ms = ?, claimed_by = NULL, claim_expires_at_ms = NULL,"
+            " updated_at_ms = ? WHERE id = ? AND state = 'sending' AND claimed_by = ?",
+            (
+                outcome.state.value, outcome.code, outcome.next_attempt_at_ms, at_ms,
+                delivery_id, claim_id,
+            ),
+        )  # fmt: skip
+        return done.rowcount == 1
+
+    async def suppressed(self, start_ms: float, end_ms: float) -> list[Suppressed]:
+        rows = self._db.execute(
+            "SELECT organization_id, count(DISTINCT notification_id),"
+            " count(DISTINCT json_extract(payload, '$.rule.id'))"
+            " FROM notification_deliveries WHERE state = 'suppressed'"
+            " AND created_at_ms >= ? AND created_at_ms < ?"
+            " GROUP BY organization_id ORDER BY organization_id",
+            (start_ms, end_ms),
+        ).fetchall()
+        return [Suppressed(r[0], int(r[1]), int(r[2])) for r in rows]
 
     async def queue(self, deliveries: Sequence[Delivery]) -> int:
         new = 0

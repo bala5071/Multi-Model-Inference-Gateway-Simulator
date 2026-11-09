@@ -205,6 +205,24 @@ class AlertEvaluatorGroup:
 
 DISABLED_EVALUATOR = AlertEvaluatorGroup(True, "disabled", None, False, None, 0)
 
+# The codes a webhook attempt can come to (gateway.alerts.webhook; a test keeps them equal),
+# named here so monitoring imports nothing of it.
+ALERT_DELIVERY_RESULTS = (
+    "delivered", "egress_refused", "port_refused", "dns_failure", "timeout", "connect_failed",
+    "tls", "http_3xx", "http_4xx", "http_5xx", "channel_secret_unreadable", "channel_gone",
+    "channel_disabled",
+)  # fmt: skip
+ALERT_CHANNEL_TYPES = ("webhook",)
+
+
+@dataclass(frozen=True, slots=True)
+class AlertDeliveriesGroup:
+    """This instance's webhook attempts since it started, by channel type and result (docs/46):
+    counts only, with no organization, channel or target. Nothing decides from them."""
+
+    available: bool
+    attempts: dict[str, dict[str, int]]
+
 
 @dataclass(frozen=True, slots=True)
 class Snapshot:
@@ -216,6 +234,7 @@ class Snapshot:
     events: EventsGroup
     breakers: BreakersGroup
     alert_evaluator: AlertEvaluatorGroup
+    alert_deliveries: AlertDeliveriesGroup
 
 
 def _quantiles(distribution: Distribution | None) -> Quantiles | None:
@@ -264,6 +283,9 @@ class Monitor:
             if model in self._views:
                 series.set_degraded(model, False)
         self._reports_dropped = dict.fromkeys(BREAKER_DROP_REASONS, 0)
+        self._deliveries = {
+            t: dict.fromkeys(ALERT_DELIVERY_RESULTS, 0) for t in ALERT_CHANNEL_TYPES
+        }
 
     @property
     def events(self) -> EventBus:
@@ -358,6 +380,11 @@ class Monitor:
         in ``gateway_events_total{type="state_store_restarted"}`` like every event."""
         self._events.publish("state_store_restarted", store=store)
 
+    def alert_delivery(self, channel_type: str, result: str) -> None:
+        """A webhook attempt this instance recorded (docs/46): a count by type and result."""
+        if channel_type in self._deliveries and result in ALERT_DELIVERY_RESULTS:
+            self._deliveries[channel_type][result] += 1
+
     def breaker_report_dropped(self, reason: str) -> None:
         """A breaker's report was not written (docs/41): it can make the breaker open late or
         early; it never admits anything."""
@@ -409,6 +436,9 @@ class Monitor:
             ),
             breakers=BreakersGroup(available=True, reports_dropped=dict(self._reports_dropped)),
             alert_evaluator=alert_evaluator,
+            alert_deliveries=AlertDeliveriesGroup(
+                available=True, attempts={t: dict(r) for t, r in self._deliveries.items()}
+            ),
         )
 
     def _observe(self, model: str) -> None:
@@ -820,6 +850,16 @@ def render_prometheus(snapshot: Snapshot) -> str:
             "counter",
             "Alert evaluation cycles that did not complete.",
             [({}, evaluator.evaluation_failures)],
+        ),
+        (
+            "gateway_alert_deliveries_total",
+            "counter",
+            "Webhook attempts this instance recorded, by type and result.",
+            [
+                ({"channel_type": channel_type, "result": result}, count)
+                for channel_type, results in snapshot.alert_deliveries.attempts.items()
+                for result, count in results.items()
+            ],
         ),
     ]
     lines: list[str] = []

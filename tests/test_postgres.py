@@ -30,6 +30,7 @@ from benchmarks import durable_calls
 
 from accounts_helpers import PASSWORD, cookie, with_csrf
 from gateway.alertrules import DEFAULT_RULES, AlertRule, RuleVersionConflictError, default_rules
+from gateway.alerts.caps import SqliteCeilingsStore
 from gateway.alerts.channels import (
     Channel,
     ChannelNameTakenError,
@@ -37,6 +38,7 @@ from gateway.alerts.channels import (
     StoredSecret,
 )
 from gateway.alerts.outbox import Delivery, DeliveryState
+from gateway.alerts.outbox import Outcome as DeliveryOutcome
 from gateway.apikeys import ApiKeyService, ApplicationAccess, InvalidApiKeyError
 from gateway.app import create_app, create_default_app
 from gateway.applications import (
@@ -895,6 +897,43 @@ async def _scenario(s: StateBackend) -> list[Any]:
         await ob.count_notification("organization", "north", 7, 2),
         await ob.add_summary("north", 7, "ntf_00000000000000ee", NOW),
         await ob.add_summary("north", 7, "ntf_00000000000000ef", NOW),
+    ]
+    # Delivery (group 2): the claim, the outcome on the claim, the summary's counts, health.
+    suppressed = dataclasses.replace(
+        deliveries[0], id="dlv_00000000000000f1", notification_id="ntf_00000000000000f1",
+        state=DeliveryState.SUPPRESSED, next_attempt_at_ms=None, last_code="rule_cap",
+        payload='{"rule":{"id":"rul_00000000000000aa"}}',
+    )  # fmt: skip
+    out.append(ob.holds_transaction())
+    async with ob.delivery_transaction():
+        out.append(ob.holds_transaction())
+        await ob.queue([suppressed])
+        claimed = await ob.claim("clm_00000000000000a1", 1, NOW, 60_000.0)
+    out += [
+        claimed,
+        await ob.claim("clm_00000000000000a2", 5, NOW, 60_000.0),
+        await ob.claim("clm_00000000000000a3", 5, NOW + 60_000.0, 60_000.0),
+        await ob.record(claimed[0].id, "clm_00000000000000a1",
+                        DeliveryOutcome(DeliveryState.DELIVERED, "delivered"), NOW),
+        await ob.record(claimed[0].id, "clm_00000000000000a3",
+                        DeliveryOutcome(DeliveryState.QUEUED, "http_5xx", NOW + 30_000.0), NOW),
+        await ob.channel_deliveries(first.id, 5),
+        await ob.suppressed(NOW - 1.0, NOW + 1.0),
+        await ob.suppressed(NOW + 1.0, NOW + 2.0),
+    ]  # fmt: skip
+    for delivered in (False, False, False):
+        await ch.record_health(first.id, delivered, NOW)
+    out.append(await ch.failing_channels(3))
+    await ch.record_health(first.id, True, NOW + 1.0)
+    out.append(await ch.failing_channels(1))
+    await ch.put_secret(StoredSecret(first.id, "webhook_signing_key_previous", sealed, NOW + 1.0))
+    out += [
+        await ch.drop_expired_previous_keys(NOW),
+        await ch.drop_expired_previous_keys(NOW + 1.0),
+        await ch.secrets(first.id),
+        await s.ceilings.report("ins_one", "d1", '{"per_rule":6}', 60_000.0, 3_600_000.0),
+        await s.ceilings.report("ins_two", "d2", '{"per_rule":7}', 60_000.0, 3_600_000.0),
+        await s.ceilings.report("ins_one", "d1", '{"per_rule":6}', 60_000.0, 3_600_000.0),
         await ch.delete_channel(second.id),
         await ch.delete_channel(second.id),
         await ch.secrets(second.id),
@@ -904,6 +943,7 @@ async def _scenario(s: StateBackend) -> list[Any]:
 
 def _protocol_methods() -> set[str]:
     from gateway.alertrules import RuleStore
+    from gateway.alerts.caps import CeilingsStore
     from gateway.alerts.channels import ChannelStore
     from gateway.alerts.outbox import OutboxStore
     from gateway.applications import ApplicationStore
@@ -929,6 +969,7 @@ def _protocol_methods() -> set[str]:
         IncidentStore: "PostgresIncidentStore",
         ChannelStore: "PostgresChannelStore",
         OutboxStore: "PostgresOutboxStore",
+        CeilingsStore: "PostgresCeilingsStore",
     }
     return {
         f"{store}.{name}"
@@ -944,7 +985,8 @@ def _sqlite_world() -> tuple[sqlite3.Connection, StateBackend]:
     state = sqlite_state(connection, ClockEpoch(SimClock()))
     # The lease is timed on the store's clock: on Postgres the database's (NOW in these tests).
     incidents = SqliteIncidentStore(connection, ClockEpoch(SimClock(), NOW))
-    return connection, dataclasses.replace(state, incidents=incidents)
+    ceilings = SqliteCeilingsStore(connection, lambda: NOW)
+    return connection, dataclasses.replace(state, incidents=incidents, ceilings=ceilings)
 
 
 @postgres

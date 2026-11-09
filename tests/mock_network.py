@@ -5,8 +5,11 @@ item: a raw HTTP response; an exception raised on connecting (a refused connecti
 timeout); ``Breaks`` (part of an answer, then the connection breaks); ``Pauses`` (part of an
 answer, a wait for the test, then the rest); ``HANG`` (a server that
 accepts and never answers: on a ``SimClock`` the loop goes idle and time moves to the next
-timeout); or a ``Gate`` that waits for the test before going on. It records the address the
-guard connected to, the TLS host name, and every byte written (the request, headers included).
+timeout); or a ``Gate`` that waits for the test before going on. For the webhook stages (docs/46)
+also ``CONNECT_HANGS``, ``TLS_HANGS``, ``TLS_FAILS``, ``WRITE_HANGS`` and ``Trickles`` (an answer
+sent a piece at a time on a clock). It records the address the guard connected to, the TLS host
+name and context, every byte written (the request, headers included), and how much of the
+answer was read.
 A fake resolver answers names from a table, and can change its answer between calls (DNS
 rebinding). Test values, not secrets.
 """
@@ -20,6 +23,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpcore
+
+from gateway.clock import Clock
 
 
 def http_response(body: bytes, status: str = "200 OK", **headers: str) -> bytes:
@@ -39,12 +44,20 @@ class Connection:
     port: int
     tls_host: str | None = None
     written: bytearray = field(default_factory=bytearray)
+    tls_context: Any = None
+    # Bytes of the answer handed to the client so far.
+    read: int = 0
 
 
 class RecordingStream(httpcore.AsyncMockStream):
     def __init__(self, buffer: list[bytes], connection: Connection) -> None:
         super().__init__(buffer)
         self._connection = connection
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:  # noqa: ASYNC109
+        data = await super().read(max_bytes, timeout)
+        self._connection.read += len(data)
+        return data
 
     async def write(self, buffer: bytes, timeout: float | None = None) -> None:  # noqa: ASYNC109
         self._connection.written += buffer
@@ -56,7 +69,61 @@ class RecordingStream(httpcore.AsyncMockStream):
         timeout: float | None = None,  # noqa: ASYNC109
     ) -> httpcore.AsyncNetworkStream:
         self._connection.tls_host = server_hostname
+        self._connection.tls_context = ssl_context
         return self
+
+
+async def _forever() -> None:
+    await asyncio.get_running_loop().create_future()  # never set: only cancelled
+
+
+class TlsHangingStream(RecordingStream):
+    async def start_tls(
+        self,
+        ssl_context: Any,
+        server_hostname: str | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> httpcore.AsyncNetworkStream:
+        await _forever()
+        return self
+
+
+class TlsFailingStream(RecordingStream):
+    """The handshake fails, as httpcore reports an ``ssl`` error (``ConnectError``), with a
+    message that must never be kept."""
+
+    def __init__(self, connection: Connection, message: str) -> None:
+        super().__init__([], connection)
+        self._message = message
+
+    async def start_tls(
+        self,
+        ssl_context: Any,
+        server_hostname: str | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> httpcore.AsyncNetworkStream:
+        self._connection.tls_context = ssl_context
+        raise httpcore.ConnectError(self._message)
+
+
+class WriteHangingStream(RecordingStream):
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:  # noqa: ASYNC109
+        await _forever()
+
+
+class TricklingStream(RecordingStream):
+    """Each piece after ``every_ms`` on ``clock``."""
+
+    def __init__(
+        self, pieces: list[bytes], connection: Connection, clock: Clock, every_ms: float
+    ) -> None:
+        super().__init__(pieces, connection)
+        self._clock = clock
+        self._every_ms = every_ms
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:  # noqa: ASYNC109
+        await self._clock.sleep_ms(self._every_ms)
+        return await super().read(max_bytes, timeout)
 
 
 class HangingStream(RecordingStream):
@@ -81,6 +148,25 @@ class BreakingStream(RecordingStream):
 
 
 HANG = object()
+CONNECT_HANGS = object()
+TLS_HANGS = object()
+WRITE_HANGS = object()
+
+
+@dataclass(frozen=True)
+class TlsFails:
+    """The handshake fails; ``message`` is what the error says (a test plants a URL in it)."""
+
+    message: str = "certificate verify failed"
+
+
+@dataclass(frozen=True)
+class Trickles:
+    """An answer sent a piece at a time, one every ``every_ms`` on ``clock``."""
+
+    pieces: tuple[bytes, ...]
+    clock: Clock
+    every_ms: float
 
 
 @dataclass(frozen=True)
@@ -125,7 +211,7 @@ class Gate:
     opened: asyncio.Event = field(default_factory=asyncio.Event)
 
 
-Scripted = bytes | Exception | Gate | Breaks | Pauses | object
+Scripted = bytes | Exception | Gate | Breaks | Pauses | TlsFails | Trickles | object
 
 
 @dataclass
@@ -156,6 +242,16 @@ class ScriptedNetwork(httpcore.AsyncNetworkBackend):
             item = item.then
         if isinstance(item, Exception):
             raise item
+        if item is CONNECT_HANGS:
+            await _forever()
+        if item is TLS_HANGS:
+            return TlsHangingStream([], connection)
+        if item is WRITE_HANGS:
+            return WriteHangingStream([], connection)
+        if isinstance(item, TlsFails):
+            return TlsFailingStream(connection, item.message)
+        if isinstance(item, Trickles):
+            return TricklingStream(list(item.pieces), connection, item.clock, item.every_ms)
         if item is HANG:
             return HangingStream(connection)
         if isinstance(item, Breaks):

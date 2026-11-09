@@ -245,7 +245,7 @@ def test_the_gateway_migrations_create_exactly_their_tables(tmp_path: Path) -> N
     accounts |= {"settings_current", "settings_versions", "alert_rules"}
     accounts |= {"alert_lease", "incidents", "incident_notifications"}
     accounts |= {"alert_channels", "channel_secrets", "notification_deliveries"}
-    accounts |= {"notification_caps", "suppression_summaries"}
+    accounts |= {"notification_caps", "suppression_summaries", "instance_ceilings"}
     assert _tables(db) == every_table | {"organizations"} | accounts
     assert _columns(db, "usage_events")[10:] == [
         "provider",
