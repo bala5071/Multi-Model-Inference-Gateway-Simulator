@@ -92,6 +92,10 @@ found." for a missing and a forbidden resource alike (note 28).
     of `localStorage`, `sessionStorage`, IndexedDB, `document.cookie`, any input, the page, the
     URL or the console. The control: the same scan finds the password in the login request's
     body and the token in the login answer.
+- **Screenshots** of the application screen (as an admin and as a viewer) and the
+  organization screen are taken by those tests, into the run's output folder, only after the
+  test finds none of the run's generated secrets in the page's text or fields. The control: a
+  password typed into the login form is found.
 - **Moved to C2,** with their screens: the test that a webhook URL is never rendered (only its
   origin), and the evaluator's stale and unknown states on every alert screen.
 
