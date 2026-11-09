@@ -1,0 +1,136 @@
+/* The admin console's own pieces, on the dashboard's tokens (styles.css), so both themes
+   apply unchanged. */
+
+.console-nav {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.console-nav a {
+  padding: 8px 12px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+}
+
+.console-nav a[aria-current="page"] {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+.console-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.console-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 360px;
+}
+
+.console-form label,
+.chooser label,
+label.chooser {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-secondary);
+}
+
+.chooser {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.console input,
+.console select,
+.console button {
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+.console button {
+  cursor: pointer;
+}
+
+.console button:disabled,
+.console input:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.login {
+  max-width: 420px;
+}
+
+.edit-table input {
+  width: 100%;
+  min-width: 160px;
+}
+
+.verdict {
+  margin-top: 12px;
+}
+
+.notice {
+  color: var(--text-primary);
+  border-left: 3px solid var(--warning);
+  padding-left: 8px;
+}
+
+.presets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.presets li {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.dialog {
+  background: var(--surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  max-width: 420px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
