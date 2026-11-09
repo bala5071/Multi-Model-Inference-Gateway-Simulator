@@ -332,6 +332,18 @@ class ValkeyCounters:
             what=("a channel", "an organization's channels"),
         )  # fmt: skip
 
+    def confirmations(
+        self, per_channel_hour: int, per_organization_hour: int
+    ) -> ValkeyConnectionTestCounter:
+        """An email recipient's confirmations (docs/48): per channel and per organization an
+        hour, in keys of their own."""
+        return ValkeyConnectionTestCounter(
+            self, per_channel_hour, per_organization_hour,
+            kinds=("confirm-channel", "confirm-org"), reason=Reason.CONFIRMATION_LIMITED,
+            what=("one channel's recipients", "an organization's recipients"),
+            noun="confirmations to",
+        )  # fmt: skip
+
     def breakers(
         self,
         on_transition: Callable[[Transition], None] | None = None,
@@ -469,8 +481,10 @@ class ValkeyConnectionTestCounter:
         kinds: tuple[str, str] = ("tests", "org-tests"),
         reason: Reason = Reason.TEST_RATE_LIMITED,
         what: tuple[str, str] = ("a provider", "an organization's providers"),
+        noun: str = "tests of",
     ) -> None:
         self._counters = counters
+        self._noun = noun
         self._per_hour = per_hour
         self._per_organization_hour = per_organization_hour
         self._kinds = kinds
@@ -499,7 +513,7 @@ class ValkeyConnectionTestCounter:
             )
             raise ManagementRefusal(
                 self._reason,
-                f"at most {limit} tests of {what} an hour; try again later",
+                f"at most {limit} {self._noun} {what} an hour; try again later",
             )
 
 

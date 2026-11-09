@@ -330,6 +330,15 @@ The table it comes from, and what each relation means, are in docs/28-roles.md.
 | app_admin | n/a | n/a | n/a | n/a | deny |
 | viewer | n/a | deny | n/a | n/a | deny |
 
+## `alert_channels.confirm_recipient` (level organization, wired alerts A5)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | deny | n/a | n/a | n/a | n/a |
+| org_admin | n/a | allow | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
+
 ## `audit.read_organization` (level organization, wired later)
 
 | role | platform | own_organization | application_in_own_organization | own_application | other |

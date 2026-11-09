@@ -538,7 +538,7 @@ async def test_postgres_schema_4_gives_every_existing_application_the_default_ru
 
     async with pg_world() as world:
         [db] = world.instances
-        assert await rollback_schema(db, 3) == (6, 5, 4)
+        assert await rollback_schema(db, 3) == (7, 6, 5, 4)
         state = postgres_state(db)
         await state.applications.add_organization(
             new_organization("north", "North", "business", created_at_ms=0)
@@ -548,7 +548,7 @@ async def test_postgres_schema_4_gives_every_existing_application_the_default_ru
                 "app1", "Shop", load_plans(), "pro", organization_id="north", created_at_ms=1.0
             )
         )
-        assert await apply_schema(db) == 6
+        assert await apply_schema(db) == 7
         rows = await world.rows(f"SELECT {COLUMNS} FROM alert_rules ORDER BY id")
     assert sorted(r[0] for r in rows) == _default_ids("app1")
     by_key = {rule_from_row(r).default_key: rule_from_row(r) for r in rows}

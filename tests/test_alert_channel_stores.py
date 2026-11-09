@@ -331,10 +331,10 @@ def test_migration_17_refuses_while_an_application_has_an_empty_id(tmp_path: Pat
     tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master")}
     assert "alert_channels" not in tables
     connection.execute("DELETE FROM applications WHERE id = ''")
-    assert runner.migrate() == (17,)  # the control
+    assert runner.migrate(17) == (17,)  # the control
     # Rolled back and applied again, the column it added is kept and found.
     assert runner.rollback(16) == (17,)
-    assert runner.migrate() == (17,)
+    assert runner.migrate(17) == (17,)
     connection.close()
 
 
@@ -413,8 +413,9 @@ def test_rotate_vault_key_reseals_channel_secrets(
                VAULT_KEY_PREVIOUS_ENV: _key(OTHER)}  # fmt: skip
     assert manage(["rotate-vault-key"], environ) == 0
     err = capsys.readouterr().err
-    assert "and 2 alert channel secret(s)" in err
+    assert ", 2 alert channel secret(s)" in err
     assert "planted-store-token" not in err
+    assert made.signing_key is not None
     assert made.signing_key not in err
     connection = open_database(path)
     store = SqliteChannelStore(connection)
@@ -503,7 +504,12 @@ async def test_postgres_one_summary_an_organization_an_hour() -> None:
 @pytest.mark.parametrize(
     ("sql", "args", "constraint"),
     [
-        (CHANNEL_ROW, ("chn_t", "T", "email", 1, 1, 1, 0), "alert_channels_type_check"),
+        (
+            # No origin, so only the type is wrong (schema 7 also ties the origin to webhooks).
+            CHANNEL_ROW.replace("'https://h.example'", "NULL"),
+            ("chn_t", "T", "sms", 1, 1, 1, 0),
+            "alert_channels_type_check",
+        ),
         (CHANNEL_ROW, ("chn_e", "E", "webhook", 2, 1, 1, 0), "alert_channels_enabled_check"),
         (CHANNEL_ROW, ("chn_d", "D", "webhook", 1, 2, 1, 0), "alert_channels_is_default_check"),
         (CHANNEL_ROW, ("chn_v", "V", "webhook", 1, 1, 0, 0), "alert_channels_version_check"),
@@ -611,7 +617,7 @@ async def test_postgres_schema_6_refuses_while_an_application_has_an_empty_id() 
 
     async with pg_world() as world:
         [db] = world.instances
-        assert await rollback_schema(db, 5) == (6,)
+        assert await rollback_schema(db, 5) == (7, 6)
         await world.rows(
             "INSERT INTO applications (id, name, plan_name, models, price_multiplier,"
             " monthly_token_budget, created_at_ms, organization_id)"
@@ -621,7 +627,7 @@ async def test_postgres_schema_6_refuses_while_an_application_has_an_empty_id() 
             await apply_schema(db)
         assert await world.rows("SELECT max(version) FROM gateway_schema") == [(5,)]
         await world.rows("DELETE FROM applications WHERE id = ''")
-        assert await apply_schema(db) == 6  # the control
+        assert await apply_schema(db) == 7  # the control (and schema 7 after it)
 
 
 @postgres

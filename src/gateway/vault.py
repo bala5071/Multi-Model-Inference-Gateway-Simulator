@@ -19,7 +19,11 @@ See docs/32-provider-settings-and-vault.md and docs/provider-plan.md, section 3.
   ``Binding`` (``vault-v1|...``, unchanged: no provider row is resealed); an alert channel's
   secrets (its webhook URL and signing keys) by ``ChannelBinding``
   (``vault-channel-v1|organization|channel|kind|origin|key_id``). The first field names the
-  scope, so a channel ciphertext never opens as a provider key, nor the reverse.
+  scope, so a channel ciphertext never opens as a provider key, nor the reverse. The operator's
+  own secrets (the SMTP password, docs/48) by ``PlatformBinding``
+  (``vault-platform-v1|kind|host|port|username|key_id``), and under a key of their own: the
+  platform scope's subkey, ``HMAC-SHA256(master, "gateway vault scope platform")``. So neither
+  the associated data nor the key of any organization's secret can open it.
 """
 
 from __future__ import annotations
@@ -46,6 +50,8 @@ MASTER_KEY_BYTES = 32
 NONCE_BYTES = 12
 LAST4_MIN_LENGTH = 20
 _KEY_ID_LABEL = b"gateway vault key id"
+# The platform scope's own key is derived from the master key under this label (docs/48).
+_PLATFORM_SCOPE_LABEL = b"gateway vault scope platform"
 
 
 class VaultKeyError(RuntimeError):
@@ -158,7 +164,38 @@ def channel_binding(
     ).encode()
 
 
-AnyBinding = Binding | ChannelBinding
+# The operator's own secrets, sealed in the platform scope (docs/48): the SMTP password only.
+PLATFORM_SECRET_KINDS = frozenset({"smtp_password"})
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformBinding:
+    """Where an operator's secret may be used: which secret it is, and the server it is for
+    (the SMTP host, port and username). A password left behind when the host, port or username
+    changed does not decrypt. No organization is in it: it belongs to the platform."""
+
+    kind: str
+    host: str
+    port: int
+    username: str
+
+    def __post_init__(self) -> None:
+        if self.kind not in PLATFORM_SECRET_KINDS:
+            raise ValueError("not a kind of platform secret")
+
+
+def platform_binding(kind: str, host: str, port: int, username: str, key_id: str) -> bytes:
+    """The associated data a platform secret is bound to. Its first field names the scope, so
+    no binding of another scope gives the same bytes; the key id is last and has no ``|``."""
+    return "|".join(("vault-platform-v1", kind, host.lower(), str(port), username, key_id)).encode()
+
+
+def platform_scope_key(master: bytes) -> bytes:
+    """The platform scope's own key: derived from the master key, used for nothing else."""
+    return hmac.new(master, _PLATFORM_SCOPE_LABEL, hashlib.sha256).digest()
+
+
+AnyBinding = Binding | ChannelBinding | PlatformBinding
 
 
 class Vault:
@@ -197,13 +234,15 @@ class Vault:
         key. The plaintext is never wrapped and unwrapped here: ``Secret.reveal()`` keeps its
         one call site (the adapters' header builder)."""
         nonce = self._random_bytes(NONCE_BYTES)
-        ciphertext = AESGCM(self._keys[self.current_key_id]).encrypt(
+        ciphertext = AESGCM(self._cipher_key(self.current_key_id, where)).encrypt(
             nonce, plaintext.encode(), self._aad(where, self.current_key_id)
         )
-        # A channel secret keeps no last four characters: a webhook URL's are its token's end.
+        # A channel secret keeps no last four characters (a webhook URL's are its token's end),
+        # nor does a platform secret (docs/48).
         last4 = (
             plaintext[-4:]
-            if len(plaintext) >= LAST4_MIN_LENGTH and not isinstance(where, ChannelBinding)
+            if len(plaintext) >= LAST4_MIN_LENGTH
+            and not isinstance(where, ChannelBinding | PlatformBinding)
             else None
         )
         return SealedKey(self.current_key_id, nonce, ciphertext, last4)
@@ -226,7 +265,7 @@ class Vault:
         """The same key under the current master key (rotation), keeping its ``last4``."""
         plaintext = self._decrypt(sealed, where)
         nonce = self._random_bytes(NONCE_BYTES)
-        ciphertext = AESGCM(self._keys[self.current_key_id]).encrypt(
+        ciphertext = AESGCM(self._cipher_key(self.current_key_id, where)).encrypt(
             nonce, plaintext, self._aad(where, self.current_key_id)
         )
         return SealedKey(self.current_key_id, nonce, ciphertext, sealed.last4)
@@ -234,15 +273,26 @@ class Vault:
     def rebind(self, sealed: SealedKey, was: AnyBinding, now: AnyBinding) -> SealedKey:
         """The same secret under the current master key, bound to ``now`` instead of ``was``
         (a channel whose URL's origin changed keeps its signing key, docs/46)."""
+        if type(was) is not type(now):
+            raise ValueError("a secret is rebound within its own scope only")
         plaintext = self._decrypt(sealed, was)
         nonce = self._random_bytes(NONCE_BYTES)
-        ciphertext = AESGCM(self._keys[self.current_key_id]).encrypt(
+        ciphertext = AESGCM(self._cipher_key(self.current_key_id, now)).encrypt(
             nonce, plaintext, self._aad(now, self.current_key_id)
         )
         return SealedKey(self.current_key_id, nonce, ciphertext, sealed.last4)
 
+    def _cipher_key(self, key_id: str, where: AnyBinding) -> bytes:
+        """The key a scope encrypts with under master key ``key_id``: the master key itself for
+        provider keys and channel secrets (no row is resealed), the platform scope's subkey for
+        the operator's secrets."""
+        master = self._keys[key_id]
+        return platform_scope_key(master) if isinstance(where, PlatformBinding) else master
+
     @staticmethod
     def _aad(where: AnyBinding, key_id: str) -> bytes:
+        if isinstance(where, PlatformBinding):
+            return platform_binding(where.kind, where.host, where.port, where.username, key_id)
         if isinstance(where, ChannelBinding):
             return channel_binding(
                 where.organization_id, where.channel_id, where.kind, where.url_origin, key_id
@@ -252,11 +302,10 @@ class Vault:
         )
 
     def _decrypt(self, sealed: SealedKey, where: AnyBinding) -> bytes:
-        master = self._keys.get(sealed.key_id)
-        if master is None:
+        if sealed.key_id not in self._keys:
             raise KeyUnreadableError(sealed.key_id)
         try:
-            return AESGCM(master).decrypt(
+            return AESGCM(self._cipher_key(sealed.key_id, where)).decrypt(
                 sealed.nonce, sealed.ciphertext, self._aad(where, sealed.key_id)
             )
         except InvalidTag:

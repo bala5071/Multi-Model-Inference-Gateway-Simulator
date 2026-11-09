@@ -77,6 +77,7 @@ class Wired(StrEnum):
     ALERTS_A2 = "alerts A2"  # the alert rule endpoints (docs/44)
     ALERTS_A3 = "alerts A3"  # the incident endpoints (docs/45)
     ALERTS_A4 = "alerts A4"  # the alert channel endpoints (docs/46)
+    ALERTS_A5 = "alerts A5"  # an email channel's recipients (docs/48)
     LATER = "later"  # declared; no endpoint is planned in A2
 
 
@@ -181,6 +182,9 @@ def _rows() -> list[Permission]:
         ("alert_channels.write", o, (_ORG_ADMIN,), CONSUME, w.ALERTS_A4),
         ("alert_channels.disable", o, (_ORG_ADMIN,), False, w.ALERTS_A4),
         ("alert_channels.test", o, (_ORG_ADMIN,), False, w.ALERTS_A4),
+        # Re-sending an email recipient's confirmation and entering its code (docs/48): its
+        # org_admin only; no step-up (capped, and one answer for every refused code).
+        ("alert_channels.confirm_recipient", o, (_ORG_ADMIN,), False, w.ALERTS_A5),
         # The audit log: organization-, user-, role- and login-level entries.
         ("audit.read_organization", o, (_PLATFORM, _ORG_ADMIN), False, w.LATER),
         # Inside an application: never platform_admin.

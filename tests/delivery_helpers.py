@@ -16,7 +16,7 @@ from typing import Any
 
 from gateway.alertrules import AlertRule, validate_rule
 from gateway.alerts.caps import AlertCaps, CeilingsWatch
-from gateway.alerts.channels import ChannelService
+from gateway.alerts.channels import ChannelService, CreatedChannel
 from gateway.alerts.delivery import AttemptReport, DeliveryWorker
 from gateway.alerts.notices import Notices, builtin_rule_ids
 from gateway.applications import application_from_template
@@ -297,3 +297,9 @@ class FrozenClock:
     async def sleep_ms(self, duration_ms: float) -> None:
         if duration_ms > 0:
             await asyncio.get_running_loop().create_future()
+
+
+def key_of(made: CreatedChannel) -> str:
+    """A webhook channel's signing key, shown once when it was made (an email channel has none)."""
+    assert made.signing_key is not None
+    return made.signing_key

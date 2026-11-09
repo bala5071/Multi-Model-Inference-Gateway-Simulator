@@ -27,6 +27,7 @@ from delivery_helpers import (
     T0,
     THIRD_URL,
     World,
+    key_of,
     sqlite_world,
 )
 from gateway.alerts.caps import (
@@ -283,8 +284,8 @@ async def test_each_attempt_is_signed_afresh_with_its_own_timestamp() -> None:
     assert first["x-gateway-delivery"] == second["x-gateway-delivery"]
     assert int(second["x-gateway-timestamp"]) - int(first["x-gateway-timestamp"]) >= 30
     assert first["x-gateway-signature"] != second["x-gateway-signature"]
-    assert _verifies(made.signing_key, first, body1)
-    assert _verifies(made.signing_key, second, body2)
+    assert _verifies(key_of(made), first, body1)
+    assert _verifies(key_of(made), second, body2)
 
 
 async def test_every_delivery_resolves_and_checks_again() -> None:
@@ -315,7 +316,7 @@ async def test_both_keys_sign_during_a_rotation_and_one_after() -> None:
         actor=_actor(),
         marker=_Mark(),
     )
-    first_key = made.signing_key
+    first_key = key_of(made)
     new_key = await world.service.rotate_key(made.channel.id, actor=_actor(), marker=_Mark())
     rule = await _fire(world, [made.channel.id])
     await world.deliver()
@@ -638,7 +639,7 @@ async def test_a_dead_instances_row_stops_counting() -> None:
     await clock.sleep_ms(LIVE_MS)
     assert await live.check() == []
     assert seen == [["per_organization"]]
-    # The row holds the four numbers and their digest, nothing else.
+    # The row holds the caps' numbers and their digest, nothing else.
     [row] = db.execute("SELECT * FROM instance_ceilings WHERE instance_id = 'live'").fetchall()
     assert row[2] == ceilings_text(AlertCaps())
     assert json.loads(row[2]) == {
@@ -646,6 +647,11 @@ async def test_a_dead_instances_row_stops_counting() -> None:
         "per_rule": 6,
         "test_sends_per_channel": 10,
         "test_sends_per_organization": 30,
+        # The email confirmations' caps (docs/48).
+        "confirmations_per_address": 3,
+        "confirmations_per_channel": 10,
+        "confirmations_per_organization": 20,
+        "confirmations_per_instance": 200,
     }
     assert len(row) == 4
 
@@ -773,13 +779,13 @@ async def test_the_receivers_recipe_verifies_a_real_delivery_and_refuses_replays
     headers = dict(line.split(": ", 1) for line in head.decode("ascii").split("\r\n")[1:])
     stamp = int(headers["X-Gateway-Timestamp"])
     receiver = _recipe()
-    assert receiver["verify"](made.signing_key, headers, body, now=stamp + 10)
-    assert not receiver["verify"](made.signing_key, headers, body, now=stamp + 10)  # a repeat
+    assert receiver["verify"](key_of(made), headers, body, now=stamp + 10)
+    assert not receiver["verify"](key_of(made), headers, body, now=stamp + 10)  # a repeat
     fresh = _recipe()
-    assert not fresh["verify"](made.signing_key, headers, body, now=stamp + 301)  # stale
-    assert not fresh["verify"](made.signing_key, headers, body + b" ", now=stamp)
+    assert not fresh["verify"](key_of(made), headers, body, now=stamp + 301)  # stale
+    assert not fresh["verify"](key_of(made), headers, body + b" ", now=stamp)
     assert not fresh["verify"]("00" * 32, headers, body, now=stamp)
-    assert fresh["verify"](made.signing_key, headers, body, now=stamp)
+    assert fresh["verify"](key_of(made), headers, body, now=stamp)
 
 
 # --- small helpers -------------------------------------------------------------------------------

@@ -109,6 +109,9 @@ ORDER_BY = {
     "notification_caps": "scope, scope_id, hour",
     "suppression_summaries": "organization_id, hour",
     "instance_ceilings": "instance_id",
+    "alert_recipients": "id",
+    "confirmation_caps": "address_digest",
+    "platform_secrets": "kind",
 }
 IN_ORDER = frozenset(t for t, order in ORDER_BY.items() if order in ("ord", "seq"))
 

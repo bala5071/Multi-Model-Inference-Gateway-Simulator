@@ -77,8 +77,8 @@ class Endpoint:
     success: int
 
 
-def documented_endpoints() -> list[Endpoint]:
-    text = (REPO / "docs" / "46-alert-channels.md").read_text(encoding="utf-8")
+def documented_endpoints(note: str = "46-alert-channels.md") -> list[Endpoint]:
+    text = (REPO / "docs" / note).read_text(encoding="utf-8")
     pattern = re.compile(
         r"^\| `(GET|POST|PATCH|DELETE)` \| `([^`]+)` \| `([a-z_.]+)` \| (\d{3}) \|$"
     )
@@ -201,9 +201,11 @@ async def test_each_channel_route_is_documented_and_declares_its_action() -> Non
                 [method] = route.methods
                 actions = {d.action for d in declaration_of(route) if d.kind == "requires"}
                 declared[(method, route.path)] = actions
+    # A4's endpoints (note 46) and an email channel's recipients' (A5, note 48).
     documented = {
-        (e.method, "/v1/admin/orgs" + e.path): {e.action} for e in ENDPOINTS
-    }  # fmt: skip
+        (e.method, "/v1/admin/orgs" + e.path): {e.action}
+        for e in [*ENDPOINTS, *documented_endpoints("48-email-channels.md")]
+    }
     assert declared == documented
     assert all(e.action in PERMISSIONS for e in ENDPOINTS)
 

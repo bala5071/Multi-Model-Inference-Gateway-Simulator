@@ -62,8 +62,19 @@ from gateway.alerts.channels import (
     resolve_channel,
 )
 from gateway.alerts.delivery import AttemptReport, DeliverySetup, DeliveryWorker, TestSends
+from gateway.alerts.email import email_settings_from
 from gateway.alerts.notices import Notices, builtin_rule_ids
 from gateway.alerts.outbox import Delivery, OutboxStore
+from gateway.alerts.recipients import (
+    ConfirmationCaps,
+    EmailUnavailableError,
+    InstanceConfirmations,
+    Mailer,
+    Recipient,
+    RecipientGoneError,
+    RecipientService,
+    resolve_recipient_in,
+)
 from gateway.alerts.webhook import DELIVERED
 from gateway.apikeys import (
     INVALID_KEY_MESSAGE,
@@ -1071,7 +1082,8 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
                 exc.reason,
             )
         limited = (
-            Reason.USER_CREATION_LIMITED, Reason.TEST_RATE_LIMITED, Reason.TEST_SEND_LIMITED
+            Reason.USER_CREATION_LIMITED, Reason.TEST_RATE_LIMITED, Reason.TEST_SEND_LIMITED,
+            Reason.CONFIRMATION_LIMITED,
         )  # fmt: skip
         status = 429 if exc.reason in limited else 409
         return _error(status, exc.reason.value, str(exc), headers=_NO_STORE)
@@ -2282,8 +2294,24 @@ class CreateChannelBody(BaseModel):
     # URL (the URL is a secret: docs/46).
     type: str = Field(max_length=20)
     name: str = Field(max_length=200)
-    url: str = Field(max_length=4096)
+    # A webhook's URL; an email channel has none, and has 1 to 10 recipients instead (docs/48).
+    url: str | None = Field(default=None, max_length=4096)
+    recipients: list[str] | None = Field(default=None, max_length=50)
     default: bool = False
+
+
+class AddRecipientBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Checked by the recipient service, whose refusal never repeats the address.
+    address: str = Field(max_length=1024)
+
+
+class ConfirmRecipientBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Checked only by comparison, after the same steps for every value (docs/48).
+    code: str = Field(max_length=64)
 
 
 class UpdateChannelBody(BaseModel):
@@ -2297,9 +2325,25 @@ class UpdateChannelBody(BaseModel):
     enabled: bool | None = None
 
 
-def _channel_view(channel: Channel) -> dict[str, object]:
-    """For the organization's admin: only the URL's origin, never the URL or a key."""
+def _recipient_view(recipient: Recipient) -> dict[str, object]:
+    """For the organization's admin, who entered it: the address and its state; never the code
+    or its digest."""
     return {
+        "id": recipient.id,
+        "address": recipient.address,
+        "state": recipient.state,
+        "added_at_ms": recipient.added_at_ms,
+        "verified_at_ms": recipient.verified_at_ms,
+        "confirmation_expires_at_ms": recipient.code_expires_at_ms,
+    }
+
+
+def _channel_view(
+    channel: Channel, recipients: Sequence[Recipient] | None = None
+) -> dict[str, object]:
+    """For the organization's admin: only the URL's origin, never the URL or a key; an email
+    channel's recipients (docs/48)."""
+    view: dict[str, object] = {
         "id": channel.id,
         "name": channel.name,
         "type": channel.type,
@@ -2315,6 +2359,9 @@ def _channel_view(channel: Channel) -> dict[str, object]:
             "consecutive_failures": channel.consecutive_failures,
         },
     }
+    if recipients is not None:
+        view["recipients"] = [_recipient_view(r) for r in recipients]
+    return view
 
 
 def _channel_application_view(channel: Channel) -> dict[str, object]:
@@ -2359,9 +2406,26 @@ def _channel_routes(
     store = channels.store
     notices = channels.notices
     assert notices is not None
+    recipients = channels.recipients
 
     async def organization(request: Request) -> Resource | None:
         return await resolve_organization(stores, request.path_params["org"])
+
+    async def recipient(request: Request) -> Resource | None:
+        # The channel in the path's organization, and the recipient in that channel; anything
+        # else (an id not in a recipient id's form included) is missing, answered as forbidden.
+        p = request.path_params
+        resource = await resolve_channel(stores, store, p["org"], p["channel"])
+        if resource is None or recipients is None:
+            return None
+        if not await resolve_recipient_in(recipients.store, p["channel"], p["recipient"]):
+            return None
+        return resource
+
+    async def viewed(channel: Channel) -> dict[str, object]:
+        if channel.type == "email" and recipients is not None:
+            return _channel_view(channel, await recipients.store.channel_recipients(channel.id))
+        return _channel_view(channel)
 
     async def application(request: Request) -> Resource | None:
         p = request.path_params
@@ -2378,7 +2442,20 @@ def _channel_routes(
     writing_channel = requires("alert_channels.write", channel)
     disabling_channel = requires("alert_channels.disable", channel)
     testing_channel = requires("alert_channels.test", channel)
+    confirming_in_channel = requires("alert_channels.confirm_recipient", channel)
+    confirming_recipient = requires("alert_channels.confirm_recipient", recipient)
+    removing_recipient = requires("alert_channels.disable", recipient)
     prefix = ORG_PREFIX + "/alert-channels"
+
+    @app.exception_handler(EmailUnavailableError)
+    async def email_unavailable(_: Request, exc: EmailUnavailableError) -> JSONResponse:
+        # Raised, so a claimed step-up window is given back (docs/32).
+        return _invalid("type", "email is not set up on this server")
+
+    @app.exception_handler(RecipientGoneError)
+    async def recipient_gone(_: Request, exc: RecipientGoneError) -> JSONResponse:
+        # Resolved a moment ago, removed since: missing, answered as forbidden.
+        return _error(403, "forbidden", "Not permitted, or not found.", headers=_NO_STORE)
 
     @app.exception_handler(ChannelFieldError)
     async def channel_invalid(_: Request, exc: ChannelFieldError) -> JSONResponse:
@@ -2412,7 +2489,7 @@ def _channel_routes(
         page = await store.list_channels(org, limit, after)
         return JSONResponse(
             {
-                "channels": [_channel_view(c) for c in page],
+                "channels": [await viewed(c) for c in page],
                 "next": page[-1].id if len(page) == limit else None,
             }
         )
@@ -2424,8 +2501,17 @@ def _channel_routes(
         assert auth.consumed is not None
         made = await channels.create(
             org, name=body.name, url=body.url, is_default=body.default, channel_type=body.type,
-            actor=auth.actor, marker=auth.consumed,
+            actor=auth.actor, marker=auth.consumed, recipients=body.recipients,
         )  # fmt: skip
+        if made.signing_key is None:
+            # An email channel: its recipients, each unverified, and each confirmation's outcome.
+            return JSONResponse(
+                {
+                    **_channel_view(made.channel, [r for r, _ in made.recipients]),
+                    "confirmations": {r.id: outcome for r, outcome in made.recipients},
+                },
+                status_code=201,
+            )
         # The signing key, this once (no-store, as every admin answer).
         return JSONResponse(
             {**_channel_view(made.channel), "signing_key": made.signing_key}, status_code=201
@@ -2438,7 +2524,7 @@ def _channel_routes(
         found = await store.get_channel(channel)
         if found is None:
             raise ForbiddenError()
-        return JSONResponse(_channel_view(found))
+        return JSONResponse(await viewed(found))
 
     @app.patch(prefix + "/{channel}")
     async def update_alert_channel(
@@ -2482,6 +2568,56 @@ def _channel_routes(
         # The code alone: never anything the receiver answered.
         code = await test_sends.send(org, channel, auth.actor)
         return JSONResponse({"id": channel, "outcome": code, "delivered": code == DELIVERED})
+
+    @app.post(prefix + "/{channel}/recipients", status_code=201)
+    async def add_alert_recipient(
+        org: str, channel: str, body: AddRecipientBody, auth: Authorized = writing_channel
+    ) -> JSONResponse:
+        assert auth.consumed is not None
+        found = await store.get_channel(channel)
+        if found is None:
+            raise ForbiddenError()
+        if found.type != "email":
+            raise ManagementRefusal(
+                Reason.CHANNEL_NOT_EMAIL, "only an email channel has recipients"
+            )
+        if recipients is None:
+            raise EmailUnavailableError()
+        made, outcome = await recipients.add(
+            org, channel, body.address, actor=auth.actor, marker=auth.consumed
+        )
+        return JSONResponse({**_recipient_view(made), "confirmation": outcome}, status_code=201)
+
+    @app.post(prefix + "/{channel}/recipients/{recipient}/resend")
+    async def resend_alert_recipient(
+        org: str, channel: str, recipient: str, auth: Authorized = confirming_recipient
+    ) -> JSONResponse:
+        assert recipients is not None  # the resolver found the recipient
+        made, outcome = await recipients.resend(org, channel, recipient, actor=auth.actor)
+        return JSONResponse({**_recipient_view(made), "confirmation": outcome})
+
+    @app.post(prefix + "/{channel}/recipients/{recipient}/confirm")
+    async def confirm_alert_recipient(
+        org: str,
+        channel: str,
+        recipient: str,
+        body: ConfirmRecipientBody,
+        auth: Authorized = confirming_in_channel,
+    ) -> JSONResponse:
+        # The channel is resolved; the recipient is not: an unknown one is refused exactly as a
+        # wrong code is, after the same steps (docs/48).
+        if recipients is None:
+            raise EmailUnavailableError()
+        made = await recipients.confirm(org, channel, recipient, body.code, actor=auth.actor)
+        return JSONResponse(_recipient_view(made))
+
+    @app.delete(prefix + "/{channel}/recipients/{recipient}")
+    async def remove_alert_recipient(
+        org: str, channel: str, recipient: str, auth: Authorized = removing_recipient
+    ) -> JSONResponse:
+        assert recipients is not None  # the resolver found the recipient
+        await recipients.remove(channel, recipient, actor=auth.actor)
+        return JSONResponse({"deleted": recipient})
 
     @app.get(prefix + "/{channel}/deliveries")
     async def list_alert_channel_deliveries(
@@ -5205,14 +5341,23 @@ def build_channels(
     pepper: bytes,
     redactor: Redactor,
     clock: Clock,
+    counters: SharedCounters | None = None,
+    mailer: Mailer | None = None,
 ) -> ChannelService:
     """The organizations' alert channels for a server (docs/46): sealed under the same vault as
     provider keys, in their own scope; the webhook ports from ``GATEWAY_ALERT_WEBHOOK_PORTS``
     and the caps from their four variables (a value out of range refuses the start); their
     notices queued in the outbox on the state's clock; the built-in's rule ids under their own
     key derived from the pepper; each attempt through a new ``webhook_client`` on the system
-    resolver, with one pinned TLS context, its leased secrets scrubbed by ``redactor``."""
+    resolver, with one pinned TLS context, its leased secrets scrubbed by ``redactor``.
+
+    Email channels (docs/48): the operator's SMTP settings from the environment (a value that is
+    not valid refuses the start); their recipients' codes and the per-address cap under keys
+    derived from the pepper; the hourly confirmation windows in ``counters`` when shared, else in
+    memory; codes and ids from the operating system's generator. Without ``mailer`` (group 1)
+    no email channel can be made."""
     caps = caps_from(environ)
+    email = email_settings_from(environ)
     ports = parse_webhook_ports(environ.get(WEBHOOK_PORTS_ENV))
     notices = Notices(
         state.channels,
@@ -5225,6 +5370,42 @@ def build_channels(
         builtin_rule_id=builtin_rule_ids(derive_key(pepper, KeyPurpose.BUILTIN_RULE_ID)),
     )
     tls = provider_tls_context()
+
+    async def organization_name(organization_id: str) -> str | None:
+        found = await state.applications.get_organization(organization_id)
+        return found.name if found is not None else None
+
+    recipients = RecipientService(
+        state.recipients,
+        state.confirmations,
+        counters.confirmations(caps.confirmations_per_channel, caps.confirmations_per_organization)
+        if counters is not None
+        else InMemoryConnectionTestCounter(
+            clock,
+            caps.confirmations_per_channel,
+            caps.confirmations_per_organization,
+            reason=Reason.CONFIRMATION_LIMITED,
+            what=("one channel's recipients", "an organization's recipients"),
+            noun="confirmations to",
+        ),
+        InstanceConfirmations(clock, caps.confirmations_per_instance),
+        audit,
+        epoch,
+        state.clock,
+        random.SystemRandom(),
+        code_key=derive_key(pepper, KeyPurpose.EMAIL_CONFIRMATION),
+        address_key=derive_key(pepper, KeyPurpose.EMAIL_ADDRESS),
+        caps=ConfirmationCaps(
+            caps.confirmations_per_address,
+            caps.confirmations_per_channel,
+            caps.confirmations_per_organization,
+            caps.confirmations_per_instance,
+        ),
+        settings=email,
+        mailer=mailer,
+        organization_name=organization_name,
+        held=state.outbox,
+    )
     return ChannelService(
         state.channels,
         vault,
@@ -5234,6 +5415,7 @@ def build_channels(
         notices=notices,
         ports=ports,
         store_clock=state.clock,
+        recipients=recipients,
         delivery=DeliverySetup(
             lambda: webhook_client(system_resolver, clock, ports, ssl_context=tls),
             redactor,
@@ -5600,6 +5782,7 @@ def create_shared_app(environ: Mapping[str, str]) -> FastAPI:
             pepper=pepper,
             redactor=redactor,
             clock=clock,
+            counters=shared,
         ),
         modes=state.modes,
         settings=state.settings,

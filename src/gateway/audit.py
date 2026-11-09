@@ -44,6 +44,10 @@ RULE_ID_PATTERN = re.compile(r"rul_[0-9a-f]{16}")
 # An alert channel (docs/46), and the fields a change of one names (never a value).
 CHANNEL_ID_PATTERN = re.compile(r"chn_[0-9a-f]{16}")
 CHANNEL_FIELDS = frozenset({"name", "url", "default", "enabled"})
+# An email channel's recipient (docs/48): named by its id, never its address.
+RECIPIENT_ID_PATTERN = re.compile(r"rcp_[0-9a-f]{16}")
+# The operator's own secrets in the vault's platform scope (docs/48), named by their kind.
+PLATFORM_SECRET_PATTERN = re.compile(r"smtp_password")
 INCIDENT_ID_PATTERN = re.compile(r"inc_[0-9a-f]{16}")
 
 MINUTE_MS = 60_000.0
@@ -121,6 +125,14 @@ class AuditAction(StrEnum):
     ALERT_CHANNEL_DELETED = "alert_channel_deleted"
     ALERT_CHANNEL_KEY_ROTATED = "alert_channel_key_rotated"
     ALERT_CHANNEL_TESTED = "alert_channel_tested"
+    # An email channel's recipients (docs/48): the channel and recipient ids, never the address
+    # or the confirmation code.
+    ALERT_RECIPIENT_ADDED = "alert_recipient_added"
+    ALERT_RECIPIENT_CONFIRMATION_SENT = "alert_recipient_confirmation_sent"
+    ALERT_RECIPIENT_VERIFIED = "alert_recipient_verified"
+    ALERT_RECIPIENT_REMOVED = "alert_recipient_removed"
+    # The SMTP password set by the operator at the CLI (docs/48): its kind only.
+    SMTP_PASSWORD_SET = "smtp_password_set"
 
 
 class Outcome(StrEnum):
@@ -142,6 +154,7 @@ class TargetType(StrEnum):
     ALERT_RULE = "alert_rule"
     INCIDENT = "incident"
     ALERT_CHANNEL = "alert_channel"
+    PLATFORM_SECRET = "platform_secret"
 
 
 class Reason(StrEnum):
@@ -188,6 +201,14 @@ class Reason(StrEnum):
     CHANNEL_NAME_TAKEN = "channel_name_taken"
     TEST_SEND_LIMITED = "test_send_limited"
     CHANNEL_DISABLED = "channel_disabled"
+    # Email channels and their recipients (docs/48).
+    CHANNEL_HAS_NO_KEY = "channel_has_no_key"
+    CHANNEL_NOT_EMAIL = "channel_not_email"
+    RECIPIENT_LIMIT = "recipient_limit"
+    RECIPIENT_TAKEN = "recipient_taken"
+    RECIPIENT_VERIFIED = "recipient_verified"
+    CONFIRMATION_INVALID = "confirmation_invalid"
+    CONFIRMATION_LIMITED = "confirmation_limited"
 
 
 # The only keys ``details`` may have, and the type of each value.
@@ -235,6 +256,8 @@ DETAIL_FIELDS: Mapping[str, type] = {
     "channel_type": str,
     # A test send's outcome: "delivered" or a delivery's failure code (docs/46).
     "delivery_code": str,
+    # An email channel's recipient (docs/48): its id, checked against its form.
+    "recipient_id": str,
 }
 # gateway.egress.refusal's reasons for an address.
 _ADDRESS_REFUSALS = (
@@ -258,7 +281,7 @@ FIXED_VALUES: Mapping[str, frozenset[str]] = {
     "old_mode": _MODES,
     "new_mode": _MODES,
     "preset": frozenset(_PRESETS),
-    "channel_type": frozenset({"webhook"}),
+    "channel_type": frozenset({"webhook", "email"}),
     # The delivery codes of the A4 plan's section 4.3, and "delivered".
     "delivery_code": frozenset(
         {
@@ -364,6 +387,10 @@ def _checked_details(details: Mapping[str, object]) -> dict[str, object]:
             if not isinstance(value, str) or not KEY_ID_PATTERN.fullmatch(value):
                 raise ValueError("audit detail 'key_id' must be a key id")
             checked[key] = value
+        elif key == "recipient_id":
+            if not isinstance(value, str) or not RECIPIENT_ID_PATTERN.fullmatch(value):
+                raise ValueError("audit detail 'recipient_id' must be a recipient id")
+            checked[key] = value
         else:  # organization_id, application_id, plan, role, scope_id: ids, never free text
             ok = isinstance(value, str) and (
                 ORGANIZATION_ID_PATTERN.fullmatch(value) is not None
@@ -390,6 +417,7 @@ _TARGET_PATTERNS: Mapping[TargetType, re.Pattern[str]] = {
     TargetType.ALERT_RULE: RULE_ID_PATTERN,
     TargetType.INCIDENT: INCIDENT_ID_PATTERN,
     TargetType.ALERT_CHANNEL: CHANNEL_ID_PATTERN,
+    TargetType.PLATFORM_SECRET: PLATFORM_SECRET_PATTERN,
 }
 
 

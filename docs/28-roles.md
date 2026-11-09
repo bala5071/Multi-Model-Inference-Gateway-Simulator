@@ -97,6 +97,7 @@ planned in A2).
 | `alert_channels.write` | organization | `org_admin@own_organization` | consume | alerts A4 |
 | `alert_channels.disable` | organization | `org_admin@own_organization` | | alerts A4 |
 | `alert_channels.test` | organization | `org_admin@own_organization` | | alerts A4 |
+| `alert_channels.confirm_recipient` | organization | `org_admin@own_organization` | | alerts A5 |
 | `audit.read_organization` | organization | `org_admin@own_organization`, `platform_admin@platform` | | later |
 | `applications.read` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@application_in_own_organization`, `viewer@own_application` | | step 7 |
 | `usage.read_application` | application | `app_admin@own_application`, `org_admin@application_in_own_organization`, `viewer@application_in_own_organization`, `viewer@own_application` | | later |

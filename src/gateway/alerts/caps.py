@@ -6,13 +6,18 @@ hour. Each is one environment variable of the instance, a whole number in its ra
 else refuses the start, naming the variable (``caps_from``). Each range starts at 1, so no cap
 can be turned off, and each default is at most a sixth of its maximum (the plan's section 21.5).
 
-**The ceilings row** (the main plan's decision 19, for the four caps: the reviewer's decision of
-2026-11-08). Every instance writes its four values and their sha256 to ``instance_ceilings`` on
-each lease attempt (every 10 s) and reads the other **live** instances' rows: those written in
-the last ``LIVE_MS`` (a dead instance's row stops counting then, and is deleted after
-``KEEP_MS``). A difference is **reported, never refused**: an ``alert_caps_differ`` event naming
-the caps that differ (never a value of anything else) and a warning log line, once for each new
-difference. The row and the event hold only the four numbers and their names.
+**The confirmation caps** (docs/48, the A5 plan's section 6): an email recipient's confirmations
+per address a day, per channel, per organization and per instance an hour. The same rule: each
+from 1, each default at most a sixth of its maximum, and they join the ceilings row.
+
+**The ceilings row** (the main plan's decision 19, for the caps: the reviewer's decisions of
+2026-11-08 and, for the confirmation caps, 2026-11-09). Every instance writes its values and their
+sha256 to ``instance_ceilings`` on each lease attempt (every 10 s) and reads the other **live**
+instances' rows: those written in the last ``LIVE_MS`` (a dead instance's row stops counting then,
+and is deleted after ``KEEP_MS``). A difference is **reported, never refused**: an
+``alert_caps_differ`` event naming the caps that differ (never a value of anything else) and a
+warning log line, once for each new difference. The row and the event hold only the numbers and
+their names.
 """
 
 from __future__ import annotations
@@ -39,6 +44,10 @@ class AlertCaps:
     per_organization: int = 60
     test_sends_per_channel: int = 10
     test_sends_per_organization: int = 30
+    confirmations_per_address: int = 3
+    confirmations_per_channel: int = 10
+    confirmations_per_organization: int = 20
+    confirmations_per_instance: int = 200
 
 
 # Each cap: its variable, and its range (the plan's section 7).
@@ -47,6 +56,12 @@ CAP_VARIABLES: Mapping[str, tuple[str, int, int]] = {
     "per_organization": ("GATEWAY_ALERT_CAP_PER_ORGANIZATION", 1, 600),
     "test_sends_per_channel": ("GATEWAY_ALERT_TEST_SENDS_PER_CHANNEL", 1, 60),
     "test_sends_per_organization": ("GATEWAY_ALERT_TEST_SENDS_PER_ORGANIZATION", 1, 300),
+    # Email confirmations (docs/48): per address a day; per channel, organization and instance
+    # an hour.
+    "confirmations_per_address": ("GATEWAY_EMAIL_CONFIRMATIONS_PER_ADDRESS", 1, 18),
+    "confirmations_per_channel": ("GATEWAY_EMAIL_CONFIRMATIONS_PER_CHANNEL", 1, 60),
+    "confirmations_per_organization": ("GATEWAY_EMAIL_CONFIRMATIONS_PER_ORGANIZATION", 1, 120),
+    "confirmations_per_instance": ("GATEWAY_EMAIL_CONFIRMATIONS_PER_INSTANCE", 1, 1200),
 }
 
 
