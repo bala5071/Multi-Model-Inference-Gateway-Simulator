@@ -150,8 +150,23 @@ test), and a new one is made for every attempt, so every delivery resolves and c
 
 **Nothing of an attempt is logged by the HTTP libraries.** `httpx` logs every request's full URL
 at INFO, and `httpcore`'s DEBUG trace logs the answer's headers. Group 2's leak scan found both.
-While an attempt runs, a filter keyed to the attempt drops those loggers' records, and only
-those (`QuietAttempt`): other requests log as before.
+What the gateway does about it, exactly:
+
+- **The filter (`QuietAttempt`) is process-wide in where it sits:** it is attached once to the
+  six loggers of `httpx` and `httpcore`, the first time a webhook is sent, and stays attached for
+  the life of the process. It is never removed.
+- **It is switched on per attempt, not per process:** by a context variable set when `send`
+  starts and reset in its `finally`, on every path (delivered, a timeout, a connection error, a
+  redirect, any failure). It drops a record only while that variable is set in the context the
+  record is made in: the attempt's own task and the tasks it starts.
+- **So a concurrent provider call keeps its lines.** Another task, a chat request's provider
+  call among them, logs through the same loggers as before, even while an attempt is in
+  flight. Tested: a provider-style `httpx` line logged by another task during an attempt is
+  kept, and the same task's `httpx` line after an attempt is kept (the reset). A task started
+  from inside an attempt would inherit the quiet state; none is.
+- **What an operator loses:** `httpx`'s and `httpcore`'s own lines for webhook attempts. The
+  gateway's line for a failed attempt (`alert delivery failed: channel <id>, <code>`) and the
+  `alert_delivery_failed` event take their place, with no URL in them.
 
 **Codes.** `delivered`; `egress_refused`, `port_refused`, `dns_failure`, `timeout`,
 `connect_failed`, `tls`, `http_3xx`, `http_4xx`, `http_5xx`; `payload_too_large`,
@@ -222,6 +237,15 @@ the hour on the store clock. Over a cap, its deliveries are queued `suppressed` 
 `suppressed_summary` an organization (a unique index on organization and hour, M26), with the
 number of notifications and rules suppressed and the hour, to the default channels. It is not
 counted.
+
+- **Only the hour just ended is summarised.** Each evaluator tries once an hour, for the last
+  complete hour. If no instance holds the lease through the whole of the following hour (every
+  instance down, or none able to reach the store), that hour's summary is never sent. The
+  suppressed deliveries stay in the outbox (`GET .../alert-channels/{channel}/deliveries` shows
+  them, state `suppressed`, with `rule_cap` or `organization_cap`), so nothing is lost from the
+  record, only the notice of it.
+- **A summary goes only to default channels.** An organization with no enabled default channel
+  gets none: its suppressed notifications are visible only in the deliveries list.
 
 **Instances agree, or say so** (the main plan's decision 19, for the four caps only; decided
 2026-11-08). On every lease attempt, every instance writes its four values and their sha256 to
@@ -330,7 +354,12 @@ against group 1's (`6e007a9`), three runs each, alternated:
 
 - **The ceilings row** holds the four cap values and their digest, compared on each lease
   attempt; only live instances count (60 s), a dead one's row is deleted after an hour.
-- **Every failed attempt counts toward `consecutive_failures`**, retried or not.
+- **Every failed attempt counts toward `consecutive_failures`**, retried or not. So a
+  receiver that fails three tries of one delivery (the first, and the retries at 30 s and
+  2 min) fires the built-in `channel_delivery_failing` within about 2.5 minutes, while that
+  delivery still has three retries left; three different deliveries failing once each do the
+  same. It resolves when the channel next delivers anything. A receiver that is down briefly
+  can therefore raise and resolve the built-in during one delivery's retries.
 - **A disabled channel's queued deliveries fail at send as `channel_disabled`**, and a test send
   to a disabled channel is refused: a disabled channel gets nothing.
 - **`Retry-After` replaces the backoff** when the receiver gives one (at most an hour).

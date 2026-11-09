@@ -11,9 +11,11 @@ production guard is relaxed and no socket is opened. Test values, not secrets.""
 from __future__ import annotations
 
 import ast
+import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import ssl
 from pathlib import Path
 
@@ -47,6 +49,7 @@ from mock_network import (
     TLS_HANGS,
     WRITE_HANGS,
     FakeResolver,
+    Gate,
     Pauses,
     ScriptedNetwork,
     TlsFails,
@@ -534,6 +537,56 @@ async def test_names_with_quotes_backslashes_braces_and_unicode_stay_in_the_json
     assert sent.isascii()
     assert headers["x-gateway-delivery"] == DELIVERY
     assert verify(KEY, headers, sent)
+
+
+# --- the HTTP libraries' log records --------------------------------------------------------------
+
+LOCATION = "https://10.0.0.9/planted-location-5d1e"
+
+
+@pytest.mark.parametrize(
+    "scripted",
+    [
+        HANG,  # timing out
+        httpcore.ConnectError(f"could not reach {URL}"),  # a connection error naming the URL
+        http_response(b"", "302 Found", Location=LOCATION, Content_Length="0"),  # redirected
+        OK,
+    ],
+    ids=["timeout", "connection-error", "redirect", "delivered"],
+)
+async def test_no_url_or_location_reaches_a_log_record_and_the_filter_is_off_after(
+    scripted: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every log record at DEBUG, through the attempt and after it: none carries the URL's
+    token or a redirect's Location, whatever the attempt came to; once it has returned (the
+    context variable reset in its ``finally``), the same task's httpx records are logged
+    again."""
+    with caplog.at_level(logging.DEBUG):
+        await _attempt(ScriptedNetwork([scripted]))
+        logging.getLogger("httpx").info("after the attempt: planted-after-line")
+    text = "\n".join(f"{r.name} {r.getMessage()} {r.exc_text or ''}" for r in caplog.records)
+    assert TOKEN not in text
+    assert "planted-location" not in text
+    assert "httpx after the attempt: planted-after-line" in text
+
+
+async def test_an_attempt_drops_only_its_own_records_not_a_concurrent_tasks(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The filter sits on the HTTP loggers for the whole process, but it is switched on by a
+    context variable: only the attempt's own task (and the tasks it starts) is quiet. A
+    provider call's httpx line, logged by another task while an attempt is in flight, is
+    kept."""
+    gate = Gate(OK)
+    with caplog.at_level(logging.DEBUG):
+        attempt = asyncio.create_task(_attempt(ScriptedNetwork([gate])))
+        await gate.reached.wait()  # the attempt is at its connection now
+        logging.getLogger("httpx").info("concurrent: planted-provider-line")
+        gate.opened.set()
+        assert (await attempt).code == "delivered"
+    lines = [f"{r.name} {r.getMessage()}" for r in caplog.records]
+    assert "httpx concurrent: planted-provider-line" in lines
+    assert not any(TOKEN in line for line in lines)
 
 
 def test_build_request_is_the_one_reveal_of_the_alert_modules() -> None:
