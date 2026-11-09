@@ -298,6 +298,22 @@ async def test_a_failed_handshake_is_permanent_tls_and_keeps_nothing_of_its_mess
     assert TOKEN not in repr(found)
 
 
+def test_the_pinned_context_sets_tls_1_2_whatever_the_platform_allows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The floor is the gateway's, not the platform's: on a platform whose OpenSSL allows any
+    version (as a CI runner's did), the pinned context still requires TLS 1.2."""
+    import httpx
+
+    def permissive(**_: object) -> ssl.SSLContext:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+        return context
+
+    monkeypatch.setattr(httpx, "create_ssl_context", permissive)
+    assert provider_tls_context().minimum_version == ssl.TLSVersion.TLSv1_2
+
+
 def test_the_webhook_client_takes_only_the_pinned_context() -> None:
     """No alert module, nor ``webhook_client``, makes a TLS context of its own or turns
     verification off; the only client construction in the alert modules is in egress."""

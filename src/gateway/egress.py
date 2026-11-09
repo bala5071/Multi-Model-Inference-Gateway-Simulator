@@ -346,9 +346,13 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
 def provider_tls_context() -> ssl.SSLContext:
     """The TLS context provider calls are made with: certificates verified, host names checked,
     against httpx's own trust store (``certifi``). ``trust_env=False``, as for every guarded
-    client: ``SSL_CERT_FILE`` and ``SSL_CERT_DIR`` cannot replace it. Nothing in it depends on
-    the organization; the server makes one and shares it (docs/33, tested)."""
-    return httpx.create_ssl_context(trust_env=False)
+    client: ``SSL_CERT_FILE`` and ``SSL_CERT_DIR`` cannot replace it. TLS 1.2 at least, set
+    here rather than left to the platform's OpenSSL defaults, which differ (docs/46). Nothing in
+    it depends on the organization; the server makes one and shares it (docs/33, tested)."""
+    context = httpx.create_ssl_context(trust_env=False)
+    if context.minimum_version < ssl.TLSVersion.TLSv1_2:
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
 
 
 class StagedStream(httpcore.AsyncNetworkStream):
