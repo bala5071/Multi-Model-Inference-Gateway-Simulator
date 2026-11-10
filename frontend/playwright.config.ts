@@ -10,6 +10,9 @@ import { defineConfig } from "@playwright/test";
 
 const PORT = 8177;
 const CONSOLE_PORT = 8178;
+// The console server's test mailbox (e2e/console_server.py): what its test SMTP server received.
+const CONSOLE_MAIL_PORT = 8179;
+process.env.CONSOLE_E2E_MAIL_PORT = String(CONSOLE_MAIL_PORT);
 
 // The console's server needs a pepper, a vault key and accounts. Each is made here, at the
 // start of the run, from the operating system's generator, and handed to the server and the
@@ -31,8 +34,13 @@ const consoleEnv = {
   CONSOLE_E2E_ADMIN_FIRST_PASSWORD: generated("CONSOLE_E2E_ADMIN_FIRST_PASSWORD", 18),
   CONSOLE_E2E_VIEWER_FIRST_PASSWORD: generated("CONSOLE_E2E_VIEWER_FIRST_PASSWORD", 18),
   CONSOLE_E2E_APPADMIN_FIRST_PASSWORD: generated("CONSOLE_E2E_APPADMIN_FIRST_PASSWORD", 18),
+  CONSOLE_E2E_MAIL_PORT: String(CONSOLE_MAIL_PORT),
 };
 generated("CONSOLE_E2E_ADMIN_PASSWORD", 18);
+// The alert screens' planted values (docs/49): a webhook URL's secret path and a recipient's
+// address, each found by the leak scan where it must be and nowhere else.
+generated("CONSOLE_E2E_HOOK_TOKEN", 18);
+generated("CONSOLE_E2E_RECIPIENT_TAG", 6);
 generated("CONSOLE_E2E_VIEWER_PASSWORD", 18);
 generated("CONSOLE_E2E_APPADMIN_PASSWORD", 18);
 
@@ -59,8 +67,16 @@ export default defineConfig({
     },
     {
       name: "console",
-      testMatch: "console*.e2e.ts",
+      testMatch: "console.e2e.ts",
       // No trace: it would record the generated passwords, in the login and step-up bodies.
+      use: { baseURL: `http://127.0.0.1:${CONSOLE_PORT}`, trace: "off", screenshot: "off" },
+    },
+    {
+      // The alert screens (docs/49), on the same server, after the settings screens: those
+      // test each account's first login.
+      name: "console-alerts",
+      testMatch: "console_alerts.e2e.ts",
+      dependencies: ["console"],
       use: { baseURL: `http://127.0.0.1:${CONSOLE_PORT}`, trace: "off", screenshot: "off" },
     },
   ],
@@ -81,7 +97,7 @@ export default defineConfig({
     },
     {
       // The plain server on a database made for this run and seeded through the operator's
-      // CLI (e2e/console_server.py).
+      // CLI, with the suite's test SMTP server beside it (e2e/console_server.py).
       command: `uv run python e2e/console_server.py ${CONSOLE_PORT}`,
       env: consoleEnv,
       url: `http://127.0.0.1:${CONSOLE_PORT}/healthz`,

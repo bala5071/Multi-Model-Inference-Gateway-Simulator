@@ -18,7 +18,7 @@ export class ApiError extends Error {
 
 export interface Api {
   get<T>(path: string): Promise<T>;
-  send<T>(method: "POST" | "PUT" | "DELETE", path: string, body?: unknown): Promise<T>;
+  send<T>(method: "POST" | "PUT" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T>;
 }
 
 function isErrorBody(value: unknown): value is ErrorBody {
@@ -128,3 +128,34 @@ export function orgPath(organizationId: string): string {
 export function applicationSettingsPath(organizationId: string, applicationId: string): string {
   return `${orgPath(organizationId)}/applications/${encodeURIComponent(applicationId)}/settings`;
 }
+
+/**
+ * Whether the gateway lets this user make the write at `path`, for a write that has no dry run
+ * of its own (C2, docs/49): a body the route's own model refuses (a JSON array), which the
+ * gateway checks only after it has checked who may write. Nothing is written or audited: 422
+ * `invalid_request` to someone who may, 403 `forbidden` to anyone else. Anything else is
+ * `unknown`, and the console then shows no write control.
+ */
+export async function probeRefusedBody(api: Api, path: string): Promise<WriteProbe> {
+  try {
+    await api.send("POST", path, []);
+    // The gateway took an array as a body: not the answer this probe relies on.
+    return "unknown";
+  } catch (error) {
+    if (!(error instanceof ApiError)) return "unknown";
+    if (error.status === 422 && error.code === "invalid_request") return "allowed";
+    if (error.status === 403 && error.code === "forbidden") return "forbidden";
+    return "unknown";
+  }
+}
+
+export function applicationPath(organizationId: string, applicationId: string): string {
+  return `${orgPath(organizationId)}/applications/${encodeURIComponent(applicationId)}`;
+}
+
+export function channelPath(organizationId: string, channelId: string): string {
+  return `${orgPath(organizationId)}/alert-channels/${encodeURIComponent(channelId)}`;
+}
+
+/** A recipient id the confirm probe names: the route resolves only the channel (docs/48). */
+export const PROBE_RECIPIENT = "rcp_probe";

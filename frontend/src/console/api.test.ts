@@ -1,4 +1,4 @@
-import { ApiError, CSRF_HEADER, makeApi, probeWrite } from "./api";
+import { ApiError, CSRF_HEADER, makeApi, probeRefusedBody, probeWrite } from "./api";
 
 interface Call {
   path: string;
@@ -124,6 +124,57 @@ describe("probeWrite", () => {
         makeApi(() => "t", fetcher),
         "/b",
         1,
+      ),
+    ).toBe("unknown");
+  });
+});
+
+describe("probeRefusedBody", () => {
+  it("sends a JSON array, which the route refuses after checking who may write", async () => {
+    const { fetcher, calls } = stub([
+      { status: 422, body: { error: { code: "invalid_request", message: "no" } } },
+    ]);
+    expect(
+      await probeRefusedBody(
+        makeApi(() => "t", fetcher),
+        "/v1/x/alert-rules",
+      ),
+    ).toBe("allowed");
+    expect(calls[0]?.init.method).toBe("POST");
+    expect(calls[0]?.init.body).toBe("[]");
+    expect(headers(calls[0])[CSRF_HEADER]).toBe("t");
+  });
+
+  it("is forbidden on the gateway's 403 forbidden", async () => {
+    const { fetcher } = stub([
+      {
+        status: 403,
+        body: { error: { code: "forbidden", message: "Not permitted, or not found." } },
+      },
+    ]);
+    expect(
+      await probeRefusedBody(
+        makeApi(() => "t", fetcher),
+        "/b",
+      ),
+    ).toBe("forbidden");
+  });
+
+  it.each([
+    [200, "ok"],
+    [201, "created"],
+    [403, "step_up_required"],
+    [403, "csrf_failed"],
+    [401, "session_required"],
+    [409, "rule_limit"],
+    [422, "confirmation_invalid"],
+    [503, "state_unavailable"],
+  ])("is unknown, never allowed, on a %i %s", async (status, code) => {
+    const { fetcher } = stub([{ status, body: { error: { code, message: "no" } } }]);
+    expect(
+      await probeRefusedBody(
+        makeApi(() => "t", fetcher),
+        "/b",
       ),
     ).toBe("unknown");
   });

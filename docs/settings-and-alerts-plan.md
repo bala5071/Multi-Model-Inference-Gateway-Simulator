@@ -1343,18 +1343,21 @@ of section 16, on the endpoints already merged, and nothing beyond. Frontend onl
 the gateway's side; no backend code change.
 
 - **Who may write is asked of the gateway, as in C1.** Each write has a dry run that writes
-  nothing and is not audited: a body the route's own model refuses, sent after `requires` has
-  run, answers 422 to someone allowed and 403 `forbidden` to anyone else (a consume-on-use
-  action without an open window answers `step_up_required`, after authorization: allowed). A
-  claimed window is given back when the body is refused. A test on the gateway's side pins each
-  probe's answers, that nothing is written or audited, and that an open window survives it.
+  nothing and is not audited where one exists: a body the route's own model refuses, sent after
+  `requires` has run, answers 422 to someone allowed and 403 `forbidden` to anyone else. A test
+  on the gateway's side pins each probe's answers and that nothing is written or audited.
 - **Three actions have no route that can be dry-run** (decided 2026-11-09):
   `incidents.acknowledge`, `alert_channels.disable` and `alert_channels.test` take no body or
-  query, so `requires` is followed by the action itself. Their controls follow the probe of an
-  action with the same role row: Acknowledge follows `alert_rules.write` on the same
-  application; Disable, Delete, Remove a recipient and Test send follow `alert_channels.write`.
-  A test pins those rows equal in `PERMISSIONS`, so a change to the matrix fails CI rather than
-  showing a control. The gateway still refuses anyone not allowed.
+  query, so `requires` is followed by the action itself. Their controls follow the answer of an
+  action with the same role row: Acknowledge follows the `alert_rules.write` probe on the same
+  application. A test pins those rows equal in `PERMISSIONS`, so a change to the matrix fails CI
+  rather than showing a control. The gateway still refuses anyone not allowed.
+- **`alert_channels.write` has no dry run either,** found when it was built: without an open
+  window its probe is refused `step_up_required`, and every step-up refusal is an audit row. So
+  every channel control (create, add a recipient, Disable, Delete, Remove, Test send) follows the
+  channel list's own answer (`alert_channels.read`, the same role row as write, disable and
+  test, pinned the same way), which writes and audits nothing. A recipient's code entry and
+  re-send have their own probe (`confirm_recipient`, a refused body, not audited).
 - **The evaluator banner** reads `/healthz`, whose `alert_evaluator` is one word with no time,
   so the banner names the state (`stale`, `unknown`, or `/healthz` unreadable) without "since
   10:14".

@@ -204,22 +204,54 @@ export function presetRows(presets: Record<string, Record<string, Json>>): Prese
   }));
 }
 
-/** The console's two screens, in the URL's hash: `#/application/<id>` and `#/organization`. */
+/**
+ * The console's screens, in the URL's hash: `#/application/<id>`, `#/organization`,
+ * `#/rules/<id>`, `#/channels`, `#/incidents` and `#/incidents/<app>/<incident>`.
+ */
 export type Route =
-  { screen: "application"; applicationId: string | null } | { screen: "organization" };
+  | { screen: "application"; applicationId: string | null }
+  | { screen: "organization" }
+  | { screen: "rules"; applicationId: string | null }
+  | { screen: "channels" }
+  | { screen: "incidents"; applicationId: string | null; incidentId: string | null };
 
 export function parseRoute(hash: string): Route {
   const parts = hash.replace(/^#\/?/, "").split("/");
+  const part = (i: number) => (parts[i] ? decodeURIComponent(parts[i]) : null);
   if (parts[0] === "organization") return { screen: "organization" };
-  const id = parts[0] === "application" && parts[1] ? decodeURIComponent(parts[1]) : null;
+  if (parts[0] === "channels") return { screen: "channels" };
+  if (parts[0] === "rules") return { screen: "rules", applicationId: part(1) };
+  if (parts[0] === "incidents") {
+    const applicationId = part(1);
+    return {
+      screen: "incidents",
+      applicationId,
+      incidentId: applicationId === null ? null : part(2),
+    };
+  }
+  const id = parts[0] === "application" ? part(1) : null;
   return { screen: "application", applicationId: id };
 }
 
 export function routeHash(route: Route): string {
-  if (route.screen === "organization") return "#/organization";
-  return route.applicationId === null
-    ? "#/application"
-    : `#/application/${encodeURIComponent(route.applicationId)}`;
+  const e = encodeURIComponent;
+  switch (route.screen) {
+    case "organization":
+      return "#/organization";
+    case "channels":
+      return "#/channels";
+    case "rules":
+      return route.applicationId === null ? "#/rules" : `#/rules/${e(route.applicationId)}`;
+    case "incidents":
+      if (route.applicationId === null) return "#/incidents";
+      return route.incidentId === null
+        ? `#/incidents/${e(route.applicationId)}`
+        : `#/incidents/${e(route.applicationId)}/${e(route.incidentId)}`;
+    case "application":
+      return route.applicationId === null
+        ? "#/application"
+        : `#/application/${e(route.applicationId)}`;
+  }
 }
 
 /** The words for a refusal the console shows; the gateway's own message otherwise. */
@@ -228,6 +260,9 @@ export function refusalText(code: string, message: string): string {
   if (code === "session_required") return "Your session has ended. Log in again.";
   if (code === "settings_version_conflict") {
     return "The settings changed since they were read. They have been read again: check them and make the change from there.";
+  }
+  if (code === "rule_version_conflict") {
+    return "The rule changed since it was read. The rules have been read again: check it and make the change from there.";
   }
   return message;
 }

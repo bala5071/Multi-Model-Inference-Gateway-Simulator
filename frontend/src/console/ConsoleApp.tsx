@@ -2,10 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { useTheme } from "../hooks/useTheme";
 import { ApiError, sessionApi } from "./api";
 import { ApplicationScreen } from "./ApplicationScreen";
+import { ChannelsScreen } from "./ChannelsScreen";
 import type { ConsoleContext } from "./context";
 import { parseRoute, routeHash, type Route } from "./derive";
+import { IncidentsScreen } from "./IncidentsScreen";
 import { ChangePasswordScreen, LoginScreen } from "./LoginScreen";
 import { OrganizationScreen } from "./OrganizationScreen";
+import { RulesScreen } from "./RulesScreen";
 import { StepUpDialog } from "./StepUpDialog";
 import type { LoginAnswer, MeAnswer, SessionUser } from "./types";
 
@@ -37,8 +40,14 @@ function useRoute(): [Route, (route: Route) => void] {
   ];
 }
 
+/** The application a route names, carried from one screen to the next where it fits. */
+function routeApplication(route: Route): string | null {
+  return "applicationId" in route ? route.applicationId : null;
+}
+
 /**
- * The admin console (C1): an organization's and its applications' settings. It logs in, sends
+ * The admin console (C1, C2): an organization's and its applications' settings, alert rules,
+ * channels and incidents. It logs in, sends
  * the session's CSRF token on every change and asks for the password when the gateway wants a
  * step-up; every rule (who may, what is valid, what is capped) is the gateway's. The CSRF token
  * is held in memory only: a reload asks `/v1/auth/me` for it again.
@@ -146,24 +155,32 @@ export function ConsoleApp({ fetcher }: { fetcher?: typeof fetch }) {
       {context !== null && !context.user.must_change_password && (
         <>
           <nav className="console-nav" aria-label="Console sections">
-            <a
-              href={routeHash({
-                screen: "application",
-                applicationId: route.screen === "application" ? route.applicationId : null,
-              })}
-              aria-current={route.screen === "application" ? "page" : undefined}
-            >
-              Application settings
-            </a>
-            <a
-              href={routeHash({ screen: "organization" })}
-              aria-current={route.screen === "organization" ? "page" : undefined}
-            >
-              Organization settings
-            </a>
+            {(
+              [
+                [
+                  "Application settings",
+                  { screen: "application", applicationId: routeApplication(route) },
+                ],
+                ["Organization settings", { screen: "organization" }],
+                ["Alert rules", { screen: "rules", applicationId: routeApplication(route) }],
+                ["Channels", { screen: "channels" }],
+                [
+                  "Incidents",
+                  { screen: "incidents", applicationId: routeApplication(route), incidentId: null },
+                ],
+              ] as [string, Route][]
+            ).map(([label, target]) => (
+              <a
+                key={label}
+                href={routeHash(target)}
+                aria-current={route.screen === target.screen ? "page" : undefined}
+              >
+                {label}
+              </a>
+            ))}
           </nav>
           <main>
-            {route.screen === "application" ? (
+            {route.screen === "application" && (
               <ApplicationScreen
                 context={context}
                 applicationId={route.applicationId}
@@ -171,8 +188,27 @@ export function ConsoleApp({ fetcher }: { fetcher?: typeof fetch }) {
                   setRoute({ screen: "application", applicationId: id });
                 }}
               />
-            ) : (
-              <OrganizationScreen context={context} />
+            )}
+            {route.screen === "organization" && <OrganizationScreen context={context} />}
+            {route.screen === "rules" && (
+              <RulesScreen
+                context={context}
+                applicationId={route.applicationId}
+                onChoose={(id) => {
+                  setRoute({ screen: "rules", applicationId: id });
+                }}
+              />
+            )}
+            {route.screen === "channels" && <ChannelsScreen context={context} />}
+            {route.screen === "incidents" && (
+              <IncidentsScreen
+                context={context}
+                applicationId={route.applicationId}
+                incidentId={route.incidentId}
+                onRoute={(applicationId, incidentId) => {
+                  setRoute({ screen: "incidents", applicationId, incidentId });
+                }}
+              />
             )}
           </main>
         </>
