@@ -1337,6 +1337,36 @@ merged, and nothing from C2. Frontend only: no backend change.
 - **Its mutations:** the plan names none for the console. C1 makes one for each rule it has
   about who may do what and where a secret may go (note 47).
 
+**C2, as agreed when it started (2026-11-09).** Its row above: the console's **Alert rules**,
+**Channels** (email channels included, A5 being merged), **Incidents** and the evaluator banner
+of section 16, on the endpoints already merged, and nothing beyond. Frontend only, plus tests on
+the gateway's side; no backend code change.
+
+- **Who may write is asked of the gateway, as in C1.** Each write has a dry run that writes
+  nothing and is not audited: a body the route's own model refuses, sent after `requires` has
+  run, answers 422 to someone allowed and 403 `forbidden` to anyone else (a consume-on-use
+  action without an open window answers `step_up_required`, after authorization: allowed). A
+  claimed window is given back when the body is refused. A test on the gateway's side pins each
+  probe's answers, that nothing is written or audited, and that an open window survives it.
+- **Three actions have no route that can be dry-run** (decided 2026-11-09):
+  `incidents.acknowledge`, `alert_channels.disable` and `alert_channels.test` take no body or
+  query, so `requires` is followed by the action itself. Their controls follow the probe of an
+  action with the same role row: Acknowledge follows `alert_rules.write` on the same
+  application; Disable, Delete, Remove a recipient and Test send follow `alert_channels.write`.
+  A test pins those rows equal in `PERMISSIONS`, so a change to the matrix fails CI rather than
+  showing a control. The gateway still refuses anyone not allowed.
+- **The evaluator banner** reads `/healthz`, whose `alert_evaluator` is one word with no time,
+  so the banner names the state (`stale`, `unknown`, or `/healthz` unreadable) without "since
+  10:14".
+- **E2e for email** (decided 2026-11-09): the second Playwright server's harness starts the
+  suite's test SMTP server on 127.0.0.1 with STARTTLS and a certificate from a CA made for the
+  run. In its own process only, it replaces `gateway.app.provider_tls_context` with a context
+  that trusts that CA alone (TLS 1.2 at least, the name checked). The server pins SMTP to
+  certifi and reads nothing from the environment for it. The harness serves the test mailbox to
+  the Playwright tests on a loopback port; the confirmation code is never written to a file.
+- **Its mutations:** the plan names none for the console. C2 makes one for each rule it has
+  about who may do what and where a secret may go (note 49), as C1 did.
+
 **A3, as agreed when it started (2026-11-03).** Its row above and nothing from A4 or later; no
 outbound connection, no new secret. Where the row and sections 8 to 11 meet A4's outbox, the
 safe reading: **A3 records each notification on its incident** (`firing`, `firing_again`,
