@@ -255,6 +255,30 @@ def _rows() -> list[Permission]:
 PERMISSIONS: Mapping[str, Permission] = {row.action: row for row in _rows()}
 
 
+# The actions the console's navigation asks about (docs/50), by the level of resource each acts
+# on: ``GET /v1/auth/capabilities`` answers, for each, what ``authorize`` answers. Not a second
+# table: whether one is allowed is still only ``PERMISSIONS``'. None needs step-up, so the answer
+# is the role table's alone; each is declared by the route its screen loads first (both pinned by
+# tests/test_capabilities.py).
+NAVIGATION_ACTIONS: Mapping[Level, tuple[str, ...]] = {
+    Level.PLATFORM: ("monitoring.read", "control.write", "playground.use"),
+    Level.ORGANIZATION: (
+        "users.list",
+        "applications.list",
+        "org_settings.read",
+        "alert_channels.read",
+        "incidents.read_organization",
+    ),
+    Level.APPLICATION: (
+        "applications.read",
+        "settings.read",
+        "alert_rules.read",
+        "incidents.read",
+        "application_keys.list",
+    ),
+}
+
+
 @dataclass(frozen=True, slots=True)
 class Assignment:
     role: str
