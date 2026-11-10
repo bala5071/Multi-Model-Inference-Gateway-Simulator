@@ -292,7 +292,8 @@
       "alert_evaluator_stale": 0,
       "alert_evaluator_recovered": 0,
       "alert_delivery_failed": 0,
-      "alert_caps_differ": 0
+      "alert_caps_differ": 0,
+      "alert_smtp_resolver_busy": 0
     },
     "recent": []
   },
@@ -329,7 +330,23 @@
         "channel_secret_unreadable": 0,
         "channel_gone": 0,
         "channel_disabled": 0
+      },
+      "email": {
+        "delivered": 0,
+        "tls": 0,
+        "timeout": 0,
+        "connect_failed": 0,
+        "smtp_4xx": 0,
+        "smtp_5xx": 0,
+        "smtp_credential_unreadable": 0,
+        "resolver_busy": 0,
+        "no_verified_recipient": 0,
+        "recipient_not_verified": 0,
+        "domain_not_allowed": 0,
+        "channel_gone": 0,
+        "channel_disabled": 0
       }
-    }
+    },
+    "smtp_lookups_abandoned": 0
   }
 }

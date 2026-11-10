@@ -1,8 +1,8 @@
 # 48. Email channels, verified recipients and the vault's platform scope
 
 PR A5 of `docs/settings-and-alerts-plan.md`, built as `docs/settings-and-alerts-a5-plan.md` (the
-A5 plan) defines it, on A4 as built (note 46). Two commit groups: **group 1** (this part) makes
-no outbound connection; **group 2** delivers by email (its own section below, when built).
+A5 plan) defines it, on A4 as built (note 46). Two commit groups: **group 1** makes no outbound
+connection; **group 2** delivers by email (its own section, "Delivery by email", below).
 
 ## The operator's settings
 
@@ -20,9 +20,9 @@ variable and never repeating its value (`gateway.alerts.email.email_settings_fro
 With no host or no allowed domain, email is not set up: creating an email channel answers 422
 (`type`: email is not set up on this server), and the start does not fail.
 
-**Group 1 wires no mailer into the server**, so a server built from group 1 refuses every email
-channel the same way, whatever its settings. The recipient service and its endpoints are built
-and tested with a recording mailer.
+**The mailer.** Group 1 wired none, so a server built from it refused every email channel.
+Group 2 wires the SMTP mailer when the settings are set: each confirmation goes out as its own
+message, over the sender below.
 
 ## The SMTP password: the vault's platform scope
 
@@ -171,3 +171,76 @@ part of the code's check, so an unknown one gets the code's one answer (409).
   - the foreign keys (`foreign_key_check` empty and the keys on again);
   - a failure planted after the copy leaving the database exactly as it was;
   - the reverse migration giving version 17's schema and every row back.
+
+## Delivery by email (group 2)
+
+**One attempt, one message, one recipient,** within a hard 10 s budget (`gateway.alerts.smtp`):
+
+- **The name lookup runs on the event loop,** `getaddrinfo` on a pool of its own
+  (`BoundedResolver`), bounded on the injected clock by the budget. A lookup past it is
+  abandoned: the attempt is `timeout`, and the lookup's thread runs on until the system
+  resolver gives up. It holds no delivery slot, socket or credential, because the password is
+  leased only after the lookup.
+  - **The abandoned lookups are capped:** `LOOKUP_THREADS` is 4, the worker's limit. An attempt
+    takes a thread without waiting.
+  - **When every thread is held, the attempt is refused before any lookup:** `resolver_busy`.
+    It counts toward the channel's health and is tried again on A4's schedule, with the metric
+    `gateway_alert_deliveries_total{channel_type="email",result="resolver_busy"}` and the event
+    `alert_smtp_resolver_busy` (the channel id). `gateway_alert_smtp_lookups_abandoned` (and
+    the snapshot's `alert_deliveries.smtp_lookups_abandoned`) is how many abandoned lookups
+    are still running.
+  - An address as `GATEWAY_SMTP_HOST` needs no lookup.
+- **The conversation runs in a thread** of the sender's own pool of 2, with `smtplib`
+  subclasses (`DeadlineSMTP`, and `DeadlineSMTP_SSL` for implicit TLS).
+  - Before **every** blocking socket call they set the socket's timeout to what is left of the
+    budget, read from the injected clock: the connect, each send, each read of a reply, the TLS
+    handshake. One reply takes several reads, so a server sending a byte at a time ends
+    `timeout` once the budget is spent.
+  - The attempt awaits its thread to the end, so a delivery's slot is held until the thread
+    returns, which the deadline makes at most the budget.
+- **TLS always:**
+  - STARTTLS when chosen is required: a server that does not offer it fails `tls` before any
+    login or message. The alternative is implicit TLS.
+  - The certificate is checked against `GATEWAY_SMTP_HOST` with the pinned context (TLS 1.2 or
+    higher), with or without a login.
+- **The password,** if a username is set, is leased from the platform scope for the attempt
+  (scrubbed from every log record meanwhile) and revealed only to log in (`_login`, the alert
+  modules' second `reveal()`). It is opened with the binding the settings make now, so a
+  password set for another host, port or username does not open (`smtp_credential_unreadable`).
+- **Codes:** `delivered`; `tls`; `timeout`; `connect_failed`; `smtp_4xx` (tried again);
+  `smtp_5xx` (not tried again); `smtp_credential_unreadable`; `resolver_busy` (tried again);
+  `no_verified_recipient`; `recipient_not_verified`; `domain_not_allowed`. The server's words
+  are never kept, logged or returned.
+- **Nothing of the conversation is printed:** `smtplib`'s debug output is dropped whatever its
+  level (the leak scan forces it on).
+
+**Through A4's outbox and worker:**
+
+- **One row per verified recipient** of an email channel (`notification_deliveries.recipient_id`),
+  made at queue time in the change's transaction.
+  - **The caps count per recipient:** each recipient's message counts as one against the rule's
+    and the organization's hour. A notification's webhooks still count once together, as in A4.
+  - An email channel with no verified recipient gets one row with no recipient, not counted,
+    which fails `no_verified_recipient` and so counts toward the channel's health (the
+    built-in `channel_delivery_failing` can say alerts reach no one).
+- **Checked again when the row is claimed,** with no store connection held while sending:
+  - a recipient removed, or no longer verified, is not sent to: the row fails
+    `recipient_not_verified`, not counted toward health;
+  - a recipient whose domain the operator no longer allows is not sent to: `domain_not_allowed`.
+- **The message:**
+  - plain text, quoted-printable, built with the standard library under the SMTP policy, which
+    refuses a CR or LF in a header;
+  - made by a fixed template from the stored payload's allowlisted fields: no HTML, no link, no
+    image;
+  - `To` is that recipient alone;
+  - the `Message-ID` is `<notification.recipient@sender's domain>`, so a retried message is the
+    same message.
+- **Test send** (A4's endpoint): one message to each verified recipient, each counted against
+  A4's test-send caps; `no_verified_recipient` if none. As A4's test sends, it makes no outbox
+  row.
+
+**Tested** against an SMTP server written in the suite, on asyncio streams. It does STARTTLS and
+implicit TLS with a certificate made at run time, and AUTH PLAIN. It can be scripted to answer
+4xx or 5xx at each step, to leave out STARTTLS, to stop answering, or to send a byte at a time.
+The deadline tests need no real time, except the hanging server's, which runs on the wall clock
+with a 300 ms budget: a real socket timeout needs real time.

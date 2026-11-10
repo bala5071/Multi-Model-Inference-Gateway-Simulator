@@ -2779,7 +2779,7 @@ class PostgresOutboxStore(_Store):
         for d in deliveries:
             new += await self._execute(
                 f"INSERT INTO notification_deliveries ({_DELIVERY_COLUMNS})"
-                f" VALUES ({_placeholders(13)})"
+                f" VALUES ({_placeholders(14)})"
                 # Any unique conflict, as SQLite's INSERT OR IGNORE: the index is one row per
                 # (notification, channel, recipient) from schema 7.
                 " ON CONFLICT DO NOTHING",

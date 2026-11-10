@@ -24,7 +24,7 @@ import pytest
 
 from gateway.alertrules import RuleService
 from gateway.alerts.channels import Channel, StoredSecret
-from gateway.alerts.outbox import Delivery, DeliveryState
+from gateway.alerts.outbox import Delivery, DeliveryState, delivery_row
 from gateway.apikeys import ApiKeyService
 from gateway.audit import AuditLog
 from gateway.clock import ClockEpoch, SimClock
@@ -109,7 +109,15 @@ async def seed(state: StateBackend, execute: Execute) -> None:
         )
         for index, state_ in enumerate(DeliveryState)
     ]
-    assert await state.outbox.queue(deliveries) == len(deliveries)
+    # Written with version 17's own columns (the store writes recipient_id, which 17 has not).
+    for delivery in deliveries:
+        await execute(
+            "INSERT INTO notification_deliveries (id, notification_id, channel_id,"
+            " organization_id, state, attempts, next_attempt_at_ms, claimed_by,"
+            " claim_expires_at_ms, last_code, payload, created_at_ms, updated_at_ms)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            delivery_row(delivery)[:13],
+        )
     assert await state.outbox.count_notification("rule", "rul_0000000000000001", 7, 6)
     assert await state.outbox.count_notification("organization", "north", 7, 60)
     assert await state.outbox.add_summary("north", 7, "ntf_00000000000000ee", NOW)

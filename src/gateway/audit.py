@@ -299,6 +299,14 @@ FIXED_VALUES: Mapping[str, frozenset[str]] = {
             "channel_secret_unreadable",
             "channel_disabled",
             "channel_gone",
+            # An email test send's (docs/48).
+            "smtp_4xx",
+            "smtp_5xx",
+            "smtp_credential_unreadable",
+            "resolver_busy",
+            "no_verified_recipient",
+            "recipient_not_verified",
+            "domain_not_allowed",
         }
     ),
     # "ok", or the code a provider failure or refusal maps to (gateway.chat, docs/32).

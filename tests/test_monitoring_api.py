@@ -20,7 +20,13 @@ from gateway.clock import SimClock
 from gateway.continuous import ContinuousBatchingWorker
 from gateway.events import EventBus
 from gateway.metrics import MetricsStore
-from gateway.monitoring import ALERT_DELIVERY_RESULTS, Monitor, SchedulerView, render_prometheus
+from gateway.monitoring import (
+    ALERT_DELIVERY_RESULTS,
+    EMAIL_DELIVERY_RESULTS,
+    Monitor,
+    SchedulerView,
+    render_prometheus,
+)
 from gateway.overload import OverloadPolicy, SloPolicy
 from gateway.passthrough import PassthroughWorker
 from gateway.prefix_cache import PrefixCache
@@ -50,6 +56,7 @@ NO_EVENTS = {
     "alert_evaluator_recovered": 0,
     "alert_delivery_failed": 0,
     "alert_caps_differ": 0,
+    "alert_smtp_resolver_busy": 0,
 }
 UNAVAILABLE = {
     "queue": {"available": False, "length": None},
@@ -283,7 +290,11 @@ async def test_snapshot_of_one_request_has_exact_values() -> None:
         # No channels here: nothing delivered (docs/46).
         "alert_deliveries": {
             "available": True,
-            "attempts": {"webhook": dict.fromkeys(ALERT_DELIVERY_RESULTS, 0)},
+            "attempts": {
+                "webhook": dict.fromkeys(ALERT_DELIVERY_RESULTS, 0),
+                "email": dict.fromkeys(EMAIL_DELIVERY_RESULTS, 0),
+            },
+            "smtp_lookups_abandoned": 0,
         },
     }
     # Prefill ends at 5 ms; the tokens come at 9, 13 and 17 ms.
@@ -1033,6 +1044,7 @@ gateway_events_total{type="alert_evaluator_stale"} 0
 gateway_events_total{type="alert_evaluator_recovered"} 0
 gateway_events_total{type="alert_delivery_failed"} 0
 gateway_events_total{type="alert_caps_differ"} 0
+gateway_events_total{type="alert_smtp_resolver_busy"} 0
 # HELP gateway_breaker_reports_dropped_total Breaker reports this instance dropped, by reason.
 # TYPE gateway_breaker_reports_dropped_total counter
 gateway_breaker_reports_dropped_total{reason="queue_full"} 0
@@ -1050,7 +1062,7 @@ gateway_alert_evaluator_holder 0
 # HELP gateway_alert_evaluation_failures_total Alert evaluation cycles that did not complete.
 # TYPE gateway_alert_evaluation_failures_total counter
 gateway_alert_evaluation_failures_total 0
-# HELP gateway_alert_deliveries_total Webhook attempts this instance recorded, by type and result.
+# HELP gateway_alert_deliveries_total Alert delivery attempts recorded here, by type and result.
 # TYPE gateway_alert_deliveries_total counter
 gateway_alert_deliveries_total{channel_type="webhook",result="delivered"} 0
 gateway_alert_deliveries_total{channel_type="webhook",result="egress_refused"} 0
@@ -1065,6 +1077,22 @@ gateway_alert_deliveries_total{channel_type="webhook",result="http_5xx"} 0
 gateway_alert_deliveries_total{channel_type="webhook",result="channel_secret_unreadable"} 0
 gateway_alert_deliveries_total{channel_type="webhook",result="channel_gone"} 0
 gateway_alert_deliveries_total{channel_type="webhook",result="channel_disabled"} 0
+gateway_alert_deliveries_total{channel_type="email",result="delivered"} 0
+gateway_alert_deliveries_total{channel_type="email",result="tls"} 0
+gateway_alert_deliveries_total{channel_type="email",result="timeout"} 0
+gateway_alert_deliveries_total{channel_type="email",result="connect_failed"} 0
+gateway_alert_deliveries_total{channel_type="email",result="smtp_4xx"} 0
+gateway_alert_deliveries_total{channel_type="email",result="smtp_5xx"} 0
+gateway_alert_deliveries_total{channel_type="email",result="smtp_credential_unreadable"} 0
+gateway_alert_deliveries_total{channel_type="email",result="resolver_busy"} 0
+gateway_alert_deliveries_total{channel_type="email",result="no_verified_recipient"} 0
+gateway_alert_deliveries_total{channel_type="email",result="recipient_not_verified"} 0
+gateway_alert_deliveries_total{channel_type="email",result="domain_not_allowed"} 0
+gateway_alert_deliveries_total{channel_type="email",result="channel_gone"} 0
+gateway_alert_deliveries_total{channel_type="email",result="channel_disabled"} 0
+# HELP gateway_alert_smtp_lookups_abandoned Email name lookups past their budget, still running.
+# TYPE gateway_alert_smtp_lookups_abandoned gauge
+gateway_alert_smtp_lookups_abandoned 0
 """
 
 # Label names as Prometheus allows them: a letter, then letters and underscores.

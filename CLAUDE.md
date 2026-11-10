@@ -145,7 +145,13 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   per-address cap, one conditional upsert) on memory and SQLite, `InstanceConfirmations`, the
   `Mailer` protocol (handed each confirmation after its write commits) and `RecipientService`
   (add, resend, confirm with one answer after the same steps, remove); the four confirmation
-  caps are part of `AlertCaps` (exists)
+  caps are part of `AlertCaps`; `smtp.py`, `SmtpSender` (one message to one recipient within
+  a hard 10 s budget: the name lookup on `BoundedResolver`, 4 threads, `resolver_busy` past
+  them; `DeadlineSMTP`/`DeadlineSMTP_SSL` setting the socket timeout before every socket call;
+  STARTTLS or implicit TLS only, the certificate checked; the password leased and revealed only
+  in `_login`; smtplib's debug output dropped), `notification_message`,
+  `confirmation_message` and `SmtpMailer`; email deliveries one outbox row per verified
+  recipient, checked again when claimed (exists)
 - `incidents.py` — `Incident`, the notifications recorded on it (A4 delivers them), the lease
   (`LeaseView`, `Fence`), and `IncidentStore` on memory, SQLite (migration 16) and Postgres
   (schema 5): one open incident a series by a partial unique index, every change a fenced

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import random
 from collections.abc import Callable, Mapping
@@ -52,6 +53,18 @@ from gateway.alerts.outbox import (
     TransactionHeldError,
 )
 from gateway.alerts.payload import AlertPayload
+from gateway.alerts.recipients import VERIFIED, Recipient, RecipientStore
+from gateway.alerts.smtp import (
+    CONNECT_FAILED as SMTP_CONNECT_FAILED,
+)
+from gateway.alerts.smtp import (
+    DOMAIN_NOT_ALLOWED,
+    NO_VERIFIED_RECIPIENT,
+    RECIPIENT_NOT_VERIFIED,
+    RETRIED,
+    SmtpSender,
+    notification_message,
+)
 from gateway.alerts.webhook import (
     CHANNEL_DISABLED,
     CHANNEL_GONE,
@@ -82,7 +95,7 @@ MAX_ATTEMPTS = len(BACKOFF_MS) + 1
 JITTER = 0.10
 CLAIM_ID_PREFIX = "clm_"
 # Codes that say nothing about the channel's receiver: its health is left as it is.
-NOT_HEALTH = frozenset({CHANNEL_GONE, CHANNEL_DISABLED})
+NOT_HEALTH = frozenset({CHANNEL_GONE, CHANNEL_DISABLED, RECIPIENT_NOT_VERIFIED})
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,9 +108,19 @@ class DeliverySetup:
     redactor: Redactor
     caps: AlertCaps
     ceilings: CeilingsStore
+    # Email (docs/48): the SMTP sender and the recipients it sends to; None: no email.
+    email: EmailSetup | None = None
 
     def __repr__(self) -> str:
         return f"DeliverySetup(caps={self.caps!r})"
+
+
+@dataclass(frozen=True, slots=True)
+class EmailSetup:
+    """What email deliveries need: the operator's SMTP sender and the channels' recipients."""
+
+    sender: SmtpSender
+    recipients: RecipientStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +169,7 @@ class DeliveryWorker:
         random_bytes: Callable[[int], bytes],
         on_attempt: Callable[[AttemptReport], None] | None = None,
         max_running: int = MAX_RUNNING,
+        email: EmailSetup | None = None,
     ) -> None:
         """``client`` makes a new ``webhook_client`` for each attempt (M45)."""
         self.outbox = outbox
@@ -161,6 +185,7 @@ class DeliveryWorker:
         self._on_attempt = on_attempt
         self._max_running = max_running
         self._running: set[asyncio.Task[None]] = set()
+        self.email = email
 
     def __repr__(self) -> str:
         return "DeliveryWorker(<vault redacted>)"
@@ -253,6 +278,35 @@ class DeliveryWorker:
             with egress_scope(always_hosted):
                 return await send(self._client(), request, self._clock)
 
+    async def recipient(self, recipient_id: str) -> Recipient | None:
+        """An email recipient as it is now, in one short transaction."""
+        assert self.email is not None
+        async with self.outbox.delivery_transaction():
+            return await self.email.recipients.get_recipient(recipient_id)
+
+    async def email_attempt(self, channel: Channel, recipient_id: str | None, body: str) -> Attempt:
+        """One message to one recipient (docs/48): checked again now, after every store
+        connection was given back. No recipient: the channel had no verified one when it was
+        queued. Not verified any more (removed, or another channel's): not sent, not counted
+        toward health. A domain the operator no longer allows: not sent."""
+        if self.email is None:
+            return Attempt(SMTP_CONNECT_FAILED, True)
+        if recipient_id is None:
+            return Attempt(NO_VERIFIED_RECIPIENT, False)
+        found = await self.recipient(recipient_id)
+        if found is None or found.state != VERIFIED or found.channel_id != channel.id:
+            return Attempt(RECIPIENT_NOT_VERIFIED, False)
+        sender = self.email.sender
+        if found.address.rsplit("@", 1)[-1] not in sender.settings.domains:
+            return Attempt(DOMAIN_NOT_ALLOWED, False)
+        message = notification_message(
+            sender.settings.sender, found.address, found.id, json.loads(body),
+            self._epoch.epoch_ms(),
+        )  # fmt: skip
+        self._guard()
+        code = await sender.send(found.address, message)
+        return Attempt(code, code in RETRIED)
+
     async def _deliver(self, delivery: Delivery, claim_id: str) -> None:
         try:
             channel, secrets = await self.read(delivery.channel_id)
@@ -260,6 +314,8 @@ class DeliveryWorker:
                 attempt = Attempt(CHANNEL_GONE, False)
             elif not channel.enabled:
                 attempt = Attempt(CHANNEL_DISABLED, False)
+            elif channel.type == "email":
+                attempt = await self.email_attempt(channel, delivery.recipient_id, delivery.payload)
             else:
                 attempt = await self.attempt(
                     channel, secrets, delivery.payload, delivery.notification_id
@@ -323,7 +379,6 @@ class TestSends:
             raise ManagementRefusal(
                 Reason.CHANNEL_DISABLED, "a disabled channel is sent nothing; enable it first"
             )
-        await self._counter.count(channel.id, organization_id)
         payload = AlertPayload(
             "ntf_" + self._random_bytes(8).hex(),
             "test",
@@ -331,7 +386,13 @@ class TestSends:
             organization_id,
             console_path=f"/v1/admin/orgs/{organization_id}/alert-channels/{channel.id}",
         )
-        attempt = await self._worker.attempt(channel, secrets, payload.body(), payload.delivery_id)
+        if channel.type == "email":
+            attempt = await self._email(channel, organization_id, payload)
+        else:
+            await self._counter.count(channel.id, organization_id)
+            attempt = await self._worker.attempt(
+                channel, secrets, payload.body(), payload.delivery_id
+            )
         await self._audit.write(
             AuditEvent(
                 AuditAction.ALERT_CHANNEL_TESTED, AuditOutcome.SUCCESS, TargetType.ALERT_CHANNEL,
@@ -344,3 +405,28 @@ class TestSends:
             self._epoch.epoch_ms(),
         )  # fmt: skip
         return attempt.code
+
+    async def _email(
+        self, channel: Channel, organization_id: str, payload: AlertPayload
+    ) -> Attempt:
+        """One test message to each verified recipient, each counted against the test sends'
+        caps; ``no_verified_recipient`` if none. The first failure's code, else delivered."""
+        email = self._worker.email
+        verified = (
+            [
+                r
+                for r in await email.recipients.channel_recipients(channel.id)
+                if r.state == VERIFIED
+            ]
+            if email is not None
+            else []
+        )
+        if not verified:
+            return Attempt(NO_VERIFIED_RECIPIENT, False)
+        first: Attempt | None = None
+        for recipient in verified:
+            await self._counter.count(channel.id, organization_id)
+            attempt = await self._worker.email_attempt(channel, recipient.id, payload.body())
+            if first is None and not attempt.delivered:
+                first = attempt
+        return first if first is not None else Attempt("delivered", False)

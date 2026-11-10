@@ -61,7 +61,13 @@ from gateway.alerts.channels import (
     parse_webhook_ports,
     resolve_channel,
 )
-from gateway.alerts.delivery import AttemptReport, DeliverySetup, DeliveryWorker, TestSends
+from gateway.alerts.delivery import (
+    AttemptReport,
+    DeliverySetup,
+    DeliveryWorker,
+    EmailSetup,
+    TestSends,
+)
 from gateway.alerts.email import email_settings_from
 from gateway.alerts.notices import Notices, builtin_rule_ids
 from gateway.alerts.outbox import Delivery, OutboxStore
@@ -75,6 +81,7 @@ from gateway.alerts.recipients import (
     RecipientService,
     resolve_recipient_in,
 )
+from gateway.alerts.smtp import RESOLVER_BUSY, SmtpMailer, SmtpSender
 from gateway.alerts.webhook import DELIVERED
 from gateway.apikeys import (
     INVALID_KEY_MESSAGE,
@@ -3585,6 +3592,9 @@ def create_app(
         def attempted(report: AttemptReport) -> None:
             # A count, and for a failure an event and a log line: the channel id and the code.
             monitoring.alert_delivery(report.channel_type, report.code)
+            if report.code == RESOLVER_BUSY:
+                # Every lookup thread held by lookups past their budget (docs/48).
+                bus.publish("alert_smtp_resolver_busy", channel_id=report.channel_id)
             if report.code != DELIVERED:
                 bus.publish("alert_delivery_failed", channel_id=report.channel_id,
                             code=report.code)  # fmt: skip
@@ -3607,7 +3617,11 @@ def create_app(
             rng=random.Random(secrets.randbits(64)),
             random_bytes=secrets.token_bytes,
             on_attempt=attempted,
+            email=setup.email,
         )
+        if setup.email is not None:
+            resolver = setup.email.sender.resolver
+            monitoring.watch_smtp_lookups(lambda: resolver.abandoned)
         test_sends = TestSends(
             delivery_worker,
             counters.channel_tests(
@@ -5355,7 +5369,12 @@ def build_channels(
     not valid refuses the start); their recipients' codes and the per-address cap under keys
     derived from the pepper; the hourly confirmation windows in ``counters`` when shared, else in
     memory; codes and ids from the operating system's generator. Without ``mailer`` (group 1)
-    no email channel can be made."""
+    no email channel can be made.
+
+    With the SMTP settings (group 2), the SMTP sender (the pinned TLS context, its name lookups
+    on their own bounded pool, never while a store transaction is open), the recipients' mailer
+    over it, and email deliveries through the worker; ``mailer`` replaces the SMTP mailer (tests).
+    """
     caps = caps_from(environ)
     email = email_settings_from(environ)
     ports = parse_webhook_ports(environ.get(WEBHOOK_PORTS_ENV))
@@ -5368,8 +5387,18 @@ def build_channels(
         caps=caps,
         store_clock=state.clock,
         builtin_rule_id=builtin_rule_ids(derive_key(pepper, KeyPurpose.BUILTIN_RULE_ID)),
+        recipients=state.recipients,
     )
     tls = provider_tls_context()
+    sender = (
+        SmtpSender(
+            email, state.platform_secrets, vault, redactor, clock, context=tls, held=state.outbox
+        )
+        if email is not None
+        else None
+    )
+    if mailer is None and sender is not None:
+        mailer = SmtpMailer(sender, epoch)
 
     async def organization_name(organization_id: str) -> str | None:
         found = await state.applications.get_organization(organization_id)
@@ -5421,6 +5450,7 @@ def build_channels(
             redactor,
             caps,
             state.ceilings,
+            EmailSetup(sender, state.recipients) if sender is not None else None,
         ),
     )
 

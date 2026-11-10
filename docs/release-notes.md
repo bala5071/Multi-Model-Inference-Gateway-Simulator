@@ -17,8 +17,13 @@ features. Newest first. Each entry names its PR and its note.
 - **Four more cap variables,** `GATEWAY_EMAIL_CONFIRMATIONS_PER_*`, with defaults; a value out of
   range refuses the start, as A4's do. They join the ceilings row, so instances with different
   values report it (note 48).
-- **No email is sent by this PR's first group:** the SMTP settings are read and checked, but a
-  server built from it refuses to create an email channel (note 48).
+- **Email is sent only when the operator sets it up:** with no `GATEWAY_SMTP_HOST` or no
+  `GATEWAY_ALERT_EMAIL_DOMAINS`, email channels cannot be created and nothing changes. With them,
+  mail goes over STARTTLS or implicit TLS only, to verified recipients only (note 48).
+- **The monitoring snapshot's `alert_deliveries` gains `email` and `smtp_lookups_abandoned`,**
+  `/metrics` gains `gateway_alert_smtp_lookups_abandoned` and the email results of
+  `gateway_alert_deliveries_total`, and there is one more event type, `alert_smtp_resolver_busy`
+  (note 15).
 
 ### PR #39 (A4: alert channels and their webhook delivery)
 

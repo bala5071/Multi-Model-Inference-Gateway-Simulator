@@ -43,7 +43,7 @@ BASE = {
         ("ops@example.com", "ops@example.com"),
         ("Ops.Team+alerts@EXAMPLE.com", "Ops.Team+alerts@example.com"),  # domain lowercased
         ("a!#$%&'*+/=?^_`{|}~-z@example.com", "a!#$%&'*+/=?^_`{|}~-z@example.com"),
-        ("ops@bücher.example", "ops@xn--bcher-kva.example"),  # IDNA, stored in ASCII
+        ("ops@b\u00fccher.example", "ops@xn--bcher-kva.example"),  # IDNA, stored in ASCII
         ("x" * 64 + "@example.com", "x" * 64 + "@example.com"),
     ],
 )
@@ -69,7 +69,7 @@ def test_an_address_is_stored_as_entered_with_its_domain_lowercased_in_ascii(
         ("ops@example.com\r\nBcc: x@example.com", "control character"),  # header injection
         ("ops@example.com\n", "control character"),
         ("ops\\@example.com", "backslash"),
-        ("ops​@example.com", "control character"),  # a zero-width space (Cf)
+        ("ops\u200b@example.com", "control character"),  # a zero-width space (Cf)
         ("ops@-bad-.example.com", "valid name"),
         ("ops@localhost", "valid name"),  # one label
         ("ops@" + "a" * 64 + ".com", "valid name"),
@@ -175,7 +175,7 @@ def test_a_setting_that_is_not_valid_refuses_the_start_naming_it_never_its_value
 
 
 def test_the_domains_are_exact_ascii_names() -> None:
-    assert domains_from(" Example.COM , bücher.example,, ") == frozenset(
+    assert domains_from(" Example.COM , b\u00fccher.example,, ") == frozenset(
         {"example.com", "xn--bcher-kva.example"}
     )
 
