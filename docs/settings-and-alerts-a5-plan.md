@@ -10,6 +10,22 @@ are applied (section 16), and question 7 (name resolution) was decided the same 
 with a cap on abandoned lookups. A4 (#39) is merged; this plan builds on it as built
 (`docs/46-alert-channels.md`).
 
+**Approved 2026-11-09 (#40 merged); built in PR A5 as one draft PR in two commit groups,** each
+ending with its own checks:
+
+- **Group 1, no outbound connection:** migration 18 and Postgres schema 7 with their tests, the
+  vault's platform scope and `platform_secrets`, email channels and verified recipients with
+  their endpoints, the code stored only as an HMAC, the confirmation caps and the ceilings row,
+  and the new permission row. The confirmation is handed to a mailer interface after the write
+  commits; group 1 wires none into the server, so a server built from group 1 refuses to create
+  an email channel.
+- **Group 2, email delivery:** the SMTP client on a thread with the per-socket-call deadline,
+  the bounded name lookup and its pool, STARTTLS or implicit TLS only, one message per
+  recipient, test send, and the test SMTP server.
+
+A conflict touching authentication, step-up, secrets or where data can go stops the work for
+the reviewer; a blocker for group 2 is reported at the end of group 1.
+
 **Scope.** Part F's A5 row, and nothing from A6 or later:
 
 - email through the operator's SMTP server: the operator settings, STARTTLS or implicit TLS

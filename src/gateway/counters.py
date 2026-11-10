@@ -57,4 +57,11 @@ class SharedCounters(Protocol):
         """An alert channel's test sends, per channel and per organization an hour (docs/46)."""
         ...
 
+    def confirmations(
+        self, per_channel_hour: int, per_organization_hour: int
+    ) -> ConnectionTestCounter:
+        """An email recipient's confirmations, per channel and per organization an hour
+        (docs/48)."""
+        ...
+
     async def aclose(self) -> None: ...

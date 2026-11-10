@@ -160,6 +160,7 @@ export const EVENT_TYPES = [
   "alert_evaluator_recovered",
   "alert_delivery_failed",
   "alert_caps_differ",
+  "alert_smtp_resolver_busy",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];
@@ -213,6 +214,8 @@ export interface AlertDeliveriesGroup {
   available: boolean;
   // Strings, not fixed unions: a newer gateway may report a type or result this build does not know.
   attempts: Record<string, Record<string, number>>;
+  // Email name lookups past their attempt's budget, still running (docs/48).
+  smtp_lookups_abandoned: number;
 }
 
 export interface Snapshot {

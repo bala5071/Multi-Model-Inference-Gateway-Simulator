@@ -42,6 +42,8 @@ docs/26-organizations.md and docs/30-management-endpoints.md.
     uv run python scripts/manage.py backup --to /backups/gateway-2025-06-01.db
     uv run python scripts/manage.py restore --from /backups/gateway-2025-06-01.db
     uv run python scripts/manage.py rotate-vault-key
+    uv run python scripts/manage.py set-smtp-password
+    uv run python scripts/manage.py set-smtp-password --from-env SMTP_PASSWORD_FOR_SETUP
     uv run python scripts/manage.py vault-drop-unreadable
     uv run python scripts/manage.py migrate-to-postgres --dry-run
     uv run python scripts/manage.py migrate-to-postgres
@@ -76,17 +78,19 @@ import secrets
 import sqlite3
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from gateway.alertrules import RuleService
 from gateway.alerts.channels import ChannelService
+from gateway.alerts.email import email_settings_from
 from gateway.apikeys import ApiKeyService, load_pepper
 from gateway.app import default_platform_settings
 from gateway.applications import (
     ApiKeyRecord,
     seed_demo_applications,
 )
-from gateway.audit import AuditLog
+from gateway.audit import AuditAction, AuditEvent, AuditLog, Outcome, Reason, TargetType
 from gateway.auth import AccountService
 from gateway.chatrouter import max_hosted_attempts_from
 from gateway.clock import EpochSource, SystemEpoch, WallClock
@@ -124,6 +128,7 @@ from gateway.pg_migrate import (
     migrate_to_postgres,
     migrate_to_sqlite,
 )
+from gateway.platformsecrets import SMTP_PASSWORD, StoredPlatformSecret
 from gateway.postgres import URL_ENV as POSTGRES_URL_ENV
 from gateway.postgres import PostgresDatabase, PostgresPasswordMissingError
 from gateway.routing import PlansConfig, load_plans
@@ -133,6 +138,7 @@ from gateway.state import StateBackend, StateUnavailableError, sqlite_state
 from gateway.vault import (
     VAULT_KEY_ENV,
     VAULT_KEY_PREVIOUS_ENV,
+    PlatformBinding,
     Vault,
     VaultKeyError,
     load_master_keys,
@@ -347,10 +353,28 @@ async def _rotate_vault_key(
             state.channels, vault, AuditLog(state.audit), epoch, secrets.token_bytes
         )
         channel_secrets, unreadable_channels = await channels.reseal_all()
+        # The platform scope's secrets (the SMTP password, docs/48), its subkey derived from the
+        # new master key, in the same transaction.
+        platform, unreadable_platform = 0, []
+        for kept in await state.platform_secrets.all():
+            if kept.sealed.key_id == vault.current_key_id:
+                continue
+            if not vault.readable(kept.sealed):
+                unreadable_platform.append(kept.kind)
+                continue
+            await state.platform_secrets.put(
+                replace(kept, sealed=vault.reseal(kept.sealed, kept.binding))
+            )
+            platform += 1
     note = (
-        f"backed up to {target}; re-sealed {resealed} provider key(s) and {channel_secrets} "
-        "alert channel secret(s) under the new master key"
+        f"backed up to {target}; re-sealed {resealed} provider key(s), {channel_secrets} "
+        f"alert channel secret(s) and {platform} platform secret(s) under the new master key"
     )
+    if unreadable_platform:
+        note += (
+            f"; platform secrets unreadable, left as they were (email deliveries fail as "
+            f"smtp_credential_unreadable): {', '.join(unreadable_platform)}"
+        )
     if unreadable:
         note += f"; unreadable, left as they were: {', '.join(unreadable)}"
     if unreadable_channels:
@@ -359,6 +383,55 @@ async def _rotate_vault_key(
             f"channel_secret_unreadable): {', '.join(unreadable_channels)}"
         )
     return note + f". Remove {VAULT_KEY_PREVIOUS_ENV} and restart the server."
+
+
+async def _set_smtp_password(
+    state: StateBackend, env: dict[str, str], read_password: ReadPassword, from_env: str | None
+) -> str:
+    """The SMTP password, sealed in the vault's platform scope and bound to the SMTP host, port
+    and username it is for (docs/48). Typed at a prompt twice with no echo, or read from the
+    environment variable the operator names; never printed, logged or audited, only its kind."""
+    settings = email_settings_from(env)
+    if settings is None:
+        raise ValueError(
+            "set GATEWAY_SMTP_HOST, GATEWAY_SMTP_FROM and GATEWAY_ALERT_EMAIL_DOMAINS first, as "
+            "the server has them: the password is bound to the SMTP server"
+        )
+    if settings.username is None:
+        raise ValueError(
+            "GATEWAY_SMTP_USERNAME is not set: the SMTP server is used without a login, so no "
+            "password is stored"
+        )
+    if from_env is not None:
+        password = env.get(from_env, "")
+        if not password:
+            raise ValueError(f"{from_env} is empty or not set")
+    else:
+        password = _new_password(read_password)
+        if not password:
+            raise ValueError("the password is empty; nothing was changed")
+    vault = Vault(*load_master_keys(env))
+    epoch = SystemEpoch()
+    binding = PlatformBinding(SMTP_PASSWORD, settings.host, settings.port, settings.username)
+    async with state.platform_secrets.write_transaction():
+        await state.platform_secrets.put(
+            StoredPlatformSecret(
+                SMTP_PASSWORD, vault.seal(password, binding), settings.host, settings.port,
+                settings.username, epoch.epoch_ms(),
+            )
+        )  # fmt: skip
+        await AuditLog(state.audit).write(
+            AuditEvent(
+                AuditAction.SMTP_PASSWORD_SET, Outcome.SUCCESS, TargetType.PLATFORM_SECRET,
+                SMTP_PASSWORD, None, {"reason": Reason.CLI},
+            ),
+            epoch.epoch_ms(),
+        )  # fmt: skip
+    del password
+    return (
+        f"the SMTP password is sealed in the vault's platform scope, for {settings.host} port "
+        f"{settings.port}; it was not printed"
+    )
 
 
 ACCOUNT_COMMANDS = frozenset(
@@ -567,6 +640,8 @@ async def _store_command(
         )
     elif args.command == "rotate-vault-key":
         _note(await _rotate_vault_key(connection, state, database_path(env), env))
+    elif args.command == "set-smtp-password":
+        _note(await _set_smtp_password(state, env, read_password, args.from_env))
     elif args.command == "vault-drop-unreadable":
         vault = Vault(*load_master_keys(env))
         providers = state.providers
@@ -791,6 +866,15 @@ def main(
         "rotate-vault-key",
         help="re-seal every provider key under GATEWAY_VAULT_KEY; the old master key is "
         "GATEWAY_VAULT_KEY_PREVIOUS (a backup first)",
+    )
+    smtp = commands.add_parser(
+        "set-smtp-password",
+        help="seal the SMTP password in the vault's platform scope (asked twice, never printed)",
+    )
+    smtp.add_argument(
+        "--from-env",
+        metavar="VARIABLE",
+        help="read it from this environment variable instead of a prompt (for automation)",
     )
     commands.add_parser(
         "vault-drop-unreadable",

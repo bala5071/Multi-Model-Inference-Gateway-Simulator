@@ -31,6 +31,10 @@ class KeyPurpose(StrEnum):
     ALERT_ROLLUPS = "alert rollups"
     # The built-in channel_delivery_failing's rule id of an organization (docs/46).
     BUILTIN_RULE_ID = "builtin rule id"
+    # An email recipient's confirmation code, stored only as an HMAC under this key (docs/48).
+    EMAIL_CONFIRMATION = "email confirmation"
+    # The per-address confirmation cap's row key: an HMAC of the normalised address (docs/48).
+    EMAIL_ADDRESS = "email address"
 
 
 def derive_key(secret: bytes, purpose: KeyPurpose) -> bytes:

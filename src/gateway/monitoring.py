@@ -6,7 +6,7 @@ components it is given. It never changes what they do. See docs/15-monitoring-ap
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -212,7 +212,14 @@ ALERT_DELIVERY_RESULTS = (
     "tls", "http_3xx", "http_4xx", "http_5xx", "channel_secret_unreadable", "channel_gone",
     "channel_disabled",
 )  # fmt: skip
-ALERT_CHANNEL_TYPES = ("webhook",)
+# The codes an email attempt can come to (gateway.alerts.smtp; a test keeps them equal, docs/48).
+EMAIL_DELIVERY_RESULTS = (
+    "delivered", "tls", "timeout", "connect_failed", "smtp_4xx", "smtp_5xx",
+    "smtp_credential_unreadable", "resolver_busy", "no_verified_recipient",
+    "recipient_not_verified", "domain_not_allowed", "channel_gone", "channel_disabled",
+)  # fmt: skip
+ALERT_CHANNEL_TYPES = ("webhook", "email")
+RESULTS_BY_TYPE = {"webhook": ALERT_DELIVERY_RESULTS, "email": EMAIL_DELIVERY_RESULTS}
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +229,8 @@ class AlertDeliveriesGroup:
 
     available: bool
     attempts: dict[str, dict[str, int]]
+    # Email name lookups past their budget still running on their threads (docs/48).
+    smtp_lookups_abandoned: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,9 +292,14 @@ class Monitor:
             if model in self._views:
                 series.set_degraded(model, False)
         self._reports_dropped = dict.fromkeys(BREAKER_DROP_REASONS, 0)
-        self._deliveries = {
-            t: dict.fromkeys(ALERT_DELIVERY_RESULTS, 0) for t in ALERT_CHANNEL_TYPES
-        }
+        self._deliveries = {t: dict.fromkeys(RESULTS_BY_TYPE[t], 0) for t in ALERT_CHANNEL_TYPES}
+        # What says how many email name lookups are abandoned and running (docs/48).
+        self._abandoned_lookups: Callable[[], int] | None = None
+
+    def watch_smtp_lookups(self, abandoned: Callable[[], int]) -> None:
+        """Where the gauge of abandoned email name lookups is read (the SMTP sender's
+        resolver); read when a snapshot is taken, never deciding anything."""
+        self._abandoned_lookups = abandoned
 
     @property
     def events(self) -> EventBus:
@@ -382,7 +396,7 @@ class Monitor:
 
     def alert_delivery(self, channel_type: str, result: str) -> None:
         """A webhook attempt this instance recorded (docs/46): a count by type and result."""
-        if channel_type in self._deliveries and result in ALERT_DELIVERY_RESULTS:
+        if channel_type in self._deliveries and result in self._deliveries[channel_type]:
             self._deliveries[channel_type][result] += 1
 
     def breaker_report_dropped(self, reason: str) -> None:
@@ -437,7 +451,11 @@ class Monitor:
             breakers=BreakersGroup(available=True, reports_dropped=dict(self._reports_dropped)),
             alert_evaluator=alert_evaluator,
             alert_deliveries=AlertDeliveriesGroup(
-                available=True, attempts={t: dict(r) for t, r in self._deliveries.items()}
+                available=True,
+                attempts={t: dict(r) for t, r in self._deliveries.items()},
+                smtp_lookups_abandoned=(
+                    self._abandoned_lookups() if self._abandoned_lookups is not None else 0
+                ),
             ),
         )
 
@@ -854,12 +872,18 @@ def render_prometheus(snapshot: Snapshot) -> str:
         (
             "gateway_alert_deliveries_total",
             "counter",
-            "Webhook attempts this instance recorded, by type and result.",
+            "Alert delivery attempts recorded here, by type and result.",
             [
                 ({"channel_type": channel_type, "result": result}, count)
                 for channel_type, results in snapshot.alert_deliveries.attempts.items()
                 for result, count in results.items()
             ],
+        ),
+        (
+            "gateway_alert_smtp_lookups_abandoned",
+            "gauge",
+            "Email name lookups past their budget, still running.",
+            [({}, snapshot.alert_deliveries.smtp_lookups_abandoned)],
         ),
     ]
     lines: list[str] = []

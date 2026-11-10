@@ -590,7 +590,8 @@ async def test_an_attempt_drops_only_its_own_records_not_a_concurrent_tasks(
 
 
 def test_build_request_is_the_one_reveal_of_the_alert_modules() -> None:
-    """M36: one ``reveal()`` call in the alert modules, in ``build_request``."""
+    """M36: one ``reveal()`` call in the alert modules for webhooks, in ``build_request``; and
+    from A5 (docs/48) one for the SMTP login, in ``_login``."""
     found = []
     for path in sorted((REPO / "src" / "gateway" / "alerts").glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -598,4 +599,4 @@ def test_build_request_is_the_one_reveal_of_the_alert_modules() -> None:
             for node in ast.walk(function):
                 if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "reveal":
                     found.append((path.name, function.name))
-    assert found == [("webhook.py", "build_request")]
+    assert found == [("smtp.py", "_login"), ("webhook.py", "build_request")]

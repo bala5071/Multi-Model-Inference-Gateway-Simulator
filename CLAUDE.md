@@ -59,7 +59,14 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   server refuses to start without it; `GATEWAY_VAULT_KEY_PREVIOUS` during a rotation), bound to
   organization, provider, type and URL origin; no trial decryption; `lease()` decrypts for one
   use; `ChannelBinding`, the channel scope (`vault-channel-v1|...`), for alert channels'
-  secrets, with no last four characters kept (docs/46) (exists)
+  secrets, with no last four characters kept (docs/46); `PlatformBinding`, the platform scope
+  (`vault-platform-v1|kind|host|port|username|key_id`) for the operator's SMTP password, under
+  its own subkey (`platform_scope_key`, an HMAC of the master key), never rebound across scopes
+  (docs/48) (exists)
+- `platformsecrets.py` — `platform_secrets` (migration 18, schema 7): the operator's own secrets
+  sealed in the platform scope, one row a kind (the SMTP password), with the host, port and
+  username they are bound to; read by these stores only, which only the CLI and the SMTP sender
+  use (docs/48) (exists)
 - `redaction.py` — `Redactor` and `install`: a log-record factory that scrubs leased key values
   and credential patterns from every record; installed by the server's lifespan (exists)
 - `egress.py` — the egress guard for organization providers: https only, every resolved address
@@ -130,7 +137,21 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `webhook.py`: `build_request` (the alert modules' one `reveal()`), the signature, `send` (one
   attempt, the fixed `CODES`, the HTTP libraries' log records of it dropped); `delivery.py`:
   `DeliveryWorker` (claim, read, send with no transaction held, compare-and-set outcome,
-  retries, at most 4 at once), `TestSends`, `DeliverySetup` (exists)
+  retries, at most 4 at once), `TestSends`, `DeliverySetup`. A5 (docs/48): `email.py`, the
+  operator's SMTP settings (`email_settings_from`: `GATEWAY_SMTP_*`, no plain option, the exact
+  domains of `GATEWAY_ALERT_EMAIL_DOMAINS`), `check_address`, and the confirmation code (10
+  base32 characters, 50 bits, from the random source given; its HMAC over channel, address and
+  code); `recipients.py`, `Recipient`, `RecipientStore` and `ConfirmationStore` (the durable
+  per-address cap, one conditional upsert) on memory and SQLite, `InstanceConfirmations`, the
+  `Mailer` protocol (handed each confirmation after its write commits) and `RecipientService`
+  (add, resend, confirm with one answer after the same steps, remove); the four confirmation
+  caps are part of `AlertCaps`; `smtp.py`, `SmtpSender` (one message to one recipient within
+  a hard 10 s budget: the name lookup on `BoundedResolver`, 4 threads, `resolver_busy` past
+  them; `DeadlineSMTP`/`DeadlineSMTP_SSL` setting the socket timeout before every socket call;
+  STARTTLS or implicit TLS only, the certificate checked; the password leased and revealed only
+  in `_login`; smtplib's debug output dropped), `notification_message`,
+  `confirmation_message` and `SmtpMailer`; email deliveries one outbox row per verified
+  recipient, checked again when claimed (exists)
 - `incidents.py` — `Incident`, the notifications recorded on it (A4 delivers them), the lease
   (`LeaseView`, `Fence`), and `IncidentStore` on memory, SQLite (migration 16) and Postgres
   (schema 5): one open incident a series by a partial unique index, every change a fenced
@@ -254,7 +275,11 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   1 to 13, plus `ord` where SQLite orders by rowid), `PG_SETTINGS` (schema version 3, migration
   14, with `rollback_schema`), `PG_ALERT_RULES` (schema version 4, migration 15 and its data
   step), `PG_INCIDENTS` (schema version 5, migration 16), `PG_CHANNELS` (schema version 6,
-  migration 17, refused while an application has an empty id), `PostgresSettingsStore`,
+  migration 17, refused while an application has an empty id), `PG_EMAIL` (schema version 7,
+  migration 18: the channel type constraint replaced in place, the outbox per recipient, the
+  recipients, the per-address cap and `platform_secrets`; its rollback refused while email data
+  exists), `PostgresRecipientStore`, `PostgresConfirmationStore`, `PostgresPlatformSecretStore`,
+  `PostgresSettingsStore`,
   `PostgresRuleStore`, `PostgresIncidentStore`, `PostgresChannelStore`, `PostgresOutboxStore`,
   `PostgresCeilingsStore`, `PostgresDatabase` with three pools (request, management, and the
   alert evaluator's, 3 connections, which its task and the delivery worker take under
@@ -280,7 +305,10 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   rules), 16 `alert_lease`, `incidents` and `incident_notifications`, 17 `alert_channels`,
   `channel_secrets`, `notification_deliveries`, `notification_caps`, `suppression_summaries`,
   `instance_ceilings` and `incidents.notify_channels` (refused while an application has an
-  empty id). The default
+  empty id), 18 rebuilds `alert_channels` (type webhook or email, `url_origin` only for a
+  webhook), adds `notification_deliveries.recipient_id` and its per-recipient unique index, and
+  creates `alert_recipients`, `confirmation_caps` and `platform_secrets` (a rebuild: the server
+  refuses it on an existing database; its reverse refused while email data exists). The default
   database is in the user's data folder,
   owner-only; `ProcessLock` allows one gateway process per database; `backup_database` and
   `restore_database` use SQLite's backup API (exists)
@@ -440,7 +468,9 @@ about the gateway.
 `capture_demo.py` (retakes the dashboard pictures in `docs/img/`),
 `run_local_models.sh`, `manage.py` (creates organizations and applications and issues, rotates
 and revokes API keys, audited like the management endpoints; prints a new key once, never logs
-it; `rotate-vault-key` and `vault-drop-unreadable` for provider keys (docs/32);
+it; `rotate-vault-key` and `vault-drop-unreadable` for provider keys (docs/32), the former
+resealing channel secrets and the platform scope too; `set-smtp-password` (asked twice or
+`--from-env VAR`, never printed, docs/48);
 `settings-show`, `settings-set` and `settings-revert` (docs/39); also
 `migrate` with `--dry-run` and a backup before a table rebuild, backup and restore), `readme_quickstart.py` (runs the README's quickstart blocks exactly as written and
 checks the result; a CI job, so the README cannot go stale), `check_characters.py` (a CI

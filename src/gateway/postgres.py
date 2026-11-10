@@ -50,6 +50,13 @@ from gateway.alerts.channels import (
 )
 from gateway.alerts.outbox import COLUMNS as _DELIVERY_COLUMNS
 from gateway.alerts.outbox import Delivery, Outcome, Suppressed, delivery_from_row, delivery_row
+from gateway.alerts.recipients import COLUMNS as _RECIPIENT_COLUMNS
+from gateway.alerts.recipients import (
+    Recipient,
+    RecipientTakenError,
+    recipient_from_row,
+    recipient_row,
+)
 from gateway.applications import (
     _APP_COLUMNS,
     _KEY_COLUMNS,
@@ -98,6 +105,10 @@ from gateway.modes import (
 from gateway.organizations import Organization, check_application_id, normalize_name
 from gateway.periods import BudgetPeriods, CalendarMonthsUTC
 from gateway.permissions import Assignment, Role, ScopeType
+from gateway.platformsecrets import COLUMNS as _PLATFORM_COLUMNS
+from gateway.platformsecrets import StoredPlatformSecret
+from gateway.platformsecrets import secret_from_row as platform_secret_from_row
+from gateway.platformsecrets import secret_row as platform_secret_row
 from gateway.providers import _COLUMNS as _PROVIDER_COLUMNS
 from gateway.providers import ProviderConfig, StoredKey, _config
 from gateway.roles import check_app_role_name
@@ -156,7 +167,7 @@ LOCK_POLL_MS = 20.0
 # The advisory lock keys: management writes, and applying the schema. Fixed, distinct.
 WRITE_LOCK = 0x6777_5752_4954_4531  # "gwWRITE1"
 SCHEMA_LOCK = 0x6777_5343_4845_4D31  # "gwSCHEM1"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 # How long a settled reservation's id is kept, so that a settle tried again is not charged twice
 # (docs/37).
 SETTLED_KEEP_MS = 24 * 60 * 60 * 1000.0
@@ -534,6 +545,58 @@ CREATE TABLE instance_ceilings (
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS notify_channels text;
 """
 
+# Version 7 (docs/48): email channels, the tables and changes of SQLite migration 18. The type
+# constraint is replaced in place (Postgres needs no rebuild), ``url_origin`` is required exactly
+# for a webhook, the outbox gets one row per recipient, and the three new tables.
+PG_EMAIL = """
+ALTER TABLE alert_channels DROP CONSTRAINT alert_channels_type_check;
+ALTER TABLE alert_channels ADD CONSTRAINT alert_channels_type_check
+  CHECK (type IN ('webhook', 'email'));
+ALTER TABLE alert_channels ALTER COLUMN url_origin DROP NOT NULL;
+ALTER TABLE alert_channels ADD CONSTRAINT alert_channels_origin_check
+  CHECK ((type = 'webhook') = (url_origin IS NOT NULL));
+
+ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS recipient_id text;
+DROP INDEX notification_deliveries_one;
+CREATE UNIQUE INDEX notification_deliveries_one ON notification_deliveries
+  (notification_id, channel_id, (COALESCE(recipient_id, '')));
+
+CREATE TABLE alert_recipients (
+  id text PRIMARY KEY,
+  channel_id text NOT NULL,
+  organization_id text NOT NULL,
+  address text NOT NULL,
+  state text NOT NULL CONSTRAINT alert_recipients_state_check
+    CHECK (state IN ('unverified', 'verified')),
+  code_digest bytea,
+  code_expires_at_ms double precision,
+  wrong_entries integer NOT NULL CONSTRAINT alert_recipients_wrong_check
+    CHECK (wrong_entries BETWEEN 0 AND 5),
+  added_at_ms double precision NOT NULL,
+  verified_at_ms double precision,
+  last_refused_at_ms double precision,
+  CONSTRAINT alert_recipients_code_check CHECK (code_digest IS NULL OR state = 'unverified'),
+  CONSTRAINT alert_recipients_verified_check
+    CHECK ((state = 'verified') = (verified_at_ms IS NOT NULL)));
+CREATE UNIQUE INDEX alert_recipients_one ON alert_recipients (channel_id, address);
+CREATE INDEX alert_recipients_by_channel ON alert_recipients (channel_id, id);
+
+CREATE TABLE confirmation_caps (
+  address_digest text PRIMARY KEY,
+  window_start_ms double precision NOT NULL,
+  sent integer NOT NULL CONSTRAINT confirmation_caps_sent_check CHECK (sent >= 1));
+
+CREATE TABLE platform_secrets (
+  kind text PRIMARY KEY CONSTRAINT platform_secrets_kind_check CHECK (kind IN ('smtp_password')),
+  key_id text NOT NULL,
+  nonce bytea NOT NULL,
+  ciphertext bytea NOT NULL,
+  host text NOT NULL,
+  port integer NOT NULL CONSTRAINT platform_secrets_port_check CHECK (port BETWEEN 1 AND 65535),
+  username text NOT NULL,
+  updated_at_ms double precision NOT NULL);
+"""
+
 # Each version and what it adds, applied in order to a database that has an earlier one.
 SCHEMA = (
     (1, PG_BASELINE),
@@ -542,6 +605,7 @@ SCHEMA = (
     (4, PG_ALERT_RULES),
     (5, PG_INCIDENTS),
     (6, PG_CHANNELS),
+    (7, PG_EMAIL),
 )
 # What takes a version back out, for the versions that can be (``rollback_schema``). Versions 1
 # and 2 have none: ``migrate-to-sqlite`` is their way back.
@@ -553,6 +617,24 @@ SCHEMA_DOWN = {
     6: "DROP TABLE instance_ceilings; DROP TABLE suppression_summaries;"
     " DROP TABLE notification_caps;"
     " DROP TABLE notification_deliveries; DROP TABLE channel_secrets; DROP TABLE alert_channels;",
+    # Refused while an email channel or a recipient's delivery exists, as on SQLite; the column
+    # stays, unread, and applying 7 again leaves it (IF NOT EXISTS).
+    7: """
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM alert_channels WHERE type = 'email')
+     OR EXISTS (SELECT 1 FROM notification_deliveries WHERE recipient_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'schema 7 not rolled back: an email channel or a recipient''s delivery exists';
+  END IF;
+END $$;
+DROP TABLE platform_secrets; DROP TABLE confirmation_caps; DROP TABLE alert_recipients;
+DROP INDEX notification_deliveries_one;
+CREATE UNIQUE INDEX notification_deliveries_one ON notification_deliveries
+  (notification_id, channel_id);
+ALTER TABLE alert_channels DROP CONSTRAINT alert_channels_origin_check;
+ALTER TABLE alert_channels ALTER COLUMN url_origin SET NOT NULL;
+ALTER TABLE alert_channels DROP CONSTRAINT alert_channels_type_check;
+ALTER TABLE alert_channels ADD CONSTRAINT alert_channels_type_check CHECK (type IN ('webhook'));
+""",
 }
 
 # The tables of PG_BUDGETS: Postgres only, never copied to or from SQLite.
@@ -584,6 +666,9 @@ TABLES = (
     "notification_caps",
     "suppression_summaries",
     "instance_ceilings",
+    "alert_recipients",
+    "confirmation_caps",
+    "platform_secrets",
 )
 
 
@@ -2694,8 +2779,10 @@ class PostgresOutboxStore(_Store):
         for d in deliveries:
             new += await self._execute(
                 f"INSERT INTO notification_deliveries ({_DELIVERY_COLUMNS})"
-                f" VALUES ({_placeholders(13)})"
-                " ON CONFLICT (notification_id, channel_id) DO NOTHING",
+                f" VALUES ({_placeholders(14)})"
+                # Any unique conflict, as SQLite's INSERT OR IGNORE: the index is one row per
+                # (notification, channel, recipient) from schema 7.
+                " ON CONFLICT DO NOTHING",
                 *delivery_row(d),
             )
         return new
@@ -2788,6 +2875,97 @@ class PostgresCeilingsStore(_Store):
         return {r[0]: r[1] for r in rows}
 
 
+class PostgresRecipientStore(_Store):
+    """An email channel's recipients (``alert_recipients``, schema version 7, docs/48)."""
+
+    async def _rows(self, where: str, *args: Any) -> list[Recipient]:
+        rows = await self._fetch(
+            f"SELECT {_RECIPIENT_COLUMNS} FROM alert_recipients WHERE {where}", *args
+        )
+        return [recipient_from_row(tuple(r.values())) for r in rows]
+
+    async def get_recipient(self, recipient_id: str) -> Recipient | None:
+        found = await self._rows("id = $1", recipient_id)
+        return found[0] if found else None
+
+    async def channel_recipients(self, channel_id: str) -> list[Recipient]:
+        return await self._rows("channel_id = $1 ORDER BY id", channel_id)
+
+    async def insert_recipient(self, recipient: Recipient) -> None:
+        try:
+            await self._execute(
+                f"INSERT INTO alert_recipients ({_RECIPIENT_COLUMNS}) VALUES ({_placeholders(11)})",
+                *recipient_row(recipient),
+            )
+        except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name == "alert_recipients_one":
+                raise RecipientTakenError() from None
+            raise
+
+    async def put_recipient(self, recipient: Recipient) -> None:
+        row = recipient_row(recipient)
+        await self._execute(
+            "UPDATE alert_recipients SET state = $1, code_digest = $2, code_expires_at_ms = $3,"
+            " wrong_entries = $4, verified_at_ms = $5, last_refused_at_ms = $6 WHERE id = $7",
+            *row[4:8],
+            row[9],
+            row[10],
+            recipient.id,
+        )
+
+    async def delete_recipient(self, recipient_id: str) -> bool:
+        return await self._execute("DELETE FROM alert_recipients WHERE id = $1", recipient_id) == 1
+
+    async def delete_channel_recipients(self, channel_id: str) -> int:
+        return await self._execute("DELETE FROM alert_recipients WHERE channel_id = $1", channel_id)
+
+
+class PostgresConfirmationStore(_Store):
+    """The per-address confirmation cap (``confirmation_caps``, schema version 7) on the
+    database's clock: one conditional upsert counts or refuses, so two instances at the cap
+    cannot both count (docs/48)."""
+
+    async def count(self, digest: str, cap: int, window_ms: float) -> bool:
+        done = await self._execute(
+            "INSERT INTO confirmation_caps AS c (address_digest, window_start_ms, sent)"
+            " VALUES ($1, gateway_now_ms(), 1) ON CONFLICT (address_digest) DO UPDATE SET"
+            " sent = CASE WHEN c.window_start_ms <= gateway_now_ms() - $2 THEN 1"
+            "  ELSE c.sent + 1 END,"
+            " window_start_ms = CASE WHEN c.window_start_ms <= gateway_now_ms() - $2"
+            "  THEN gateway_now_ms() ELSE c.window_start_ms END"
+            " WHERE c.window_start_ms <= gateway_now_ms() - $2 OR c.sent < $3",
+            digest,
+            window_ms,
+            cap,
+        )
+        return done == 1
+
+
+class PostgresPlatformSecretStore(_Store):
+    """The operator's own secrets (``platform_secrets``, schema version 7, docs/48), read here
+    and by no other store."""
+
+    async def get(self, kind: str) -> StoredPlatformSecret | None:
+        row = await self._row(
+            f"SELECT {_PLATFORM_COLUMNS} FROM platform_secrets WHERE kind = $1", kind
+        )
+        return platform_secret_from_row(tuple(row.values())) if row is not None else None
+
+    async def put(self, secret: StoredPlatformSecret) -> None:
+        await self._execute(
+            f"INSERT INTO platform_secrets ({_PLATFORM_COLUMNS}) VALUES ({_placeholders(8)})"
+            " ON CONFLICT (kind) DO UPDATE SET key_id = EXCLUDED.key_id,"
+            " nonce = EXCLUDED.nonce, ciphertext = EXCLUDED.ciphertext, host = EXCLUDED.host,"
+            " port = EXCLUDED.port, username = EXCLUDED.username,"
+            " updated_at_ms = EXCLUDED.updated_at_ms",
+            *platform_secret_row(secret),
+        )
+
+    async def all(self) -> list[StoredPlatformSecret]:
+        rows = await self._fetch(f"SELECT {_PLATFORM_COLUMNS} FROM platform_secrets ORDER BY kind")
+        return [platform_secret_from_row(tuple(r.values())) for r in rows]
+
+
 def postgres_state(db: PostgresDatabase) -> StateBackend:
     """Every store over one Postgres database; windows on its clock."""
     return StateBackend(
@@ -2804,5 +2982,8 @@ def postgres_state(db: PostgresDatabase) -> StateBackend:
         channels=PostgresChannelStore(db),
         outbox=PostgresOutboxStore(db),
         ceilings=PostgresCeilingsStore(db),
+        recipients=PostgresRecipientStore(db),
+        confirmations=PostgresConfirmationStore(db),
+        platform_secrets=PostgresPlatformSecretStore(db),
         clock=db,
     )

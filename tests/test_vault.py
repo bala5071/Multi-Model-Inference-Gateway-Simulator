@@ -234,6 +234,8 @@ def test_only_the_provider_service_the_wiring_and_the_cli_hold_the_vault() -> No
         # that leases them to deliver.
         "channels.py",
         "delivery.py",
+        # The SMTP sender, which leases the SMTP password from the platform scope (docs/48).
+        "smtp.py",
     }
 
 

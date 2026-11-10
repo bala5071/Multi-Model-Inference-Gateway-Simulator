@@ -470,7 +470,7 @@ def test_every_route_of_every_app_declares_itself() -> None:
     # incident endpoints (docs/45) on 4 more, and the alert channel endpoints (docs/46) on 7
     # more (test send among them).
     assert len({p for v, p in requires_routes if v == "accounts"}) == 5
-    assert len({p for v, p in requires_routes if v == "default server"}) == 48
+    assert len({p for v, p in requires_routes if v == "default server"}) == 52
 
 
 def test_a_route_without_a_declaration_is_found() -> None:

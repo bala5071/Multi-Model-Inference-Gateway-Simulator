@@ -89,14 +89,17 @@ one line in the real stream.)
                         "budget_exhausted": 0, "circuit_breaker": 0,
                         "state_store_restarted": 0, "reservation_expired": 0,
                         "alert_evaluator_stale": 0, "alert_evaluator_recovered": 0,
-                        "alert_delivery_failed": 0, "alert_caps_differ": 0},
+                        "alert_delivery_failed": 0, "alert_caps_differ": 0,
+                        "alert_smtp_resolver_busy": 0},
              "recent": []},
   "breakers": {"available": true,
                "reports_dropped": {"queue_full": 0, "flush_timeout": 0, "unavailable": 0}},
   "alert_evaluator": {"available": true, "state": "disabled", "last_cycle_age_ms": null,
                       "holder": false, "last_evaluation_ms": null, "evaluation_failures": 0},
   "alert_deliveries": {"available": true,
-                       "attempts": {"webhook": {"delivered": 0, "egress_refused": 0, "...": 0}}}
+                       "attempts": {"webhook": {"delivered": 0, "egress_refused": 0, "...": 0},
+                                    "email": {"delivered": 0, "tls": 0, "...": 0}},
+                       "smtp_lookups_abandoned": 0}
 }
 ```
 
@@ -119,7 +122,12 @@ nothing decides from it.
 by channel type and result: `delivered`, or the fixed code of the failure (`egress_refused`,
 `port_refused`, `dns_failure`, `timeout`, `connect_failed`, `tls`, `http_3xx`, `http_4xx`,
 `http_5xx`, `channel_secret_unreadable`, `channel_gone`, `channel_disabled`), every one present
-at 0. No organization, channel or target: a count of what the instance did.
+at 0. No organization, channel or target: a count of what the instance did. From note 48 it
+counts email attempts too, under `email`: `delivered`, `tls`, `timeout`, `connect_failed`,
+`smtp_4xx`, `smtp_5xx`, `smtp_credential_unreadable`, `resolver_busy`, `no_verified_recipient`,
+`recipient_not_verified`, `domain_not_allowed`, `channel_gone`, `channel_disabled`. And
+`smtp_lookups_abandoned` is how many email name lookups are past their attempt's budget and
+still running on their threads (at most 4).
 
 ### Model groups: the state now
 
@@ -279,8 +287,9 @@ it creates no series (`test_applications_show_spend_tokens_against_budget_and_re
 | `state_store_restarted` | The shared counter store came back empty after a restart (docs/35); only with `GATEWAY_COUNTERS=valkey` | `store` (`valkey`) |
 | `reservation_expired` | A shared budget reservation outlived its request and was released; its request's usage was not charged (docs/37); only with `GATEWAY_STATE=shared` | `tokens` (what it held) |
 | `alert_evaluator_stale`, `alert_evaluator_recovered` | The alert evaluator's heartbeat went stale or unknown, and came back (docs/45) | `state` |
-| `alert_delivery_failed` | A webhook attempt failed, retried or not (docs/46) | `channel_id`, `code` |
+| `alert_delivery_failed` | A webhook or email attempt failed, retried or not (docs/46, docs/48) | `channel_id`, `code` |
 | `alert_caps_differ` | A live instance's alert caps differ from this one's: reported, never refused (docs/46) | `caps` (the names of those that differ) |
+| `alert_smtp_resolver_busy` | Every email name lookup thread was held by lookups past their budget, so an attempt was refused before any lookup; it counts toward the channel's health and is tried again (docs/48) | `channel_id` |
 
 Every event has `seq`, `at_ms`, `type`, `model` and `application_id` (`null` without
 applications). A rate-limit refusal is a rejection, not an event: it never reached a model.
@@ -336,7 +345,8 @@ gateway_ttft_ms{model="premium",quantile="0.99"} 50.0
   `gateway_alert_evaluator_last_cycle_age_seconds` (absent while unknown),
   `gateway_alert_evaluator_holder`, `gateway_alert_evaluation_ms` and
   `gateway_alert_evaluation_failures_total` are `alert_evaluator` (note 45).
-- `gateway_alert_deliveries_total{channel_type=..., result=...}` is `alert_deliveries` (note 46).
+- `gateway_alert_deliveries_total{channel_type=..., result=...}` is `alert_deliveries` (note 46,
+  email from note 48), and `gateway_alert_smtp_lookups_abandoned` its `smtp_lookups_abandoned`.
 - The full output for one request is asserted in
   `test_metrics_endpoint_is_exact_prometheus_text_for_one_request`.
 

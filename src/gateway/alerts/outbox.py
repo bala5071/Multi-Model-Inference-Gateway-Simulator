@@ -53,6 +53,9 @@ class Delivery:
     payload: str
     created_at_ms: float
     updated_at_ms: float
+    # An email channel's recipient this row is for (docs/48); None for a webhook, and for an
+    # email channel's notice when it had no verified recipient.
+    recipient_id: str | None = None
 
     def __repr__(self) -> str:
         # The payload is the notification's own body: kept out of reprs and tracebacks.
@@ -64,7 +67,8 @@ class Delivery:
 
 COLUMNS = (
     "id, notification_id, channel_id, organization_id, state, attempts, next_attempt_at_ms,"
-    " claimed_by, claim_expires_at_ms, last_code, payload, created_at_ms, updated_at_ms"
+    " claimed_by, claim_expires_at_ms, last_code, payload, created_at_ms, updated_at_ms,"
+    " recipient_id"
 )
 
 
@@ -72,7 +76,7 @@ def delivery_row(d: Delivery) -> tuple[Any, ...]:
     return (
         d.id, d.notification_id, d.channel_id, d.organization_id, d.state.value, d.attempts,
         d.next_attempt_at_ms, d.claimed_by, d.claim_expires_at_ms, d.last_code, d.payload,
-        d.created_at_ms, d.updated_at_ms,
+        d.created_at_ms, d.updated_at_ms, d.recipient_id,
     )  # fmt: skip
 
 
@@ -80,6 +84,7 @@ def delivery_from_row(row: Sequence[Any]) -> Delivery:
     return Delivery(
         row[0], row[1], row[2], row[3], DeliveryState(row[4]), int(row[5]), row[6], row[7],
         row[8], row[9], row[10], float(row[11]), float(row[12]),
+        row[13] if len(row) > 13 else None,
     )  # fmt: skip
 
 
@@ -376,7 +381,7 @@ class SqliteOutboxStore:
         for d in deliveries:
             done = self._db.execute(
                 f"INSERT OR IGNORE INTO notification_deliveries ({COLUMNS})"
-                f" VALUES ({', '.join('?' * 13)})",
+                f" VALUES ({', '.join('?' * 14)})",
                 delivery_row(d),
             )
             new += done.rowcount

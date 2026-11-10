@@ -336,9 +336,11 @@ class InMemoryConnectionTestCounter:
         *,
         reason: Reason = Reason.TEST_RATE_LIMITED,
         what: tuple[str, str] = ("a provider", "an organization's providers"),
+        noun: str = "tests of",
     ) -> None:
-        """``reason`` and ``what``: the refusal's code and words (an alert channel's test sends
-        count the same way, docs/46)."""
+        """``reason``, ``what`` and ``noun``: the refusal's code and words (an alert channel's
+        test sends count the same way, docs/46, and an email recipient's confirmations, docs/48)."""
+        self._noun = noun
         self._clock = clock
         self._tests_per_hour = tests_per_hour
         self._tests_per_organization_hour = tests_per_organization_hour
@@ -363,7 +365,7 @@ class InMemoryConnectionTestCounter:
             if len(times) >= limit:
                 raise ManagementRefusal(
                     self._reason,
-                    f"at most {limit} tests of {what} an hour; try again later",
+                    f"at most {limit} {self._noun} {what} an hour; try again later",
                 )
         for times, _, _ in windows:
             times.append(now)

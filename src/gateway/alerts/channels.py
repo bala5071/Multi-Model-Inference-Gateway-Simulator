@@ -1,8 +1,9 @@
-"""Alert channels: an organization's webhook destinations, their sealed secrets, and how they
-change (docs/46, the A4 plan's sections 2, 3, 4.1 and 9).
+"""Alert channels: an organization's webhook and email destinations, their sealed secrets, and
+how they change (docs/46, the A4 plan's sections 2, 3, 4.1 and 9; email channels: docs/48).
 
 **A channel belongs to an organization,** so one webhook can serve several applications. It has
-a name (the rule-name charset), a type (``webhook`` only in A4), ``enabled`` and ``is_default``
+a name (the rule-name charset), a type (``webhook``, or ``email`` from A5), ``enabled`` and
+``is_default``
 (default channels receive the default rules' notifications and the summaries). At most
 ``MAX_CHANNELS`` an organization, counted under the global write lock.
 
@@ -14,6 +15,10 @@ stored; the connect-time check of every delivery (group 2) is the one relied on.
 **Its signing key** is 32 bytes from the injected ``random_bytes``, sealed the same way and
 returned once, in the answer that creates the channel or rotates the key. A rotation keeps the
 previous key for ``PREVIOUS_KEY_MS`` (store clock), and both sign meanwhile.
+
+**An email channel** (docs/48) has no URL and no signing key: ``url_origin`` is None, and its
+destinations are its recipients (``gateway.alerts.recipients``), created with it, each sent a
+confirmation once the write has committed.
 
 ``channel_secrets`` is read by the channel stores and nothing else (a test greps every store's
 SQL).
@@ -43,11 +48,14 @@ from gateway.vault import ChannelBinding, SealedKey, Vault
 if TYPE_CHECKING:
     from gateway.alerts.delivery import DeliverySetup
     from gateway.alerts.notices import Notices
+    from gateway.alerts.recipients import Recipient, RecipientService
 
 CHANNEL_ID_PREFIX = "chn_"
 CHANNEL_ID = re.compile(r"chn_[0-9a-f]{16}")
 MAX_CHANNELS = 20
-CHANNEL_TYPES = ("webhook",)
+CHANNEL_TYPES = ("webhook", "email")
+WEBHOOK = "webhook"
+EMAIL = "email"
 # The rule-name charset (gateway.alertrules.NAME; a test keeps the two equal).
 NAME = re.compile(r"[A-Za-z0-9 ._-]{1,64}")
 SIGNING_KEY_BYTES = 32
@@ -202,7 +210,8 @@ class Channel:
     type: str
     enabled: bool
     is_default: bool
-    url_origin: str
+    # The webhook URL's origin; None for an email channel, which has no URL.
+    url_origin: str | None
     version: int
     created_at_ms: float
     updated_at_ms: float
@@ -540,6 +549,8 @@ async def resolve_channel(
 
 
 def binding_of(channel: Channel, kind: str) -> ChannelBinding:
+    if channel.url_origin is None:
+        raise ValueError("an email channel has no secret")
     return ChannelBinding(channel.organization_id, channel.id, kind, channel.url_origin)
 
 
@@ -555,8 +566,11 @@ def _check_name(name: object) -> str:
 @dataclass(frozen=True, slots=True)
 class CreatedChannel:
     channel: Channel
-    # Shown once, in the answer that creates the channel or rotates its key; hex.
-    signing_key: str
+    # Shown once, in the answer that creates the channel or rotates its key; hex. None for an
+    # email channel, which has no key.
+    signing_key: str | None
+    # An email channel's recipients as created, and each one's confirmation outcome.
+    recipients: tuple[tuple[Recipient, str], ...] = ()
 
     def __repr__(self) -> str:
         return f"CreatedChannel(channel={self.channel!r}, <signing key redacted>)"
@@ -578,6 +592,7 @@ class ChannelService:
         ports: Collection[int] = (DEFAULT_WEBHOOK_PORT,),
         store_clock: StoreClock | None = None,
         delivery: DeliverySetup | None = None,
+        recipients: RecipientService | None = None,
     ) -> None:
         """``store_clock`` times the previous signing key's 24 hours (the database's clock
         where it is shared, docs/37); ``epoch`` without it. ``delivery``: what the server
@@ -596,6 +611,8 @@ class ChannelService:
             store_clock if store_clock is not None else EpochStoreClock(epoch)
         )
         self.delivery = delivery
+        # An email channel's recipients and their confirmations (docs/48); None: no email.
+        self.recipients = recipients
 
     def __repr__(self) -> str:
         return "ChannelService(<vault redacted>)"
@@ -645,15 +662,22 @@ class ChannelService:
         channel_type: object,
         actor: Actor,
         marker: ChangeMarker,
+        recipients: object = None,
     ) -> CreatedChannel:
         if channel_type not in CHANNEL_TYPES:
-            raise ChannelFieldError("type", "must be webhook")
+            raise ChannelFieldError("type", "must be webhook or email")
         try:
             checked_name = _check_name(name)
         except ValueError as exc:
             raise ChannelFieldError("name", str(exc)) from None
         if not isinstance(is_default, bool):
             raise ChannelFieldError("default", "must be true or false")
+        if channel_type == EMAIL:
+            return await self._create_email(
+                organization_id, checked_name, url, is_default, recipients, actor, marker
+            )
+        if recipients is not None:
+            raise ChannelFieldError("recipients", "only an email channel has recipients")
         try:
             checked = check_webhook_url(url, self.ports)
         except WebhookUrlError as exc:
@@ -688,6 +712,64 @@ class ChannelService:
             await self._record(AuditAction.ALERT_CHANNEL_CREATED, channel, actor)
             marker.changed()
         return CreatedChannel(channel, key)
+
+    async def _create_email(
+        self,
+        organization_id: str,
+        name: str,
+        url: object,
+        is_default: bool,
+        addresses: object,
+        actor: Actor,
+        marker: ChangeMarker,
+    ) -> CreatedChannel:
+        """An email channel with 1 to 10 recipients, each unverified and sent a confirmation
+        once the write has committed (capped: a cap that refuses refuses the whole channel,
+        and nothing is sent)."""
+        from gateway.alerts.email import AddressError
+        from gateway.alerts.recipients import EmailUnavailableError
+
+        service = self.recipients
+        if service is None or not service.available:
+            raise EmailUnavailableError()
+        if url is not None:
+            raise ChannelFieldError("url", "an email channel has no URL; it has recipients")
+        try:
+            checked = service.check_addresses(addresses)
+        except AddressError as exc:
+            raise ChannelFieldError("recipients", str(exc)) from None
+        channel_id = CHANNEL_ID_PREFIX + self._random_bytes(8).hex()
+        taken = await service.admit(organization_id, channel_id, len(checked))
+        issued = []
+        try:
+            async with self.store.write_transaction():
+                if await self.store.count_channels(organization_id) >= MAX_CHANNELS:
+                    raise ManagementRefusal(
+                        Reason.CHANNEL_LIMIT, f"an organization has at most {MAX_CHANNELS} channels"
+                    )
+                now = self._epoch.epoch_ms()
+                channel = Channel(
+                    channel_id, organization_id, name, EMAIL, True, is_default, None, 1, now, now
+                )
+                try:
+                    await self.store.insert_channel(channel)
+                except ChannelNameTakenError:
+                    raise _name_taken() from None
+                await self._record(AuditAction.ALERT_CHANNEL_CREATED, channel, actor)
+                for address in checked:
+                    fresh = service.recipient(channel_id, organization_id, address.address)
+                    await service.store.insert_recipient(fresh)
+                    made, code = await service.issue(fresh)
+                    await service.store.put_recipient(made)
+                    issued.append((made, code))
+                    await service.record(AuditAction.ALERT_RECIPIENT_ADDED, made, actor)
+                    await service.record(AuditAction.ALERT_RECIPIENT_CONFIRMATION_SENT, made, actor)
+                marker.changed()
+        except BaseException:
+            service.give_back(taken)
+            raise
+        outcomes = await service.send(issued)
+        return CreatedChannel(channel, None, tuple((made, outcomes[made.id]) for made, _ in issued))
 
     async def _current(self, channel_id: str) -> Channel:
         found = await self.store.get_channel(channel_id)
@@ -730,6 +812,8 @@ class ChannelService:
             found = await self._current(channel_id)
             if found.version != expected_version:
                 raise _version_conflict(found.version, expected_version)
+            if found.type == EMAIL and checked is not None:
+                raise ChannelFieldError("url", "an email channel has no URL")
             after = found
             changed: list[str] = []
             if "name" in changes and name != found.name:
@@ -810,6 +894,8 @@ class ChannelService:
         async with self.store.write_transaction():
             found = await self._current(channel_id)
             await self.store.delete_channel(found.id)
+            if self.recipients is not None:
+                await self.recipients.store.delete_channel_recipients(found.id)
             await self._record(AuditAction.ALERT_CHANNEL_DELETED, found, actor)
             if self.notices is not None:
                 await self.notices.channel_gone(found.id)
@@ -821,6 +907,10 @@ class ChannelService:
         previous key (both sign meanwhile), replacing any older previous key."""
         async with self.store.write_transaction():
             found = await self._current(channel_id)
+            if found.type == EMAIL:
+                raise ManagementRefusal(
+                    Reason.CHANNEL_HAS_NO_KEY, "an email channel has no signing key to rotate"
+                )
             secrets = await self.store.secrets(found.id)
             current = secrets.get(KEY_KIND)
             now = await self.store_clock.now_ms()

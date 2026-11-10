@@ -31,6 +31,9 @@ EVENT_TYPES = (
     "alert_delivery_failed",
     # A live instance's alert caps differ from this one's: reported, never refused (docs/46).
     "alert_caps_differ",
+    # Every email name lookup thread held by lookups past their budget: an attempt refused
+    # before any lookup, with the channel id (docs/48).
+    "alert_smtp_resolver_busy",
 )
 
 

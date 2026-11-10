@@ -27,6 +27,12 @@ its rule's hour and its organization's hour, by one conditional upsert each in t
 transaction (M25), the hour from the store clock. Over either, its deliveries are queued as
 ``suppressed`` with ``rule_cap`` or ``organization_cap``. Counted in that order: one its
 organization refuses has counted against its rule.
+
+**An email channel** (docs/48) gets one delivery per **verified** recipient, read here at queue
+time; each counts against the caps as one (the webhooks of a notification still count once
+together, as above), so a notification to an email channel of 10 verified recipients takes 10.
+One with no verified recipient gets one delivery with no recipient, not counted, which fails
+``no_verified_recipient`` and so counts toward the channel's health.
 """
 
 from __future__ import annotations
@@ -49,6 +55,7 @@ from gateway.alerts.payload import (
     PayloadTooLargeError,
     iso,
 )
+from gateway.alerts.recipients import VERIFIED
 from gateway.alerts.webhook import ORGANIZATION_CAP, RULE_CAP
 from gateway.applications import Application, ApplicationStore
 from gateway.clock import EpochSource, EpochStoreClock, StoreClock
@@ -57,6 +64,7 @@ from gateway.signals import SIGNALS
 
 if TYPE_CHECKING:
     from gateway.alertrules import AlertRule
+    from gateway.alerts.recipients import RecipientStore
 
 ORGANIZATION_DEFAULTS = "organization defaults"
 NOTIFICATION_ID_PREFIX = "ntf_"
@@ -123,6 +131,7 @@ class Notices:
         caps: AlertCaps | None = None,
         store_clock: StoreClock | None = None,
         builtin_rule_id: Callable[[str], str] | None = None,
+        recipients: RecipientStore | None = None,
     ) -> None:
         """``caps``: the caps counted when a notification is queued (None: none, as in the
         tests of group 1). ``store_clock``: the time notifications are queued at and their
@@ -138,6 +147,8 @@ class Notices:
             store_clock if store_clock is not None else EpochStoreClock(epoch)
         )
         self.builtin_rule_id = builtin_rule_id
+        # An email channel's recipients, its deliveries one per verified recipient (docs/48).
+        self.recipients = recipients
 
     def new_id(self, prefix: str) -> str:
         return prefix + self._random_bytes(8).hex()
@@ -192,20 +203,42 @@ class Notices:
             body = payload.body()
         except PayloadTooLargeError:
             body, state, code, attempt_at = "", DeliveryState.FAILED, PAYLOAD_TOO_LARGE, None
-        if state is DeliveryState.QUEUED and counted:
-            capped = await self._counted(payload.organization_id, rule_id, now)
-            if capped is not None:
-                state, code, attempt_at = DeliveryState.SUPPRESSED, capped, None
-        return await self.outbox.queue(
-            [
+        # (channel, recipient, counted): the webhooks of a notification count once together;
+        # each verified recipient of an email channel counts one; an email channel with none
+        # gets a row of no recipient, not counted.
+        rows: list[tuple[Channel, str | None, bool]] = []
+        webhooks = [c for c in channels if c.type != "email"]
+        rows += [(c, None, i == 0) for i, c in enumerate(webhooks)]
+        for c in channels:
+            if c.type != "email":
+                continue
+            verified = (
+                [
+                    r.id
+                    for r in await self.recipients.channel_recipients(c.id)
+                    if r.state == VERIFIED
+                ]
+                if self.recipients is not None
+                else []
+            )
+            rows += [(c, r, True) for r in verified] or [(c, None, False)]
+        deliveries = []
+        capped: str | None = None
+        for c, recipient, unit in rows:
+            row_state, row_code, row_at = state, code, attempt_at
+            if state is DeliveryState.QUEUED and counted:
+                if unit:
+                    capped = await self._counted(payload.organization_id, rule_id, now)
+                if capped is not None and (unit or c.type != "email"):
+                    row_state, row_code, row_at = DeliveryState.SUPPRESSED, capped, None
+            deliveries.append(
                 Delivery(
                     self.new_id(DELIVERY_ID_PREFIX), payload.delivery_id, c.id,
-                    payload.organization_id, state, 0, attempt_at, None, None, code, body, now,
-                    now,
+                    payload.organization_id, row_state, 0, row_at, None, None, row_code, body,
+                    now, now, recipient,
                 )
-                for c in channels
-            ]
-        )  # fmt: skip
+            )  # fmt: skip
+        return await self.outbox.queue(deliveries)
 
     # --- the evaluator's notifications ----------------------------------------------------------
 

@@ -30,6 +30,7 @@ from delivery_helpers import (
     FrozenClock,
     World,
     build,
+    key_of,
     seed,
 )
 from gateway.alerts.caps import LIVE_MS, AlertCaps, CeilingsWatch
@@ -421,13 +422,13 @@ async def test_the_channel_secrets_leak_into_no_postgres_row_and_no_valkey_key()
         planted = {
             "path token": token,
             "query token": query,
-            "key": made.signing_key,
+            "key": key_of(made),
             "new key": new_key,
         }
         for where, text in (("postgres", "\n".join(rows)), ("valkey", "\n".join(valkey))):
             assert sorted(n for n, v in planted.items() if v in text) == [], where
         assert len(world.network.connections) == 2
-        control = url + made.signing_key + new_key
+        control = url + key_of(made) + new_key
         assert sorted(n for n, v in planted.items() if v in control) == sorted(planted)
 
 

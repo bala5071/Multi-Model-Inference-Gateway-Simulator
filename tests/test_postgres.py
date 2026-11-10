@@ -39,6 +39,7 @@ from gateway.alerts.channels import (
 )
 from gateway.alerts.outbox import Delivery, DeliveryState
 from gateway.alerts.outbox import Outcome as DeliveryOutcome
+from gateway.alerts.recipients import Recipient, RecipientTakenError, SqliteConfirmationStore
 from gateway.apikeys import ApiKeyService, ApplicationAccess, InvalidApiKeyError
 from gateway.app import create_app, create_default_app
 from gateway.applications import (
@@ -58,7 +59,7 @@ from gateway.auth import (
     LoginFailedError,
     SessionInvalidError,
 )
-from gateway.clock import ClockEpoch, SimClock, SystemEpoch, WallClock
+from gateway.clock import ClockEpoch, EpochStoreClock, SimClock, SystemEpoch, WallClock
 from gateway.continuous import build_continuous_registry
 from gateway.database import open_database
 from gateway.evaluator import Series, decide
@@ -78,11 +79,13 @@ from gateway.pg_migrate import (
     migrate_to_postgres,
     migrate_to_sqlite,
 )
+from gateway.platformsecrets import StoredPlatformSecret
 from gateway.postgres import (
     NO_PASSWORD_FOR_TESTS_ENV,
     PG_ALERT_RULES,
     PG_BASELINE,
     PG_CHANNELS,
+    PG_EMAIL,
     PG_INCIDENTS,
     PG_SETTINGS,
     TABLES,
@@ -145,7 +148,7 @@ def _postgres_columns() -> dict[str, list[str]]:
     """Each table's columns, read from the text of the baseline, of version 3 (settings) and
     of version 4 (alert rules)."""
     found: dict[str, list[str]] = {}
-    text = PG_BASELINE + PG_SETTINGS + PG_ALERT_RULES + PG_INCIDENTS + PG_CHANNELS
+    text = PG_BASELINE + PG_SETTINGS + PG_ALERT_RULES + PG_INCIDENTS + PG_CHANNELS + PG_EMAIL
     for match in re.finditer(r"CREATE TABLE (\w+) \((.*?)\);\n", text, re.S):
         depth, part, parts = 0, "", []
         for char in match.group(2):
@@ -938,6 +941,57 @@ async def _scenario(s: StateBackend) -> list[Any]:
         await ch.delete_channel(second.id),
         await ch.secrets(second.id),
     ]
+    # An email channel's recipients, the per-address cap and the platform's secrets (docs/48).
+    mail, mail_two = "chn_00000000000000e1", "chn_00000000000000e2"
+    async with ch.write_transaction():
+        for channel_id, name in ((mail, "Mail"), (mail_two, "Mail two")):
+            await ch.insert_channel(
+                Channel(channel_id, "north", name, "email", True, False, None, 1, NOW, NOW)
+            )
+    rs = s.recipients
+    async with rs.write_transaction():
+        pass
+    first_recipient = Recipient(
+        "rcp_0000000000000001", mail, "north", "Ops@example.com", "unverified", b"\x05" * 32,
+        NOW + 1.0, 0, NOW,
+    )  # fmt: skip
+    await rs.insert_recipient(first_recipient)
+    with pytest.raises(RecipientTakenError):
+        await rs.insert_recipient(dataclasses.replace(first_recipient, id="rcp_0000000000000002"))
+    for number, channel_id in (("3", mail), ("4", mail_two), ("5", mail_two)):
+        await rs.insert_recipient(
+            Recipient(
+                f"rcp_000000000000000{number}", channel_id, "north", f"r{number}@example.com",
+                "unverified", None, None, 0, NOW,
+            )
+        )  # fmt: skip
+    await rs.put_recipient(
+        dataclasses.replace(
+            first_recipient, state="verified", code_digest=None, code_expires_at_ms=None,
+            wrong_entries=0, verified_at_ms=NOW + 2.0,
+        )
+    )  # fmt: skip
+    out += [
+        await rs.get_recipient(first_recipient.id),
+        await rs.get_recipient("rcp_00000000000000ff"),
+        await rs.channel_recipients(mail),
+        await rs.delete_recipient("rcp_0000000000000003"),
+        await rs.delete_recipient("rcp_0000000000000003"),
+        await rs.delete_channel_recipients(mail_two),
+        await rs.channel_recipients(mail_two),
+    ]
+    out += [await s.confirmations.count("addr-digest", 2, 86_400_000.0) for _ in range(3)]
+    ps = s.platform_secrets
+    async with ps.write_transaction():
+        pass
+    for key_id, ciphertext in (("k1", b"\x08sealed"), ("k2", b"\x09again")):
+        await ps.put(
+            StoredPlatformSecret(
+                "smtp_password", SealedKey(key_id, b"\x07" * 12, ciphertext, None),
+                "smtp.example.com", 587, "gateway", NOW,
+            )
+        )  # fmt: skip
+    out += [await ps.get("smtp_password"), await ps.get("none"), await ps.all()]
     return out
 
 
@@ -946,10 +1000,12 @@ def _protocol_methods() -> set[str]:
     from gateway.alerts.caps import CeilingsStore
     from gateway.alerts.channels import ChannelStore
     from gateway.alerts.outbox import OutboxStore
+    from gateway.alerts.recipients import ConfirmationStore, RecipientStore
     from gateway.applications import ApplicationStore
     from gateway.audit import AuditStore
     from gateway.incidents import IncidentStore
     from gateway.modes import ModeStore
+    from gateway.platformsecrets import PlatformSecretStore
     from gateway.providers import ProviderStore
     from gateway.roles import RoleStore
     from gateway.settings import SettingsStore
@@ -970,6 +1026,9 @@ def _protocol_methods() -> set[str]:
         ChannelStore: "PostgresChannelStore",
         OutboxStore: "PostgresOutboxStore",
         CeilingsStore: "PostgresCeilingsStore",
+        RecipientStore: "PostgresRecipientStore",
+        ConfirmationStore: "PostgresConfirmationStore",
+        PlatformSecretStore: "PostgresPlatformSecretStore",
     }
     return {
         f"{store}.{name}"
@@ -986,7 +1045,12 @@ def _sqlite_world() -> tuple[sqlite3.Connection, StateBackend]:
     # The lease is timed on the store's clock: on Postgres the database's (NOW in these tests).
     incidents = SqliteIncidentStore(connection, ClockEpoch(SimClock(), NOW))
     ceilings = SqliteCeilingsStore(connection, lambda: NOW)
-    return connection, dataclasses.replace(state, incidents=incidents, ceilings=ceilings)
+    confirmations = SqliteConfirmationStore(
+        connection, EpochStoreClock(ClockEpoch(SimClock(), NOW))
+    )
+    return connection, dataclasses.replace(
+        state, incidents=incidents, ceilings=ceilings, confirmations=confirmations
+    )
 
 
 @postgres

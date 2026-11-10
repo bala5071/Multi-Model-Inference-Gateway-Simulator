@@ -37,7 +37,9 @@ if TYPE_CHECKING:
     from gateway.alerts.caps import CeilingsStore
     from gateway.alerts.channels import ChannelStore
     from gateway.alerts.outbox import OutboxStore
+    from gateway.alerts.recipients import ConfirmationStore, RecipientStore
     from gateway.incidents import IncidentStore
+    from gateway.platformsecrets import PlatformSecretStore
 
 T = TypeVar("T")
 
@@ -173,6 +175,11 @@ class StateBackend:
     outbox: OutboxStore
     # Each live instance's alert caps, compared (docs/46): reported, never refused.
     ceilings: CeilingsStore
+    # An email channel's recipients, the per-address confirmation cap, and the operator's own
+    # secrets sealed in the vault's platform scope (docs/48).
+    recipients: RecipientStore
+    confirmations: ConfirmationStore
+    platform_secrets: PlatformSecretStore
     clock: StoreClock
 
 
@@ -194,6 +201,24 @@ def _sqlite_channels(connection: sqlite3.Connection) -> tuple[ChannelStore, Outb
     from gateway.alerts.outbox import SqliteOutboxStore
 
     return SqliteChannelStore(connection), SqliteOutboxStore(connection)
+
+
+def _sqlite_recipients(connection: sqlite3.Connection) -> RecipientStore:
+    from gateway.alerts.recipients import SqliteRecipientStore
+
+    return SqliteRecipientStore(connection)
+
+
+def _sqlite_confirmations(connection: sqlite3.Connection, epoch: EpochSource) -> ConfirmationStore:
+    from gateway.alerts.recipients import SqliteConfirmationStore
+
+    return SqliteConfirmationStore(connection, EpochStoreClock(epoch))
+
+
+def _sqlite_platform_secrets(connection: sqlite3.Connection) -> PlatformSecretStore:
+    from gateway.platformsecrets import SqlitePlatformSecretStore
+
+    return SqlitePlatformSecretStore(connection)
 
 
 def _sqlite_ceilings(connection: sqlite3.Connection, epoch: EpochSource) -> CeilingsStore:
@@ -218,5 +243,8 @@ def sqlite_state(connection: sqlite3.Connection, epoch: EpochSource) -> StateBac
         channels=_sqlite_channels(connection)[0],
         outbox=_sqlite_channels(connection)[1],
         ceilings=_sqlite_ceilings(connection, epoch),
+        recipients=_sqlite_recipients(connection),
+        confirmations=_sqlite_confirmations(connection, epoch),
+        platform_secrets=_sqlite_platform_secrets(connection),
         clock=EpochStoreClock(epoch),
     )

@@ -28,6 +28,8 @@ def test_every_purpose_has_its_own_label() -> None:
         "counter keys",
         "alert rollups",
         "builtin rule id",
+        "email confirmation",
+        "email address",
     }
 
 

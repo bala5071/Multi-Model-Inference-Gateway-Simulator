@@ -45,6 +45,7 @@ def test_counts_list_every_type_and_only_known_types_are_accepted() -> None:
         "alert_evaluator_recovered": 0,
         "alert_delivery_failed": 0,
         "alert_caps_differ": 0,
+        "alert_smtp_resolver_busy": 0,
     }
     assert tuple(bus.counts) == EVENT_TYPES
     with pytest.raises(ValueError, match="unknown event type 'surprise'"):
