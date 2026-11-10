@@ -2,8 +2,8 @@
 
 The server speaks enough SMTP for ``smtplib``: a greeting, EHLO (advertising STARTTLS unless told
 not to, and AUTH PLAIN), STARTTLS (``StreamWriter.start_tls``), implicit TLS, AUTH PLAIN, MAIL,
-RCPT, DATA and QUIT. Each step's reply can be scripted (``replies``: a 4xx or 5xx), the server
-can stop answering at a step (``hang_at``), or send its replies a byte at a time (``trickle``).
+RCPT, DATA and QUIT. Each step's reply can be scripted (``replies``: a 4xx or 5xx), or the
+server can stop answering at a step (``hang_at``).
 It records every envelope (sender, recipients, message), every login, whether TLS was on, and
 every reply it sent (with ``marker`` in each, for the leak scan's control).
 
@@ -138,7 +138,6 @@ class SmtpTestServer:
     password: str | None = None
     replies: dict[str, tuple[int, str]] = field(default_factory=dict)
     hang_at: str | None = None
-    trickle: bool = False
     marker: str = "planted-server-reply-5c71"
     envelopes: list[Envelope] = field(default_factory=list)
     logins: list[tuple[str, str]] = field(default_factory=list)
@@ -168,14 +167,8 @@ class SmtpTestServer:
         code, text = self.replies.get(step, (code, text))
         line = f"{code} {text} {self.marker}\r\n"
         self.sent.append(line)
-        if self.trickle:
-            for byte in line.encode():
-                writer.write(bytes([byte]))
-                await writer.drain()
-                await real_pause(0.002)
-        else:
-            writer.write(line.encode())
-            await writer.drain()
+        writer.write(line.encode())
+        await writer.drain()
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.connections += 1

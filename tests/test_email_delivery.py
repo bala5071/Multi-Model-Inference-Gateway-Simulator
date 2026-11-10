@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import email
 import email.policy
+import io
 import json
 import random
 import smtplib
@@ -275,20 +276,69 @@ async def test_an_address_as_the_host_needs_no_lookup(tmp_path: Path) -> None:
 # --- the hard deadline ---------------------------------------------------------------------------
 
 
-async def test_a_server_sending_a_byte_at_a_time_cannot_stretch_the_attempt(tmp_path: Path) -> None:
-    """A5-19: each socket call reads the clock, which moves on 400 ms each time it is read, so
-    the 10 s budget allows about 25 reads. A whole conversation is about 22 SMTP commands, but
-    the trickled greeting alone takes one read a byte: it times out within it. (A timeout set
-    once per command would let the conversation through.) The control: the same server, on a
-    clock that does not move, delivers."""
-    async with smtp(tmp_path, trickle=True) as (server, certificates):
-        clock = StepClock(400.0)
-        assert await _sender(certificates, server.port, clock=clock).send(ONE, _message()) == (
-            "timeout"
-        )
-        assert server.envelopes == []
-        assert clock.reads <= 30
-        assert await _sender(certificates, server.port).send(ONE, _message()) == "delivered"
+class TrickleSocket:
+    """A socket that has one reply to give, one byte per read: what a server sending a byte at
+    a time looks like to its reader, with no network and no real time."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = bytearray(data)
+        self.reads = 0
+
+    def settimeout(self, timeout: float | None) -> None:
+        return None
+
+    def recv(self, size: int) -> bytes:
+        self.reads += 1
+        byte = bytes(self._data[:1])
+        del self._data[:1]
+        return byte
+
+    def recv_into(self, buffer: Any, size: int = 0) -> int:
+        byte = self.recv(1)
+        buffer[: len(byte)] = byte
+        return len(byte)
+
+    def makefile(self, mode: str) -> io.BufferedReader:
+        sock = self
+
+        class Raw(io.RawIOBase):
+            def readable(self) -> bool:
+                return True
+
+            def readinto(self, buffer: Any) -> int:
+                return sock.recv_into(buffer)
+
+        return io.BufferedReader(Raw())
+
+    def close(self) -> None:
+        return None
+
+
+def _reading(clock: Any, reply: bytes) -> tuple[DeadlineSMTP, Deadline, TrickleSocket]:
+    smtp_object = DeadlineSMTP.__new__(DeadlineSMTP)
+    smtplib.SMTP.__init__(smtp_object)  # no host: no connection
+    deadline = Deadline(clock, 10_000.0)
+    trickle = TrickleSocket(reply)
+    smtp_object.sock = trickle
+    smtp_object.file = None
+    smtp_object._deadline = deadline
+    return smtp_object, deadline, trickle
+
+
+def test_a_reply_sent_a_byte_at_a_time_cannot_stretch_the_attempt() -> None:
+    """A5-19: a reply read one byte per read, on a clock that moves on 400 ms each time it is
+    read (about 25 reads in the 10 s budget): the budget is spent within the reply, because
+    every read is given what is left. A timeout set once per reply would read it whole. The
+    control: on a clock that does not move, the same reply is read whole."""
+    reply = b"220 smtp.test " + b"." * 340 + b"\r\n"
+    smtp_object, deadline, trickle = _reading(StepClock(400.0), reply)
+    with pytest.raises(smtplib.SMTPServerDisconnected):
+        smtp_object.getreply()
+    assert deadline.expired
+    assert trickle.reads <= 25
+    control, still, _ = _reading(NeverClock(), reply)
+    assert control.getreply()[0] == 220
+    assert not still.expired
 
 
 @pytest.mark.parametrize("step", ["GREETING", "EHLO", "MAIL", "DOT"])
