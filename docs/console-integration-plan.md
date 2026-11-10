@@ -1,8 +1,8 @@
 # Console integration plan: one product, one login, navigation by role
 
-Status: **for approval**. No code is written until it is approved. It touches authentication,
-sessions and authorization, so it is plan-first (CLAUDE.md, working agreement). The design note
-that ships with the code is `docs/50-console-integration.md`.
+Status: **approved** (PR #45, 2026-11-10), with the answers and additions in section 13. It
+touches authentication, sessions and authorization, so it was plan-first (CLAUDE.md, working
+agreement). The design note that ships with the code is `docs/50-console-integration.md`.
 
 Nothing in this plan changes who may do what. `src/gateway/permissions.py` and
 `docs/permission-matrix.md` stay byte for byte as they are in every PR below unless the answer to
@@ -498,3 +498,51 @@ reads better with the role, and it is the person's own data.
 the other plans, with the design note that ships with the code numbered 50
 (`docs/50-console-integration.md`). Options: (a) keep that; (b) rename this file
 `docs/50-console-integration-plan.md`. **Recommendation: (a).**
+
+## 13. Answers and additions (approved 2026-11-10)
+
+Answers:
+
+- **Q1: A.** No permission change. The platform_admin creates organizations and their first
+  org_admins; each organization's settings are managed by its own accounts.
+- **Q2: (a).** Monitoring stays platform_admin only until A8. The organization home says that
+  per-organization monitoring is not built yet.
+- **Q3: (a).** One page under the console's content security policy.
+- **Q4: (a).** `/` stays the JSON index.
+- **Q5: (a), in P3,** with its own plan-first draft PR before any code: step-up, audit rows, and
+  missing equals forbidden on every new route.
+- **Q6: (a).** The capabilities answer carries the session's own built-in roles, shown as text.
+- **Q7: (a).** This file's name stays; the design note is 50.
+
+Additions:
+
+1. **P3 makes a fresh install work end to end in the browser**: log in as the bootstrap admin,
+   create an organization, create its first org_admin, log out, log in as that user (who changes
+   the temporary password first). P3's plan says which step, if any, cannot be done over HTTP in
+   P3, keeps it on the CLI, and names it.
+2. **Simulated live mode (no accounts, `/v1/auth/*` answers 404)** shows a clear "this mode has
+   no accounts" message where the login would be, never a broken login screen; P2 adds an e2e
+   for it.
+3. The tests of section 6 stay: the per-route check for every role, identical bytes for missing
+   and forbidden, the mutation checks on the capabilities function restored by sha256, and the
+   leak scan with planted controls.
+
+Corrections found while building P1 (each is listed in P1's description so it can be objected
+to):
+
+- **The answer does not echo the organization asked for.** Echoing it would make the answer for
+  a missing organization and for a forbidden one differ in that field, so they could not be the
+  same bytes. The page knows what it asked. The answer is `roles`, `platform`, `organization`,
+  `applications` and `more_applications`.
+- **`organizations.list` joins `NAVIGATION_ACTIONS` in P3**, with the route that serves it
+  (Q5). In P1 no route declares it, and the route-pin test requires one for every action.
+- **The capabilities fixtures for the frontend move to P2**, which adds the TypeScript type
+  they are checked against; in P1 nothing would read them.
+- **Applications from the organization's own page** (`applications.list` allowed) are taken as
+  they come from the store's page of that organization, the query the `applications.list` route
+  makes. The resolver `resolve_application` is used for the applications of the session's own
+  application-scope assignments, which come from the role store and are checked against the
+  organization.
+- **`Cache-Control: no-store` on the refusals too:** the `NoStoreMiddleware` (today only
+  `/v1/admin`) also wraps `/v1/auth/capabilities`, because the `password_change_required`
+  refusal is answered without the header.
