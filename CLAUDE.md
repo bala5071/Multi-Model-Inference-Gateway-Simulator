@@ -431,10 +431,14 @@ If a change moves simulated latency on purpose, re-baseline with
 in the same change, with the printed diff in the PR description. Never update budgets to
 make an unexplained failure pass.
 
-`frontend/` is two pages: the monitoring dashboard (`index.html`, React, TypeScript, Vite,
-uPlot), which only reads the monitoring API (`docs/15`), and the admin console (`console.html`,
-`src/console/`, docs/47 and docs/49: settings, alert rules, channels, incidents), served beside
-it at `/dashboard/console.html`. The console logs in,
+`frontend/` is one page at `/dashboard/` (`index.html`, React, TypeScript, Vite, uPlot; the shell
+in `src/shell/`, docs/50): the monitoring (`src/App.tsx`), which only reads the monitoring API
+(`docs/15`), and the admin console (`src/console/`, docs/47 and docs/49: settings, alert rules,
+channels, incidents), behind one login, one header and one navigation drawn from
+`GET /v1/auth/capabilities` (no role name in `src/`, outside the gateway's fixtures). The whole
+page is under the console's content security policy; `console.html` is the old address, a stub
+whose same-origin script opens the same place on the page. Without accounts (simulated live
+mode) the page is the monitoring. The console logs in,
 sends the session's CSRF token on every change and asks for the password when the gateway wants a
 step-up, but holds no rules of its own: who may write, what is valid and what is capped are the
 gateway's answers (who may write is asked of the gateway, by a dry run; where a write has none,

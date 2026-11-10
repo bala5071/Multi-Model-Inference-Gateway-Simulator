@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +157,22 @@ async def _plain_control() -> dict[str, Any]:
     return control
 
 
+# The users of tests/test_capabilities.py's world whose capabilities answers the frontend's
+# tests read (docs/50): named by user, so the frontend holds no role name.
+CAPABILITY_USERS = ("root", "alice", "vera", "nina", "olive", "cleo", "bob")
+
+
+async def _capabilities() -> dict[str, Any]:
+    """``GET /v1/auth/capabilities`` for each of those users, in their own organization."""
+    from test_capabilities import gateway
+
+    answers: dict[str, Any] = {}
+    async with gateway() as g:
+        for username in CAPABILITY_USERS:
+            answers[f"capabilities-{username}.json"] = await g.capabilities(await g.login(username))
+    return answers
+
+
 async def test_frontend_fixtures_are_what_the_gateway_produces() -> None:
     """The frontend's types and tests are checked against these files.
 
@@ -168,6 +185,7 @@ async def test_frontend_fixtures_are_what_the_gateway_produces() -> None:
         "snapshot-passthrough.json": await _passthrough_snapshot(),
         "control-simulated.json": await _simulated_control(),
         "control-off.json": await _plain_control(),
+        **await _capabilities(),
     }
     if os.environ.get(UPDATE_ENV) == "1":
         FIXTURES.mkdir(parents=True, exist_ok=True)
@@ -238,3 +256,46 @@ async def test_stream_takes_the_last_event_id_as_a_query_parameter() -> None:
     assert after_two == ["3"]
     assert both == ["2", "3"]
     assert invalid.status_code == 422
+
+
+# --- the page holds no role name, and asks only what the gateway answers (docs/50) -----------
+
+FRONTEND_SRC = FIXTURES.parent.parent
+ROLE_NAMES = re.compile(r"\b(platform_admin|org_admin|app_admin|viewer)\b")
+
+
+def role_names_in(text: str) -> list[str]:
+    return ROLE_NAMES.findall(text)
+
+
+def test_the_frontend_names_no_role() -> None:
+    """Who may do what is the gateway's answer (GET /v1/auth/capabilities); the frontend shows the
+    session's roles as the gateway names them and never spells one itself. The fixtures, which the
+    gateway produced, are the exception."""
+    found = []
+    for path in sorted(FRONTEND_SRC.rglob("*")):
+        if not path.is_file() or path.suffix not in {".ts", ".tsx", ".css", ".html", ".json"}:
+            continue
+        if FIXTURES in path.parents:
+            continue
+        for name in role_names_in(path.read_text(encoding="utf-8")):
+            found.append(f"{path.relative_to(FRONTEND_SRC)}: {name}")
+    assert found == []
+    # The control: the same scan finds a role name where one is written.
+    assert role_names_in('const allowed = role === "org_admin";') == ["org_admin"]
+    assert role_names_in("a viewer may read") == ["viewer"]
+
+
+def test_the_frontend_asks_only_actions_the_gateway_answers_at_their_level() -> None:
+    """Every action in the page's navigation map is one of NAVIGATION_ACTIONS, at the level the
+    capabilities answer files it under."""
+    from gateway.permissions import NAVIGATION_ACTIONS
+
+    source = (FRONTEND_SRC / "shell" / "navigation.ts").read_text(encoding="utf-8")
+    asked = re.findall(r'level: "([a-z]+)", action: "([a-z_.]+)"', source)
+    assert len(asked) >= 9
+    answered = {
+        action: level.value for level, actions in NAVIGATION_ACTIONS.items() for action in actions
+    }
+    for level, action in asked:
+        assert answered.get(action) == level, (level, action)

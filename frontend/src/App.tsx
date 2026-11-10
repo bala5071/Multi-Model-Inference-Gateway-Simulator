@@ -1,58 +1,94 @@
+import { useEffect, useRef } from "react";
 import { DisconnectedBanner } from "./components/DisconnectedBanner";
 import { SimulationBanner } from "./components/SimulationBanner";
 import { Tabs } from "./components/Tabs";
 import { useControl } from "./hooks/useControl";
-import { useHashTab } from "./hooks/useHashTab";
 import { useMonitorStream, type StreamOptions } from "./hooks/useMonitorStream";
-import { useTheme } from "./hooks/useTheme";
+import type { MonitorTab } from "./shell/routes";
+import { Applications } from "./tabs/Applications";
 import { Capacity } from "./tabs/Capacity";
 import { Events } from "./tabs/Events";
 import { Latency } from "./tabs/Latency";
 import { Overview } from "./tabs/Overview";
 import { Playground } from "./tabs/Playground";
-import { Applications } from "./tabs/Applications";
 
-const TABS = [
+const TABS: readonly { id: MonitorTab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "latency", label: "Latency" },
   { id: "capacity", label: "Capacity" },
   { id: "applications", label: "Applications" },
   { id: "events", label: "Events" },
   { id: "playground", label: "Playground" },
-] as const;
-
-type TabId = (typeof TABS)[number]["id"];
-const TAB_IDS = TABS.map((tab) => tab.id);
+];
 
 const STATUS_TEXT = { connecting: "Connecting…", live: "Live", disconnected: "Disconnected" };
 
-export function App({ stream: options }: { stream?: StreamOptions }) {
+/** What the gateway allows inside the monitoring; everything without accounts. */
+export interface MonitoringAllows {
+  playground: boolean;
+  loadControl: boolean;
+}
+
+const EVERYTHING: MonitoringAllows = { playground: true, loadControl: true };
+
+export interface MonitoringProps {
+  /** The tab in view: the shell keeps it in the URL (`#/monitor/<tab>`). */
+  tab: MonitorTab;
+  onSelectTab: (tab: MonitorTab) => void;
+  stream?: StreamOptions;
+  allows?: MonitoringAllows;
+  /** Told whether the gateway is in simulated live mode, for the page's header. */
+  onSimulated?: (active: boolean) => void;
+  /** Told when the stream comes back after a break, so the shell can ask after the session. */
+  onReconnect?: () => void;
+}
+
+/**
+ * The monitoring (the former dashboard, docs/15 and docs/16), one section of the page. The
+ * stream runs only while it is shown. It reads only the monitoring API.
+ */
+export function App({
+  tab,
+  onSelectTab,
+  stream: options,
+  allows = EVERYTHING,
+  onSimulated,
+  onReconnect,
+}: MonitoringProps) {
   const { state, status, lastUpdate } = useMonitorStream(options);
-  const [tab, setTab] = useHashTab<TabId>(TAB_IDS, "overview");
-  const { theme, toggle } = useTheme();
   const control = useControl();
   const simulated = control.status?.simulation.active === true;
+  const tabs = TABS.filter((t) => t.id !== "playground" || allows.playground);
+  const shown = tabs.some((t) => t.id === tab) ? tab : "overview";
+
+  useEffect(() => {
+    onSimulated?.(simulated);
+  }, [simulated, onSimulated]);
+
+  const previous = useRef(status);
+  useEffect(() => {
+    if (previous.current === "disconnected" && status === "live") onReconnect?.();
+    previous.current = status;
+  }, [status, onReconnect]);
 
   return (
-    <div className={status === "disconnected" ? "app stale" : "app"}>
-      <header className="top">
-        <h1>Gateway monitor</h1>
-        {simulated && <span className="mode-badge">Simulated</span>}
+    <div className={status === "disconnected" ? "monitor stale" : "monitor"}>
+      <div className="monitor-bar">
+        <h2>Monitoring</h2>
         <span className={`status status-${status}`}>{STATUS_TEXT[status]}</span>
-        <button type="button" onClick={toggle}>
-          {theme === "dark" ? "Light theme" : "Dark theme"}
-        </button>
-      </header>
+      </div>
       <SimulationBanner control={control} />
       <DisconnectedBanner status={status} lastUpdate={lastUpdate} />
-      <Tabs tabs={TABS} selected={tab} onSelect={setTab} />
-      <main id="tab-panel" role="tabpanel" aria-labelledby={`tab-${tab}`}>
-        {tab === "overview" && <Overview state={state} />}
-        {tab === "latency" && <Latency state={state} />}
-        {tab === "capacity" && <Capacity state={state} />}
-        {tab === "applications" && <Applications state={state} />}
-        {tab === "events" && <Events state={state} />}
-        {tab === "playground" && <Playground state={state} control={control} />}
+      <Tabs tabs={tabs} selected={shown} onSelect={onSelectTab} />
+      <main id="tab-panel" role="tabpanel" aria-labelledby={`tab-${shown}`}>
+        {shown === "overview" && <Overview state={state} />}
+        {shown === "latency" && <Latency state={state} />}
+        {shown === "capacity" && <Capacity state={state} />}
+        {shown === "applications" && <Applications state={state} />}
+        {shown === "events" && <Events state={state} />}
+        {shown === "playground" && (
+          <Playground state={state} control={control} loadControl={allows.loadControl} />
+        )}
       </main>
     </div>
   );

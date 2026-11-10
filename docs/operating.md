@@ -104,10 +104,15 @@ names no `max_tokens`, the application's `default_max_tokens` is applied as if i
 every answer of `/v1/generate` and `/v1/chat/completions` says what was applied in
 `X-Max-Tokens-Applied` (a number, or `none` when no limit applies).
 
-The admin console is a second page of the dashboard, at `/dashboard/console.html` once the
-dashboard is built ([note 47](47-console-settings.md), [note 49](49-console-alerts.md)): an
-application's settings and its alert rules, the organization's caps, channels and incidents.
-It logs in with the accounts above and asks for the password again where the gateway does.
+The admin console and the monitoring are one page, at `/dashboard/` once it is built
+([note 47](47-console-settings.md), [note 49](49-console-alerts.md),
+[note 50](50-console-integration.md)): an application's settings and its alert rules, the
+organization's caps, channels and incidents, and the monitoring. It logs in with the accounts
+above, shows each person only the places the gateway says their roles allow (the platform's
+admins see the monitoring; an organization's admins its settings, rules, channels and
+incidents), and asks for the password again where the gateway does. The old address,
+`/dashboard/console.html#...`, opens the same place on the page. In simulated live mode there
+are no accounts: the page shows the monitoring, and says so where a login would be.
 
 ## Alert channels and email
 

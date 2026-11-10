@@ -34,6 +34,8 @@ const consoleEnv = {
   CONSOLE_E2E_ADMIN_FIRST_PASSWORD: generated("CONSOLE_E2E_ADMIN_FIRST_PASSWORD", 18),
   CONSOLE_E2E_VIEWER_FIRST_PASSWORD: generated("CONSOLE_E2E_VIEWER_FIRST_PASSWORD", 18),
   CONSOLE_E2E_APPADMIN_FIRST_PASSWORD: generated("CONSOLE_E2E_APPADMIN_FIRST_PASSWORD", 18),
+  CONSOLE_E2E_APPVIEWER_FIRST_PASSWORD: generated("CONSOLE_E2E_APPVIEWER_FIRST_PASSWORD", 18),
+  CONSOLE_E2E_NOROLE_FIRST_PASSWORD: generated("CONSOLE_E2E_NOROLE_FIRST_PASSWORD", 18),
   CONSOLE_E2E_MAIL_PORT: String(CONSOLE_MAIL_PORT),
 };
 generated("CONSOLE_E2E_ADMIN_PASSWORD", 18);
@@ -43,6 +45,10 @@ generated("CONSOLE_E2E_HOOK_TOKEN", 18);
 generated("CONSOLE_E2E_RECIPIENT_TAG", 6);
 generated("CONSOLE_E2E_VIEWER_PASSWORD", 18);
 generated("CONSOLE_E2E_APPADMIN_PASSWORD", 18);
+// The every-role specs (docs/50): the second password of each account they log in with.
+generated("CONSOLE_E2E_APPVIEWER_PASSWORD", 18);
+generated("CONSOLE_E2E_NOROLE_PASSWORD", 18);
+generated("CONSOLE_E2E_OPERATOR_NEW_PASSWORD", 18);
 
 export default defineConfig({
   testDir: "./e2e",
@@ -77,6 +83,13 @@ export default defineConfig({
       name: "console-alerts",
       testMatch: "console_alerts.e2e.ts",
       dependencies: ["console"],
+      use: { baseURL: `http://127.0.0.1:${CONSOLE_PORT}`, trace: "off", screenshot: "off" },
+    },
+    {
+      // The one page for every role (docs/50), on the same server, after the screens' own tests.
+      name: "shell",
+      testMatch: "shell.e2e.ts",
+      dependencies: ["console-alerts"],
       use: { baseURL: `http://127.0.0.1:${CONSOLE_PORT}`, trace: "off", screenshot: "off" },
     },
   ],

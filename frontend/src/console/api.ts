@@ -34,7 +34,10 @@ function isErrorBody(value: unknown): value is ErrorBody {
   );
 }
 
-async function answer<T>(response: Response): Promise<T> {
+/** The gateway's answer to a call whose session has ended or never was (docs/27). */
+export const SESSION_REQUIRED = "session_required";
+
+async function answer<T>(response: Response, onSessionEnded: () => void): Promise<T> {
   let body: unknown = null;
   try {
     body = await response.json();
@@ -42,7 +45,11 @@ async function answer<T>(response: Response): Promise<T> {
     // Not JSON: reported by its status below.
   }
   if (response.ok) return body as T;
-  if (isErrorBody(body)) throw new ApiError(response.status, body.error.code, body.error.message);
+  if (isErrorBody(body)) {
+    // The one place a call learns that the session is gone, whichever screen made it.
+    if (response.status === 401 && body.error.code === SESSION_REQUIRED) onSessionEnded();
+    throw new ApiError(response.status, body.error.code, body.error.message);
+  }
   throw new ApiError(
     response.status,
     "unexpected_answer",
@@ -53,9 +60,14 @@ async function answer<T>(response: Response): Promise<T> {
 /**
  * The console's one way to the gateway. The session is the HttpOnly cookie, which the browser
  * sends and no script can read; the CSRF token is read from `csrf` at each call, from memory
- * only, and sent on every state change. Nothing is cached and nothing is stored.
+ * only, and sent on every state change. Nothing is cached and nothing is stored. Every answer
+ * `401 session_required` calls `onSessionEnded` before it is thrown (docs/50).
  */
-export function makeApi(csrf: () => string | null, fetcher: typeof fetch = fetch): Api {
+export function makeApi(
+  csrf: () => string | null,
+  fetcher: typeof fetch = fetch,
+  onSessionEnded: () => void = () => undefined,
+): Api {
   async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
     const headers: Record<string, string> = { Accept: "application/json" };
     if (method !== "GET") {
@@ -75,7 +87,7 @@ export function makeApi(csrf: () => string | null, fetcher: typeof fetch = fetch
     } catch {
       throw new ApiError(0, "unreachable", "The gateway could not be reached.");
     }
-    return answer<T>(response);
+    return answer<T>(response, onSessionEnded);
   }
   return {
     get: (path) => call("GET", path),
@@ -85,17 +97,29 @@ export function makeApi(csrf: () => string | null, fetcher: typeof fetch = fetch
 
 /**
  * The API of one console session, and how its CSRF token is set: held in this closure, in
- * memory only, never in storage.
+ * memory only, never in storage. The listener set with `onSessionEnded` is told of every
+ * `401 session_required` (docs/50).
  */
 export function sessionApi(fetcher?: typeof fetch): {
   api: Api;
   setCsrf: (token: string | null) => void;
+  onSessionEnded: (listener: () => void) => void;
 } {
   let token: string | null = null;
+  let ended: () => void = () => undefined;
   return {
-    api: makeApi(() => token, fetcher),
+    api: makeApi(
+      () => token,
+      fetcher,
+      () => {
+        ended();
+      },
+    ),
     setCsrf: (next) => {
       token = next;
+    },
+    onSessionEnded: (listener) => {
+      ended = listener;
     },
   };
 }

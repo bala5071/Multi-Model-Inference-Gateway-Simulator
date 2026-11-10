@@ -10,7 +10,9 @@ or key is.
 
 The seed: organization ``acme`` with two applications and an organization cap on
 ``requests_per_minute``; ``admin-e2e`` (org_admin), ``viewer-e2e`` (viewer of the
-organization) and ``appadmin-e2e`` (app_admin of ``app-one`` only); and an API key of
+organization), ``appadmin-e2e`` (app_admin of ``app-one`` only), ``appviewer-e2e`` (viewer of
+``app-one`` only) and ``norole-e2e`` (no role: docs/50's every-role specs); the bootstrap
+admin ``operator-e2e`` (platform_admin) comes from the environment; and an API key of
 ``app-one`` that expires in 3 days, so the default rule "Key expires within 14 days" fires on the
 evaluator's first cycle: a real incident for the incident screens. The CLI prints a new key
 once; that output goes nowhere here, so the key is never printed.
@@ -21,6 +23,10 @@ SMTP's TLS to certifi and reads nothing from the environment for it, so in this 
 ``gateway.app.provider_tls_context`` is replaced by a context that trusts that CA alone (TLS 1.2
 at least, the name checked). The tests read the mailbox from a loopback HTTP port
 (``CONSOLE_E2E_MAIL_PORT``): each message's recipients and text, from memory, never a file.
+
+The leak scan of the one page (docs/50) reads two more things from that port: ``/output``,
+everything this process printed or logged since it started (kept in memory as it is written,
+and still printed), and ``/audit``, the audit log's rows.
 """
 
 from __future__ import annotations
@@ -31,8 +37,10 @@ import email
 import email.policy
 import io
 import json
+import logging
 import os
 import shutil
+import sqlite3
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -51,6 +59,14 @@ ACCOUNTS = (
         "app_admin",
         ("--application", "app-one"),
     ),
+    (
+        "appviewer-e2e",
+        "CONSOLE_E2E_APPVIEWER_FIRST_PASSWORD",
+        "viewer",
+        ("--application", "app-one"),
+    ),
+    # No role at all: the page shows it that there is nothing yet (docs/50).
+    ("norole-e2e", "CONSOLE_E2E_NOROLE_FIRST_PASSWORD", None, ()),
 )
 
 # Where alerts may be mailed in this run: the reserved example domain only.
@@ -76,7 +92,8 @@ def seed(env: dict[str, str]) -> None:
     for username, variable, role, scope in ACCOUNTS:
         run("create-user", "--username", username, "--organization", "acme",
             password=env[variable])  # fmt: skip
-        run("grant-role", "--username", username, "--role", role, *scope)
+        if role is not None:
+            run("grant-role", "--username", username, "--role", role, *scope)
     run("settings-set", "--organization", "acme", "--expected-version", "0",
         "--set", "requests_per_minute=600")  # fmt: skip
     # Printed once by the CLI: quiet, so it is never printed here.
@@ -109,11 +126,92 @@ def start_mail(directory: Path) -> tuple[Any, Any]:
     return started["server"], certificates
 
 
-def serve_mailbox(server: Any, port: int) -> None:
-    """``GET /messages``: every message received, its recipients and its text, from memory."""
+class Captured:
+    """Everything this process writes or logs, in memory, for the leak scan (docs/50)."""
+
+    def __init__(self) -> None:
+        self._parts: list[str] = []
+        self._lock = threading.Lock()
+
+    def add(self, text: str) -> None:
+        with self._lock:
+            self._parts.append(text)
+
+    def text(self) -> str:
+        with self._lock:
+            return "".join(self._parts)
+
+
+class Tee(io.TextIOBase):
+    """A stream that still writes where it did, and keeps a copy."""
+
+    def __init__(self, stream: Any, captured: Captured) -> None:
+        self._stream = stream
+        self._captured = captured
+
+    def write(self, text: str) -> int:
+        self._captured.add(text)
+        return int(self._stream.write(text))
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    def isatty(self) -> bool:
+        return bool(self._stream.isatty())
+
+    def fileno(self) -> int:
+        return int(self._stream.fileno())
+
+    @property
+    def encoding(self) -> str:  # type: ignore[override]
+        return str(self._stream.encoding)
+
+
+class Recorder(logging.Handler):
+    """Every log record, as a log line would carry it: the message, its arguments, the error."""
+
+    def __init__(self, captured: Captured) -> None:
+        super().__init__(logging.DEBUG)
+        self._captured = captured
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()
+        except Exception:  # a record that cannot be formatted is still kept as it is
+            message = str(record.msg)
+        line = f"{record.name} {message} {record.args!r} {record.exc_text or ''}"
+        self._captured.add(line + chr(10))
+
+
+def capture_output() -> Captured:
+    captured = Captured()
+    sys.stdout = Tee(sys.stdout, captured)
+    sys.stderr = Tee(sys.stderr, captured)
+    logging.getLogger().addHandler(Recorder(captured))
+    return captured
+
+
+def audit_rows(database: Path) -> list[str]:
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    try:
+        return [repr(row) for row in connection.execute("SELECT * FROM audit_log ORDER BY rowid")]
+    finally:
+        connection.close()
+
+
+def serve_mailbox(server: Any, port: int, captured: Captured, database: Path) -> None:
+    """On loopback: ``GET /messages``, every message received, its recipients and its text;
+    ``GET /output``, what this process printed or logged; ``GET /audit``, the audit log's rows.
+    All from memory or the run's own database, for the tests only."""
 
     class Mailbox(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            if self.path == "/output":
+                self.answer({"output": captured.text()})
+                return
+            if self.path == "/audit":
+                self.answer({"rows": audit_rows(database)})
+                return
             if self.path != "/messages":
                 self.send_error(404)
                 return
@@ -123,7 +221,10 @@ def serve_mailbox(server: Any, port: int) -> None:
                 body = parsed.get_body(preferencelist=("plain",))
                 text = body.get_content() if body is not None else ""
                 messages.append({"to": envelope.recipients, "text": text, "tls": envelope.tls})
-            data = json.dumps(messages).encode()
+            self.answer(messages)
+
+        def answer(self, body: object) -> None:
+            data = json.dumps(body).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
@@ -139,6 +240,7 @@ def serve_mailbox(server: Any, port: int) -> None:
 
 
 def main(argv: list[str]) -> int:
+    captured = capture_output()
     port = argv[0] if argv else "8178"
     if STATE.exists():
         shutil.rmtree(STATE)
@@ -149,7 +251,12 @@ def main(argv: list[str]) -> int:
     seed(env)
 
     mail, certificates = start_mail(STATE / "smtp")
-    serve_mailbox(mail, int(os.environ.get("CONSOLE_E2E_MAIL_PORT", "8179")))
+    serve_mailbox(
+        mail,
+        int(os.environ.get("CONSOLE_E2E_MAIL_PORT", "8179")),
+        captured,
+        Path(env["GATEWAY_DATABASE"]),
+    )
     os.environ.update(
         {
             "GATEWAY_SMTP_HOST": "127.0.0.1",

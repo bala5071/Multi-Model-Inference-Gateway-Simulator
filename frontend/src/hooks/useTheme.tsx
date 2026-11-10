@@ -21,7 +21,7 @@ function initialTheme(): Theme {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-/** The viewer's saved choice, else the system's. Stamped on <html> for the stylesheet. */
+/** The saved choice, else the system's. Stamped on <html> for the stylesheet. */
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState<Theme>(initialTheme);
 

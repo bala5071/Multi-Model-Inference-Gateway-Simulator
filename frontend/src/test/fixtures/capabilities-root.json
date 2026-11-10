@@ -1,0 +1,23 @@
+{
+  "roles": [
+    {
+      "role": "platform_admin",
+      "scope_type": "platform",
+      "scope_id": "*"
+    }
+  ],
+  "platform": {
+    "monitoring.read": true,
+    "control.write": true,
+    "playground.use": true
+  },
+  "organization": {
+    "users.list": true,
+    "applications.list": false,
+    "org_settings.read": false,
+    "alert_channels.read": false,
+    "incidents.read_organization": false
+  },
+  "applications": [],
+  "more_applications": false
+}

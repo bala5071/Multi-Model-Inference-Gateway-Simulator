@@ -4,18 +4,45 @@
 // of overload" is three real seconds. The waits below are for simulated things to happen;
 // they are generous because a loaded CI machine may let simulated time through more slowly.
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { capacityPanel, openTab, startPreset, stopLoad, tableValues } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
+/** Every content-security-policy violation the page reports, gathered from its start. */
+async function watchPolicy(page: Page): Promise<() => Promise<string[]>> {
+  await page.addInitScript(() => {
+    const seen: string[] = [];
+    Object.assign(window, { policyViolations: seen });
+    document.addEventListener("securitypolicyviolation", (event) => {
+      seen.push(`${event.violatedDirective} ${event.blockedURI}`);
+    });
+  });
+  return () =>
+    page.evaluate(() => (window as unknown as { policyViolations: string[] }).policyViolations);
+}
+
 test("the page loads, is live, and says it is simulated", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    // The one expected error: /v1/auth/me answers 404 here, which is how the page knows this
+    // mode has no accounts (docs/50). The browser reports every 404 it loads.
+    const expected = message.location().url.endsWith("/v1/auth/me");
+    if (message.type() === "error" && !expected) errors.push(message.text());
+  });
+  const violations = await watchPolicy(page);
 
   await page.goto("/dashboard/");
 
-  await expect(page.getByRole("heading", { name: "Gateway monitor" })).toBeVisible();
+  // The one page, under the console's content security policy (docs/50).
+  await expect(page.getByRole("heading", { name: "Gateway", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Monitoring" })).toBeVisible();
+  const policy = await page
+    .locator('head > meta[http-equiv="Content-Security-Policy"]:first-child')
+    .getAttribute("content");
+  expect(policy).toContain("style-src 'self'");
+  expect(policy).not.toContain("unsafe-inline");
   await expect(page.getByText("Live", { exact: true })).toBeVisible();
   // One card per model, from the first snapshot of the stream.
   await expect(page.getByRole("article")).toHaveCount(3);
@@ -33,6 +60,25 @@ test("the page loads, is live, and says it is simulated", async ({ page }) => {
   await openTab(page, "Latency");
   await expect(page.locator("canvas").first()).toBeVisible();
   expect(errors).toEqual([]);
+  // Nothing the monitoring draws (uPlot's charts included) was blocked by the policy.
+  expect(await violations()).toEqual([]);
+});
+
+test("simulated live mode has no accounts: the console's address says so, never a login", async ({
+  page,
+}, testInfo) => {
+  // The console's old address keeps its place (the stub's script), then the page explains.
+  await page.goto("/dashboard/console.html#/organization");
+  await expect(page).toHaveURL(/\/dashboard\/#\/organization$/);
+  const panel = page.getByRole("region", { name: "This mode has no accounts" });
+  await expect(panel).toContainText("simulated live mode");
+  await expect(page.getByRole("region", { name: "Log in" })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Sections" })).toHaveCount(0);
+  // For the PR (git-ignored run output): this mode has no account, so no secret to show.
+  await page.screenshot({ path: testInfo.outputPath("no-accounts.png"), fullPage: true });
+  await panel.getByRole("link", { name: "Open the monitoring" }).click();
+  await expect(page.getByRole("article")).toHaveCount(3);
+  await expect(page.getByRole("status", { name: "Simulated live mode" })).toBeVisible();
 });
 
 test("a load preset changes the queue chart", async ({ page }) => {

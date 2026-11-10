@@ -229,7 +229,7 @@ describe("streamGenerate", () => {
     });
   });
 
-  it("is cancelled, not failed, when the viewer aborts it", async () => {
+  it("is cancelled, not failed, when the person aborts it", async () => {
     const controller = new AbortController();
     vi.stubGlobal(
       "fetch",

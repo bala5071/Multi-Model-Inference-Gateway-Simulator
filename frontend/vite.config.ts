@@ -6,9 +6,10 @@ import { defineConfig, type Plugin } from "vite";
 // Where the gateway listens while developing. `npm run dev` proxies the API to it.
 const gateway = process.env.GATEWAY_URL ?? "http://127.0.0.1:8000";
 
-// The admin console's content security policy (docs/47): its scripts and styles only from
-// the gateway's own files, never inline; its requests only to the gateway. Added to the
-// built console.html, not in development, where Vite injects its own inline styles.
+// The page's content security policy (docs/47, docs/50): its scripts and styles only from the
+// gateway's own files, never inline; its requests only to the gateway. Added to every built page
+// (the one page, index.html, and the console's old address, console.html), not in development,
+// where Vite injects its own inline styles.
 export const CONSOLE_CSP = [
   "default-src 'none'",
   "script-src 'self'",
@@ -23,8 +24,7 @@ function consolePolicy(): Plugin {
   return {
     name: "console-content-security-policy",
     apply: "build",
-    transformIndexHtml(html, context) {
-      if (!context.filename.endsWith("console.html")) return html;
+    transformIndexHtml() {
       return [
         {
           tag: "meta",
@@ -38,8 +38,8 @@ function consolePolicy(): Plugin {
 
 export default defineConfig({
   plugins: [react(), consolePolicy()],
-  // FastAPI serves the build at /dashboard (see docs/16-dashboard.md); the admin console is
-  // its second page, /dashboard/console.html (docs/47).
+  // FastAPI serves the build at /dashboard (see docs/16-dashboard.md): the one page, and the
+  // console's old address, /dashboard/console.html, which sends the browser there (docs/50).
   base: "/dashboard/",
   build: {
     outDir: "../src/gateway/dashboard",

@@ -1,0 +1,44 @@
+{
+  "roles": [
+    {
+      "role": "viewer",
+      "scope_type": "organization",
+      "scope_id": "north"
+    }
+  ],
+  "platform": {
+    "monitoring.read": false,
+    "control.write": false,
+    "playground.use": false
+  },
+  "organization": {
+    "users.list": false,
+    "applications.list": true,
+    "org_settings.read": true,
+    "alert_channels.read": false,
+    "incidents.read_organization": true
+  },
+  "applications": [
+    {
+      "application_id": "north-blog",
+      "actions": {
+        "applications.read": true,
+        "settings.read": true,
+        "alert_rules.read": true,
+        "incidents.read": true,
+        "application_keys.list": false
+      }
+    },
+    {
+      "application_id": "north-shop",
+      "actions": {
+        "applications.read": true,
+        "settings.read": true,
+        "alert_rules.read": true,
+        "incidents.read": true,
+        "application_keys.list": false
+      }
+    }
+  ],
+  "more_applications": false
+}

@@ -8,7 +8,8 @@ model serves it, when, and what it costs whom. It routes by plan, batches per mo
 shared prompt prefixes, meters and limits each application, lets an organization bring its own
 model providers behind a vault and an egress guard, runs on one SQLite file or on Postgres and
 Valkey across several instances, and raises alerts to webhooks and verified email addresses.
-An admin console and a monitoring dashboard sit on top.
+One web page sits on top: the monitoring dashboard and the admin console behind one login,
+each person seeing the places their role allows.
 
 **It is mostly a simulator.** The scheduler, cache, routing, limits, identity and alerting are
 real code, but by default no model runs: time comes from a cost model fitted once to three real
@@ -139,9 +140,9 @@ curl -sf http://127.0.0.1:8000/v1/applications/me/usage -H "Authorization: Beare
  "total":{"requests":1,...},"by_model":{"premium":{"requests":1,...}}}
 ```
 
-Then open <http://127.0.0.1:8000/docs>. The dashboard and the admin console are at
-`/dashboard/` and `/dashboard/console.html` once built (`cd frontend && npm ci && npm run
-build`). Accounts, roles, providers, fallback modes, settings, channels, several instances,
+Then open <http://127.0.0.1:8000/docs>. The page (the monitoring and the admin console, one
+login) is at `/dashboard/` once built (`cd frontend && npm ci && npm run build`); the console's
+old address, `/dashboard/console.html`, still leads there. Accounts, roles, providers, fallback modes, settings, channels, several instances,
 upgrades, real models and a curl tour are in [docs/operating.md](docs/operating.md).
 
 ## Architecture
@@ -235,10 +236,11 @@ Each item links the note that records how it was built and tested.
 
 **Console and voice**
 
-- An admin console (`/dashboard/console.html`): application and organization settings, alert
-  rules, channels and recipients, incidents, the evaluator's state. It holds no rules of its
-  own: who may write is asked of the gateway ([note 47](docs/47-console-settings.md),
-  [note 49](docs/49-console-alerts.md)).
+- An admin console, part of the one page at `/dashboard/`: application and organization
+  settings, alert rules, channels and recipients, incidents, the evaluator's state. It holds no
+  rules of its own: who may write is asked of the gateway, and the navigation and home screen
+  show only what the gateway says each session may do ([note 47](docs/47-console-settings.md),
+  [note 49](docs/49-console-alerts.md), [note 50](docs/50-console-integration.md)).
 - A monitoring dashboard with per-second series, events and Prometheus `/metrics`
   ([note 15](docs/15-monitoring-api.md), [note 16](docs/16-dashboard.md)).
 - **Voice: not built.** No speech endpoint exists; a chat request with an audio part is refused

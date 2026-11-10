@@ -1,8 +1,11 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { useState } from "react";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
 import type { TimeChartProps } from "./charts/TimeChart";
 import { ThemeProvider } from "./hooks/useTheme";
+import { Header } from "./shell/Header";
+import { parseRoute, routeHash, type MonitorTab } from "./shell/routes";
 import { FakeEventSource, installFakeEventSource } from "./test/fakeEventSource";
 import type { ControlStatus } from "./api/control";
 import { controlOff, controlSimulated, passthrough, simulated } from "./test/fixtures";
@@ -12,6 +15,30 @@ vi.mock("./charts/TimeChart", () => ({
     <div data-testid="chart" data-unit={props.unit} data-reference={props.reference?.label ?? ""} />
   ),
 }));
+
+/**
+ * The monitoring as the page draws it without accounts (simulated live mode): the page's header
+ * above it, and its tab in the URL through the page's own routes.
+ */
+function Monitoring() {
+  const [route, setRoute] = useState(() => parseRoute(window.location.hash));
+  const [simulatedMode, setSimulatedMode] = useState(false);
+  const tab: MonitorTab = route.screen === "monitor" ? route.tab : "overview";
+  return (
+    <>
+      <Header user={null} capabilities={null} simulated={simulatedMode} onLogout={null} />
+      <App
+        tab={tab}
+        onSelectTab={(next) => {
+          const chosen = { screen: "monitor", tab: next } as const;
+          window.location.hash = routeHash(chosen);
+          setRoute(chosen);
+        }}
+        onSimulated={setSimulatedMode}
+      />
+    </>
+  );
+}
 
 function open(snapshot: typeof simulated | null = simulated, control: ControlStatus = controlOff) {
   installFakeEventSource();
@@ -28,7 +55,7 @@ function open(snapshot: typeof simulated | null = simulated, control: ControlSta
   );
   render(
     <ThemeProvider>
-      <App />
+      <Monitoring />
     </ThemeProvider>,
   );
   if (snapshot !== null) FakeEventSource.latest.push("snapshot", snapshot);
@@ -74,7 +101,7 @@ describe("layout", () => {
     const user = open();
 
     await go(user, "Applications");
-    expect(window.location.hash).toBe("#/applications");
+    expect(window.location.hash).toBe("#/monitor/applications");
     expect(screen.getByRole("tab", { name: "Applications" })).toHaveAttribute(
       "aria-selected",
       "true",
@@ -87,10 +114,53 @@ describe("layout", () => {
     expect(screen.getByRole("tab", { name: "Events" })).toHaveFocus();
   });
 
-  it("opens on the tab named in the URL", () => {
-    window.location.hash = "#/playground";
-    open();
+  it.each(["#/monitor/playground", "#/playground"])(
+    "opens on the tab named in the URL: %s",
+    (hash) => {
+      // The dashboard's old hash still opens its tab.
+      window.location.hash = hash;
+      open();
+      expect(screen.getByRole("heading", { name: "Send a request" })).toBeInTheDocument();
+    },
+  );
+
+  it("leaves out the Playground and the load control when the gateway does not allow them", () => {
+    window.location.hash = "#/monitor/playground";
+    installFakeEventSource();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response(JSON.stringify(controlOff)))),
+    );
+    render(
+      <ThemeProvider>
+        <App
+          tab="playground"
+          onSelectTab={() => undefined}
+          allows={{ playground: false, loadControl: false }}
+        />
+      </ThemeProvider>,
+    );
+    expect(screen.queryByRole("tab", { name: "Playground" })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("shows the Playground without the load control when only that is allowed", () => {
+    installFakeEventSource();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response(JSON.stringify(controlOff)))),
+    );
+    render(
+      <ThemeProvider>
+        <App
+          tab="playground"
+          onSelectTab={() => undefined}
+          allows={{ playground: true, loadControl: false }}
+        />
+      </ThemeProvider>,
+    );
     expect(screen.getByRole("heading", { name: "Send a request" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Load" })).not.toBeInTheDocument();
   });
 
   it("waits for the first snapshot", () => {
@@ -135,7 +205,7 @@ describe("connection", () => {
 });
 
 describe("theme", () => {
-  it("follows the system setting, then the viewer's choice, and remembers it", async () => {
+  it("follows the system setting, then the choice made here, and remembers it", async () => {
     const user = open();
     expect(document.documentElement.dataset.theme).toBe("light");
 
@@ -370,7 +440,8 @@ describe("simulated live mode", () => {
     expect(banner).toHaveTextContent("Simulated live mode. No model is running.");
     expect(banner).toHaveTextContent("simulated, not wall-clock");
     expect(banner).toHaveTextContent("Seed 7 · load preset “steady”");
-    expect(screen.getByText("Simulated")).toBeInTheDocument();
+    // The header's badge: told by the monitoring once it has read the gateway's status.
+    expect(await screen.findByText("Simulated")).toBeInTheDocument();
     expect(within(banner).getByRole("button", { name: "5×" })).toHaveAttribute(
       "aria-pressed",
       "true",
