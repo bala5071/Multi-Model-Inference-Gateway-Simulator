@@ -546,3 +546,44 @@ to):
 - **`Cache-Control: no-store` on the refusals too:** the `NoStoreMiddleware` (today only
   `/v1/admin`) also wraps `/v1/auth/capabilities`, because the `password_change_required`
   refusal is answered without the header.
+
+## 14. P2: corrections, answered before its code (2026-11-10)
+
+Two errors and one gap in the plan, and one step against a standing instruction, were found
+before any P2 code and answered:
+
+1. **The `console.html` stub cannot keep the hash with a meta refresh.** Checked in Chrome: a
+   `<meta http-equiv="refresh">` navigates to its URL without the current fragment, so
+   `console.html#/organization` (quoted in the v0.1.0 release notes and `docs/operating.md`)
+   would open Home. **Answer:** the stub loads a small same-origin module that calls
+   `location.replace` with `./` and the hash (allowed by `script-src 'self'`; no inline script);
+   a meta refresh inside `<noscript>`, and a link, are the fallback without JavaScript, which
+   loses the hash.
+2. **`#/applications` was taken twice:** the old dashboard tab (mapped to
+   `#/monitor/applications`) and P3's "Applications and keys" screen. **Answer:** the old hash
+   keeps meaning the monitoring tab; P3's screens take `#/manage/applications`,
+   `#/manage/users` and `#/manage/organizations`. P2's `routes.ts` has only the routes of the
+   screens that exist (home, monitor, the console's five); P3 adds its own with its screens.
+3. **`docs/img`:** `scripts/capture_demo.py` starts its own simulated-live gateway. **Answer:**
+   run in P2 like the e2e suite (a short-lived server the script starts and stops itself, no keys).
+
+Decisions made from the code, each listed in P2's description so it can be objected to:
+
+- **The shell allows or refuses an item, not one application.** A route naming an application
+  (`#/application/<id>`) is drawn when its item is allowed, and the screen asks the gateway, which
+  refuses one the session cannot use ("Not permitted, or not found."). Checking the id against
+  the answer's list would refuse applications past its first page (`more_applications`).
+- **The application chooser** lists the applications the answer names when the organization's
+  list is refused (an application's own admin or reader), instead of a typed id; the typed id
+  stays for a session the answer names none for.
+- **The Incidents link** opens the organization's list when `incidents.read_organization` is
+  allowed, and otherwise the first named application with `incidents.read`.
+- **"Open incidents" on the organization home** are `OPEN_STATES` (`incidents.py`: pending,
+  firing, acknowledged): one read of each, and "100 or more" when a page is full.
+- **The word "viewer"** appears in the frontend as plain English ("the person viewing the
+  page"); those comments and test names are reworded so the role-name lint has no exception.
+- **The page's heading** is "Gateway" for both sections; `smoke.e2e.ts` checks that heading
+  instead of "Gateway monitor", and nothing else in it changes.
+- **Without accounts** (simulated live mode), an empty hash or Home opens the monitoring; a console
+  route, or one the shell does not know, shows "This mode has no accounts" where the login would
+  be, with a link to the monitoring.
