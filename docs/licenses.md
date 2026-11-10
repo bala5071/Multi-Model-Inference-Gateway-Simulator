@@ -1,11 +1,15 @@
 # Licenses of what the gateway ships with
 
-Every runtime dependency of the `gateway` package, and every piece of third-party data it
+Every runtime dependency of the `gateway` package, every package built into the dashboard and
+the admin console that the gateway serves, and every piece of third-party data the repository
 bundles, with its license. `tests/test_licenses.py` keeps this file honest: it walks the
 installed runtime dependencies, fails on any license that is not allowed below, fails if a
-package is missing from the table or listed with another license, and checks the pinned
-versions against `pyproject.toml`. Development tools (pytest, ruff, mypy, matplotlib, ...) are
-not shipped and are not listed.
+package is missing from the table or listed with another license, checks the pinned versions
+against `pyproject.toml`, checks the dashboard's packages against `frontend/package-lock.json`,
+and checks each bundled file against its recorded sha256. Development tools (pytest, ruff, mypy,
+matplotlib, Vite, TypeScript, Playwright, ...) are not shipped and are not listed.
+
+The project's own code is under the [MIT license](../LICENSE).
 
 ## Allowed licenses
 
@@ -73,6 +77,17 @@ dependency, `async_timeout`, applies only before Python 3.11.
 | Valkey | `valkey/valkey:9.0.7@sha256:7e1deda01b64ece3167d370ab5be3452d29734feec22cbcbc69b3a64f6859d6d` | BSD-3-Clause | `docker-compose.valkey.yml`, the CI `valkey` job | Built and pushed by `valkey-io/valkey-container`'s CI from its `mainline` branch (the push run of 2026-10-27 00:13Z matches the tag dates); tags are rebuilt daily, so it is pinned by digest. **An exception to the two-week rule, agreed 2026-10-29:** every current tag was two days old, a security release on all lines (GHSA-f4q9-j22m-xqq9), and the newest older tag, 9.0.6, lacks the fix |
 | PostgreSQL | `postgres:18.6-trixie@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336` | PostgreSQL License | `docker-compose.postgres.yml`, the CI `postgres` job | The Docker Official Image, built from `docker-library/postgres`; this digest is the build of 2026-10-07 recorded in `docker-library/repo-info` (22 days old when pinned, PostgreSQL package `18.6-1.pgdg13+2`). The current tags were rebuilt 2026-10-28 for Debian base layers with the same PostgreSQL; the older digest was chosen to meet the two-week rule (agreed 2026-10-29) |
 
+## Images the Dockerfile builds from (not published by this repository)
+
+`docker compose up --build` builds an image on the user's machine from these. **They are not
+pinned by version or digest**, so the image changes when they do.
+
+| Image | Used for | License of what it adds | In the final image |
+|---|---|---|---|
+| `node:20-slim` | building the dashboard (`npm ci`, `npm run build`) | Node.js: MIT; the image's Debian packages carry their own licenses | No: only the built files are copied out |
+| `python:3.12-slim` | the base of the gateway's image | CPython: PSF-2.0; the image's Debian packages carry their own licenses | Yes |
+| `ghcr.io/astral-sh/uv:latest` | the `uv` binary that installs `uv.lock` | uv: MIT OR Apache-2.0 | Yes (`/usr/local/bin/uv`) |
+
 ## Every runtime dependency
 
 As resolved in `uv.lock` for Python 3.11 and 3.12 (`async-timeout`, Apache-2.0, only before 3.11.3).
@@ -106,6 +121,22 @@ As resolved in `uv.lock` for Python 3.11 and 3.12 (`async-timeout`, Apache-2.0, 
 | typing-inspection | MIT |
 | uvicorn | BSD-3-Clause |
 
+## Built into the dashboard and the console
+
+`npm run build` bundles these into `src/gateway/dashboard/` (not tracked), which the gateway
+serves at `/dashboard` and the Docker image ships. They are the only packages of
+`frontend/package-lock.json` that are not development-only.
+
+| Package | Version | License |
+|---|---|---|
+| react | 19.3.0 | MIT |
+| react-dom | 19.3.0 | MIT |
+| scheduler | 0.28.0 | MIT |
+| uplot | 1.6.32 | MIT |
+
+No font, icon set or other asset of a third party is bundled; the console's icon is an inline
+SVG written here, and so is the dashboard's.
+
 ## Bundled data
 
 ### Common-password blocklist
@@ -130,6 +161,19 @@ them.
 
 It replaced SecLists' `10k-most-common.txt` (commit `913b3273`), of whose 10,001 entries only
 10 had 12 or more characters.
+
+## Benchmark data (in the repository, not shipped)
+
+### MMLU sample
+
+| | |
+|---|---|
+| Files | `benchmarks/quality/mmlu_sample.json`, `benchmarks/quality/LICENSE-MMLU.txt` |
+| Source | MMLU, "Measuring Massive Multitask Language Understanding", Hendrycks et al., 2021 (arXiv:2009.03300); the copy `cais/mmlu` on Hugging Face, config `all`, split `test` |
+| What is stored | 100 questions drawn at random, with their answers |
+| sha256 of the stored files | `f6e1f66693df6d4328396c451361e1c2a01db15641cb6f542cde293736c1b7ca` (`mmlu_sample.json`), `5d841b9eee8bf0d721359b79fbae956a8b426d3139bfefee32149c7d4f2a1a9c` (`LICENSE-MMLU.txt`) |
+| License | MIT, Copyright (c) 2020 Dan Hendrycks; the license text is beside the data. Checked on 2026-10-09 in the authors' repository and on the dataset card |
+| Used by | `benchmarks/quality_eval.py` and note 14; exempt from hard rule 7 as a public dataset with its attribution, not request traffic |
 
 ## Test data (not shipped)
 

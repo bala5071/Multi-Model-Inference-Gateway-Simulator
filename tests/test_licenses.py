@@ -156,3 +156,37 @@ def test_the_openai_wire_fixture_is_the_recorded_extract() -> None:
     assert fixture["sha256"] in doc
     assert "MIT License" in (folder / "LICENSE-openai-openapi.txt").read_text(encoding="utf-8")
     assert set(fixture["examples"]) == {"Default", "Streaming", "Functions"}
+
+
+def _section(heading: str) -> str:
+    return _doc().split(heading, 1)[1].split("\n## ", 1)[0]
+
+
+def documented_dashboard_table() -> dict[str, tuple[str, str]]:
+    section = _section("## Built into the dashboard and the console")
+    rows = re.findall(r"^\| ([a-z0-9@/.-]+) \| ([0-9][^|]*) \| ([^|]+) \|$", section, re.MULTILINE)
+    return {name: (version.strip(), license.strip()) for name, version, license in rows}
+
+
+def test_every_dashboard_package_is_in_the_docs_with_its_version_and_an_allowed_license() -> None:
+    """The packages ``npm run build`` bundles into what the gateway serves: every package of
+    ``frontend/package-lock.json`` that is not development-only."""
+    lock = json.loads((REPO / "frontend" / "package-lock.json").read_text(encoding="utf-8"))
+    shipped = {
+        path.removeprefix("node_modules/"): (entry["version"], entry.get("license", "?"))
+        for path, entry in lock["packages"].items()
+        if path and not entry.get("dev") and not entry.get("devOptional")
+    }
+    assert shipped, "frontend/package-lock.json lists no shipped package"
+    assert documented_dashboard_table() == shipped
+    allowed = allowed_licenses()
+    assert {n: lic for n, (_, lic) in shipped.items() if not is_allowed(lic, allowed)} == {}
+
+
+def test_the_mmlu_sample_is_the_recorded_file_with_its_license() -> None:
+    section = _section("### MMLU sample")
+    folder = REPO / "benchmarks" / "quality"
+    for name in ("mmlu_sample.json", "LICENSE-MMLU.txt"):
+        digest = hashlib.sha256((folder / name).read_bytes()).hexdigest()
+        assert f"`{digest}` (`{name}`)" in section, name
+    assert (folder / "LICENSE-MMLU.txt").read_text(encoding="utf-8").startswith("MIT License")

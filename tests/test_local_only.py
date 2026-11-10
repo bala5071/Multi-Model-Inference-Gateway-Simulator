@@ -111,7 +111,7 @@ def test_which_paths_are_local_only() -> None:
     assert is_local_only("/v1/playground/generate")
 
 
-@pytest.mark.parametrize("document", ["README.md", "docs/25-local-only.md"])
+@pytest.mark.parametrize("document", ["SECURITY.md", "docs/25-local-only.md"])
 def test_the_documented_local_only_endpoints_are_the_guarded_ones(document: str) -> None:
     # Each document has one table of the local-only endpoints, one row per path.
     text = (REPO / document).read_text(encoding="utf-8")
