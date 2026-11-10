@@ -232,7 +232,8 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   shared with the CLI (exists)
 - `permissions.py` — `Role`, `ScopeType`, scope `Relation`s, `PERMISSIONS` (one table: action,
   level, allowed role@relation pairs, step-up, consume-on-use, wired), `Actor`, `Resource`, and `authorize`, deny
-  by default; `python -m gateway.permissions --matrix` writes `docs/permission-matrix.md` (exists)
+  by default; `NAVIGATION_ACTIONS`, the actions the console's navigation asks about (docs/50);
+  `python -m gateway.permissions --matrix` writes `docs/permission-matrix.md` (exists)
 - `roles.py` — `RoleStore` over migration 8: role assignments and application-defined roles
   (exists)
 - `keyderivation.py` — `derive_key(pepper, KeyPurpose)`: one key per purpose (CSRF tokens, the
@@ -342,7 +343,9 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   the escalation when a change loosens egress in docs/42), the alert rule and incident
   endpoints (docs/44, docs/45), `/healthz`'s `alert_evaluator` and the
   provider endpoints (docs/32), each
-  through `requires` (which claims the step-up window for consume-on-use actions), every answer
+  through `requires` (which claims the step-up window for consume-on-use actions), and
+  `/v1/auth/capabilities`, what a session may do among `NAVIGATION_ACTIONS`, answered inside
+  `make_requires` with the same `authorize` (docs/50), every answer
   `Cache-Control: no-store` (exists)
 
 Outside the package, `benchmarks/` is a package run with `python -m`:

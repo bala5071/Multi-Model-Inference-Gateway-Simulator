@@ -278,7 +278,15 @@ from gateway.passwords import (
     ThreadHashRunner,
     parameters_from,
 )
-from gateway.permissions import PERMISSIONS, Actor, Resource
+from gateway.permissions import (
+    NAVIGATION_ACTIONS,
+    PERMISSIONS,
+    Actor,
+    Level,
+    Resource,
+    Role,
+    ScopeType,
+)
 from gateway.postgres import (
     PostgresBudgets,
     PostgresDatabase,
@@ -841,6 +849,12 @@ class ConsumeToken:
         self.was_changed = True
 
 
+# The capabilities endpoint (docs/50), and how many of an organization's applications it names:
+# the console's page of applications.
+CAPABILITIES_PATH = "/v1/auth/capabilities"
+CAPABILITY_APPLICATIONS = 100
+
+
 def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
     """``requires(action, resolver)``: a dependency that declares a route's action and
     enforces it, so a route cannot be declared without being checked. On every request it
@@ -918,7 +932,70 @@ def make_requires(service: AccountService) -> Callable[[str, Resolver], Any]:
                 await service.restore_step_up(auth.context, claimed)
             raise
 
+    stores = Stores(service.organizations, service.store)
+
+    async def capabilities(request: Request, organization_id: str | None) -> dict[str, object]:
+        """What this session may do among ``NAVIGATION_ACTIONS`` (docs/50): for the platform, an
+        organization (the session's own unless ``organization_id`` names another) and the
+        applications in it the session can name, each action as ``authorize`` answers it. The
+        same steps as ``requires``: the session (401 without one), a password that must be
+        changed first refused, the actor's roles read now, the resource resolved; a missing
+        organization is answered as one the session may do nothing in, byte for byte, which is
+        why the organization asked for is not echoed."""
+        context = await service.authenticate(request.cookies.get(SESSION_COOKIE))
+        if context.user.must_change_password:
+            raise PasswordChangeRequiredError()
+        actor = await service.actor_for(context.user)
+        asked = context.user.organization_id if organization_id is None else organization_id
+
+        def allowed(level: Level, resource: Resource | None) -> dict[str, bool]:
+            return {
+                action: resource is not None and authorize(actor, action, resource).allowed
+                for action in NAVIGATION_ACTIONS[level]
+            }
+
+        organization = await resolve_organization(stores, asked)
+        in_organization = allowed(Level.ORGANIZATION, organization)
+        named: list[Resource] = []
+        more = False
+        if organization is not None and in_organization["applications.list"]:
+            # The organization's own page, the query the applications.list route makes.
+            page = await service.organizations.page_applications(
+                asked, None, CAPABILITY_APPLICATIONS + 1
+            )
+            more = len(page) > CAPABILITY_APPLICATIONS
+            named = [Resource.application(asked, a.id) for a in page[:CAPABILITY_APPLICATIONS]]
+        elif organization is not None:
+            # The applications of the session's own application-scope assignments, each
+            # resolved: one that is gone, or not in this organization, is not there.
+            own = sorted(
+                {a.scope_id for a in actor.assignments if a.scope_type is ScopeType.APPLICATION}
+            )
+            for application_id in own:
+                found = await resolve_application(stores, asked, application_id)
+                if found is not None:
+                    named.append(found)
+        applications = []
+        for resource in named:
+            actions = allowed(Level.APPLICATION, resource)
+            if any(actions.values()):
+                applications.append({"application_id": resource.application_id, "actions": actions})
+        built_in = {role.value for role in Role}
+        return {
+            # The session's own built-in roles, for the header to show (decides nothing).
+            "roles": [
+                {"role": a.role, "scope_type": a.scope_type.value, "scope_id": a.scope_id}
+                for a in actor.assignments
+                if a.role in built_in
+            ],
+            "platform": allowed(Level.PLATFORM, Resource.platform()),
+            "organization": in_organization,
+            "applications": applications,
+            "more_applications": more,
+        }
+
     vars(requires)["escalate"] = escalate
+    vars(requires)["capabilities"] = capabilities
     return requires
 
 
@@ -1169,6 +1246,16 @@ def _auth_routes(app: FastAPI, accounts: AccountAccess) -> None:
             },
             headers=_NO_STORE,
         )
+
+    @app.get(CAPABILITIES_PATH)
+    @public_route("the session's own endpoint: make_requires answers it with authorize")
+    async def capabilities(
+        request: Request, organization: str | None = Query(default=None, max_length=64)
+    ) -> JSONResponse:
+        # What the console's navigation shows (docs/50). Hiding is a convenience: every action
+        # is still checked by its own route.
+        answer = await app.state.requires.capabilities(request, organization)
+        return JSONResponse(answer, headers=_NO_STORE)
 
     @app.post("/v1/auth/step-up")
     @public_route("the session's own endpoint: the route checks the session and the password")
@@ -3912,7 +3999,9 @@ def create_app(
                 settings_store,
                 mode_store,
             )
-        # Outermost, so even the local-only guard's refusals of /v1/admin are not cached.
+        # Outermost, so even the local-only guard's refusals of /v1/admin are not cached; and
+        # every answer of the capabilities endpoint, refusals included (docs/50).
+        app.add_middleware(NoStoreMiddleware, prefix=CAPABILITIES_PATH)
         app.add_middleware(NoStoreMiddleware)
     app.state.slo_monitor = monitor
     app.state.monitoring = monitoring
