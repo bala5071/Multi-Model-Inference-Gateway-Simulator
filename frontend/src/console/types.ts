@@ -102,3 +102,174 @@ export interface PresetList {
 export interface ErrorBody {
   error: { code: string; message: string };
 }
+
+// --- Alerts (C2): docs/44, docs/45, docs/46, docs/48. Shapes only; the gateway decides. ---
+
+/** `GET /healthz`: `alert_evaluator` is one word (docs/45). */
+export interface Health {
+  alert_evaluator?: string;
+}
+
+/** A rule's body, as the gateway shows it and takes it back (docs/44). */
+export type RuleBody = Record<string, Json>;
+
+/** `GET .../alert-rules`: each rule's body beside its id, version and default markers. */
+export interface AlertRule {
+  id: string;
+  version: number;
+  default_key: string | null;
+  changed_from_default: boolean;
+  name: string;
+  signal: string;
+  parameter: string | null;
+  comparison: string;
+  threshold: number;
+  window: number | null;
+  for_minutes: number;
+  severity: string;
+  channels: string[];
+  cooldown_minutes: number;
+  repeat_every_minutes: number | null;
+  quiet_hours: Json;
+  enabled: boolean;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface RulePage {
+  rules: AlertRule[];
+  next: string | null;
+}
+
+/** One minute of the last hour, as `validate` previews it. */
+export interface PreviewMinute {
+  minute: number;
+  value: number | null;
+  why_not: string | null;
+  met: boolean;
+}
+
+/** `POST .../alert-rules/validate`. */
+export interface RuleValidation {
+  valid: boolean;
+  invalid_field: string | null;
+  message: string | null;
+  rule: RuleBody | null;
+  preview: { minutes: PreviewMinute[]; met: number } | null;
+}
+
+/** `GET .../applications/{app}/alert-channels`: what a rule may name, never a target. */
+export interface ChannelName {
+  id: string;
+  name: string;
+  type: string;
+  default: boolean;
+  enabled: boolean;
+}
+
+export interface Incident {
+  id: string;
+  application_id: string | null;
+  rule_id: string;
+  rule_version: number;
+  series: string | null;
+  state: string;
+  severity: string;
+  value: number | null;
+  opened_at_ms: number;
+  pending_since_ms: number | null;
+  fired_at_ms: number | null;
+  acknowledged_at_ms: number | null;
+  acknowledged_by: string | null;
+  resolved_at_ms: number | null;
+  resolve_reason: string | null;
+  no_data_since_ms: number | null;
+  reopened: boolean;
+}
+
+export interface IncidentPage {
+  incidents: Incident[];
+  next: string | null;
+}
+
+export interface NotificationDelivery {
+  channel_id: string;
+  state: string;
+  attempts: number;
+  last_code: string | null;
+}
+
+export interface IncidentNotification {
+  kind: string;
+  state: string;
+  at_ms: number;
+  reason: string | null;
+  deliveries: NotificationDelivery[];
+}
+
+export interface IncidentDetail extends Incident {
+  notifications: IncidentNotification[];
+}
+
+/** An email channel's recipient, for the organization's admin only (docs/48). */
+export interface Recipient {
+  id: string;
+  address: string;
+  state: string;
+  added_at_ms: number;
+  verified_at_ms: number | null;
+  confirmation_expires_at_ms: number | null;
+}
+
+/** A channel, for the organization's admin: a webhook's origin only, never its URL or key. */
+export interface Channel {
+  id: string;
+  name: string;
+  type: string;
+  enabled: boolean;
+  default: boolean;
+  url_origin: string | null;
+  version: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+  health: {
+    last_delivered_at_ms: number | null;
+    last_failed_at_ms: number | null;
+    consecutive_failures: number;
+  };
+  recipients?: Recipient[];
+}
+
+export interface ChannelPage {
+  channels: Channel[];
+  next: string | null;
+}
+
+/** `POST .../alert-channels`: a webhook's signing key, this once; an email channel's confirmations. */
+export interface CreatedChannel extends Channel {
+  signing_key?: string;
+  confirmations?: Record<string, string>;
+}
+
+export interface Delivery {
+  id: string;
+  notification_id: string;
+  channel_id: string;
+  state: string;
+  attempts: number;
+  next_attempt_at_ms: number | null;
+  last_code: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface DeliveryPage {
+  deliveries: Delivery[];
+  next: string | null;
+}
+
+export interface TestSend {
+  id: string;
+  outcome: string;
+  delivered: boolean;
+}

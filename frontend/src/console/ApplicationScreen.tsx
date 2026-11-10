@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ApiError, applicationSettingsPath, orgPath, probeWrite, type WriteProbe } from "./api";
+import { Chooser } from "./Chooser";
 import type { ConsoleContext } from "./context";
 import {
   canWrite,
@@ -11,76 +12,7 @@ import {
 } from "./derive";
 import { EditForm } from "./EditForm";
 import { useLoad } from "./useLoad";
-import type {
-  ApplicationPage,
-  ApplicationSettings,
-  Change,
-  PresetList,
-  VersionPage,
-} from "./types";
-
-/** Which application: from the organization's list, or typed when the list is not allowed. */
-function Chooser({
-  context,
-  selected,
-  onChoose,
-}: {
-  context: ConsoleContext;
-  selected: string | null;
-  onChoose: (id: string) => void;
-}) {
-  const org = context.user.organization_id;
-  const list = useLoad(`apps:${org}`, () =>
-    context.api.get<ApplicationPage>(`${orgPath(org)}/applications?limit=100`),
-  );
-  const [typed, setTyped] = useState(selected ?? "");
-
-  if (list.kind === "loading") return <p className="muted">Loading applications…</p>;
-  if (list.kind === "ready") {
-    return (
-      <label className="chooser">
-        Application
-        <select
-          value={selected ?? ""}
-          onChange={(event) => {
-            onChoose(event.target.value);
-          }}
-        >
-          <option value="" disabled>
-            Choose an application
-          </option>
-          {list.value.applications.map((a) => (
-            <option key={a.application_id} value={a.application_id}>
-              {a.name} ({a.application_id})
-            </option>
-          ))}
-        </select>
-      </label>
-    );
-  }
-  // This account may not list the organization's applications (an application's own admin
-  // or viewer): it names the one it was given.
-  return (
-    <form
-      className="chooser"
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (typed !== "") onChoose(typed);
-      }}
-    >
-      <label>
-        Application id
-        <input
-          value={typed}
-          onChange={(event) => {
-            setTyped(event.target.value);
-          }}
-        />
-      </label>
-      <button type="submit">Open</button>
-    </form>
-  );
-}
+import type { ApplicationSettings, Change, PresetList, VersionPage } from "./types";
 
 interface Loaded {
   settings: ApplicationSettings;
@@ -194,7 +126,13 @@ export function ApplicationScreen({
   return (
     <div className="console-screen">
       <h2>Application settings</h2>
-      <Chooser context={context} selected={applicationId} onChoose={onChoose} />
+      <Chooser
+        context={context}
+        selected={applicationId}
+        onChoose={(id) => {
+          if (id !== null) onChoose(id);
+        }}
+      />
       {message !== null && (
         <p className="notice" role="status">
           {message}

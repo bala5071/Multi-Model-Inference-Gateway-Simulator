@@ -134,3 +134,71 @@ label.chooser {
   flex-direction: column;
   gap: 12px;
 }
+
+/* C2: the alert screens. */
+
+.evaluator-banner {
+  border: 1px solid var(--warning);
+  border-left-width: 4px;
+  border-radius: 4px;
+  padding: 8px 12px;
+  color: var(--text-primary);
+  background: var(--surface);
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: flex-end;
+}
+
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.inline-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-secondary);
+}
+
+.console-form label.inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.console textarea {
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+.signing-key .key {
+  display: block;
+  overflow-wrap: anywhere;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+}
+
+.timeline {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.console-screen h4 {
+  margin: 16px 0 8px;
+}
