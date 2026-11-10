@@ -95,7 +95,10 @@ def test_every_launch_command_uses_the_launcher() -> None:
 
 
 def test_the_readme_makes_its_admin_password_at_run_time_and_keeps_it_out_of_git() -> None:
-    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    # The README's quickstart, and the chat walkthrough that moved to docs/operating.md.
+    readme = "".join(
+        (REPO / name).read_text(encoding="utf-8") for name in ("README.md", "docs/operating.md")
+    )
     assignments = re.findall(r"GATEWAY_ADMIN_PASSWORD=[^\n]*", readme)
     # Each makes a random value when it runs (the quickstart's into gateway.env, "Try the chat
     # endpoint" into a variable); no password is written down.
