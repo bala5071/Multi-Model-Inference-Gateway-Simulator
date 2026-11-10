@@ -61,6 +61,8 @@ async def instance(db: PostgresDatabase, seed: int) -> AsyncIterator[Instance]:
     keys = ApiKeyService(state.applications, TEST_PEPPER, ClockEpoch(clock), store_clock=db)
     service = pg_accounts(db, seed=seed)
     registry = build_continuous_registry(clock, seed=7)
+    # Read before the app is built: a Postgres store call suspends, so create_app cannot make it.
+    startup = await state.applications.list_applications()
     app = create_app(
         registry,
         clock,
@@ -70,6 +72,7 @@ async def instance(db: PostgresDatabase, seed: int) -> AsyncIterator[Instance]:
         epoch=ClockEpoch(clock),
         modes=state.modes,
         local_only=LocalOnlyPolicy(),
+        startup_applications=startup,
     )
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
