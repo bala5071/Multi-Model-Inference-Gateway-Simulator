@@ -14,6 +14,7 @@ import {
   type Page,
   type TestInfo,
 } from "@playwright/test";
+import { picturedAndChecked } from "./a11y";
 
 test.describe.configure({ mode: "serial" });
 
@@ -93,7 +94,8 @@ async function visibleSecrets(page: Page): Promise<string[]> {
  */
 async function picture(page: Page, testInfo: TestInfo, name: string): Promise<void> {
   expect(await visibleSecrets(page)).toEqual([]);
-  await page.screenshot({ path: testInfo.outputPath(`${name}.png`), fullPage: true });
+  // In both themes, each checked by axe in both (docs/53).
+  await picturedAndChecked(page, testInfo, name);
 }
 
 /** Logs in; an account still on its first password (this file run alone) changes it first. */

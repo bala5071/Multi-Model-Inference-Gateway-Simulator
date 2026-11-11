@@ -29,6 +29,7 @@ import {
   sections,
   type Account,
 } from "./session";
+import { checkAccessible, findingsIn } from "./a11y";
 
 test.describe.configure({ mode: "serial" });
 
@@ -279,4 +280,34 @@ test("leak scan control: an issued key planted in storage and in the address is 
   await page.evaluate(() => {
     sessionStorage.removeItem("planted");
   });
+});
+
+test("accessibility check control: planted violations are found in both themes", async ({
+  page,
+}, testInfo) => {
+  await page.goto("/dashboard/");
+  await logIn(page, ORG_READER);
+  await expect(region(page, "Applications")).toBeVisible();
+  // Planted by this test, not the page: a button with no name, an image with no text, and text
+  // at 4.48:1 (#777 on white, under 4.5:1). axe must report all three in each theme, or a clean
+  // run of the check (docs/53) could not be trusted.
+  await page.evaluate(() => {
+    const box = document.createElement("div");
+    box.id = "planted";
+    box.style.cssText = "background:#ffffff;color:#777777;padding:8px";
+    box.innerHTML =
+      '<button type="button"></button><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">' +
+      "<p>planted low-contrast text</p>";
+    document.querySelector("main")?.append(box);
+  });
+  const found = await findingsIn(page, "planted-control");
+  for (const theme of ["light", "dark"]) {
+    const rules = found.filter((f) => f.theme === theme).map((f) => f.rule);
+    expect(rules).toEqual(expect.arrayContaining(["button-name", "image-alt", "color-contrast"]));
+  }
+  // And the check every screen goes through fails on them (they are serious or critical).
+  await expect(checkAccessible(page, testInfo, "planted-control-check")).rejects.toThrow(
+    /serious or critical accessibility findings/,
+  );
+  await page.evaluate(() => document.getElementById("planted")?.remove());
 });

@@ -21,4 +21,15 @@ export default tseslint.config(
       "no-console": "error",
     },
   },
+  {
+    // Command-line scripts run by Node (the bundle budget, docs/53): no type information, Node's
+    // globals, and they print their results.
+    files: ["scripts/**/*.mjs"],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      globals: globals.node,
+      parserOptions: { projectService: false, project: false },
+    },
+    rules: { ...tseslint.configs.disableTypeChecked.rules, "no-console": "off" },
+  },
 );

@@ -5,6 +5,7 @@
 // they are generous because a loaded CI machine may let simulated time through more slowly.
 
 import { expect, test, type Page } from "@playwright/test";
+import { checkAccessible, picturedAndChecked } from "./a11y";
 import { capacityPanel, openTab, startPreset, stopLoad, tableValues } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
@@ -22,7 +23,7 @@ async function watchPolicy(page: Page): Promise<() => Promise<string[]>> {
     page.evaluate(() => (window as unknown as { policyViolations: string[] }).policyViolations);
 }
 
-test("the page loads, is live, and says it is simulated", async ({ page }) => {
+test("the page loads, is live, and says it is simulated", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
@@ -52,10 +53,13 @@ test("the page loads, is live, and says it is simulated", async ({ page }) => {
   await expect(banner).toContainText("Seed 7");
   await expect(banner.getByRole("button", { name: "20×" })).toHaveAttribute("aria-pressed", "true");
 
-  // Every tab opens, keeps the label, and draws its charts.
+  // Every tab opens, keeps the label, and draws its charts; each is checked by axe in both
+  // system themes (docs/53).
+  await checkAccessible(page, testInfo, "monitoring-overview");
   for (const tab of ["Latency", "Capacity", "Applications", "Events", "Playground"]) {
     await openTab(page, tab);
     await expect(banner).toBeVisible();
+    await checkAccessible(page, testInfo, `monitoring-${tab.toLowerCase()}`);
   }
   await openTab(page, "Latency");
   await expect(page.locator("canvas").first()).toBeVisible();
@@ -75,7 +79,7 @@ test("simulated live mode has no accounts: the console's address says so, never 
   await expect(page.getByRole("region", { name: "Log in" })).toHaveCount(0);
   await expect(page.getByRole("navigation", { name: "Sections" })).toHaveCount(0);
   // For the PR (git-ignored run output): this mode has no account, so no secret to show.
-  await page.screenshot({ path: testInfo.outputPath("no-accounts.png"), fullPage: true });
+  await picturedAndChecked(page, testInfo, "no-accounts");
   await panel.getByRole("link", { name: "Open the monitoring" }).click();
   await expect(page.getByRole("article")).toHaveCount(3);
   await expect(page.getByRole("status", { name: "Simulated live mode" })).toBeVisible();

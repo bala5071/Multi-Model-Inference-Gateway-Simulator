@@ -4,6 +4,7 @@
 // secret on the page.
 
 import { expect, type Locator, type Page, type TestInfo } from "@playwright/test";
+import { picturedAndChecked } from "./a11y";
 
 export const NOT_AVAILABLE = "That page is not available to this account.";
 export const SESSION_ENDED = "Your session has ended. Log in again.";
@@ -186,12 +187,8 @@ export async function picture(
   masked: Locator[] = [],
 ): Promise<void> {
   expect(await visibleSecrets(page)).toEqual([]);
-  await page.screenshot({
-    path: testInfo.outputPath(`${name}.png`),
-    fullPage: true,
-    mask: masked,
-    maskColor: "#555555",
-  });
+  // In both themes, each checked by axe in both (docs/53).
+  await picturedAndChecked(page, testInfo, name, masked);
 }
 
 /**

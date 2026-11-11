@@ -106,6 +106,14 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The bundle budget (docs/52, Q4; docs/53): JS 135 kB and CSS 12 kB, gzip level 9.
+      - name: Bundle budget
+        run: npm run budget
+
+      # The gate's control: with a 1000 B budget it must fail.
+      - name: Bundle budget control
+        run: npm run budget:control
+
   # Browser smoke tests of the built dashboard against the gateway in simulated live mode.
   # See docs/18-demo.md.
   e2e:
