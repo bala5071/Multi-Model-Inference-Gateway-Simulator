@@ -473,6 +473,10 @@ about the gateway.
 - `npm run budget` (CI, after the build): JS at most 135 kB, CSS at most 12 kB, gzip level 9.
 - The e2e runs axe (`e2e/a11y.ts`) on every pictured screen in both themes; a serious or
   critical finding fails it.
+- The frame (docs/54): the sidebar, breadcrumbs and the account menu in `src/shell/`; icons from
+  `lucide-react`, imported one by one; no font file (the gate's font budget is 0 B). Visual
+  baselines in `frontend/e2e/visual/` are compared only by CI's `visual` job in the pinned
+  Playwright image, never refreshed to make a failure pass.
 - `npm run build` writes to `src/gateway/dashboard/`, which is not tracked.
 
 - The dashboard must label simulated live mode on every tab (`SimulationBanner`).
