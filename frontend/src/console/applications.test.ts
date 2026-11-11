@@ -34,7 +34,7 @@ describe("figureText", () => {
     expect(figureText({ value: 13.45, why_not: null }, "ms")).toBe("13 ms");
     // Too few: a dash, which the table explains (docs/54).
     expect(figureText({ value: null, why_not: "too_few" }, "percent")).toBe(TOO_FEW);
-    expect(TOO_FEW).toBe("—");
+    expect(TOO_FEW).toBe(String.fromCodePoint(0x2014));
     expect(figureText({ value: null, why_not: "incomplete" }, "count")).toBe("incomplete");
     expect(figureText({ value: null, why_not: "unavailable" }, "ms")).toBe("unavailable");
     expect(figureText({ value: null, why_not: "above_range" }, "ms")).toBe(

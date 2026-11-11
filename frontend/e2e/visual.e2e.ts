@@ -74,6 +74,14 @@ test("the login and the forced password change", async ({ page }) => {
   const change = page.getByRole("region", { name: "Change your password", exact: true });
   await expect(change).toBeVisible();
   await shot(page, "forced-password-change");
+  // The bootstrap password works for one login only: finish the change for the tests after this.
+  await change
+    .getByLabel("Current password", { exact: true })
+    .fill(process.env[OPERATOR.first] ?? "");
+  await change.getByLabel("New password", { exact: true }).fill(process.env[OPERATOR.second] ?? "");
+  await change.getByRole("button", { name: "Change password" }).click();
+  await expect(page.getByRole("button", { name: /^Account:/ })).toBeVisible();
+  await logOut(page);
 });
 
 const ROLES: [Account, string][] = [

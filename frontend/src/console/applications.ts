@@ -19,7 +19,8 @@ export const WINDOW_WORDS = "last 60 minutes";
  * What a figure too few requests stand behind is drawn as (docs/54): a dash, explained by a
  * tooltip, words for screen readers, and the table's footnote. Never 0.
  */
-export const TOO_FEW = "—";
+// An em dash, written as its code point (the character check keeps sources ASCII).
+export const TOO_FEW = String.fromCodePoint(0x2014);
 /** The alert signals' minimums (gateway.signals, pinned by tests/test_dashboard.py). */
 export const RATE_MINIMUM = 20;
 export const P50_MINIMUM = 10;
