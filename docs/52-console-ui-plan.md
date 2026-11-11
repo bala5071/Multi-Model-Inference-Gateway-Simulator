@@ -520,3 +520,65 @@ UI4 (the Applications list, the application page and its tabs, then the monitori
 2. **The key shown once stays visible**, as today: restyled with the new components, with Copy
    and "I have stored it", cleared when it is stored or the screen is left. Section 4's masking is
    dropped.
+
+## 17. UI4: the Applications list, the application page, the monitoring (plan, 2026-11-11)
+
+Asked after UI3 (#53) merged, following the approved flow of `docs/console-ia-v2-plan.md`
+(sections 2.1 to 2.5, 10 and 13). Sections 4, 7 to 9, 13, 15 and 16 of this plan still apply.
+**Two points are open (17.6) and are asked before any code.**
+
+### 17.1 The Applications list
+
+The existing list (docs/51), drawn with UI3's components: a search box and filters (mode,
+status) that work **on the current page only**, labelled so; status pills; the dash with its
+tooltip for "too few to judge"; an empty state that says what an application is, with Add
+application (shown only where the gateway allows it, as today); a skeleton while loading. The
+figures, their window and their honesty rules (2.5) are unchanged.
+
+### 17.2 The application page
+
+`#/app/<id>/overview`, `/settings`, `/rules`, `/incidents`, `/keys` (2.2), with tabs and the
+breadcrumb "Applications / name". Clicking a row of the list opens it. The tabs are the
+existing screens under one header, so the application dropdown on Application settings, Alert
+rules, Incidents and API keys goes. **The old hashes keep working**: `#/application/<id>` reads
+as `#/app/<id>/settings`, `#/rules/<id>` as `/rules`, `#/incidents/<app>/<incident>` as that
+application's incidents tab, `#/app/<id>/keys` is already the new form, and `#/incidents` stays
+the organization's list. `routes.ts` stays the one parser and printer, with a round-trip test.
+A tab the session cannot use is not drawn, and its address draws the landing with no request for
+its data (10.1). The landing follows 2.1: one application for an application's admin or viewer
+lands on that application's page.
+
+### 17.3 Overview
+
+Whatever the gateway returns for this application, said with what it covers, never more: see
+17.6, question 1.
+
+### 17.4 The bundle: split by route
+
+JS is at 132.9 kB of 135 kB. The login, the frame and the first screen load first; the
+application page, the Overview's charts (uPlot) and the monitoring load on demand
+(`React.lazy` and dynamic `import()`, chunks from the same origin, so the CSP's
+`script-src 'self'` holds). `npm run budget` gains an **initial-download** figure (the entry and
+what it imports statically, gzip) with its own budget, checked in CI, beside the total; each
+chunk is reported. The total budget is not raised.
+
+### 17.5 What this PR carries
+
+Section 15's list, plus deep links and direct URLs a role cannot use, per role, in the e2e.
+
+### 17.6 Open, asked before any code
+
+1. **Overview's data.** The plan's Overview (2.4) is per-application monitoring over time, from
+   a read that does not exist yet: IA PR 2's per-application metrics route, with
+   `usage.read_application` wired (marked LATER in `permissions.py` today). What the gateway
+   returns now: the organization's metrics read (`usage.read_organization`, org admin and
+   organization reader) gives each application's requests, error rate and p50 **over 60 minutes,
+   as single figures, no series**; the incident counts by state. Time series exist only in the
+   platform monitoring snapshot (15 minutes at 1 s, `monitoring.read`, platform admin, loopback),
+   which the platform admin cannot use for an organization's application (IA Q1). An application's
+   admin or viewer can read no figures at all today. So uPlot charts and sparklines on Overview
+   cannot be drawn from what exists without inventing a series.
+2. **"Fold the monitoring into the same page".** The monitoring is the platform's (models,
+   scheduler, KV, events), for the platform admin from loopback. The reading proposed: it stays
+   its own item (`#/monitor/<tab>`, unchanged rule), redrawn with UI3's components and loaded on
+   demand, inside the same frame, not inside the application page.
