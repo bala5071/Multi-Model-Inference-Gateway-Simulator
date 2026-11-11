@@ -582,3 +582,14 @@ Section 15's list, plus deep links and direct URLs a role cannot use, per role, 
    scheduler, KV, events), for the platform admin from loopback. The reading proposed: it stays
    its own item (`#/monitor/<tab>`, unchanged rule), redrawn with UI3's components and loaded on
    demand, inside the same frame, not inside the application page.
+
+### 17.7 Answers (2026-11-11)
+
+1. **Overview uses what exists only.** Stat tiles of the 60-minute figures (requests, error rate,
+   p50 to within about 19%) from the organization's metrics read, and the incident counts by
+   state, each labelled with what it covers; for a session the gateway lets read them
+   (`usage.read_organization`). No uPlot chart or sparkline on Overview: the gateway returns no
+   per-application series. An application's admin or viewer is told the figures are not
+   available to this account yet. The charts stay in the platform monitoring.
+2. **The monitoring stays its own item** (`#/monitor/<tab>`, platform admin, loopback, unchanged),
+   redrawn with UI3's components and loaded on demand, in the same frame.
