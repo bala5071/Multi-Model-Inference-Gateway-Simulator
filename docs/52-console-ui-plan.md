@@ -355,3 +355,63 @@ decision is listed in UI1's description so it can be objected to.
 8. **Visual regression moves to UI2.** UI1's pictures would be replaced by UI2's frame at once;
    the pinned-image job and its baselines start with the frame.
 9. Design note: `docs/53-console-tokens-theme.md`.
+
+## 15. The remaining UI work, reordered so the most visible comes first (2026-11-11)
+
+Asked after UI1 (#51) merged. It replaces the order of section 10 from UI2 on; sections 1 to 9 and
+13 still apply. Presentation, structure and accessibility only: no behaviour, route or permission
+change in any of them.
+
+**UI2. The frame and the auth screens.**
+
+- A left sidebar for navigation: collapsible, icons with labels, grouped by level, drawn only from
+  `GET /v1/auth/capabilities` as today. A top bar with breadcrumbs and a user menu (initials:
+  the name, the organization, the roles as words, Theme, Log out). They replace the run-on header
+  line and the flat row of links.
+- Login and the forced password change redesigned: a centred card on a clean page, the product
+  mark, a short heading and a helper line, labelled fields with the right `autocomplete`
+  (`username`, `current-password`, `new-password`) so password managers work, a show/hide
+  button, a caps-lock warning, the password rules shown before anyone types, inline errors in
+  words, a loading state on submit, Enter to submit, focus on the first field, and a clear
+  sentence about lockout. The forced change shows only its form and Log out, no navigation.
+  Every security behaviour stays: CSRF, the one login refusal and its wording, nothing in the
+  address, storage or logs.
+- The small things from the screenshots: "too few to judge" shown as a dash with a tooltip,
+  "Add application" as the primary button, the yellow notices replaced by toasts.
+
+**UI3. Components and the typed settings form.** Buttons by role, tables (sticky header; empty,
+loading and error states), status pills, cards, dialogs on the native `<dialog>`, toasts,
+skeletons, menus and tabs; and the typed Application settings form: toggles for booleans,
+number fields with units, chips for lists, a "changed" summary and a sticky Save bar, JSON
+editing behind an "Advanced" disclosure. Every change is still checked by the gateway before it
+is saved.
+
+**UI4. The Applications list and the application page** (the approved flow: click an
+application, then its tabs), **then the monitoring.**
+
+**Libraries (decision).**
+
+- No Bootstrap and no Tailwind.
+- Icons: **Lucide** (`lucide-react`, ISC), imported icon by icon so only the icons used are
+  bundled; pinned to a release at least two weeks old and recorded in the "Built into the
+  dashboard and the console" licence table.
+- Font: **the system stack**, no font file. Its size is 0 B; the bundle gate gains a separate
+  font budget of 0 B (it fails on any font file in the build), so adding a self-hosted font later
+  is a decision with its own number, not a side effect.
+- A headless library only for a select, menu or combobox, and only if it passes a CSP trial (no
+  style element, no inline style attribute, no request to another origin) with its licence in the
+  table. UI2's user menu is written here on native elements, to the menu button pattern, so it
+  needs none.
+- Everything else stays our own, on native elements.
+
+**What each PR carries:** axe in both themes on every screen and component state, keyboard-only
+checks, the contrast test for every colour pair, the leak scans, the per-role e2e, mutation checks
+restored by sha256, the visual-regression screenshots on CI's pinned Linux image, and screenshots
+per role. The bundle is measured before and after against the 135 kB / 12 kB gate.
+
+**Visual regression (from UI2, section 9):** a CI job in the Playwright image of the pinned
+version (`mcr.microsoft.com/playwright:v<version>-noble`) runs a `visual` project with
+`toHaveScreenshot`, values that change between runs masked, animations off; other machines skip
+it. The first run writes the baselines and fails; they are taken from that run's artifact and
+committed, and the next run compares against them. Refreshing them is a reviewed commit, never a
+way to make a failure pass.
