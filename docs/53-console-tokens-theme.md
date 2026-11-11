@@ -55,10 +55,16 @@ timings, and do not depend on the hardware):
 | | JS raw | JS gzip | CSS raw | CSS gzip |
 |---|---|---|---|---|
 | Before (main at 7c5f805) | 391,300 B | 120,242 B | 12,204 B | 3,244 B |
-| After (this PR) | see PR | see PR | see PR | see PR |
+| After (cd05945) | 392,079 B | 120,448 B | 13,754 B | 3,731 B |
+| Change | +779 B | +206 B | +1,550 B | +487 B |
 
-The axe results, the contrast table and the before and after bundle are in UI1's description,
-with the commit they were measured at.
+Budget: JS 135,000 B and CSS 12,000 B gzip, so 14,552 B and 8,269 B of headroom after this PR.
+
+axe, in the e2e run on cd05945: 47 screens, each in the light and the dark system theme (94
+runs), no violation of any impact; the planted control was found in both themes (3 violations
+each) and failed the check. Contrast: 25 text pairs, lowest 4.75:1 (`--ok` on `--ok-soft`, light);
+27 non-text pairs, lowest 3.28:1 (`--border-strong` on `--surface-2`, light). The full table is in
+UI1's description.
 
 ## Not built here
 
