@@ -1,6 +1,15 @@
 import type { Capabilities } from "../console/types";
 import { capabilities } from "../test/fixtures";
-import { allows, itemOf, NAVIGATION, namedWith, opens, target, type ItemId } from "./navigation";
+import {
+  allows,
+  itemOf,
+  landing,
+  NAVIGATION,
+  namedWith,
+  opens,
+  target,
+  type ItemId,
+} from "./navigation";
 
 function item(id: ItemId) {
   const found = NAVIGATION.find((candidate) => candidate.id === id);
@@ -79,6 +88,39 @@ describe("navigation", () => {
     expect(target(item("monitor"), rules, capabilities.root)).toEqual({
       screen: "monitor",
       tab: "overview",
+    });
+  });
+});
+
+describe("applications (docs/51)", () => {
+  it("lands a session on its applications only when the answer allows the list", () => {
+    expect(landing(only({ organization: { "applications.list": true } }))).toEqual({
+      screen: "apps",
+    });
+    expect(landing(only({ organization: { "applications.list": false } }))).toEqual({
+      screen: "home",
+    });
+    expect(landing(only({ platform: { "monitoring.read": true } }))).toEqual({ screen: "home" });
+  });
+
+  it("opens the Add form only when the answer allows creating an application", () => {
+    const listing = only({ organization: { "applications.list": true } });
+    expect(opens({ screen: "apps" }, listing)).toBe(true);
+    expect(opens({ screen: "apps-new" }, listing)).toBe(false);
+    const creating = only({
+      organization: { "applications.list": true, "applications.create": true },
+    });
+    expect(opens({ screen: "apps-new" }, creating)).toBe(true);
+    expect(itemOf({ screen: "apps-new" })).toBe("apps");
+  });
+
+  it("opens the keys only with an application whose keys' list is allowed", () => {
+    expect(opens({ screen: "keys", applicationId: null }, capabilities.nina)).toBe(true);
+    expect(opens({ screen: "keys", applicationId: null }, capabilities.olive)).toBe(false);
+    const rules = { screen: "rules", applicationId: "north-shop" } as const;
+    expect(target(item("keys"), rules, capabilities.alice)).toEqual({
+      screen: "keys",
+      applicationId: "north-shop",
     });
   });
 });

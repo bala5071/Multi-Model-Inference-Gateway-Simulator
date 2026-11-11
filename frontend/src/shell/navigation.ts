@@ -15,7 +15,15 @@ export interface Ask {
 }
 
 export type ItemId =
-  "home" | "monitor" | "organization" | "application" | "rules" | "channels" | "incidents";
+  | "home"
+  | "monitor"
+  | "apps"
+  | "organization"
+  | "application"
+  | "rules"
+  | "keys"
+  | "channels"
+  | "incidents";
 
 export interface NavItem {
   id: ItemId;
@@ -27,6 +35,11 @@ export interface NavItem {
 export const NAVIGATION: readonly NavItem[] = [
   { id: "home", label: "Home", asks: [] },
   { id: "monitor", label: "Monitoring", asks: [{ level: "platform", action: "monitoring.read" }] },
+  {
+    id: "apps",
+    label: "Applications",
+    asks: [{ level: "organization", action: "applications.list" }],
+  },
   {
     id: "organization",
     label: "Organization settings",
@@ -41,6 +54,11 @@ export const NAVIGATION: readonly NavItem[] = [
     id: "rules",
     label: "Alert rules",
     asks: [{ level: "application", action: "alert_rules.read" }],
+  },
+  {
+    id: "keys",
+    label: "API keys",
+    asks: [{ level: "application", action: "application_keys.list" }],
   },
   {
     id: "channels",
@@ -60,6 +78,10 @@ export const NAVIGATION: readonly NavItem[] = [
 /** Inside the monitoring: the Playground tab, and the load control on it. */
 export const PLAYGROUND: Ask = { level: "platform", action: "playground.use" };
 export const LOAD_CONTROL: Ask = { level: "platform", action: "control.write" };
+/** Adding an application: the Add application control and form (docs/51). */
+export const CREATE_APPLICATION: Ask = { level: "organization", action: "applications.create" };
+/** The organization's application list: where such a session lands (docs/51). */
+export const LIST_APPLICATIONS: Ask = { level: "organization", action: "applications.list" };
 /** The organization's own incidents, for the Incidents link and the home screen's count. */
 export const ORGANIZATION_INCIDENTS: Ask = {
   level: "organization",
@@ -93,7 +115,17 @@ export function shownItems(capabilities: Capabilities): NavItem[] {
 
 /** The item a route belongs to; none for a route the page does not know. */
 export function itemOf(route: Route): ItemId | null {
-  return route.screen === "unknown" ? null : route.screen;
+  if (route.screen === "unknown") return null;
+  return route.screen === "apps-new" ? "apps" : route.screen;
+}
+
+/**
+ * Where `#/home` takes this session (docs/51): its organization's Applications when the gateway
+ * allows it the list, Home otherwise (a platform session until Clients, an application-only one
+ * until the application page).
+ */
+export function landing(capabilities: Capabilities): Route {
+  return allows(capabilities, LIST_APPLICATIONS) ? { screen: "apps" } : { screen: "home" };
 }
 
 /**
@@ -109,6 +141,7 @@ export function opens(route: Route, capabilities: Capabilities): boolean {
   if (route.screen === "monitor" && route.tab === "playground") {
     return allows(capabilities, PLAYGROUND);
   }
+  if (route.screen === "apps-new") return allows(capabilities, CREATE_APPLICATION);
   return true;
 }
 
@@ -124,6 +157,10 @@ export function target(item: NavItem, current: Route, capabilities: Capabilities
       return { screen: "organization" };
     case "channels":
       return { screen: "channels" };
+    case "apps":
+      return { screen: "apps" };
+    case "keys":
+      return { screen: "keys", applicationId: application };
     case "application":
       return { screen: "application", applicationId: application };
     case "rules":

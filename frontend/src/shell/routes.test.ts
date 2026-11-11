@@ -12,6 +12,11 @@ const EVERY: Route[] = [
   { screen: "incidents", applicationId: null, incidentId: null },
   { screen: "incidents", applicationId: "north-shop", incidentId: null },
   { screen: "incidents", applicationId: "north-shop", incidentId: "inc_1" },
+  { screen: "apps" },
+  { screen: "apps-new" },
+  { screen: "keys", applicationId: null },
+  { screen: "keys", applicationId: "north-shop" },
+  { screen: "keys", applicationId: "app one/two" },
 ];
 
 describe("routes", () => {
@@ -51,10 +56,26 @@ describe("routes", () => {
       "#/incidents/a/b/c",
       "#/home/x",
       "#/manage/users",
+      "#/apps/x",
+      "#/apps/new/x",
+      "#/app",
+      "#/app/north-shop",
+      "#/app//keys",
+      "#/app/north-shop/settings",
+      "#/keys/north-shop",
     ]) {
       expect(parseRoute(hash)).toEqual({ screen: "unknown" });
     }
     expect(routeHash({ screen: "unknown" })).toBe("#/home");
+  });
+
+  it("writes the plan's addresses for the applications and their keys (docs/51)", () => {
+    expect(routeHash({ screen: "apps" })).toBe("#/apps");
+    expect(routeHash({ screen: "apps-new" })).toBe("#/apps/new");
+    expect(routeHash({ screen: "keys", applicationId: "north-shop" })).toBe(
+      "#/app/north-shop/keys",
+    );
+    expect(routeHash({ screen: "keys", applicationId: null })).toBe("#/keys");
   });
 
   it("carries a route's application", () => {
