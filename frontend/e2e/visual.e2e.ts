@@ -49,7 +49,12 @@ function masks(page: Page): Locator[] {
  * The whole page in both themes, masked; or, given `part` (a menu, a drawer: drawn above the
  * page, where a mask would cover it), that part alone, which holds nothing that changes.
  */
-async function shot(page: Page, name: string, part?: Locator): Promise<void> {
+async function shot(
+  page: Page,
+  name: string,
+  part?: Locator,
+  partMasks: Locator[] = [],
+): Promise<void> {
   await page.evaluate(() => document.fonts.ready);
   const steady = { animations: "disabled", caret: "hide", maxDiffPixelRatio: 0.002 } as const;
   for (const theme of ["light", "dark"] as const) {
@@ -62,7 +67,7 @@ async function shot(page: Page, name: string, part?: Locator): Promise<void> {
         mask: masks(page),
       });
     } else {
-      await expect(part).toHaveScreenshot(`${name}-${theme}.png`, steady);
+      await expect(part).toHaveScreenshot(`${name}-${theme}.png`, { ...steady, mask: partMasks });
     }
   }
   await page.emulateMedia({ colorScheme: "light" });
@@ -155,8 +160,8 @@ test("UI3: the typed settings forms, a confirmation, the incidents tabs (docs/55
     .click();
   const dialog = page.getByRole("alertdialog", { name: "Revoke a key" });
   await expect(dialog).toBeVisible();
-  // The key's label and id are the run's: the dialog's words are masked by its own part shot.
-  await shot(page, "confirm-dialog", dialog.getByRole("button", { name: "Cancel" }).locator(".."));
+  // The whole dialog; its sentence names the run's key id, so that sentence is masked.
+  await shot(page, "confirm-dialog", dialog, [dialog.locator(".dialog-body")]);
   await dialog.getByRole("button", { name: "Cancel" }).click();
 
   await sectionsNav.getByRole("link", { name: "Incidents", exact: true }).click();
