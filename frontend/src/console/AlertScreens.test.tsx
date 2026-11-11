@@ -418,10 +418,11 @@ describe("channels", () => {
     await user.click(await within(channel).findByRole("button", { name: "Delete" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Delete this channel" });
     expect(dialog).toHaveTextContent("This cannot be undone.");
-    expect(within(dialog).getAllByRole("button").map((b) => b.textContent)).toEqual([
-      "Cancel",
-      "Delete it",
-    ]);
+    expect(
+      within(dialog)
+        .getAllByRole("button")
+        .map((b) => b.textContent),
+    ).toEqual(["Cancel", "Delete it"]);
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(seen.some((s) => s.method === "DELETE")).toBe(false);

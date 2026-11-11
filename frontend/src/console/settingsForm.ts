@@ -6,6 +6,10 @@ import { formatValue, type Draft, type Field } from "./derive";
 import { kindOf, unitOf } from "./settingKinds";
 import type { Json, OrganizationSettings } from "./types";
 
+/** The arrow between a value before and after, and an alias and its tier (written as its code
+ * point: the character check keeps source ASCII). */
+export const ARROW = String.fromCodePoint(0x2192);
+
 /** A draft field's value as JSON, or undefined when its text is not JSON (yet). */
 export function fieldValue(field: Field | undefined): Json | undefined {
   if (field === undefined) return undefined;
@@ -55,7 +59,7 @@ export function displayValue(name: string, value: Json | undefined): string {
     const entries = Object.entries(value);
     return entries.length === 0
       ? "none"
-      : entries.map(([k, v]) => `${k} → ${formatValue(v)}`).join(", ");
+      : entries.map(([k, v]) => `${k} ${ARROW} ${formatValue(v)}`).join(", ");
   }
   return value;
 }

@@ -3,7 +3,15 @@ import { ApiError } from "./api";
 import type { ConsoleContext } from "./context";
 import { canSave, draftChange, refusalText, verdict, type Draft, type FieldMode } from "./derive";
 import { kindOf, unitOf } from "./settingKinds";
-import { changedRows, fieldValue, withText, withUndo, withUnset, withValue } from "./settingsForm";
+import {
+  ARROW,
+  changedRows,
+  fieldValue,
+  withText,
+  withUndo,
+  withUnset,
+  withValue,
+} from "./settingsForm";
 import type { Change, Json, Validation } from "./types";
 import { TableScroll } from "../components/TableScroll";
 import { Button } from "../ui/Button";
@@ -91,7 +99,7 @@ function Control({
                 write(entries.map((e, i) => (i === index ? [event.target.value, e[1]] : e)));
               }}
             />
-            <span aria-hidden="true">{"→"}</span>
+            <span aria-hidden="true">{ARROW}</span>
             <input
               aria-label={`${name}: tier for alias ${String(index + 1)}`}
               value={tier}
@@ -359,7 +367,7 @@ export function EditForm({
           <ul className="changed-list">
             {changed.map((row) => (
               <li key={row.name}>
-                <span className="setting-name">{row.name}</span>: <del>{row.before}</del> {"→"}{" "}
+                <span className="setting-name">{row.name}</span>: <del>{row.before}</del> {ARROW}{" "}
                 <ins>{row.after}</ins>
               </li>
             ))}

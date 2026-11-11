@@ -1,6 +1,7 @@
 import type { Draft } from "./derive";
 import { kindOf, SETTING_KINDS, unitOf } from "./settingKinds";
 import {
+  ARROW,
   changedRows,
   displayValue,
   fieldValue,
@@ -61,7 +62,7 @@ describe("the typed settings form's draft (docs/55)", () => {
     expect(displayValue("max_tokens", null)).toBe("not set");
     expect(displayValue("allowed_providers", "all")).toBe("All providers");
     expect(displayValue("allowed_providers", [])).toBe("none");
-    expect(displayValue("model_aliases", { fast: "economy" })).toBe('fast → "economy"');
+    expect(displayValue("model_aliases", { fast: "economy" })).toBe(`fast ${ARROW} "economy"`);
     expect(fieldValue({ mode: "set", text: "{" })).toBeUndefined();
   });
 
