@@ -116,3 +116,90 @@ export function routeHash(route: Route): string {
 export function routeApplication(route: Route): string | null {
   return "applicationId" in route ? route.applicationId : null;
 }
+
+/** One step of the breadcrumb trail: its words, and where it goes (none for the last step). */
+export interface Crumb {
+  label: string;
+  route: Route | null;
+}
+
+const MONITOR_WORDS: Record<MonitorTab, string> = {
+  overview: "Overview",
+  latency: "Latency",
+  capacity: "Capacity",
+  applications: "Applications",
+  events: "Events",
+  playground: "Playground",
+};
+
+/**
+ * The breadcrumb trail of a place (docs/54): the organization, the section, then what the route
+ * names in it. Pure; a trail never says whether the session may open a step, the page does.
+ * `landing` is where `#/home` takes this session, so Home is named after what it shows.
+ */
+export function crumbs(route: Route, organizationId: string, landing: Route): Crumb[] {
+  const org: Crumb = { label: organizationId, route: null };
+  const last = (label: string): Crumb => ({ label, route: null });
+  switch (route.screen) {
+    case "home":
+    case "unknown":
+      return landing.screen === "apps" ? [org, last("Applications")] : [last("Home")];
+    case "monitor":
+      return [
+        { label: "Monitoring", route: { screen: "monitor", tab: "overview" } },
+        last(MONITOR_WORDS[route.tab]),
+      ];
+    case "apps":
+      return [org, last("Applications")];
+    case "apps-new":
+      return [org, { label: "Applications", route: { screen: "apps" } }, last("Add application")];
+    case "organization":
+      return [org, last("Organization settings")];
+    case "channels":
+      return [org, last("Channels")];
+    case "application":
+      return route.applicationId === null
+        ? [org, last("Application settings")]
+        : [
+            org,
+            {
+              label: "Application settings",
+              route: { screen: "application", applicationId: null },
+            },
+            last(route.applicationId),
+          ];
+    case "rules":
+      return route.applicationId === null
+        ? [org, last("Alert rules")]
+        : [
+            org,
+            { label: "Alert rules", route: { screen: "rules", applicationId: null } },
+            last(route.applicationId),
+          ];
+    case "keys":
+      return route.applicationId === null
+        ? [org, last("API keys")]
+        : [
+            org,
+            { label: "API keys", route: { screen: "keys", applicationId: null } },
+            last(route.applicationId),
+          ];
+    case "incidents": {
+      const list: Crumb = {
+        label: "Incidents",
+        route: { screen: "incidents", applicationId: null, incidentId: null },
+      };
+      if (route.applicationId === null) return [org, last("Incidents")];
+      if (route.incidentId === null) return [org, list, last(route.applicationId)];
+      return [
+        org,
+        list,
+        {
+          label: route.applicationId,
+          route: { screen: "incidents", applicationId: route.applicationId, incidentId: null },
+        },
+        last(route.incidentId),
+      ];
+    }
+  }
+}

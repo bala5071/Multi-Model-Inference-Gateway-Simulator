@@ -13,16 +13,30 @@ import { ChangePasswordScreen, LoginScreen } from "../console/LoginScreen";
 import { OrganizationScreen } from "../console/OrganizationScreen";
 import { RulesScreen } from "../console/RulesScreen";
 import { StepUpDialog } from "../console/StepUpDialog";
+import { ToastProvider } from "../console/Toasts";
 import type { Capabilities, LoginAnswer, MeAnswer, SessionUser } from "../console/types";
 import { Header } from "./Header";
 import { Home, NoAccounts } from "./Home";
 import { allows, itemOf, landing, LOAD_CONTROL, opens, PLAYGROUND } from "./navigation";
-import { NavBar } from "./NavBar";
-import { parseRoute, routeHash, type Route } from "./routes";
+import { Brand } from "./Brand";
+import { NavList, Sidebar } from "./NavBar";
+import { crumbs, parseRoute, routeHash, type Route } from "./routes";
 
 export const CAPABILITIES_PATH = "/v1/auth/capabilities";
 export const SESSION_ENDED = "Your session has ended. Log in again.";
 export const NOT_AVAILABLE = "That page is not available to this account.";
+
+// Whether the sidebar is narrowed to icons: a convenience of this browser, like the theme. Only
+// the word is kept, and a blocked storage just means it opens wide.
+const SIDEBAR_KEY = "gateway-sidebar";
+
+function savedCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_KEY) === "collapsed";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Where the page stands with the gateway: asking; no accounts at all (simulated live mode, where
@@ -76,6 +90,8 @@ export function Shell({ fetcher, stream }: { fetcher?: typeof fetch; stream?: St
   const [asking, setAskingState] = useState<Asking | null>(null);
   const [simulated, setSimulated] = useState(false);
   const [route, setRoute] = useRoute();
+  const [collapsed, setCollapsed] = useState(savedCollapsed);
+  const mainRef = useRef<HTMLDivElement>(null);
 
   /** The session's next state: kept in the ref at once, for the callbacks that read it. */
   const move = useCallback((next: Session | ((now: Session) => Session)) => {
@@ -242,7 +258,13 @@ export function Shell({ fetcher, stream }: { fetcher?: typeof fetch; stream?: St
       case "change":
         return (
           <main className="console">
-            <ChangePasswordScreen api={api} onChanged={check} />
+            <ChangePasswordScreen
+              api={api}
+              onChanged={check}
+              onLogout={() => {
+                void logout();
+              }}
+            />
           </main>
         );
       case "in":
@@ -367,42 +389,73 @@ export function Shell({ fetcher, stream }: { fetcher?: typeof fetch; stream?: St
     }
   }
 
+  const shown =
+    capabilities === null ? null : route.screen === "home" ? landing(capabilities) : route;
+  const withSidebar = session.kind === "in" && capabilities !== null && shown !== null;
+  const doLogout = () => {
+    void logout();
+  };
+
   return (
-    <div className="app">
-      <Header
-        user={user}
-        capabilities={capabilities}
-        simulated={simulated}
-        onLogout={
-          user === null
-            ? null
-            : () => {
-                void logout();
+    <ToastProvider>
+      <div className={`app ${withSidebar ? "with-sidebar" : ""} ${collapsed ? "collapsed" : ""}`}>
+        <button
+          type="button"
+          className="skip-link"
+          onClick={() => {
+            mainRef.current?.focus();
+          }}
+        >
+          Skip to content
+        </button>
+        {withSidebar && (
+          <Sidebar
+            capabilities={capabilities}
+            route={shown}
+            collapsed={collapsed}
+            brand={<Brand collapsed={collapsed} />}
+            onToggle={() => {
+              const next = !collapsed;
+              try {
+                localStorage.setItem(SIDEBAR_KEY, next ? "collapsed" : "expanded");
+              } catch {
+                // Not kept; it still applies until the page is closed.
               }
-        }
-      />
-      {capabilities !== null && (
-        <NavBar
-          capabilities={capabilities}
-          route={route.screen === "home" ? landing(capabilities) : route}
-        />
-      )}
-      {body()}
-      {asking !== null && (
-        <StepUpDialog
-          api={api}
-          onDone={() => {
-            asking.resolve();
-            setAsking(null);
-          }}
-          onCancel={() => {
-            asking.reject(
-              new ApiError(0, "step_up_cancelled", "Not changed: the password was not given."),
-            );
-            setAsking(null);
-          }}
-        />
-      )}
-    </div>
+              setCollapsed(next);
+            }}
+          />
+        )}
+        <div className="frame-main">
+          <Header
+            user={user}
+            capabilities={capabilities}
+            simulated={simulated}
+            onLogout={user === null ? null : doLogout}
+            withSidebar={withSidebar}
+            account={session.kind !== "change"}
+            trail={withSidebar && user !== null ? crumbs(route, user.organization_id, shown) : null}
+            drawer={withSidebar ? <NavList capabilities={capabilities} route={shown} /> : null}
+          />
+          <div ref={mainRef} className="frame-content" tabIndex={-1}>
+            {body()}
+          </div>
+        </div>
+        {asking !== null && (
+          <StepUpDialog
+            api={api}
+            onDone={() => {
+              asking.resolve();
+              setAsking(null);
+            }}
+            onCancel={() => {
+              asking.reject(
+                new ApiError(0, "step_up_cancelled", "Not changed: the password was not given."),
+              );
+              setAsking(null);
+            }}
+          />
+        )}
+      </div>
+    </ToastProvider>
   );
 }

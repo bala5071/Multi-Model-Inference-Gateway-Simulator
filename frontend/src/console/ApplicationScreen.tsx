@@ -14,6 +14,7 @@ import { EditForm } from "./EditForm";
 import { useLoad } from "./useLoad";
 import type { ApplicationSettings, Change, PresetList, VersionPage } from "./types";
 import { TableScroll } from "../components/TableScroll";
+import { Toasted } from "./Toasts";
 
 interface Loaded {
   settings: ApplicationSettings;
@@ -134,11 +135,7 @@ export function ApplicationScreen({
           if (id !== null) onChoose(id);
         }}
       />
-      {message !== null && (
-        <p className="notice" role="status">
-          {message}
-        </p>
-      )}
+      <Toasted message={message} />
       {error !== null && (
         <p className="form-error" role="alert">
           {error}

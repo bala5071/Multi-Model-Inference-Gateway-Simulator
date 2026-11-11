@@ -1,5 +1,10 @@
+import { Menu, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { THEME_PREFERENCES, useTheme, type ThemePreference } from "../hooks/useTheme";
 import type { Capabilities, HeldRole, SessionUser } from "../console/types";
+import { Brand } from "./Brand";
+import { routeHash, type Crumb } from "./routes";
+import { UserMenu } from "./UserMenu";
 
 /** A role as the gateway names it, with its scope: shown as text, never read for a decision. */
 export function roleText(held: HeldRole): string {
@@ -14,53 +19,141 @@ const PREFERENCE_WORDS: Record<ThemePreference, string> = {
   dark: "Dark",
 };
 
+/** The theme, where there is no account menu to hold it (logged out, no accounts). */
+function ThemeSelect() {
+  const { preference, setPreference } = useTheme();
+  return (
+    <label className="theme-choice">
+      Theme
+      <select
+        value={preference}
+        onChange={(event) => {
+          const next = THEME_PREFERENCES.find((p) => p === event.target.value);
+          if (next !== undefined) setPreference(next);
+        }}
+      >
+        {THEME_PREFERENCES.map((p) => (
+          <option key={p} value={p}>
+            {PREFERENCE_WORDS[p]}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function Breadcrumbs({ trail }: { trail: Crumb[] }) {
+  return (
+    <nav className="breadcrumbs" aria-label="Breadcrumb">
+      <ol>
+        {trail.map((crumb, index) => {
+          const isLast = index === trail.length - 1;
+          return (
+            <li key={`${crumb.label}-${index.toString()}`}>
+              {crumb.route !== null && !isLast ? (
+                <a href={routeHash(crumb.route)}>{crumb.label}</a>
+              ) : (
+                <span aria-current={isLast ? "page" : undefined}>{crumb.label}</span>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
+  );
+}
+
 /**
- * The page's one header: who is logged in, in which organization, their roles, the theme
- * (System, Light or Dark: docs/52, Q7), and Log out.
+ * The page's top bar (docs/54). Logged in: the breadcrumbs and the account menu (who, the
+ * organization, the roles as words, the theme, Log out). Otherwise the mark and the theme. While a
+ * password must be changed it shows only the mark: that screen has its own Log out.
  */
 export function Header({
   user,
   capabilities,
   simulated,
   onLogout,
+  trail = null,
+  withSidebar = false,
+  account = true,
+  drawer = null,
 }: {
   user: SessionUser | null;
   capabilities: Capabilities | null;
   simulated: boolean;
   onLogout: (() => void) | null;
+  trail?: Crumb[] | null;
+  withSidebar?: boolean;
+  account?: boolean;
+  /** The navigation, opened in a dialog on narrow screens; drawn only while it is open. */
+  drawer?: ReactNode;
 }) {
-  const { preference, setPreference } = useTheme();
   const roles = capabilities?.roles.map(roleText) ?? [];
+  const drawerRef = useRef<HTMLDialogElement>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const closeDrawer = useCallback(() => {
+    const dialog = drawerRef.current;
+    if (dialog?.open === true) dialog.close();
+  }, []);
+  // A link followed in the drawer changes the place: the drawer closes.
+  const place = trail?.map((c) => c.label).join("/") ?? "";
+  useEffect(() => {
+    closeDrawer();
+  }, [place, closeDrawer]);
+  useEffect(() => {
+    if (drawerOpen && drawerRef.current?.open === false) drawerRef.current.showModal();
+  }, [drawerOpen]);
+  const showAccount = account && user !== null && onLogout !== null;
   return (
-    <header className="top">
-      <h1>Gateway</h1>
-      {simulated && <span className="mode-badge">Simulated</span>}
-      {user !== null && (
-        <span className="muted who" aria-label="Logged in as">
-          {user.username} · organization {user.organization_id}
-          {roles.length > 0 && ` · ${roles.join(", ")}`}
-        </span>
-      )}
-      <label className="theme-choice">
-        Theme
-        <select
-          value={preference}
-          onChange={(event) => {
-            const next = THEME_PREFERENCES.find((p) => p === event.target.value);
-            if (next !== undefined) setPreference(next);
+    <header className={`top ${withSidebar ? "top-with-sidebar" : ""}`}>
+      {drawer !== null && (
+        <button
+          type="button"
+          className="drawer-button quiet"
+          aria-label="Open the navigation"
+          onClick={() => {
+            setDrawerOpen(true);
           }}
         >
-          {THEME_PREFERENCES.map((p) => (
-            <option key={p} value={p}>
-              {PREFERENCE_WORDS[p]}
-            </option>
-          ))}
-        </select>
-      </label>
-      {onLogout !== null && (
-        <button type="button" onClick={onLogout}>
-          Log out
+          <Menu aria-hidden="true" focusable="false" size={20} />
         </button>
+      )}
+      {withSidebar ? null : <Brand />}
+      {trail !== null && <Breadcrumbs trail={trail} />}
+      <div className="top-spacer" />
+      {simulated && <span className="mode-badge">Simulated</span>}
+      {showAccount ? (
+        <UserMenu
+          username={user.username}
+          organizationId={user.organization_id}
+          roles={roles}
+          onLogout={onLogout}
+        />
+      ) : (
+        account && <ThemeSelect />
+      )}
+      {drawer !== null && (
+        <dialog
+          ref={drawerRef}
+          className="drawer"
+          aria-label="Navigation"
+          onClose={() => {
+            setDrawerOpen(false);
+          }}
+        >
+          <div className="drawer-head">
+            <Brand />
+            <button
+              type="button"
+              className="quiet"
+              aria-label="Close the navigation"
+              onClick={closeDrawer}
+            >
+              <X aria-hidden="true" focusable="false" size={20} />
+            </button>
+          </div>
+          {drawerOpen && drawer}
+        </dialog>
       )}
     </header>
   );

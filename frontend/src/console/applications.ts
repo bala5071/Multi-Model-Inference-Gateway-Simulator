@@ -15,8 +15,19 @@ import type {
 /** The window every figure on the list covers, in the words the page uses. */
 export const WINDOW_WORDS = "last 60 minutes";
 
+/**
+ * What a figure too few requests stand behind is drawn as (docs/54): a dash, explained by a
+ * tooltip, words for screen readers, and the table's footnote. Never 0.
+ */
+export const TOO_FEW = "—";
+/** The alert signals' minimums (gateway.signals, pinned by tests/test_dashboard.py). */
+export const RATE_MINIMUM = 20;
+export const P50_MINIMUM = 10;
+export const TOO_FEW_WORDS = "too few to judge";
+export const TOO_FEW_EXPLAINED = `Too few to judge: fewer than ${RATE_MINIMUM.toString()} requests for a rate, ${P50_MINIMUM.toString()} for the p50, in the window.`;
+
 const WHY_NOT: Record<string, string> = {
-  too_few: "too few to judge",
+  too_few: TOO_FEW,
   incomplete: "incomplete",
   unavailable: "unavailable",
   above_range: "above the measured range",

@@ -173,7 +173,8 @@ describe("the settings screens, in the page", () => {
     await user.type(within(form).getByLabelText("Username"), "admin-e2e");
     await user.type(within(form).getByLabelText("Password"), PASSWORD);
     await user.click(within(form).getByRole("button", { name: "Log in" }));
-    await screen.findByRole("button", { name: "Log out" });
+    // Logged in: the account menu is there (docs/54).
+    await screen.findByRole("button", { name: /^Account:/ });
     await openAppOne();
     await screen.findByText("May change");
 
@@ -191,7 +192,8 @@ describe("the settings screens, in the page", () => {
   it("asks /v1/auth/me for the session and its CSRF token on a reload, with no login", async () => {
     const { fetcher, seen } = gateway({ loggedIn: true, probe: { status: 200 } });
     render(<Shell fetcher={fetcher} />);
-    await screen.findByRole("button", { name: "Log out" });
+    // Logged in: the account menu is there (docs/54).
+    await screen.findByRole("button", { name: /^Account:/ });
     await openAppOne();
     await screen.findByText("May change");
     expect(seen.find((s) => s.path.endsWith("/validate"))?.csrf).toBe(CSRF);
@@ -297,7 +299,8 @@ describe("the settings screens, in the page", () => {
     await user.type(within(login).getByLabelText("Username"), "admin-e2e");
     await user.type(within(login).getByLabelText("Password"), PASSWORD);
     await user.click(within(login).getByRole("button", { name: "Log in" }));
-    await screen.findByRole("button", { name: "Log out" });
+    // Logged in: the account menu is there (docs/54).
+    await screen.findByRole("button", { name: /^Account:/ });
     expect(seen.filter((s) => s.path === "/v1/auth/login").at(-1)?.csrf).toBeUndefined();
   });
 

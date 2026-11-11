@@ -1,5 +1,6 @@
 import type { Capabilities } from "../console/types";
 import { capabilities } from "../test/fixtures";
+import { initials } from "./UserMenu";
 import {
   allows,
   itemOf,
@@ -122,5 +123,13 @@ describe("applications (docs/51)", () => {
       screen: "keys",
       applicationId: "north-shop",
     });
+  });
+});
+
+describe("initials (docs/54)", () => {
+  it("takes up to two letters for the avatar", () => {
+    expect(initials("admin-e2e")).toBe("AE");
+    expect(initials("someone")).toBe("SO");
+    expect(initials("x")).toBe("X");
   });
 });

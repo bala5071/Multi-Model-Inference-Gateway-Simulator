@@ -15,6 +15,9 @@ import {
   simulated,
   type CapabilityUser,
 } from "../test/fixtures";
+import { TOO_FEW, TOO_FEW_EXPLAINED, TOO_FEW_WORDS } from "../console/applications";
+import { LOCKOUT_SENTENCE, PASSWORD_RULES } from "../console/passwordRules";
+import { ToastProvider, Toasted } from "../console/Toasts";
 import { NAVIGATION } from "./navigation";
 import { NOT_AVAILABLE, SESSION_ENDED, Shell } from "./Shell";
 
@@ -306,15 +309,66 @@ describe("home", () => {
     expect(within(section).getByRole("button", { name: "Log out" })).toBeInTheDocument();
   });
 
-  it("shows who is logged in, the organization and the roles the gateway names", async () => {
+  it("shows who is logged in, the organization and the roles the gateway names, in the account menu", async () => {
     const { fetcher } = gateway("in", capabilities.olive);
-    open(fetcher);
+    const user = open(fetcher);
     await screen.findByRole("region", { name: "Home" });
+    const button = screen.getByRole("button", { name: "Account: someone" });
+    expect(button).toHaveAttribute("aria-haspopup", "menu");
+    expect(button).toHaveAttribute("aria-expanded", "false");
+    await user.click(button);
+    const menu = screen.getByRole("menu", { name: "Account" });
     // The role as the gateway named it, read from its own answer.
     const [held] = capabilities.olive.roles;
-    expect(screen.getByLabelText("Logged in as")).toHaveTextContent(
-      `someone · organization north · ${held?.role ?? "?"} (application north-blog)`,
+    const who = document.getElementById(menu.getAttribute("aria-describedby") ?? "");
+    expect(who).not.toBeNull();
+    expect(who).toHaveTextContent("someone");
+    expect(who).toHaveTextContent("Organization north");
+    expect(who).toHaveTextContent(`${held?.role ?? "?"} (application north-blog)`);
+    expect(
+      within(menu)
+        .getAllByRole("menuitemradio")
+        .map((item) => item.textContent),
+    ).toEqual(["System", "Light", "Dark"]);
+    expect(within(menu).getByRole("menuitem", { name: "Log out" })).toBeInTheDocument();
+  });
+
+  it("works the account menu by keyboard: Enter opens it, arrows move, Escape gives the focus back", async () => {
+    const { fetcher } = gateway("in", capabilities.olive);
+    const user = open(fetcher);
+    await screen.findByRole("region", { name: "Home" });
+    const button = screen.getByRole("button", { name: "Account: someone" });
+    button.focus();
+    await user.keyboard("{Enter}");
+    const items = [
+      ...screen.getAllByRole("menuitemradio"),
+      screen.getByRole("menuitem", { name: "Log out" }),
+    ];
+    expect(items[0]).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    expect(items[1]).toHaveFocus();
+    await user.keyboard("{End}");
+    expect(items[3]).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    expect(items[0]).toHaveFocus();
+    await user.keyboard("{ArrowUp}");
+    expect(items[3]).toHaveFocus();
+    await user.keyboard("{Home}");
+    expect(items[0]).toHaveFocus();
+    // Choosing Dark from the menu applies it at once.
+    await user.keyboard("{ArrowDown}{ArrowDown}{Enter}");
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(screen.getByRole("menuitemradio", { name: "Dark" })).toHaveAttribute(
+      "aria-checked",
+      "true",
     );
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(button).toHaveFocus();
+    expect(button).toHaveAttribute("aria-expanded", "false");
+    // ArrowUp on the button opens it on the last item.
+    await user.keyboard("{ArrowUp}");
+    expect(screen.getByRole("menuitem", { name: "Log out" })).toHaveFocus();
   });
 });
 
@@ -365,7 +419,8 @@ describe("sessions", () => {
     const user = open(fetcher);
     await logIn(user);
     await screen.findByRole("heading", { name: "Channels", level: 2 });
-    await user.click(screen.getByRole("button", { name: "Log out" }));
+    await user.click(screen.getByRole("button", { name: "Account: someone" }));
+    await user.click(screen.getByRole("menuitem", { name: "Log out" }));
     await screen.findByText("Logged out.");
     expect(window.location.hash).toBe("#/home");
     expect(seen.find((s) => s.path === "/v1/auth/logout")?.csrf).toBe(CSRF);
@@ -559,5 +614,163 @@ describe("applications (docs/51)", () => {
     expect(login).toHaveTextContent(SESSION_ENDED);
     expect(window.location.hash).toBe("#/app/north-shop/keys");
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+describe("the frame (docs/54)", () => {
+  it("groups the sidebar by level, keeps each label as its name when collapsed, and keeps only the word", async () => {
+    const { fetcher } = gateway("in", capabilities.alice);
+    const user = open(fetcher);
+    const nav = await screen.findByRole("navigation", { name: "Sections" });
+    const labels = within(nav)
+      .getAllByRole("link")
+      .map((link) => link.textContent);
+    await user.click(screen.getByRole("button", { name: "Collapse the sidebar" }));
+    expect(screen.getByRole("button", { name: "Expand the sidebar" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    // Collapsed: the same links, by the same names, each with its tooltip.
+    const collapsed = within(screen.getByRole("navigation", { name: "Sections" })).getAllByRole(
+      "link",
+    );
+    expect(collapsed.map((link) => link.textContent)).toEqual(labels);
+    for (const link of collapsed) expect(link).toHaveAttribute("title", link.textContent);
+    expect(localStorage.getItem("gateway-sidebar")).toBe("collapsed");
+    await user.click(screen.getByRole("button", { name: "Expand the sidebar" }));
+    expect(localStorage.getItem("gateway-sidebar")).toBe("expanded");
+  });
+
+  it("shows breadcrumbs for the place, the last one current", async () => {
+    window.location.hash = "#/apps/new";
+    const { fetcher } = gateway("in", capabilities.alice);
+    open(fetcher);
+    const trail = await screen.findByRole("navigation", { name: "Breadcrumb" });
+    expect(
+      within(trail)
+        .getAllByRole("listitem")
+        .map((item) => item.textContent),
+    ).toEqual(["north", "Applications", "Add application"]);
+    expect(within(trail).getByRole("link", { name: "Applications" })).toHaveAttribute(
+      "href",
+      "#/apps",
+    );
+    expect(within(trail).getByText("Add application")).toHaveAttribute("aria-current", "page");
+  });
+
+  it("skips to the content with the first control of the page", async () => {
+    const { fetcher } = gateway("in", capabilities.alice);
+    const user = open(fetcher);
+    await screen.findByRole("navigation", { name: "Sections" });
+    await user.tab();
+    const skip = screen.getByRole("button", { name: "Skip to content" });
+    expect(skip).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(document.activeElement).toHaveClass("frame-content");
+  });
+
+  it("shows a change's result as a toast that can be dismissed", async () => {
+    const user = userEvent.setup();
+    render(
+      <ToastProvider>
+        <Toasted message="Acknowledged." />
+      </ToastProvider>,
+    );
+    const toast = await screen.findByRole("status");
+    expect(toast).toHaveTextContent("Acknowledged.");
+    await user.click(within(toast).getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+});
+
+describe("the login screen (docs/54)", () => {
+  it("puts the focus on the username, with the autocomplete password managers need", async () => {
+    const { fetcher } = gateway("out");
+    open(fetcher);
+    const form = await screen.findByRole("region", { name: "Log in" });
+    const username = within(form).getByLabelText("Username");
+    await waitFor(() => {
+      expect(username).toHaveFocus();
+    });
+    expect(username).toHaveAttribute("autocomplete", "username");
+    expect(within(form).getByLabelText("Password")).toHaveAttribute(
+      "autocomplete",
+      "current-password",
+    );
+  });
+
+  it("shows and hides the password, warns of Caps Lock, and submits with Enter", async () => {
+    const { fetcher, seen } = gateway("out");
+    const user = open(fetcher);
+    const form = await screen.findByRole("region", { name: "Log in" });
+    const password = within(form).getByLabelText("Password");
+    expect(password).toHaveAttribute("type", "password");
+    await user.click(within(form).getByRole("button", { name: "Show password" }));
+    expect(password).toHaveAttribute("type", "text");
+    expect(within(form).getByRole("button", { name: "Hide password" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await user.click(within(form).getByRole("button", { name: "Hide password" }));
+    expect(password).toHaveAttribute("type", "password");
+    await user.click(password);
+    await user.keyboard("{CapsLock}a");
+    expect(within(form).getByRole("status")).toHaveTextContent("Caps Lock is on.");
+    expect(password).toHaveAccessibleDescription("Caps Lock is on.");
+    await user.keyboard("{CapsLock}");
+    await user.clear(password);
+    await user.type(within(form).getByLabelText("Username"), "someone");
+    await user.type(password, `${PASSWORD}{Enter}`);
+    await screen.findByRole("navigation", { name: "Sections" });
+    expect(seen.some((s) => s.method === "POST" && s.path === "/v1/auth/login")).toBe(true);
+  });
+
+  it("says the gateway's one refusal in words, with the lockout rule, and empties the password", async () => {
+    const { fetcher } = gateway("out");
+    const user = open(fetcher);
+    const form = await screen.findByRole("region", { name: "Log in" });
+    await user.type(within(form).getByLabelText("Username"), "someone");
+    await user.type(within(form).getByLabelText("Password"), "not-the-password");
+    await user.click(within(form).getByRole("button", { name: "Log in" }));
+    const alert = await within(form).findByRole("alert");
+    expect(alert).toHaveTextContent("refused: invalid_credentials");
+    expect(alert).toHaveTextContent(LOCKOUT_SENTENCE);
+    expect(within(form).getByLabelText("Password")).toHaveValue("");
+  });
+});
+
+describe("the forced password change (docs/54)", () => {
+  it("shows only its form and Log out: the rules before typing, no navigation, no account menu", async () => {
+    const { fetcher } = gateway("change");
+    open(fetcher);
+    const card = await screen.findByRole("region", { name: "Change your password" });
+    await waitFor(() => {
+      expect(within(card).getByLabelText("Current password")).toHaveFocus();
+    });
+    const next = within(card).getByLabelText("New password");
+    expect(next).toHaveAttribute("autocomplete", "new-password");
+    expect(within(card).getByLabelText("Current password")).toHaveAttribute(
+      "autocomplete",
+      "current-password",
+    );
+    for (const rule of PASSWORD_RULES) expect(card).toHaveTextContent(rule);
+    expect(next).toHaveAccessibleDescription(expect.stringContaining(PASSWORD_RULES[0] ?? "?"));
+    expect(within(card).getByRole("button", { name: "Log out" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Sections" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Account:/ })).toBeNull();
+    expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
+  });
+});
+
+describe("a figure with too few requests behind it (docs/54)", () => {
+  it("is a dash with its meaning in a tooltip, in words for screen readers, and in a footnote", async () => {
+    const { fetcher } = gateway("in", capabilities.alice);
+    open(fetcher);
+    const table = await screen.findByRole("table", { name: "Applications" });
+    const blog = within(table).getByRole("row", { name: /north-blog/ });
+    const dash = within(blog).getAllByTitle(TOO_FEW_EXPLAINED)[0];
+    expect(dash).toHaveTextContent(`${TOO_FEW}${TOO_FEW_WORDS}`);
+    expect(screen.getByText(`${TOO_FEW} ${TOO_FEW_EXPLAINED}`)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Add application" })).toHaveClass("primary");
   });
 });
