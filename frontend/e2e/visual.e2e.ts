@@ -144,15 +144,24 @@ test("UI3: the typed settings forms, a confirmation, the incidents tabs (docs/55
   const chooser = page.getByRole("combobox", { name: "Application", exact: true });
 
   await sectionsNav.getByRole("link", { name: "Application settings", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Application settings", level: 2, exact: true }),
+  ).toBeVisible();
   await chooser.selectOption({ label: "App two (app-two)" });
   await expect(page.getByRole("region", { name: "Edit", exact: true })).toBeVisible();
   await shot(page, "settings-form");
 
   await sectionsNav.getByRole("link", { name: "Organization settings", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Organization settings", level: 2, exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole("region", { name: "Edit", exact: true })).toBeVisible();
   await shot(page, "organization-form");
 
   await sectionsNav.getByRole("link", { name: "API keys", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "API keys", level: 2, exact: true }),
+  ).toBeVisible();
   await chooser.selectOption({ label: "App one (app-one)" });
   await page
     .getByRole("button", { name: /^Revoke / })
@@ -165,6 +174,9 @@ test("UI3: the typed settings forms, a confirmation, the incidents tabs (docs/55
   await dialog.getByRole("button", { name: "Cancel" }).click();
 
   await sectionsNav.getByRole("link", { name: "Incidents", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Incidents", level: 2, exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole("tab", { name: "Every state", exact: true })).toBeVisible();
   await shot(page, "incidents");
   await logOut(page);

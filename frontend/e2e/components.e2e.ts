@@ -26,7 +26,8 @@ async function watchPolicy(page: Page): Promise<() => Promise<string[]>> {
 
 async function open(page: Page, item: string, application?: string): Promise<void> {
   await sections(page).getByRole("link", { name: item, exact: true }).click();
-  await expect(page.getByRole("heading", { level: 2 })).toBeVisible();
+  // The screen opened, not the one before it (each screen's heading is its item's name).
+  await expect(page.getByRole("heading", { name: item, level: 2, exact: true })).toBeVisible();
   if (application !== undefined) {
     await page
       .getByRole("combobox", { name: "Application", exact: true })
@@ -248,6 +249,7 @@ for (const who of ALL) {
       await page.getByRole("button", { name: "Open the navigation" }).click();
       await drawer.getByRole("link", { name: item, exact: true }).click();
       await expect(drawer).toBeHidden();
+      await expect(page.getByRole("heading", { name: item, level: 2, exact: true })).toBeVisible();
       if (app !== undefined) {
         const chooser = page.getByRole("combobox", { name: "Application", exact: true });
         // The applications the gateway names come after the placeholder: wait for them.
