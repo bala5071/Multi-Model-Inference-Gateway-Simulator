@@ -36,6 +36,7 @@ from gateway.alertrecorder import MINUTE_MS, AlertRecorder
 from gateway.alertrollups import (
     AlertRollups,
     InMemoryAlertRollups,
+    MinuteRollup,
     RollupFlusher,
     SharedAlertRollups,
 )
@@ -195,6 +196,7 @@ from gateway.egress import (
 from gateway.evaluator import AlertEvaluator, ApplicationSignals, HeartbeatState
 from gateway.events import EventBus
 from gateway.incidents import (
+    OPEN_STATES,
     Incident,
     IncidentState,
     IncidentStore,
@@ -346,6 +348,9 @@ from gateway.state import (
 )
 from gateway.timeseries import TimeSeriesStore
 from gateway.usage import ChatSource, UsageStore
+from gateway.usagefigures import WINDOWS as FIGURE_WINDOWS
+from gateway.usagefigures import figures, window_for, window_view
+from gateway.usagefigures import unavailable as unavailable_figures
 from gateway.users import User
 from gateway.valkey import ValkeyCounters, account_windows, shared_counters_from
 from gateway.vault import Vault, load_master_keys
@@ -1675,7 +1680,10 @@ def _page_body(name: str, items: list[dict[str, object]], next_cursor: str | Non
 
 
 def _admin_routes(
-    app: FastAPI, accounts: AccountAccess, management: ManagementService | None
+    app: FastAPI,
+    accounts: AccountAccess,
+    management: ManagementService | None,
+    modes: ModeStore | None = None,
 ) -> None:
     """The management endpoints under /v1/admin/orgs/{org} (docs/30): users, and with
     applications, applications and their keys. Every one through ``requires`` with a
@@ -1770,6 +1778,8 @@ def _admin_routes(
         return await resolve_key(stores, p["org"], p["app"], p["key_id"])
 
     creating_applications = requires("applications.create", organization)
+    # Who may create an application may see what it can be created from (docs/51).
+    reading_plans = requires("applications.create", organization)
     listing_applications = requires("applications.list", organization)
     reading_applications = requires("applications.read", application)
     issuing_keys = requires("application_keys.issue", application)
@@ -1788,6 +1798,21 @@ def _admin_routes(
             "requests_per_minute": a.requests_per_minute,
             "created_at_ms": a.created_at_ms,
         }
+
+    async def with_modes(found: Sequence[Application]) -> list[dict[str, object]]:
+        """Each application's view with the mode in force for it (docs/51): the stricter of
+        its organization's and its own, as ``effective_mode`` decides it for a request."""
+        if not found:
+            return []
+        store = modes if modes is not None else InMemoryModeStore()
+        organization_mode = await store.organization_mode(found[0].organization_id)
+        return [
+            {
+                **application_view(a),
+                "mode": effective_mode(organization_mode, await store.application_mode(a.id)).value,
+            }
+            for a in found
+        ]
 
     def key_view(record: ApiKeyRecord, now_ms: float) -> dict[str, object]:
         # Never the key, never its HMAC.
@@ -1818,7 +1843,26 @@ def _admin_routes(
             raise
         except ValueError as exc:  # the name: normalize_name says why, never echoing more
             return _invalid("name", str(exc))
-        return JSONResponse(application_view(made), status_code=201)
+        return JSONResponse((await with_modes([made]))[0], status_code=201)
+
+    @app.get(ORG_PREFIX + "/plans")
+    async def list_plans(org: str, auth: Authorized = reading_plans) -> JSONResponse:
+        """The plan templates an application can be created from, for the Add application form
+        (docs/51): names, models and limits; the plans file holds no key."""
+        return JSONResponse(
+            {
+                "plans": [
+                    {
+                        "name": plan.name,
+                        "allowed_models": list(plan.models),
+                        "monthly_token_budget": plan.monthly_token_budget,
+                        "max_tokens": limits.max_tokens,
+                        "requests_per_minute": limits.requests_per_minute,
+                    }
+                    for plan, limits in keys.plan_templates(org, actor=auth.actor)
+                ]
+            }
+        )
 
     @app.get(ORG_PREFIX + "/applications")
     async def list_applications(
@@ -1828,14 +1872,15 @@ def _admin_routes(
         auth: Authorized = listing_applications,
     ) -> JSONResponse:
         page = await keys.page_applications(org, after, limit, actor=auth.actor)
-        return _page_body("applications", [application_view(a) for a in page.items], page.next)
+        return _page_body("applications", await with_modes(page.items), page.next)
 
     @app.get(ORG_PREFIX + "/applications/{app}")
     async def read_application(
         app_id: str = Path_(alias="app"),
         auth: Authorized = reading_applications,
     ) -> JSONResponse:
-        return JSONResponse(application_view(await keys.read_application(app_id, actor=auth.actor)))
+        found = await keys.read_application(app_id, actor=auth.actor)
+        return JSONResponse((await with_modes([found]))[0])
 
     @app.post(ORG_PREFIX + "/applications/{app}/keys")
     async def issue_key(
@@ -1876,6 +1921,54 @@ def _admin_routes(
     async def revoke_key(key_id: str, auth: Authorized = revoking_keys) -> JSONResponse:
         await keys.revoke_key(key_id, actor=auth.actor)
         return JSONResponse({"key_id": key_id, "state": "revoked"})
+
+
+def _usage_routes(
+    app: FastAPI,
+    accounts: AccountAccess,
+    management: ManagementService,
+    rollups: AlertRollups,
+    epoch: EpochSource,
+    started_ms: float | None,
+    clock: Clock,
+) -> None:
+    """The organization's usage figures for the console's Applications list (docs/51): one
+    page of its applications, the list's own paging, each with its figures over the window from
+    the alert recorder's rollups. Through ``requires`` (``usage.read_organization``); a missing
+    organization is refused as a forbidden one. Ids, minutes and numbers only."""
+    requires = app.state.requires
+    service = accounts.service
+    stores = Stores(service.organizations, service.store)
+
+    async def organization(request: Request) -> Resource | None:
+        return await resolve_organization(stores, request.path_params["org"])
+
+    reading_usage = requires("usage.read_organization", organization)
+
+    @app.get(ORG_PREFIX + "/metrics")
+    async def organization_metrics(
+        org: str,
+        window: Literal["60m"] = Query(default="60m"),
+        limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+        after: str | None = Query(default=None, max_length=64),
+        auth: Authorized = reading_usage,
+    ) -> JSONResponse:
+        page = await management.page_for_usage(org, after, limit, actor=auth.actor)
+        span = window_for(epoch.epoch_ms(), FIGURE_WINDOWS[window], started_ms)
+        try:
+            read: list[list[MinuteRollup]] | None = await rollups.read_many(
+                [(a.id, span.minute_range) for a in page.items]
+            )
+        except StateUnavailableError:
+            read = None  # Valkey down: every figure says so, none is made up
+        rows = []
+        for i, a in enumerate(page.items):
+            found = unavailable_figures() if read is None else figures(a.id, read[i], span)
+            rows.append({"application_id": a.id, **found})
+            # The event loop back between two applications, as the evaluator does (docs/45):
+            # a page's figures never hold up the requests being served.
+            await clock.sleep_ms(0.0)
+        return JSONResponse({"window": window_view(span), "applications": rows, "next": page.next})
 
 
 class CreateProviderBody(BaseModel):
@@ -2155,6 +2248,28 @@ def _incident_routes(
             after=after,
         )  # fmt: skip
         return JSONResponse(page(found, limit))
+
+    @app.get(ORG_PREFIX + "/incidents/counts")
+    async def count_open_incidents(
+        org: str, auth: Authorized = reading_organization
+    ) -> JSONResponse:
+        """The organization's open incidents by application and state, for the Applications
+        list (docs/51): ids and counts only, never a rule, a value or a text."""
+        counts = await incidents.open_counts(org)
+        return JSONResponse(
+            {
+                "applications": [
+                    {
+                        "application_id": application_id,
+                        **{
+                            state.value: counts[application_id].get(state.value, 0)
+                            for state in OPEN_STATES
+                        },
+                    }
+                    for application_id in sorted(counts)
+                ]
+            }
+        )
 
     @app.get(prefix)
     async def list_application_incidents(
@@ -3627,6 +3742,8 @@ def create_app(
     alert_rollups: AlertRollups | None = None
     shared_rollups: SharedAlertRollups | None = None
     flusher: RollupFlusher | None = None
+    # When this process's own rollups began: a window reaching before it says so (docs/51).
+    rollups_started_ms: float | None = None
     if applications is not None:
         alert_epoch = epoch if epoch is not None else ClockEpoch(clock)
         if counters is not None:
@@ -3649,6 +3766,7 @@ def create_app(
         else:
             local_rollups = InMemoryAlertRollups()
             alert_rollups = local_rollups
+            rollups_started_ms = alert_epoch.epoch_ms()
             alert_recorder = AlertRecorder(alert_epoch, sink=local_rollups)
 
     def noted() -> AlertNote | None:
@@ -3948,7 +4066,17 @@ def create_app(
             if applications is not None
             else None
         )
-        _admin_routes(app, accounts, management)
+        _admin_routes(app, accounts, management, mode_store)
+        if management is not None and alert_rollups is not None:
+            _usage_routes(
+                app,
+                accounts,
+                management,
+                alert_rollups,
+                epoch if epoch is not None else ClockEpoch(clock),
+                rollups_started_ms,
+                clock,
+            )
         if providers is not None:
             app.state.providers = providers
             _provider_routes(app, accounts, providers, breakers, warnings)

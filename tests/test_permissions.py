@@ -469,10 +469,11 @@ def test_every_route_of_every_app_declares_itself() -> None:
     # default server also has the provider endpoints (docs/32), on 7 more paths, the two mode
     # endpoints (docs/33), the settings endpoints (docs/40) on 10 more paths, the two
     # preset endpoints (docs/42), the alert rule endpoints (docs/44) on 6 more, the
-    # incident endpoints (docs/45) on 4 more, and the alert channel endpoints (docs/46) on 7
-    # more (test send among them).
+    # incident endpoints (docs/45) on 4 more, the alert channel endpoints (docs/46) on 7
+    # more (test send among them), and the console's reads (docs/51) on 3 more: the plans, the
+    # organization's figures and its open incident counts.
     assert len({p for v, p in requires_routes if v == "accounts"}) == 5
-    assert len({p for v, p in requires_routes if v == "default server"}) == 52
+    assert len({p for v, p in requires_routes if v == "default server"}) == 55
 
 
 def test_a_route_without_a_declaration_is_found() -> None:

@@ -266,6 +266,8 @@ NAVIGATION_ACTIONS: Mapping[Level, tuple[str, ...]] = {
     Level.ORGANIZATION: (
         "users.list",
         "applications.list",
+        "applications.create",
+        "usage.read_organization",
         "org_settings.read",
         "alert_channels.read",
         "incidents.read_organization",

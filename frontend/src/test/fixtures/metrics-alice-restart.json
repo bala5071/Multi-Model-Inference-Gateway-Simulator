@@ -1,0 +1,41 @@
+{
+  "window": {
+    "minutes": 60,
+    "first_minute_ms": 1793610360000.0,
+    "end_ms": 1793613960000.0,
+    "since_ms": 1793613600000.0
+  },
+  "applications": [
+    {
+      "application_id": "north-blog",
+      "requests": {
+        "value": 0.0,
+        "why_not": null
+      },
+      "error_rate": {
+        "value": null,
+        "why_not": "too_few"
+      },
+      "latency_total_p50": {
+        "value": null,
+        "why_not": "too_few"
+      }
+    },
+    {
+      "application_id": "north-shop",
+      "requests": {
+        "value": 4.0,
+        "why_not": null
+      },
+      "error_rate": {
+        "value": null,
+        "why_not": "too_few"
+      },
+      "latency_total_p50": {
+        "value": null,
+        "why_not": "too_few"
+      }
+    }
+  ],
+  "next": null
+}

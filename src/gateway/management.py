@@ -42,7 +42,7 @@ from gateway.audit import (
 from gateway.clock import EpochSource
 from gateway.organizations import check_application_id, normalize_name
 from gateway.permissions import Actor, Resource, authorize
-from gateway.routing import PlansConfig
+from gateway.routing import Plan, PlanLimits, PlansConfig
 from gateway.settings import Scope, SettingsStore
 from gateway.users import AccountStore, normalize_username
 
@@ -348,6 +348,28 @@ class ManagementService:
             organization_id, after, check_page_size(limit) + 1
         )
         return page_of(found, limit, lambda a: a.id)
+
+    async def page_for_usage(
+        self, organization_id: str, after: str | None, limit: int, *, actor: Actor | None = None
+    ) -> Page[Application]:
+        """The page ``page_applications`` gives, for the organization's usage figures
+        (``usage.read_organization``, docs/51): the same order and cursor, so a metrics page
+        and a list page with the same ``after`` and ``limit`` name the same applications."""
+        _require(actor, "usage.read_organization", Resource.organization(organization_id))
+        found = await self.store.page_applications(
+            organization_id, after, check_page_size(limit) + 1
+        )
+        return page_of(found, limit, lambda a: a.id)
+
+    def plan_templates(
+        self, organization_id: str, *, actor: Actor | None = None
+    ) -> list[tuple[Plan, PlanLimits]]:
+        """The plan templates an application may be created from, in the plans file's order,
+        with their limits (``applications.create``: who may create one may see them)."""
+        _require(actor, "applications.create", Resource.organization(organization_id))
+        return [
+            (plan, self.templates.limits_for(name)) for name, plan in self.templates.plans.items()
+        ]
 
     async def read_application(
         self, application_id: str, *, actor: Actor | None = None

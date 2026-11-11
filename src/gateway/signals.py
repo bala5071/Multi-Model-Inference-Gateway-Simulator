@@ -104,16 +104,12 @@ def _rate(numerator: int, denominator: int) -> SignalValue:
     return SignalValue(100.0 * numerator / denominator)
 
 
-def evaluate(
-    name: str,
-    application_id: str,
-    rollups: Sequence[MinuteRollup],
-    *,
-    window: int,
-    parameter: str | None = None,
-) -> SignalValue:
-    """``name`` over ``rollups``, which must be ``window`` consecutive minutes of
-    ``application_id`` and nothing else."""
+def _check(
+    name: str, application_id: str, rollups: Sequence[MinuteRollup], window: int,
+    parameter: str | None,
+) -> None:  # fmt: skip
+    """Refuse a signal that is not computed from rollups, a window or parameter it does not
+    take, and rollups that are not ``window`` consecutive minutes of ``application_id``."""
     signal = SIGNALS.get(name)
     if signal is None or name not in FROM_ROLLUPS:
         raise ValueError(f"{name!r} is not a signal computed from rollups")
@@ -128,9 +124,10 @@ def evaluate(
         raise ValueError(f"{name} needs {window} consecutive minutes")
     if any(r.application_id != application_id for r in rollups):
         raise ValueError("a signal is computed from one application's rollups only")
-    if any(r.incomplete for r in rollups):
-        return INCOMPLETE
-    counts = _summed(rollups)
+
+
+def _value(name: str, parameter: str | None, counts: Mapping[str, int]) -> SignalValue:
+    """``name`` from a complete window's summed counts."""
     requests = counts.get("requests", 0)
     if name.startswith("latency_"):
         kind = "total" if name.startswith("latency_total_") else "ttft"
@@ -157,6 +154,35 @@ def evaluate(
         return _rate(counts.get("downgraded", 0), counts.get("kind:generate", 0))
     assert name == "requests"
     return SignalValue(float(requests))
+
+
+def evaluate(
+    name: str,
+    application_id: str,
+    rollups: Sequence[MinuteRollup],
+    *,
+    window: int,
+    parameter: str | None = None,
+) -> SignalValue:
+    """``name`` over ``rollups``, which must be ``window`` consecutive minutes of
+    ``application_id`` and nothing else."""
+    _check(name, application_id, rollups, window, parameter)
+    if any(r.incomplete for r in rollups):
+        return INCOMPLETE
+    return _value(name, parameter, _summed(rollups))
+
+
+def evaluate_many(
+    names: Sequence[str], application_id: str, rollups: Sequence[MinuteRollup], *, window: int
+) -> dict[str, SignalValue]:
+    """``evaluate`` of each of ``names`` (none taking a parameter) over the same rollups, the
+    window checked and summed once: the same values, for a page of applications (docs/51)."""
+    for name in names:
+        _check(name, application_id, rollups, window, None)
+    if any(r.incomplete for r in rollups):
+        return dict.fromkeys(names, INCOMPLETE)
+    counts = _summed(rollups)
+    return {name: _value(name, None, counts) for name in names}
 
 
 # --- the durable signals: values the evaluator reads from the stores (A3) -----------------------

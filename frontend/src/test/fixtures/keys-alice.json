@@ -1,0 +1,29 @@
+{
+  "keys": [
+    {
+      "key_id": "45cc8e26863d5f3b",
+      "label": "first",
+      "state": "active",
+      "created_at_ms": 1750000000000.0,
+      "expires_at_ms": 1757776000000.0,
+      "last_used_at_ms": null
+    },
+    {
+      "key_id": "589fe1ab3edaf8c6",
+      "label": "second",
+      "state": "revoked",
+      "created_at_ms": 1750000000000.0,
+      "expires_at_ms": 1757776000000.0,
+      "last_used_at_ms": null
+    },
+    {
+      "key_id": "fd3feb3c9250b797",
+      "label": "main",
+      "state": "active",
+      "created_at_ms": 1750000000000.0,
+      "expires_at_ms": null,
+      "last_used_at_ms": null
+    }
+  ],
+  "next": null
+}

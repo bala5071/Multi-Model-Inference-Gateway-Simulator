@@ -77,6 +77,7 @@ from gateway.incidents import (
     INCIDENT_COLUMNS,
     LEASE_MS,
     NOTIFICATION_COLUMNS,
+    OPEN_COUNTS_SQL,
     UPDATE_COLUMNS,
     Change,
     Fence,
@@ -86,6 +87,7 @@ from gateway.incidents import (
     Notification,
     Then,
     channels_text,
+    count_open,
     incident_from_row,
     incident_row,
     latest_resolved,
@@ -2574,6 +2576,10 @@ class PostgresIncidentStore(_Store):
             state.value if state is not None else None,
             limit,
         )
+
+    async def open_counts(self, organization_id: str) -> dict[str, dict[str, int]]:
+        rows = await self._fetch(OPEN_COUNTS_SQL, organization_id)
+        return count_open((str(r[0]), str(r[1]), int(r[2])) for r in rows)
 
     async def notifications(self, incident_id: str) -> list[Notification]:
         rows = await self._fetch(

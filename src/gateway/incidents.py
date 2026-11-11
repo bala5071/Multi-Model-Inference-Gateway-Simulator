@@ -219,11 +219,39 @@ class IncidentStore(Protocol):
         after: str | None,
     ) -> list[Incident]: ...
 
+    async def open_counts(self, organization_id: str) -> dict[str, dict[str, int]]:
+        """How many of the organization's incidents are open, by application and state
+        (docs/51): ``{application id: {state: count}}``, only the states with one, and only
+        applications with one. The built-in incidents kept under the empty application id are
+        not counted: they belong to no application."""
+        ...
+
     async def notifications(self, incident_id: str) -> list[Notification]: ...
 
     async def held_notifications(self) -> list[Notification]:
         """Every notification held for quiet hours, to be summarised when they end."""
         ...
+
+
+# The open incidents of one organization by application and state (docs/51): one statement on
+# ``incidents_by_organization``, the same text for SQLite (``?``) and Postgres (``$1``).
+OPEN_COUNTS_SQL = (
+    "SELECT application_id, state, COUNT(*) FROM incidents"
+    " WHERE organization_id = $1 AND state <> 'resolved' AND application_id <> ''"
+    " GROUP BY application_id, state"
+)
+
+
+def count_open(found: Iterable[tuple[str, str, int]]) -> dict[str, dict[str, int]]:
+    """``open_counts``' answer from (application id, state, count) triples, the empty
+    application id left out."""
+    counts: dict[str, dict[str, int]] = {}
+    for application_id, state, n in found:
+        if application_id == "":
+            continue
+        per_state = counts.setdefault(application_id, {})
+        per_state[state] = per_state.get(state, 0) + n
+    return counts
 
 
 # What runs inside ``apply``'s transaction once the incident is written: the outbox (M22).
@@ -451,6 +479,13 @@ class InMemoryIncidentStore:
         )
         return found[:limit]
 
+    async def open_counts(self, organization_id: str) -> dict[str, dict[str, int]]:
+        return count_open(
+            (i.application_id, i.state.value, 1)
+            for i in self._incidents.values()
+            if i.organization_id == organization_id and i.open
+        )
+
     async def notifications(self, incident_id: str) -> list[Notification]:
         return [n for n in self._notifications if n.incident_id == incident_id]
 
@@ -620,6 +655,10 @@ class SqliteIncidentStore:
             where.append("state = ?")
             args.append(state.value)
         return self._incidents(" AND ".join(where) + " ORDER BY id LIMIT ?", (*args, limit))
+
+    async def open_counts(self, organization_id: str) -> dict[str, dict[str, int]]:
+        rows = self._db.execute(OPEN_COUNTS_SQL.replace("$1", "?"), (organization_id,)).fetchall()
+        return count_open((str(r[0]), str(r[1]), int(r[2])) for r in rows)
 
     async def notifications(self, incident_id: str) -> list[Notification]:
         rows = self._db.execute(

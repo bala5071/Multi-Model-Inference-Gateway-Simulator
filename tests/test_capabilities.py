@@ -66,6 +66,10 @@ ROUTES: dict[str, tuple[str, str]] = {
     "playground.use": ("POST", "/v1/playground/generate"),
     "users.list": ("GET", "/v1/admin/orgs/{org}/users"),
     "applications.list": ("GET", "/v1/admin/orgs/{org}/applications"),
+    # The Add application form's first read (docs/51).
+    "applications.create": ("GET", "/v1/admin/orgs/{org}/plans"),
+    # The Applications list's figures (docs/51).
+    "usage.read_organization": ("GET", "/v1/admin/orgs/{org}/metrics"),
     "org_settings.read": ("GET", "/v1/admin/orgs/{org}/settings"),
     "alert_channels.read": ("GET", "/v1/admin/orgs/{org}/alert-channels"),
     "incidents.read_organization": ("GET", "/v1/admin/orgs/{org}/incidents"),
@@ -92,7 +96,8 @@ class Expected:
     applications: tuple[tuple[str, frozenset[str]], ...] = ()
 
 
-# docs/console-integration-plan.md, section 2.3, for today's permission table.
+# docs/console-integration-plan.md, section 2.3, and docs/console-ia-v2-plan.md, section 2.3,
+# for today's permission table.
 EXPECTED: dict[str, Expected] = {
     "root": Expected(PLATFORM, frozenset({"users.list"})),
     "alice": Expected(
@@ -101,7 +106,12 @@ EXPECTED: dict[str, Expected] = {
     ),
     "vera": Expected(
         organization=frozenset(
-            {"applications.list", "org_settings.read", "incidents.read_organization"}
+            {
+                "applications.list",
+                "usage.read_organization",
+                "org_settings.read",
+                "incidents.read_organization",
+            }
         ),
         applications=(("north-blog", READS), ("north-shop", READS)),
     ),
