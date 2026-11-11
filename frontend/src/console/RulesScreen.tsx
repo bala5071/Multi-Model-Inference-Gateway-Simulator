@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { isOpen, ruleBody, ruleRows } from "./alerts";
+import { isOpen, ruleBody, ruleRows, type RuleRow } from "./alerts";
 import { ApiError, applicationPath, probeRefusedBody, type WriteProbe } from "./api";
 import { Chooser } from "./Chooser";
 import type { ConsoleContext } from "./context";
@@ -15,7 +15,11 @@ import type {
   RulePage,
   RuleValidation,
 } from "./types";
-import { TableScroll } from "../components/TableScroll";
+import { Button } from "../ui/Button";
+import { Card, StatTile, StatTiles } from "../ui/Card";
+import { DataTable } from "../ui/DataTable";
+import { Skeleton } from "../ui/Skeleton";
+import { StatusPill, toneOf } from "../ui/StatusPill";
 import { Toasted } from "../ui/Toasts";
 
 interface Loaded {
@@ -121,7 +125,7 @@ export function RulesScreen({
           {error}
         </p>
       )}
-      {app !== null && loaded.kind === "loading" && <p className="muted">Loading…</p>}
+      {app !== null && loaded.kind === "loading" && <Skeleton />}
       {app !== null && loaded.kind === "failed" && (
         <p className="form-error" role="alert">
           {refusalText(loaded.error.code, loaded.error.message)}
@@ -129,132 +133,133 @@ export function RulesScreen({
       )}
       {app !== null && loaded.kind === "ready" && (
         <>
-          <dl className="facts">
-            <div>
-              <dt>Rules</dt>
-              <dd>{loaded.value.rules.length}</dd>
-            </div>
-            <div>
-              <dt>Access</dt>
-              <dd>{writable ? "May change" : "Read only"}</dd>
-            </div>
-          </dl>
-          <section className="panel" aria-label="Rules">
-            <h3>Rules</h3>
-            {loaded.value.rules.length === 0 ? (
-              <p className="muted">This application has no alert rule.</p>
-            ) : (
-              <TableScroll table="Rules">
-                <table className="data-table" aria-label="Rules">
-                  <thead>
-                    <tr>
-                      <th scope="col">Rule</th>
-                      <th scope="col">Default</th>
-                      <th scope="col">Condition</th>
-                      <th scope="col">Severity</th>
-                      <th scope="col">Channels</th>
-                      <th scope="col">State</th>
-                      <th scope="col">Last value</th>
-                      {writable && <th scope="col">Change</th>}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {ruleRows(
-                      loaded.value.rules,
-                      loaded.value.previews,
-                      loaded.value.incidents,
-                      loaded.value.channels,
-                    ).map((row) => {
-                      const rule = loaded.value.rules.find((r) => r.id === row.id);
-                      return (
-                        <tr key={row.id}>
-                          <th scope="row">{row.name}</th>
-                          <td>{row.mark === "" ? "-" : row.mark}</td>
-                          <td>{row.condition}</td>
-                          <td>{row.severity}</td>
-                          <td>{row.channels}</td>
-                          <td>{row.state}</td>
-                          <td>{row.last}</td>
-                          {writable && rule !== undefined && (
-                            <td>
-                              <div className="row-actions">
-                                <button
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() => {
-                                    setEditing({ rule, body: ruleBody(rule) });
-                                  }}
-                                  aria-label={`Edit ${row.name}`}
-                                >
-                                  Edit
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() => {
-                                    setEditing({
-                                      rule: null,
-                                      body: { ...ruleBody(rule), name: `Copy of ${rule.name}` },
-                                    });
-                                  }}
-                                  aria-label={`Copy ${row.name}`}
-                                >
-                                  Copy
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() => {
-                                    void act(
-                                      `${rule.enabled ? "Disabled" : "Enabled"} ${rule.name}.`,
-                                      "POST",
-                                      `${base}/${encodeURIComponent(rule.id)}/${rule.enabled ? "disable" : "enable"}`,
-                                      { expected_version: rule.version },
-                                    );
-                                  }}
-                                  aria-label={`${rule.enabled ? "Disable" : "Enable"} ${row.name}`}
-                                >
-                                  {rule.enabled ? "Disable" : "Enable"}
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() => {
-                                    void act(
-                                      `Deleted ${rule.name}.`,
-                                      "DELETE",
-                                      `${base}/${encodeURIComponent(rule.id)}`,
-                                      { expected_version: rule.version },
-                                    );
-                                  }}
-                                  aria-label={`Delete ${row.name}`}
-                                >
-                                  Delete
-                                </button>
-                              </div>
-                            </td>
-                          )}
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </TableScroll>
-            )}
-            {writable && (
-              <div className="form-actions">
-                <button
-                  type="button"
+          <StatTiles>
+            <StatTile label="Rules" value={loaded.value.rules.length} />
+            <StatTile label="Access" value={writable ? "May change" : "Read only"} />
+          </StatTiles>
+          <Card
+            title="Rules"
+            label="Rules"
+            actions={
+              writable && (
+                <Button
                   disabled={busy}
                   onClick={() => {
                     void act("Restored the default rules.", "POST", `${base}/restore-defaults`);
                   }}
                 >
                   Restore default rules
-                </button>
-              </div>
-            )}
-          </section>
+                </Button>
+              )
+            }
+          >
+            <DataTable
+              label="Rules"
+              rows={ruleRows(
+                loaded.value.rules,
+                loaded.value.previews,
+                loaded.value.incidents,
+                loaded.value.channels,
+              )}
+              rowKey={(row) => row.id}
+              empty="This application has no alert rule."
+              columns={[
+                {
+                  key: "name",
+                  header: "Rule",
+                  cell: (r) => r.name,
+                  rowHeader: true,
+                  sortValue: (r) => r.name,
+                },
+                { key: "mark", header: "Default", cell: (r) => (r.mark === "" ? "-" : r.mark) },
+                { key: "condition", header: "Condition", cell: (r) => r.condition },
+                {
+                  key: "severity",
+                  header: "Severity",
+                  cell: (r) => r.severity,
+                  sortValue: (r) => r.severity,
+                },
+                { key: "channels", header: "Channels", cell: (r) => r.channels },
+                {
+                  key: "state",
+                  header: "State",
+                  cell: (r) => <StatusPill tone={toneOf(r.state)}>{r.state}</StatusPill>,
+                  sortValue: (r) => r.state,
+                },
+                { key: "last", header: "Last value", cell: (r) => r.last },
+                ...(writable
+                  ? [
+                      {
+                        key: "change",
+                        header: "Change",
+                        cell: (row: RuleRow) => {
+                          const rule = loaded.value.rules.find((r) => r.id === row.id);
+                          if (rule === undefined) return null;
+                          return (
+                            <div className="row-actions">
+                              <Button
+                                size="sm"
+                                disabled={busy}
+                                aria-label={`Edit ${row.name}`}
+                                onClick={() => {
+                                  setEditing({ rule, body: ruleBody(rule) });
+                                }}
+                              >
+                                Edit
+                              </Button>
+                              <Button
+                                size="sm"
+                                disabled={busy}
+                                aria-label={`Copy ${row.name}`}
+                                onClick={() => {
+                                  setEditing({
+                                    rule: null,
+                                    body: { ...ruleBody(rule), name: `Copy of ${rule.name}` },
+                                  });
+                                }}
+                              >
+                                Copy
+                              </Button>
+                              <Button
+                                size="sm"
+                                disabled={busy}
+                                aria-label={`${rule.enabled ? "Disable" : "Enable"} ${row.name}`}
+                                onClick={() => {
+                                  void act(
+                                    `${rule.enabled ? "Disabled" : "Enabled"} ${rule.name}.`,
+                                    "POST",
+                                    `${base}/${encodeURIComponent(rule.id)}/${rule.enabled ? "disable" : "enable"}`,
+                                    { expected_version: rule.version },
+                                  );
+                                }}
+                              >
+                                {rule.enabled ? "Disable" : "Enable"}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="danger"
+                                disabled={busy}
+                                aria-label={`Delete ${row.name}`}
+                                onClick={() => {
+                                  void act(
+                                    `Deleted ${rule.name}.`,
+                                    "DELETE",
+                                    `${base}/${encodeURIComponent(rule.id)}`,
+                                    { expected_version: rule.version },
+                                  );
+                                }}
+                              >
+                                Delete
+                              </Button>
+                            </div>
+                          );
+                        },
+                      },
+                    ]
+                  : []),
+              ]}
+            />
+          </Card>
           {writable && editing !== null && (
             <RuleEditor
               key={`${editing.rule?.id ?? "new"}:${String(editing.rule?.version ?? 0)}`}

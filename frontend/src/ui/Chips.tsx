@@ -27,7 +27,10 @@ export function Chips({
   }
 
   return (
-    <fieldset className="chips-field" aria-describedby={hint === undefined ? undefined : `${id}-hint`}>
+    <fieldset
+      className="chips-field"
+      aria-describedby={hint === undefined ? undefined : `${id}-hint`}
+    >
       <legend>{label}</legend>
       <ul className="chips" aria-label={`${label}: values`}>
         {values.length === 0 && <li className="muted">none</li>}
@@ -64,7 +67,12 @@ export function Chips({
             }
           }}
         />
-        <button type="button" className="button secondary small" disabled={typed === ""} onClick={add}>
+        <button
+          type="button"
+          className="button secondary small"
+          disabled={typed === ""}
+          onClick={add}
+        >
           Add
         </button>
       </div>

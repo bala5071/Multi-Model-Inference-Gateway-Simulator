@@ -501,9 +501,10 @@ test("incidents: the organization's list, an incident's timeline and notificatio
   await expect(incident.getByRole("button", { name: "Acknowledge" })).toHaveCount(0);
   // The list, filtered by state, as the gateway filters it.
   await incident.getByRole("button", { name: "Back to the list" }).click();
-  await page.getByLabel("State").selectOption("acknowledged");
+  // The states are tabs now (docs/55): the same states, the same query to the gateway.
+  await page.getByRole("tab", { name: "acknowledged", exact: true }).click();
   await expect(row(incidents, "Key expires within 14 days")).toContainText("acknowledged");
-  await page.getByLabel("State").selectOption("pending");
+  await page.getByRole("tab", { name: "pending", exact: true }).click();
   await expect(incidents).toContainText("No incident.");
 });
 

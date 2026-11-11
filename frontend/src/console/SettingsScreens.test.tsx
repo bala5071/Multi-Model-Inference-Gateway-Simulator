@@ -125,6 +125,37 @@ function gateway(options: {
           effective: { max_hosted_attempts: 1 },
         });
       }
+      case `GET ${ORG}/settings`:
+        return json(200, {
+          organization_id: "acme",
+          mode: "local_first",
+          version,
+          settings: { requests_per_minute: 600 },
+          platform_caps: { requests_per_minute: {}, max_hosted_attempts: { platform: 3 } },
+        });
+      case `GET ${ORG}/settings/versions`:
+        return json(200, { versions: [], next_after: null });
+      case `POST ${ORG}/settings/validate`: {
+        const change = body as { set: object; unset: string[] };
+        const empty = Object.keys(change.set).length === 0 && change.unset.length === 0;
+        if (empty && options.probe !== undefined && options.probe.status !== 200) {
+          return refuse(options.probe.status, options.probe.code ?? "forbidden");
+        }
+        return json(200, {
+          valid: true,
+          code: null,
+          message: null,
+          invalid_setting: null,
+          refusals: [],
+          changed: empty ? [] : Object.keys(change.set),
+          settings: {},
+          loosens: [],
+          step_up_required: false,
+        });
+      }
+      case `PUT ${ORG}/settings`:
+        version += 1;
+        return json(200, { version, changed: ["requests_per_minute"], settings: {} });
       case `PUT ${APP}`:
         if (options.endsAt === "put") return refuse(401, "session_required");
         if (options.stepUpOnPut !== undefined && !steppedUp) return refuse(403, "step_up_required");
@@ -346,5 +377,109 @@ describe("the settings screens, in the page", () => {
       expect(screen.queryByRole("dialog")).toBeNull();
     });
     expect(seen.some((s) => s.method === "PUT")).toBe(false);
+  });
+});
+
+describe("the typed settings form (docs/55)", () => {
+  it("sets a number in its field, lists the change with its old and new value, and saves it", async () => {
+    const { fetcher, seen } = gateway({ loggedIn: true, probe: { status: 200 } });
+    render(<Shell fetcher={fetcher} />);
+    const user = await openAppOne();
+    const edit = await screen.findByRole("region", { name: "Edit" });
+    const field = within(edit).getByRole("spinbutton", { name: "max_hosted_attempts" });
+    expect(field).toHaveAccessibleDescription("attempts");
+    expect(field).toHaveValue(3);
+    await user.clear(field);
+    await user.type(field, "1");
+    const changes = within(edit).getByRole("region", { name: "Changes" });
+    expect(changes).toHaveTextContent("max_hosted_attempts: 3 attempts \u2192 1 attempts");
+    await screen.findByText(/^Valid\. Changes/);
+    const sent = seen.filter((s) => s.method === "POST" && s.path === `${APP}/validate`).at(-1);
+    expect(sent?.body).toEqual({ expected_version: 1, set: { max_hosted_attempts: 1 }, unset: [] });
+    const bar = within(edit).getByRole("region", { name: "Save changes" });
+    expect(bar).toHaveTextContent("1 change");
+    await user.click(within(bar).getByRole("button", { name: "Save" }));
+    await screen.findByText("Saved as version 2.");
+    expect(seen.find((s) => s.method === "PUT")?.body).toEqual({
+      expected_version: 1,
+      set: { max_hosted_attempts: 1 },
+      unset: [],
+    });
+  });
+
+  it("discards every change from the Save bar, and the bar goes", async () => {
+    const { fetcher } = gateway({ loggedIn: true, probe: { status: 200 } });
+    render(<Shell fetcher={fetcher} />);
+    const user = await openAppOne();
+    const edit = await screen.findByRole("region", { name: "Edit" });
+    const field = within(edit).getByRole("spinbutton", { name: "max_hosted_attempts" });
+    await user.clear(field);
+    await user.type(field, "2");
+    await user.click(
+      within(within(edit).getByRole("region", { name: "Save changes" })).getByRole("button", {
+        name: "Discard",
+      }),
+    );
+    expect(field).toHaveValue(3);
+    expect(within(edit).queryByRole("region", { name: "Save changes" })).toBeNull();
+    expect(within(edit).getByRole("region", { name: "Changes" })).toHaveTextContent(
+      "Nothing changed.",
+    );
+  });
+
+  it("keeps the JSON editing under Advanced, on the same draft", async () => {
+    const { fetcher } = gateway({ loggedIn: true, probe: { status: 200 } });
+    render(<Shell fetcher={fetcher} />);
+    const user = await openAppOne();
+    const edit = await screen.findByRole("region", { name: "Edit" });
+    await user.click(within(edit).getByText("Advanced: edit as JSON"));
+    await user.selectOptions(within(edit).getByLabelText("max_hosted_attempts: change"), "set");
+    await user.clear(within(edit).getByLabelText("max_hosted_attempts: value"));
+    await user.type(within(edit).getByLabelText("max_hosted_attempts: value"), "2");
+    expect(within(edit).getByRole("spinbutton", { name: "max_hosted_attempts" })).toHaveValue(2);
+  });
+});
+
+describe("the organization's settings form (docs/52 section 16.7)", () => {
+  async function openOrganization() {
+    const user = userEvent.setup();
+    const sections = await screen.findByRole("navigation", { name: "Sections" });
+    await user.click(within(sections).getByRole("link", { name: "Organization settings" }));
+    await screen.findByRole("region", { name: "Caps" });
+    return user;
+  }
+
+  it("shows the form when the gateway's dry run allows it, and saves through the organization's endpoint", async () => {
+    const { fetcher, seen } = gateway({ loggedIn: true, probe: { status: 200 } });
+    render(<Shell fetcher={fetcher} />);
+    const user = await openOrganization();
+    await screen.findByText("May change");
+    const edit = screen.getByRole("region", { name: "Edit" });
+    const field = within(edit).getByRole("spinbutton", { name: "requests_per_minute" });
+    await user.clear(field);
+    await user.type(field, "300");
+    await screen.findByText(/^Valid\. Changes/);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText("Saved as version 2.");
+    const put = seen.find((s) => s.method === "PUT");
+    expect(put?.path).toBe(`${ORG}/settings`);
+    expect(put?.body).toEqual({
+      expected_version: 1,
+      set: { requests_per_minute: 300 },
+      unset: [],
+    });
+    expect(put?.csrf).toBe(CSRF);
+  });
+
+  it.each([
+    [403, "forbidden"],
+    [503, "state_unavailable"],
+  ])("shows no form and no Revert when the dry run answers %i %s", async (status, code) => {
+    const { fetcher } = gateway({ loggedIn: true, probe: { status, code } });
+    render(<Shell fetcher={fetcher} />);
+    await openOrganization();
+    await screen.findByText("Read only");
+    expect(writeControls()).toEqual([]);
+    expect(within(screen.getByRole("main")).queryAllByRole("spinbutton")).toEqual([]);
   });
 });

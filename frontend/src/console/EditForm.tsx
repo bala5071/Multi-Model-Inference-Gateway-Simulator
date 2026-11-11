@@ -1,23 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ApiError } from "./api";
 import type { ConsoleContext } from "./context";
-import {
-  canSave,
-  draftChange,
-  refusalText,
-  verdict,
-  type Draft,
-  type FieldMode,
-} from "./derive";
+import { canSave, draftChange, refusalText, verdict, type Draft, type FieldMode } from "./derive";
 import { kindOf, unitOf } from "./settingKinds";
-import {
-  changedRows,
-  fieldValue,
-  withText,
-  withUndo,
-  withUnset,
-  withValue,
-} from "./settingsForm";
+import { changedRows, fieldValue, withText, withUndo, withUnset, withValue } from "./settingsForm";
 import type { Change, Json, Validation } from "./types";
 import { TableScroll } from "../components/TableScroll";
 import { Button } from "../ui/Button";
@@ -26,7 +12,9 @@ import { NumberField, TextField } from "../ui/Field";
 import { Toggle } from "../ui/Toggle";
 
 function strings(value: Json | undefined): string[] {
-  return Array.isArray(value) ? value.map((v) => (typeof v === "string" ? v : JSON.stringify(v))) : [];
+  return Array.isArray(value)
+    ? value.map((v) => (typeof v === "string" ? v : JSON.stringify(v)))
+    : [];
 }
 
 /** The control for one setting, by its kind (`settingKinds.ts`); a JSON field where none is known. */
@@ -371,8 +359,8 @@ export function EditForm({
           <ul className="changed-list">
             {changed.map((row) => (
               <li key={row.name}>
-                <span className="setting-name">{row.name}</span>: <del>{row.before}</del>{" "}
-                {"→"} <ins>{row.after}</ins>
+                <span className="setting-name">{row.name}</span>: <del>{row.before}</del> {"→"}{" "}
+                <ins>{row.after}</ins>
               </li>
             ))}
           </ul>

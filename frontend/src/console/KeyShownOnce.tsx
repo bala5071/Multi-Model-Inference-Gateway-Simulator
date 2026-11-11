@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Button } from "../ui/Button";
 
 /**
  * A new API key, shown this once: the gateway keeps only its HMAC and can never show it again
@@ -28,8 +29,7 @@ export function KeyShownOnce({
         <input className="key" readOnly value={value} aria-label="API key" />
       </label>
       <div className="form-actions">
-        <button
-          type="button"
+        <Button
           onClick={() => {
             navigator.clipboard.writeText(value).then(
               () => {
@@ -42,10 +42,10 @@ export function KeyShownOnce({
           }}
         >
           Copy the key
-        </button>
-        <button type="button" onClick={onDone}>
+        </Button>
+        <Button variant="primary" onClick={onDone}>
           I have stored it
-        </button>
+        </Button>
       </div>
       {copied !== null && (
         <p className="muted" role="status">
