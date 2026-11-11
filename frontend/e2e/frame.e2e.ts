@@ -188,6 +188,12 @@ test("a phone: the sidebar is a drawer, opened from the top bar and closed by a 
   await page.goto("/dashboard/");
   await logIn(page, ORG_READER);
   await expect(page.locator(".sidebar")).toBeHidden();
+  // The page is no wider than the phone: a wide table scrolls in its box, and nothing positioned
+  // inside it (a dash's hidden words) escapes the box.
+  await expect(page.getByRole("table", { name: "Applications" })).toBeVisible();
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth),
+  ).toBeLessThanOrEqual(0);
   await page.getByRole("button", { name: "Open the navigation" }).click();
   const drawer = page.getByRole("dialog", { name: "Navigation" });
   await expect(drawer).toBeVisible();
