@@ -133,6 +133,16 @@ function gateway(me: Me, answer: Capabilities = capabilities.alice) {
         if (method === "GET" && path.endsWith("/applications?limit=100")) {
           return json(200, { applications: [], next: null });
         }
+        {
+          // One application's read: the gateway's own answer for it, refused for any other.
+          const one = /^\/v1\/admin\/orgs\/north\/applications\/([^/?]+)$/.exec(path);
+          if (method === "GET" && one !== null) {
+            const found = applicationsAlice.applications.find(
+              (a) => a.application_id === decodeURIComponent(one[1] ?? ""),
+            );
+            return found === undefined ? refuse(403, "forbidden") : json(200, found);
+          }
+        }
         return refuse(404, "not_found");
     }
   };
@@ -169,9 +179,23 @@ function says(answer: Capabilities, level: string, action: string): boolean {
   return answer.organization[action] === true;
 }
 
-/** The region a session lands on, read from its own answer: Applications when it may list them. */
+/**
+ * The region a session lands on, read from its own answer (console-ia-v2-plan 2.1): Applications
+ * when it may list them; its one application's page, named after it, when it names one; Home.
+ */
 function landingName(answer: Capabilities): string {
-  return answer.organization["applications.list"] === true ? "Applications" : "Home";
+  if (answer.organization["applications.list"] === true) return "Applications";
+  const own = ownApplications(answer);
+  if (own.length !== 1) return "Home";
+  return applicationsAlice.applications.find((a) => a.application_id === own[0])?.name ?? "Home";
+}
+
+/** The applications the sidebar names for a session that cannot list them, from its answer. */
+function ownApplications(answer: Capabilities): string[] {
+  if (answer.organization["applications.list"] === true) return [];
+  return answer.applications
+    .filter((a) => a.actions["applications.read"] === true)
+    .map((a) => a.application_id);
 }
 
 function dump(storage: Storage): string {
@@ -187,10 +211,17 @@ describe("navigation", () => {
     async (_name, answer) => {
       const { fetcher } = gateway("in", answer);
       open(fetcher);
-      const expected = NAVIGATION.filter(
+      const shown = NAVIGATION.filter(
         (item) =>
           item.asks.length === 0 || item.asks.some((ask) => says(answer, ask.level, ask.action)),
-      ).map((item) => item.label);
+      );
+      // In the sidebar's order: Home and the organization's items, the applications the answer
+      // names for a session that cannot list them (docs/56), then the platform's.
+      const expected = [
+        ...shown.filter((item) => item.group !== "Platform").map((item) => item.label),
+        ...ownApplications(answer),
+        ...shown.filter((item) => item.group === "Platform").map((item) => item.label),
+      ];
       expect(await sections()).toEqual(expected);
       // Every item, shown or hidden, is decided: Home is always there.
       expect(expected[0]).toBe("Home");
@@ -288,14 +319,23 @@ describe("home", () => {
     expect(screen.queryByRole("region", { name: "Platform" })).toBeNull();
   });
 
-  it("lists an application-only session's applications with their links", async () => {
-    const { fetcher } = gateway("in", capabilities.olive);
+  it("lists the applications of a session of several, each with its page's tabs", async () => {
+    // olive's answer with a second application: several, so Home lists them (2.1).
+    const [blog] = capabilities.olive.applications;
+    const answer: Capabilities = {
+      ...capabilities.olive,
+      applications: [
+        ...capabilities.olive.applications,
+        { application_id: "north-shop", actions: { ...blog?.actions } },
+      ],
+    };
+    const { fetcher } = gateway("in", answer);
     open(fetcher);
     const section = await screen.findByRole("region", { name: "Your applications" });
     expect(section).toHaveTextContent("north-blog");
-    expect(within(section).getByRole("link", { name: "Settings" })).toHaveAttribute(
+    expect(within(section).getAllByRole("link", { name: "Settings" })[0]).toHaveAttribute(
       "href",
-      "#/application/north-blog",
+      "#/app/north-blog/settings",
     );
     expect(screen.queryByRole("region", { name: /^Organization/ })).toBeNull();
   });
@@ -313,8 +353,7 @@ describe("home", () => {
   it("shows who is logged in, the organization and the roles the gateway names, in the account menu", async () => {
     const { fetcher } = gateway("in", capabilities.olive);
     const user = open(fetcher);
-    await screen.findByRole("region", { name: "Home" });
-    const button = screen.getByRole("button", { name: "Account: someone" });
+    const button = await screen.findByRole("button", { name: "Account: someone" });
     expect(button).toHaveAttribute("aria-haspopup", "menu");
     expect(button).toHaveAttribute("aria-expanded", "false");
     await user.click(button);
@@ -337,8 +376,7 @@ describe("home", () => {
   it("works the account menu by keyboard: Enter opens it, arrows move, Escape gives the focus back", async () => {
     const { fetcher } = gateway("in", capabilities.olive);
     const user = open(fetcher);
-    await screen.findByRole("region", { name: "Home" });
-    const button = screen.getByRole("button", { name: "Account: someone" });
+    const button = await screen.findByRole("button", { name: "Account: someone" });
     button.focus();
     await user.keyboard("{Enter}");
     const items = [
@@ -375,11 +413,17 @@ describe("home", () => {
 
 describe("sessions", () => {
   it("logs in from a deep link and opens it", async () => {
+    // An old address (console-ia-v2-plan 2.2): the rules tab of north-shop's page.
     window.location.hash = "#/rules/north-shop";
     const { fetcher, seen } = gateway("out");
     const user = open(fetcher);
     await logIn(user);
-    await screen.findByRole("heading", { name: "Alert rules", level: 2 });
+    await screen.findByRole("heading", { name: "Shop", level: 2 });
+    const tabs = screen.getByRole("navigation", { name: "Application sections" });
+    expect(within(tabs).getByRole("link", { name: "Alert rules" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
     expect(window.location.hash).toBe("#/rules/north-shop");
     expect(seen.some((s) => s.path.includes("/applications/north-shop/alert-rules"))).toBe(true);
   });
@@ -613,11 +657,16 @@ describe("applications (docs/51)", () => {
     );
   });
 
-  it("gives an application's own admin its keys from home", async () => {
+  it("lands an application's own admin on its one application's page, with its keys' tab", async () => {
     const { fetcher } = gateway("in", capabilities.nina);
     open(fetcher);
-    const section = await screen.findByRole("region", { name: "Your applications" });
-    expect(within(section).getByRole("link", { name: "API keys" })).toHaveAttribute(
+    const page = await screen.findByRole("region", { name: "Shop" });
+    const tabs = within(page).getByRole("navigation", { name: "Application sections" });
+    expect(within(tabs).getByRole("link", { name: "Overview" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(within(tabs).getByRole("link", { name: "API keys" })).toHaveAttribute(
       "href",
       "#/app/north-shop/keys",
     );
@@ -831,5 +880,109 @@ describe("a figure with too few requests behind it (docs/54)", () => {
     );
     expect(screen.getByText(`${TOO_FEW} ${TOO_FEW_EXPLAINED}`)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Add application" })).toHaveClass("primary");
+  });
+});
+
+describe("the application page (docs/56)", () => {
+  it("opens an application from the list, with Applications / name in the breadcrumb", async () => {
+    const { fetcher } = gateway("in", capabilities.alice);
+    const user = open(fetcher);
+    const table = await screen.findByRole("table", { name: "Applications" });
+    await user.click(within(table).getByRole("link", { name: "Shop" }));
+    expect(window.location.hash).toBe("#/app/north-shop/overview");
+    await screen.findByRole("heading", { name: "Shop", level: 2 });
+    const trail = screen.getByRole("navigation", { name: "Breadcrumb" });
+    await within(trail).findByText("Shop");
+    expect(within(trail).getByRole("link", { name: "Applications" })).toHaveAttribute(
+      "href",
+      "#/apps",
+    );
+  });
+
+  it("shows the organization's admin the application's figures over the last 60 minutes, as the gateway gave them", async () => {
+    window.location.hash = "#/app/north-shop/overview";
+    const { fetcher } = gateway("in", capabilities.alice);
+    open(fetcher);
+    const figures = await screen.findByRole("region", { name: "Figures" });
+    await within(figures).findByText("25");
+    expect(figures).toHaveTextContent("last 60 minutes");
+    expect(figures).toHaveTextContent("20.0 %");
+    expect(figures).toHaveTextContent("single figures for the window, not a series");
+    // No chart: the gateway returns no series for one application.
+    expect(screen.queryByRole("img")).toBeNull();
+    const app = screen.getByRole("region", { name: "Application" });
+    expect(app).toHaveTextContent(applicationsAlice.applications[1]?.plan ?? "?");
+  });
+
+  it("draws too few to judge as the dash on the Overview, as on the list", async () => {
+    window.location.hash = "#/app/north-blog/overview";
+    const { fetcher } = gateway("in", capabilities.alice);
+    open(fetcher);
+    const figures = await screen.findByRole("region", { name: "Figures" });
+    const dash = await within(figures).findAllByRole("button", { description: TOO_FEW_EXPLAINED });
+    expect(dash[0]).toHaveTextContent(`${TOO_FEW}${TOO_FEW_WORDS}`);
+  });
+
+  it("tells an application's admin its figures are not available yet, and asks for none", async () => {
+    const { fetcher, seen } = gateway("in", capabilities.nina);
+    open(fetcher);
+    const figures = await screen.findByRole("region", { name: "Figures" });
+    expect(figures).toHaveTextContent("not available to this account yet");
+    expect(seen.some((s) => s.path.includes("/metrics"))).toBe(false);
+  });
+
+  it("opens each tab the session may use at its own address, and the old ones", async () => {
+    window.location.hash = "#/application/north-shop";
+    const { fetcher } = gateway("in", capabilities.nina);
+    open(fetcher);
+    const tabs = await screen.findByRole("navigation", { name: "Application sections" });
+    expect(within(tabs).getByRole("link", { name: "Settings" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(
+      within(tabs)
+        .getAllByRole("link")
+        .map((link) => link.getAttribute("href")),
+    ).toEqual([
+      "#/app/north-shop/overview",
+      "#/app/north-shop/settings",
+      "#/app/north-shop/rules",
+      "#/app/north-shop/incidents",
+      "#/app/north-shop/keys",
+    ]);
+  });
+
+  it("answers a tab the session may not use with the landing and no request for it", async () => {
+    window.location.hash = "#/app/north-blog/keys";
+    const { fetcher, seen } = gateway("in", capabilities.olive);
+    open(fetcher);
+    const landed = await screen.findByRole("region", { name: "Blog" });
+    expect(within(landed).getAllByRole("alert")[0]).toHaveTextContent(NOT_AVAILABLE);
+    expect(seen.some((s) => s.path.includes("/keys"))).toBe(false);
+    const tabs = within(landed).getByRole("navigation", { name: "Application sections" });
+    expect(within(tabs).queryByRole("link", { name: "API keys" })).toBeNull();
+  });
+});
+
+describe("the Applications list's search and filters (docs/56)", () => {
+  it("search and filter the page shown, and say so", async () => {
+    const { fetcher, seen } = gateway("in", capabilities.alice);
+    const user = open(fetcher);
+    const table = await screen.findByRole("table", { name: "Applications" });
+    const reads = seen.length;
+    expect(screen.getByText(/apply to the applications on this page only/)).toBeInTheDocument();
+    await user.type(screen.getByRole("searchbox", { name: "Search" }), "shop");
+    expect(
+      within(table)
+        .getAllByRole("rowheader")
+        .map((c) => c.textContent),
+    ).toEqual(["Shop (north-shop)"]);
+    expect(screen.getByText("Showing 1 of 2.")).toBeInTheDocument();
+    await user.clear(screen.getByRole("searchbox", { name: "Search" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Status" }), "no_requests");
+    expect(screen.getByText(/No application on this page matches/)).toBeInTheDocument();
+    // Nothing was asked of the gateway: the page's rows only.
+    expect(seen.length).toBe(reads);
   });
 });

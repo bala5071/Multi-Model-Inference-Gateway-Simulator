@@ -1,8 +1,8 @@
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Capabilities } from "../console/types";
-import { ITEM_ICONS } from "./icons";
-import { itemOf, shownItems, target, type NavGroup, type NavItem } from "./navigation";
+import { APP_ICON, ITEM_ICONS } from "./icons";
+import { appLinks, itemOf, shownItems, target, type NavGroup, type NavItem } from "./navigation";
 import { routeHash, type Route } from "./routes";
 
 const GROUPS: readonly (NavGroup | null)[] = [null, "Organization", "Application", "Platform"];
@@ -23,12 +23,43 @@ export function NavList({
   collapsed?: boolean;
   onFollow?: () => void;
 }) {
-  const current = itemOf(route);
+  // On an application's page, the Applications item is where the session is (docs/56).
+  const current = route.screen === "app" ? "apps" : itemOf(route);
   const shown = shownItems(capabilities);
+  const own = appLinks(capabilities);
   return (
     <nav className="sidebar-nav" aria-label="Sections">
       {GROUPS.map((group) => {
         const items = shown.filter((item) => item.group === group);
+        if (group === "Application" && own.length > 0) {
+          return (
+            <div key={group} className="nav-group">
+              <div className={collapsed ? "visually-hidden" : "nav-group-label"}>{group}</div>
+              <ul>
+                {own.map((id) => (
+                  <li key={id}>
+                    <a
+                      href={routeHash({
+                        screen: "app",
+                        applicationId: id,
+                        tab: "overview",
+                        incidentId: null,
+                      })}
+                      aria-current={
+                        route.screen === "app" && route.applicationId === id ? "page" : undefined
+                      }
+                      title={collapsed ? id : undefined}
+                      onClick={onFollow}
+                    >
+                      <APP_ICON aria-hidden="true" focusable="false" size={18} />
+                      <span className={collapsed ? "visually-hidden" : undefined}>{id}</span>
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          );
+        }
         if (items.length === 0) return null;
         return (
           <div key={group ?? "top"} className="nav-group">
@@ -41,7 +72,7 @@ export function NavList({
                 return (
                   <li key={item.id}>
                     <a
-                      href={routeHash(target(item, route, capabilities))}
+                      href={routeHash(target(item, route))}
                       aria-current={item.id === current ? "page" : undefined}
                       title={collapsed ? item.label : undefined}
                       onClick={onFollow}
