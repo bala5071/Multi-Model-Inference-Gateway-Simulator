@@ -100,6 +100,21 @@ export default defineConfig({
       dependencies: ["shell"],
       use: { baseURL: `http://127.0.0.1:${CONSOLE_PORT}`, trace: "off", screenshot: "off" },
     },
+    {
+      // The frame and the auth screens (docs/54): the CSP trial, the keyboard, every new state.
+      name: "frame",
+      testMatch: "frame.e2e.ts",
+      dependencies: ["applications"],
+      use: { baseURL: `http://127.0.0.1:${CONSOLE_PORT}`, trace: "off", screenshot: "off" },
+    },
+    {
+      // Visual regression (docs/54): compared only on CI's pinned Playwright image (VISUAL=1);
+      // skipped everywhere else. Baselines live in e2e/visual/, refreshed only by a reviewed commit.
+      name: "visual",
+      testMatch: "visual.e2e.ts",
+      snapshotPathTemplate: "{testDir}/visual/{arg}{ext}",
+      use: { baseURL: `http://127.0.0.1:${CONSOLE_PORT}`, trace: "off", screenshot: "off" },
+    },
   ],
   webServer: [
     {

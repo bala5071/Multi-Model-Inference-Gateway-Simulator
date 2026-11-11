@@ -45,7 +45,7 @@ async function confirmIfAsked(page: Page, who: Account, done: Locator): Promise<
   const dialog = page.getByRole("dialog", { name: "Confirm with your password" });
   await expect(dialog.or(done)).toBeVisible();
   if (await dialog.isVisible()) {
-    await dialog.getByLabel("Password").fill(process.env[who.second] ?? "");
+    await dialog.getByLabel("Password", { exact: true }).fill(process.env[who.second] ?? "");
     await dialog.getByRole("button", { name: "Confirm" }).click();
   }
   await expect(done).toBeVisible();

@@ -203,27 +203,36 @@ export async function logIn(
 ): Promise<void> {
   const form = page.getByRole("region", { name: "Log in", exact: true });
   await form.getByLabel("Username").fill(who.username);
-  await form.getByLabel("Password").fill(secret(who.second));
+  await form.getByLabel("Password", { exact: true }).fill(secret(who.second));
   await form.getByRole("button", { name: "Log in" }).click();
   const change = page.getByRole("region", { name: "Change your password", exact: true });
-  await expect(sections(page).or(change).or(form.getByRole("alert"))).toBeVisible();
-  if (await sections(page).isVisible()) {
+  // Logged in: the account menu's button, there at every width (docs/54).
+  const account = page.getByRole("button", { name: /^Account:/ });
+  await expect(account.or(change).or(form.getByRole("alert"))).toBeVisible();
+  if (await account.isVisible()) {
     await scan?.step(page);
     return;
   }
   if (!(await change.isVisible())) {
-    await form.getByLabel("Password").fill(secret(who.first));
+    await form.getByLabel("Password", { exact: true }).fill(secret(who.first));
     await form.getByRole("button", { name: "Log in" }).click();
   }
   await expect(change).toBeVisible();
-  // Only the change: no navigation, no screen.
+  // Only the change: no navigation, no account menu, no screen.
   await expect(sections(page)).toHaveCount(0);
+  await expect(account).toHaveCount(0);
   if (testInfo !== undefined && who === OPERATOR) {
     await picture(page, testInfo, "forced-password-change");
   }
-  await change.getByLabel("Current password").fill(secret(who.first));
-  await change.getByLabel("New password").fill(secret(who.second));
+  await change.getByLabel("Current password", { exact: true }).fill(secret(who.first));
+  await change.getByLabel("New password", { exact: true }).fill(secret(who.second));
   await change.getByRole("button", { name: "Change password" }).click();
-  await expect(sections(page)).toBeVisible();
+  await expect(account).toBeVisible();
   await scan?.step(page);
+}
+
+/** Logs out through the account menu (docs/54): the menu, then its Log out item. */
+export async function logOut(page: Page): Promise<void> {
+  await page.getByRole("button", { name: /^Account:/ }).click();
+  await page.getByRole("menuitem", { name: "Log out" }).click();
 }

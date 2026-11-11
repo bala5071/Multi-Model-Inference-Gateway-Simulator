@@ -155,6 +155,65 @@ jobs:
           path: frontend/e2e/results
           if-no-files-found: ignore
 
+  # Visual regression (docs/52, section 15; docs/54): the frame and the auth screens compared with
+  # baselines taken here, in the Playwright image of the version package-lock.json pins, so the
+  # fonts and rendering are the same on every run. Missing or changed baselines fail the job and
+  # are uploaded, to be reviewed and committed; never refreshed to make a failure pass.
+  visual:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.0-noble
+    steps:
+      - name: Install git (the baseline check reads the working tree)
+        run: apt-get update && apt-get install -y --no-install-recommends git
+
+      - uses: actions/checkout@v4
+
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install the gateway
+        run: uv sync --locked
+
+      - name: Install the dashboard
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+      - name: Compare with the baselines
+        working-directory: frontend
+        env:
+          VISUAL: "1"
+        run: npx playwright test --project=visual
+
+      - name: No baseline missing or changed
+        if: always()
+        run: |
+          changed="$(git status --porcelain frontend/e2e/visual)"
+          if [ -n "$changed" ]; then
+            echo "Baselines missing or changed (take them from the visual-baselines artifact):"
+            echo "$changed"
+            exit 1
+          fi
+
+      - name: Upload the baselines and results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-baselines
+          path: |
+            frontend/e2e/visual
+            frontend/e2e/results
+          if-no-files-found: ignore
+
   # Builds the image and checks that the compose demo comes up serving the dashboard.
   # The Linux check of the image; note 25 records what has run on the development machine.
   docker:

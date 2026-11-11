@@ -92,6 +92,11 @@ async function visibleSecrets(page: Page): Promise<string[]> {
  * A screenshot for the PR (in the run's output folder, git-ignored; copied to
  * docs/pr-c2-screenshots/ by hand), taken only once no secret of the run is visible.
  */
+/** The page's toasts (docs/54): where a change's result is said. */
+function toasts(page: Page) {
+  return page.locator(".toasts");
+}
+
 async function picture(page: Page, testInfo: TestInfo, name: string): Promise<void> {
   expect(await visibleSecrets(page)).toEqual([]);
   // In both themes, each checked by axe in both (docs/53).
@@ -103,17 +108,17 @@ async function logIn(page: Page, who: Account): Promise<void> {
   await page.goto("/dashboard/");
   const form = page.getByRole("region", { name: "Log in", exact: true });
   await form.getByLabel("Username").fill(who.username);
-  await form.getByLabel("Password").fill(who.password());
+  await form.getByLabel("Password", { exact: true }).fill(who.password());
   await form.getByRole("button", { name: "Log in" }).click();
-  const loggedIn = page.getByRole("button", { name: "Log out" });
+  const loggedIn = page.getByRole("button", { name: /^Account:/ });
   const refused = form.getByRole("alert");
   await expect(loggedIn.or(refused)).toBeVisible();
   if (await loggedIn.isVisible()) return;
-  await form.getByLabel("Password").fill(who.first());
+  await form.getByLabel("Password", { exact: true }).fill(who.first());
   await form.getByRole("button", { name: "Log in" }).click();
   const change = page.getByRole("region", { name: "Change your password", exact: true });
-  await change.getByLabel("Current password").fill(who.first());
-  await change.getByLabel("New password").fill(who.password());
+  await change.getByLabel("Current password", { exact: true }).fill(who.first());
+  await change.getByLabel("New password", { exact: true }).fill(who.password());
   await change.getByRole("button", { name: "Change password" }).click();
   await expect(loggedIn).toBeVisible();
 }
@@ -139,7 +144,7 @@ function row(region: Locator, name: string | RegExp): Locator {
 
 async function stepUp(page: Page, who: Account): Promise<void> {
   const dialog = page.getByRole("dialog", { name: "Confirm with your password" });
-  await dialog.getByLabel("Password").fill(who.password());
+  await dialog.getByLabel("Password", { exact: true }).fill(who.password());
   await dialog.getByRole("button", { name: "Confirm" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
 }
@@ -351,7 +356,7 @@ test("channels: a webhook shows only its origin and its key once; an email chann
   await expect(field).toHaveValue("");
   await field.fill(code);
   await channel.getByRole("button", { name: "Confirm" }).click();
-  await expect(channel.getByText(`${recipient()} is verified.`)).toBeVisible();
+  await expect(toasts(page).getByText(`${recipient()} is verified.`)).toBeVisible();
   await expect(row(recipients, recipient())).toContainText("verified");
 
   // A second recipient: added with a step-up, sent its code again, then removed.
@@ -361,16 +366,16 @@ test("channels: a webhook shows only its origin and its key once; an email chann
   await expect(row(recipients, second())).toContainText("unverified");
   await mailedCode(page.request, second());
   await channel.getByRole("button", { name: `Send the code again to ${second()}` }).click();
-  await expect(channel.getByText("Code sent again: delivered.")).toBeVisible();
+  await expect(toasts(page).getByText("Code sent again: delivered.")).toBeVisible();
   await mailedCode(page.request, second(), 2);
   await channel.getByRole("button", { name: `Remove ${second()}` }).click();
-  await expect(channel.getByText(`Removed ${second()}.`)).toBeVisible();
+  await expect(toasts(page).getByText(`Removed ${second()}.`)).toBeVisible();
   await expect(row(recipients, second())).toHaveCount(0);
 
   // Test send: to the verified recipient only, and its outcome shown.
   const before = await mailCount(page.request, recipient());
   await channel.getByRole("button", { name: "Test send" }).click();
-  await expect(channel.getByText("Test send: delivered.")).toBeVisible();
+  await expect(toasts(page).getByText("Test send: delivered.")).toBeVisible();
   expect(await mailCount(page.request, recipient())).toBe(before + 1);
   await expect(channel).toContainText("Deliveries");
   await picture(page, testInfo, "channel-email-admin");
@@ -380,7 +385,7 @@ test("channels: a webhook shows only its origin and its key once; an email chann
   await list.getByRole("button", { name: "Open Ops hook" }).click();
   await expect(channel).toContainText(HOOK_ORIGIN);
   await channel.getByRole("button", { name: "Disable" }).click();
-  await expect(channel.getByText("Disabled.")).toBeVisible();
+  await expect(toasts(page).getByText("Disabled.")).toBeVisible();
   await channel.getByRole("button", { name: "Delete", exact: true }).click();
   await channel.getByRole("button", { name: "Delete it" }).click();
   await expect(page.getByText("Deleted Ops hook.")).toBeVisible();
@@ -491,7 +496,7 @@ test("incidents: the organization's list, an incident's timeline and notificatio
   await expect(incident.getByRole("table", { name: "Notifications" })).toContainText("firing");
   await picture(page, testInfo, "incident-admin");
   await incident.getByRole("button", { name: "Acknowledge" }).click();
-  await expect(incident.getByText("Acknowledged.")).toBeVisible();
+  await expect(toasts(page).getByText("Acknowledged.")).toBeVisible();
   await expect(timeline).toContainText("Acknowledged by");
   await expect(incident.getByRole("button", { name: "Acknowledge" })).toHaveCount(0);
   // The list, filtered by state, as the gateway filters it.
@@ -542,7 +547,7 @@ test("leak scan: no webhook URL, signing key, confirmation code or recipient add
   const code = await mailedCode(page.request, address);
   await channel.getByLabel(`Code for ${address}`).fill(code);
   await channel.getByRole("button", { name: "Confirm" }).click();
-  await expect(channel.getByText(`${address} is verified.`)).toBeVisible();
+  await expect(toasts(page).getByText(`${address} is verified.`)).toBeVisible();
 
   // The controls: each planted value is found where it must be, so the scan can see them.
   expect(sent.some((body) => body.includes(token))).toBe(true);
