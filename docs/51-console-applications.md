@@ -124,11 +124,12 @@ whole app in process (session, `requires`, handler). The range is over the three
 | the mode reads alone, 50 applications | 0.31 to 0.32 | 0.6 to 0.8 |
 | the mode reads alone, 100 applications | 0.61 to 0.63 | 1.5 to 1.8 |
 
-The figures cost about a third of a millisecond an application: each application's hour is
-summed once (`signals.evaluate_many`, `evaluate`'s own code, pinned equal to it by a test) and
-the event loop is given back between applications, as the evaluator does, so a page never holds
-up the requests being served. The request path is not touched: the recorder, the generate and chat handlers are unchanged, and the perf gate
-is at +0.0% on every model. Valkey and Postgres were not measured: neither runs on this machine.
+The figures cost about a third of a millisecond an application: each application's hour is summed
+once (`signals.evaluate_many`, `evaluate`'s own code, pinned equal to it by a test) and the event
+loop is given back between applications, as the evaluator does, so a page never holds up the
+requests being served. The request path is not touched: the recorder, the generate and chat
+handlers are unchanged, and the perf gate is at +0.0% on every model. Valkey and Postgres were not
+measured: neither runs on this machine.
 
 ## Not built here
 
