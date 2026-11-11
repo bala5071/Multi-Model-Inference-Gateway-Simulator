@@ -32,11 +32,16 @@ interface Expected {
   /** The picture's name: the role, as the plan's table names it. */
   name: string;
   navigation: string[];
-  /** Where it lands (docs/51): its organization's Applications, or Home. */
-  landing: "Applications" | "Home";
+  /**
+   * Where it lands (console-ia-v2-plan 2.1): its organization's Applications, its one
+   * application's page (named after it), or Home.
+   */
+  landing: string;
   /** The regions inside Home, for a session that lands there. */
   home: (string | RegExp)[];
   hidden: string;
+  /** The tabs of App one's page it is shown; null where the page is not open to it. */
+  tabs: string[] | null;
 }
 
 const ROLES: Expected[] = [
@@ -47,54 +52,45 @@ const ROLES: Expected[] = [
     landing: "Home",
     home: ["Platform", /^Organization /],
     hidden: "#/channels",
+    tabs: null,
   },
   {
     account: ADMIN,
     name: "org-admin",
-    navigation: [
-      "Home",
-      "Applications",
-      "Organization settings",
-      "Channels",
-      "Incidents",
-      "Application settings",
-      "Alert rules",
-      "API keys",
-    ],
+    navigation: ["Home", "Applications", "Organization settings", "Channels", "Incidents"],
     landing: "Applications",
     home: [],
     hidden: "#/monitor/overview",
+    tabs: ["Overview", "Settings", "Alert rules", "Incidents", "API keys"],
   },
   {
     account: ORG_READER,
     name: "organization-reader",
-    navigation: [
-      "Home",
-      "Applications",
-      "Organization settings",
-      "Incidents",
-      "Application settings",
-      "Alert rules",
-    ],
+    navigation: ["Home", "Applications", "Organization settings", "Incidents"],
     landing: "Applications",
     home: [],
     hidden: "#/channels",
+    tabs: ["Overview", "Settings", "Alert rules", "Incidents"],
   },
   {
+    // One application: it lands on that application's page (console-ia-v2-plan 2.1), which the
+    // sidebar names by its id.
     account: APP_ADMIN,
     name: "app-admin",
-    navigation: ["Home", "Incidents", "Application settings", "Alert rules", "API keys"],
-    landing: "Home",
-    home: ["Your applications"],
+    navigation: ["Home", "app-one"],
+    landing: "App one",
+    home: [],
     hidden: "#/organization",
+    tabs: ["Overview", "Settings", "Alert rules", "Incidents", "API keys"],
   },
   {
     account: APP_READER,
     name: "application-reader",
-    navigation: ["Home", "Incidents", "Application settings", "Alert rules"],
-    landing: "Home",
-    home: ["Your applications"],
+    navigation: ["Home", "app-one"],
+    landing: "App one",
+    home: [],
     hidden: "#/channels",
+    tabs: ["Overview", "Settings", "Alert rules", "Incidents"],
   },
   {
     account: NO_ROLE,
@@ -103,8 +99,12 @@ const ROLES: Expected[] = [
     landing: "Home",
     home: ["No access yet"],
     hidden: "#/organization",
+    tabs: null,
   },
 ];
+
+/** The level-2 heading each navigation link opens: its label, or an application's name. */
+const HEADINGS: Record<string, string> = { "app-one": "App one" };
 
 // --- every role -----------------------------------------------------------------------------------
 
@@ -128,8 +128,30 @@ for (const role of ROLES) {
     // Each item shown opens its screen.
     for (const label of role.navigation.slice(1)) {
       await sections(page).getByRole("link", { name: label, exact: true }).click();
-      await expect(page.getByRole("heading", { name: label, level: 2 })).toBeVisible();
+      await expect(
+        page.getByRole("heading", { name: HEADINGS[label] ?? label, level: 2, exact: true }),
+      ).toBeVisible();
       await scan.step(page);
+    }
+
+    // The application page (docs/56): exactly the tabs the gateway allows it, each at its address.
+    if (role.tabs === null) {
+      await page.goto("/dashboard/#/app/app-one/overview");
+      await expect(
+        page.getByRole("region", { name: role.landing, exact: true }).getByRole("alert").first(),
+      ).toHaveText(NOT_AVAILABLE);
+    } else {
+      await page.goto("/dashboard/#/app/app-one/overview");
+      const tabs = page.getByRole("navigation", { name: "Application sections" });
+      await expect(tabs.getByRole("link")).toHaveText(role.tabs);
+      for (const tab of role.tabs) {
+        await tabs.getByRole("link", { name: tab, exact: true }).click();
+        await expect(tabs.getByRole("link", { name: tab, exact: true })).toHaveAttribute(
+          "aria-current",
+          "page",
+        );
+        await scan.step(page);
+      }
     }
 
     // One it does not show, opened by its address: where it lands, with one sentence.
@@ -164,10 +186,13 @@ test("a deep link from logged out returns to its place after login", async ({
   await expect(page.getByRole("region", { name: "Log in", exact: true })).toBeVisible();
   await picture(page, testInfo, "login");
   await logIn(page, ADMIN, scan);
-  await expect(page.getByRole("heading", { name: "Alert rules", level: 2 })).toBeVisible();
-  await expect(page.getByRole("combobox", { name: "Application", exact: true })).toHaveValue(
-    "app-one",
-  );
+  // An old address (console-ia-v2-plan 2.2): the Alert rules tab of App one's page.
+  await expect(page.getByRole("heading", { name: "App one", level: 2 })).toBeVisible();
+  await expect(
+    page
+      .getByRole("navigation", { name: "Application sections" })
+      .getByRole("link", { name: "Alert rules", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
   expect(new URL(page.url()).hash).toBe("#/rules/app-one");
   expect(await scan.leaks(page)).toEqual([]);
   await page.context().close();

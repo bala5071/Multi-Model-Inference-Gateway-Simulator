@@ -7,7 +7,17 @@
 
 import { expect, test, type Page } from "@playwright/test";
 import { picturedAndChecked } from "./a11y";
-import { ADMIN, ALL, APP_ADMIN, ORG_READER, Scan, logIn, sections, type Account } from "./session";
+import {
+  ADMIN,
+  ALL,
+  APP_ADMIN,
+  NOT_AVAILABLE,
+  ORG_READER,
+  Scan,
+  logIn,
+  sections,
+  type Account,
+} from "./session";
 
 test.describe.configure({ mode: "serial" });
 
@@ -24,7 +34,28 @@ async function watchPolicy(page: Page): Promise<() => Promise<string[]>> {
     page.evaluate(() => (window as unknown as { policyViolations: string[] }).policyViolations);
 }
 
+/** The application page's tabs these specs open, by the names the sidebar used to give them. */
+const TABS: Record<string, [string, string]> = {
+  "Application settings": ["settings", "Settings"],
+  "Alert rules": ["rules", "Alert rules"],
+  "API keys": ["keys", "API keys"],
+};
+
 async function open(page: Page, item: string, application?: string): Promise<void> {
+  const tab = TABS[item];
+  if (tab !== undefined) {
+    // A tab of the application's page (docs/56), by its address as a link does.
+    const id = /\(([^)]+)\)$/.exec(application ?? "")?.[1] ?? application ?? "app-one";
+    await page.evaluate((hash) => {
+      window.location.hash = hash;
+    }, `#/app/${id}/${tab[0]}`);
+    await expect(
+      page
+        .getByRole("navigation", { name: "Application sections" })
+        .getByRole("link", { name: tab[1], exact: true }),
+    ).toHaveAttribute("aria-current", "page");
+    return;
+  }
   await sections(page).getByRole("link", { name: item, exact: true }).click();
   // The screen opened, not the one before it (each screen's heading is its item's name).
   await expect(page.getByRole("heading", { name: item, level: 2, exact: true })).toBeVisible();
@@ -220,16 +251,8 @@ test("each new state, photographed and checked by axe in both themes", async ({
   expect(await scan.leaks(page)).toEqual([]);
 });
 
-/** The screens each role opens, as the gateway's navigation draws them for it. */
-const SCREENS: [string, string | undefined][] = [
-  ["Applications", undefined],
-  ["Organization settings", undefined],
-  ["Channels", undefined],
-  ["Incidents", undefined],
-  ["Application settings", "app-one"],
-  ["Alert rules", "app-one"],
-  ["API keys", "app-one"],
-];
+/** The organization's screens each role may open, as the gateway's navigation draws them. */
+const SCREENS = ["Applications", "Organization settings", "Channels", "Incidents"];
 
 for (const who of ALL) {
   test(`a phone: ${who.username}'s screens at 390 px, both themes, under axe`, async ({
@@ -244,21 +267,36 @@ for (const who of ALL) {
     const drawer = page.getByRole("dialog", { name: "Navigation" });
     const offered = await drawer.getByRole("link").allTextContents();
     await page.keyboard.press("Escape");
-    for (const [item, app] of SCREENS) {
+    const narrow = async (slug: string) => {
+      // No page wider than the phone: wide tables scroll in their own box.
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth),
+      ).toBeLessThanOrEqual(0);
+      await picturedAndChecked(page, testInfo, `phone-${role}-${slug}`);
+    };
+    // Each tab of App one's page the gateway allows it (docs/56).
+    await page.evaluate(() => {
+      window.location.hash = "#/app/app-one/overview";
+    });
+    const tabs = page.getByRole("navigation", { name: "Application sections" });
+    // Its tabs, or the landing's sentence for a session the page is not open to.
+    await expect(tabs.or(page.getByRole("alert").filter({ hasText: NOT_AVAILABLE }))).toBeVisible();
+    if (await tabs.isVisible()) {
+      for (const tab of await tabs.getByRole("link").allTextContents()) {
+        await tabs.getByRole("link", { name: tab, exact: true }).click();
+        await expect(tabs.getByRole("link", { name: tab, exact: true })).toHaveAttribute(
+          "aria-current",
+          "page",
+        );
+        await narrow(`app-${tab.toLowerCase().replaceAll(" ", "-")}`);
+      }
+    }
+    for (const item of SCREENS) {
       if (!offered.includes(item)) continue;
       await page.getByRole("button", { name: "Open the navigation" }).click();
       await drawer.getByRole("link", { name: item, exact: true }).click();
       await expect(drawer).toBeHidden();
       await expect(page.getByRole("heading", { name: item, level: 2, exact: true })).toBeVisible();
-      if (app !== undefined) {
-        const chooser = page.getByRole("combobox", { name: "Application", exact: true });
-        // The applications the gateway names come after the placeholder: wait for them.
-        await expect.poll(() => chooser.locator("option").count()).toBeGreaterThan(1);
-        const labels = await chooser.locator("option").allTextContents();
-        const label = labels.find((l) => l.includes(app));
-        if (label !== undefined) await chooser.selectOption({ label });
-      }
-      await expect(page.getByRole("heading", { level: 2 })).toBeVisible();
       // No page wider than the phone: wide tables scroll in their own box.
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth),

@@ -142,14 +142,15 @@ test("UI3: the typed settings forms, a confirmation, the incidents tabs (docs/55
   await evaluatorOk(page);
   await page.goto("/dashboard/");
   await logIn(page, ADMIN);
-  const sectionsNav = page.getByRole("navigation", { name: "Sections" });
-  const chooser = page.getByRole("combobox", { name: "Application", exact: true });
+  const sectionsNav = page.getByRole("navigation", { name: "Sections", exact: true });
+  // An application's tab (docs/56), by its address as a link does.
+  const openTab = async (hash: string) => {
+    await page.evaluate((h) => {
+      window.location.hash = h;
+    }, hash);
+  };
 
-  await sectionsNav.getByRole("link", { name: "Application settings", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "Application settings", level: 2, exact: true }),
-  ).toBeVisible();
-  await chooser.selectOption({ label: "App two (app-two)" });
+  await openTab("#/app/app-two/settings");
   await expect(page.getByRole("region", { name: "Edit", exact: true })).toBeVisible();
   await shot(page, "settings-form");
 
@@ -160,11 +161,8 @@ test("UI3: the typed settings forms, a confirmation, the incidents tabs (docs/55
   await expect(page.getByRole("region", { name: "Edit", exact: true })).toBeVisible();
   await shot(page, "organization-form");
 
-  await sectionsNav.getByRole("link", { name: "API keys", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "API keys", level: 2, exact: true }),
-  ).toBeVisible();
-  await chooser.selectOption({ label: "App one (app-one)" });
+  await openTab("#/app/app-one/keys");
+  await expect(page.getByRole("table", { name: "Keys" })).toBeVisible();
   await page
     .getByRole("button", { name: /^Revoke / })
     .first()
