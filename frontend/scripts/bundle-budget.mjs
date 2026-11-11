@@ -84,7 +84,11 @@ const total = sum(js);
   console.log(`JS   total raw ${total.raw} B, gzip ${total.gzip} B (reported, not gated)`);
 }
 {
-  const pulled = [...initial].filter((name) => ON_DEMAND.some((prefix) => name.startsWith(prefix)));
+  // Each must be a chunk of its own, loaded later: one in the initial download, or none at all
+  // (its code folded into the entry by a static import), fails.
+  const pulled = ON_DEMAND.filter(
+    (prefix) => !js.some((row) => row.name.startsWith(prefix) && !initial.has(row.name)),
+  );
   const ok = pulled.length === 0;
   over ||= !ok;
   console.log(

@@ -75,11 +75,13 @@ and the monitoring (with uPlot) load when opened, from the same origin (the CSP'
 
 **The gate (17.8)**: `npm run budget` reads the initial download from the built `index.html` (its
 module script and the files Vite preloads for it) and holds it to **135,000 B** gzip; it fails too
-if the monitoring or the application page is pulled into it. Each on-demand chunk and the total are
+if the monitoring or the application page is not a chunk of its own loaded later (pulled into the
+initial download, or folded into the entry by a static import: mutation W12). Each on-demand chunk and the total are
 printed, not gated. Why splitting could not keep the total under 135 kB: UI4's code adds about
 5.2 kB (every chunk gzipped as one stream is 138,147 B, already over), and gzipping files apart
-adds about 5.5 kB. `npm run budget:control` requires the gate to fail over a 1000 B budget, on a
-font file, and on an on-demand chunk loaded first. CSS (12 kB) and fonts (0 B) are unchanged.
+adds about 5.5 kB. `npm run budget:control` lowers each budget alone and requires the gate to fail
+on that budget's own line (before, JS and CSS were lowered together, so a dead JS check passed:
+mutation W10), and on a font file and an on-demand chunk loaded first. CSS (12 kB) and fonts (0 B) are unchanged.
 
 ## Found on the way
 

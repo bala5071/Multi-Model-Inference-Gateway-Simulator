@@ -1,18 +1,30 @@
-// The bundle gate's control (docs/53): run against the built files with a budget of 1000 B, the
-// gate must fail. If it passes, it could not be trusted to stop a bundle over its real budget.
+// The bundle gate's control (docs/53, docs/56): run against the built files, the gate must fail
+// over each of its budgets on its own. If it passes, it could not be trusted to stop a bundle over
+// its real budget.
+//
+// Each budget is lowered alone, the others left as they are, and the gate must fail on that
+// budget's own line: lowering several at once let one check's failure hide another that never
+// fails (mutation W10 of docs/56 found the initial-download check unguarded that way).
 
 import { spawnSync } from "node:child_process";
 import { rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const gate = fileURLToPath(new URL("./bundle-budget.mjs", import.meta.url));
-const run = spawnSync(process.execPath, [gate], {
-  env: { ...process.env, BUNDLE_BUDGET_JS: "1000", BUNDLE_BUDGET_CSS: "1000" },
-  encoding: "utf8",
-});
-if (run.status !== 1 || !run.stdout.includes("OVER")) {
-  console.error(`The gate did not fail over a 1000 B budget (exit ${String(run.status)}).`);
-  process.exit(1);
+for (const [variable, line] of [
+  ["BUNDLE_BUDGET_JS", /^JS {3}initial .*: OVER$/m],
+  ["BUNDLE_BUDGET_CSS", /^CSS .*: OVER$/m],
+]) {
+  const run = spawnSync(process.execPath, [gate], {
+    env: { ...process.env, [variable]: "1000" },
+    encoding: "utf8",
+  });
+  if (run.status !== 1 || !line.test(run.stdout)) {
+    console.error(
+      `The gate did not fail on its own line with ${variable}=1000 (exit ${String(run.status)}).`,
+    );
+    process.exit(1);
+  }
 }
 
 // And over the font budget: one planted font file, removed again whatever happens.
