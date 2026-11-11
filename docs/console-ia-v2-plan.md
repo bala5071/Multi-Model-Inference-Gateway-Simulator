@@ -1,8 +1,9 @@
 # Console information architecture v2: clients, applications, costs
 
-Status: **draft, for approval.** Docs only. No code and no permission change is made until this
-plan is approved; the act-as mode (section 9) and any new permission row (questions Q1, Q4)
-need an explicit yes. This file replaces P3 onward of `docs/console-integration-plan.md`
+Status: **approved** (PR #48, 2026-11-10), with the answers in section 13, which override any
+recommendation above that differs. Two new permission rows are approved: the owner's
+metrics-only read of a client's applications (Q1, PR 3) and the price rows (Q4, PR 4); each lands
+in its own clearly marked commit. The act-as mode (section 9) still needs its own plan. This file replaces P3 onward of `docs/console-integration-plan.md`
 (its section 15 says what is superseded).
 
 Builds on what PRs #45 to #47 shipped and keeps it: one React page at `/dashboard/`; navigation
@@ -53,7 +54,7 @@ Clients and also sees its own organization's tabs.
 | Route | Screen | Shown when the answer allows |
 |---|---|---|
 | `#/clients` | Clients | `organizations.list` and `usage.aggregate` (platform) |
-| `#/clients/<org>` | one client, as the platform owner (Q1) | the same |
+| `#/clients/<org>` | one client's applications and their metrics, as the platform owner (Q1 (b)) | `usage.read_client_applications` (new row, section 13) |
 | `#/monitor/<tab>` | Platform monitoring (unchanged) | `monitoring.read` |
 | `#/apps` | Applications of the organization | `applications.list` |
 | `#/apps/new` | Add application | the refused-body probe on `POST .../applications` (2.4) |
@@ -80,7 +81,8 @@ with "That page is not available to this account.", the same words for both, as 
 | Applications (organization tab) | no | yes | yes, read | no | no | no |
 | Channels (organization tab) | no | yes | no | no | no | no |
 | Organization settings (organization tab) | no | yes | yes, read | no | no | no |
-| Application page: Overview, Settings, Alert rules, Incidents | no (Q1) | yes | yes, read | its own | its own, read | no |
+| One client's applications, metrics only (`#/clients/<org>`) | yes (Q1 (b)) | no | no | no | no | no |
+| Application page: Overview, Settings, Alert rules, Incidents | no | yes | yes, read | its own | its own, read | no |
 | Application page: API keys | no | yes | no | its own | no | no |
 
 "Read" means the screen's write controls stay hidden because the screen's own probe said
@@ -96,9 +98,10 @@ with "That page is not available to this account.", the same words for both, as 
   when the organization has a firing incident, amber when pending or acknowledged, green when
   neither, grey "unknown" when the evaluator is not `ok` or the window is incomplete.
 - **One client, as the platform owner** (`#/clients/<org>`). A banner, "Viewing as platform
-  owner: metrics only". What it holds depends on Q1; under the recommendation it is that
-  organization's row of Clients over time (requests, errors, fallbacks, latency, tokens, cost),
-  with no application list and nothing editable.
+  owner: metrics only". One row per application of that client: id, name, requests, error rate,
+  fallback rate, p50, open-incident counts by state, tokens and estimated cost (PR 4), status dot;
+  a row opens that application's metrics over time. Nothing editable, no link to settings, rules,
+  channels, incidents or keys (Q1 (b), section 13).
 - **Applications** (organization). "Add application" on top when the probe allows. One row per
   application, a page of 50: name, mode (Q8), requests, error rate, p50, open incidents, status
   (the same dot as Clients, per application; "no requests" when the window is empty), usage and
@@ -178,6 +181,7 @@ tests of P1.
 | Create an application | **exists** | `POST /v1/admin/orgs/{org}/applications` (no step-up, per the table) | `applications.create` | exists; adds the audit-row assertion and the leak scan |
 | Its first key | **exists** | `POST .../applications/{app}/keys` (step-up) | `application_keys.issue` | exists; adds the e2e "shown once" check |
 | Organization list | **new** | `GET /v1/admin/orgs?after=&limit=` (id, name, kind, enabled, application count) | `organizations.list` | new |
+| One client's applications, metrics only | **new**, PR 3 | `GET /v1/admin/platform/orgs/{org}/applications/metrics?window=&after=&limit=` and `GET /v1/admin/platform/orgs/{org}/applications/{app}/metrics?window=` | **new row** `usage.read_client_applications` (section 13) | new: fixed fields, every refusal pinned |
 | Clients summaries | **new** | `GET /v1/admin/platform/usage?window=&after=&limit=` (per organization: requests, error rate, fallback rate, open-incident counts (Q2), tokens and cost (PR 4)) | `usage.aggregate` | new |
 | Platform health strip | **exists** | `/healthz`, `/readyz` | public, local | exists |
 | Price table | **new** | `GET /v1/admin/platform/prices`, `POST /v1/admin/platform/prices` (append one row) | **new rows** `prices.read`, `prices.write` (Q4) | new |
@@ -265,6 +269,8 @@ proves it), never stored in the browser, and gone from the DOM after navigation.
 both steps visible: "1. Create" and "2. First key".
 
 ## 7. The owner and client data
+
+(Answered by Q1 (b): see section 13. The text below is the analysis it answered.)
 
 The owner sees **metrics only**: counts, rates, latency buckets, tokens and estimated cost; never
 a prompt, a response, a key or a setting. Under today's table (F1, F2) that is: the organization
@@ -419,3 +425,37 @@ should be able to see.
 **Q9. The plan's file.** (a) This new file, with section 15 of the old plan pointing here. (b) All
 of it folded into `docs/console-integration-plan.md`.
 **Recommendation: (a).**
+
+## 13. Answers (approved 2026-11-10)
+
+- **Q1: (b).** The owner sees per-application metrics for a client, through **one new
+  platform_admin row**, metrics only:
+  - `usage.read_client_applications`, level organization (the client), allowed
+    `platform_admin@platform` only, no step-up, wired console. It lands in PR 3 **in its own
+    commit**, marked "permission row", holding only `permissions.py`, the regenerated matrix,
+    docs/28's table and the tests that pin it, so it can be reviewed alone.
+  - Its two routes (4.1) answer only from a fixed allowlist: application id and name, the window,
+    and the counts, rates, histogram percentiles, open-incident counts by state, tokens and
+    estimated cost. **Never** a key or key id, a setting, a mode, a channel or its target, a rule,
+    an incident's text or id, a provider, a prompt or a response. A test compares each answer's
+    field names with the allowlist exactly.
+  - An application is looked up inside the client named in the path; a missing application, one
+    of another organization and a missing organization answer the same 403 bytes as a forbidden
+    one, for every role (test).
+  - **Every other refusal stays and is pinned** by a test that asks each as platform_admin, on an
+    existing client, through the real routes: `applications.list`, `applications.read`,
+    `application_keys.list`/`issue`/`rotate`/`revoke`, `settings.read`/`write`,
+    `org_settings.read`/`write`, `alert_rules.read`/`write`, `alert_channels.read`/`write`,
+    `incidents.read`, `incidents.read_organization`, `incidents.acknowledge`,
+    `usage.read_organization`, `usage.read_application`, `mode.set_*`, `provider_keys.*`. Each
+    answers 403 `forbidden`. docs/28's "nothing at application level is ever allowed to it" stays
+    true: the new row is at organization level and its test is kept.
+  - Mutation checks for the row: allowed for org_admin; the allowlist gains a field; a missing
+    application answers differently from a forbidden one; the row granted step-up-free write.
+  - **Act-as stays the only way** for the owner to change anything in a client.
+- **Q2: (a).** Open incidents on Clients and the client view as counts by state only.
+- **Q3: (b), in PR 3,** with before/after timings. PRs 1 and 2 show 60 minutes, labelled "last 60
+  minutes" on every figure.
+- **Q4: (a).** `prices.read` and `prices.write` in PR 4, in their own marked commit.
+- **Q5: (a).** **Q6: C.** **Q7: (a).** **Q8: (a).** **Q9: (a).**
+- The ten decisions listed in #48's description are accepted.
