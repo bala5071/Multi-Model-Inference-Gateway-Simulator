@@ -587,3 +587,12 @@ Decisions made from the code, each listed in P2's description so it can be objec
 - **Without accounts** (simulated live mode), an empty hash or Home opens the monitoring; a console
   route, or one the shell does not know, shows "This mode has no accounts" where the login would
   be, with a link to the monitoring.
+
+## 15. P3 onward is replaced by information architecture v2 (2026-11-10)
+
+PRs #45 to #47 (P0 to P2) shipped as planned above. What this plan said about P3 and after is
+replaced by [console-ia-v2-plan.md](console-ia-v2-plan.md), submitted for approval: the
+Clients, Applications and application-page structure, costs, and the act-as mode as a separate
+plan. Superseded here, subject to that plan's Q7: section 4's "New screens (P3)", section 11's
+item 4, Q5 (a) (the roles routes), and addition 1 of section 13 (which holds only if that plan's
+Q6 is answered C). Sections 1 to 14 stay as the record of P0 to P2.
