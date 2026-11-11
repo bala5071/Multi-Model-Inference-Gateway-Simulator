@@ -73,7 +73,10 @@ async function firstLogIn(page: Page, who: Account) {
   await change.getByLabel("Current password").fill(who.first());
   await change.getByLabel("New password").fill(who.password());
   await change.getByRole("button", { name: "Change password" }).click();
-  await expect(page.getByRole("heading", { name: "Home", level: 2 })).toBeVisible();
+  // Where it lands (docs/51): its organization's Applications, or Home.
+  await expect(
+    page.getByRole("heading", { name: /^(Home|Applications)$/, level: 2 }),
+  ).toBeVisible();
 }
 
 async function logIn(page: Page, account: Account) {

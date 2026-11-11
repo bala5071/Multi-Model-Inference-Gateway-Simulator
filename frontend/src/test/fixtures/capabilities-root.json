@@ -14,6 +14,8 @@
   "organization": {
     "users.list": true,
     "applications.list": false,
+    "applications.create": false,
+    "usage.read_organization": false,
     "org_settings.read": false,
     "alert_channels.read": false,
     "incidents.read_organization": false

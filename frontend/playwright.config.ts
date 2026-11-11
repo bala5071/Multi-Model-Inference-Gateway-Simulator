@@ -92,6 +92,14 @@ export default defineConfig({
       dependencies: ["console-alerts"],
       use: { baseURL: `http://127.0.0.1:${CONSOLE_PORT}`, trace: "off", screenshot: "off" },
     },
+    {
+      // The Applications list and Add application for every role (docs/51), after the one page's
+      // own tests: it adds an application and keys, and sends requests with one.
+      name: "applications",
+      testMatch: "applications.e2e.ts",
+      dependencies: ["shell"],
+      use: { baseURL: `http://127.0.0.1:${CONSOLE_PORT}`, trace: "off", screenshot: "off" },
+    },
   ],
   webServer: [
     {

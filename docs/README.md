@@ -42,6 +42,8 @@ README's [table](../README.md#measured-results) gathers one from each.
 | [settings-and-alerts-plan.md](settings-and-alerts-plan.md) | Per-application settings, alert rules, incidents, webhook and email channels, and the console screens. Approved; built through C2 (notes 39 to 49), A6 and later not built. Its Part F records each step as agreed when it started |
 | [settings-and-alerts-a4-plan.md](settings-and-alerts-a4-plan.md) | A4: webhook channels, the vault's channel scope, the connect-time check, the outbox. Approved with the decisions of 2026-11-08; built in PR #39 (note 46) |
 | [settings-and-alerts-a5-plan.md](settings-and-alerts-a5-plan.md) | A5: email channels, verified recipients, the confirmation caps, the vault's platform scope. Approved; built in PR #42 (note 48) |
+| [console-integration-plan.md](console-integration-plan.md) | One page, one login, navigation by role: P0 to P2. Approved (PR #45); built in PRs #46 and #47 (note 50); P3 onward replaced by the IA v2 plan |
+| [console-ia-v2-plan.md](console-ia-v2-plan.md) | Clients, Applications, the application page, costs, act-as. Approved (PR #48); PR 1 built (note 51), the rest not built |
 
 ## Design notes
 
@@ -102,6 +104,7 @@ and the last column points out the main cases.
 | [48 Email channels](48-email-channels.md) | Email channels (A5): the operator's SMTP settings, the SMTP password in the vault's platform scope, verified recipients and their code, the confirmation caps, migration 18 and Postgres schema 7, and delivery by SMTP with a hard deadline and a bounded name lookup | Local only until A8; email only to verified recipients in exact allowed domains |
 | [49 Console alerts](49-console-alerts.md) | The admin console's alert screens (C2): rules with their last-hour preview, channels (a webhook's origin only, its key once; email recipients verified with the mailed code), incidents and Acknowledge, the evaluator banner from `/healthz`; who may write asked of the gateway, or following an answer of the same role row | Local only until A8 |
 | [50 Console integration](50-console-integration.md) | What a session may do: `GET /v1/auth/capabilities`, built inside `make_requires` from the same `authorize`, (P1); and the one page at `/dashboard/` (P2): the monitoring and the console behind one login, the navigation and home drawn from that answer, deep links, the ended session, no accounts in simulated live mode; missing equal to forbidden, no permission change | Local only until A8 |
+| [51 Console applications](51-console-applications.md) | The Applications list and Add application (PR 1 of the IA v2 plan): the organization's figures over the last 60 minutes from the alert recorder's rollups with the alert signals' own minimums, the open incident counts, the plan templates, the mode on every row, a new application's first key shown once, the API keys screen; organization sessions land on Applications | Local only until A8; no totals, no 24-hour window yet |
 
 ## Which numbers to trust for what
 

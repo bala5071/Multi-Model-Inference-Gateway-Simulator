@@ -2,10 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { App } from "../App";
 import type { StreamOptions } from "../hooks/useMonitorStream";
 import { ApiError, sessionApi } from "../console/api";
+import { AddApplicationScreen } from "../console/AddApplicationScreen";
 import { ApplicationScreen } from "../console/ApplicationScreen";
+import { ApplicationsScreen } from "../console/ApplicationsScreen";
 import { ChannelsScreen } from "../console/ChannelsScreen";
 import type { ConsoleContext } from "../console/context";
 import { IncidentsScreen } from "../console/IncidentsScreen";
+import { KeysScreen } from "../console/KeysScreen";
 import { ChangePasswordScreen, LoginScreen } from "../console/LoginScreen";
 import { OrganizationScreen } from "../console/OrganizationScreen";
 import { RulesScreen } from "../console/RulesScreen";
@@ -13,7 +16,7 @@ import { StepUpDialog } from "../console/StepUpDialog";
 import type { Capabilities, LoginAnswer, MeAnswer, SessionUser } from "../console/types";
 import { Header } from "./Header";
 import { Home, NoAccounts } from "./Home";
-import { allows, itemOf, LOAD_CONTROL, opens, PLAYGROUND } from "./navigation";
+import { allows, itemOf, landing, LOAD_CONTROL, opens, PLAYGROUND } from "./navigation";
 import { NavBar } from "./NavBar";
 import { parseRoute, routeHash, type Route } from "./routes";
 
@@ -265,17 +268,24 @@ export function Shell({ fetcher, stream }: { fetcher?: typeof fetch; stream?: St
       capabilities: now.capabilities,
       guarded,
     };
-    const home = (notice: string | null) => (
-      <main className="console">
-        <Home
-          context={context}
-          notice={notice}
-          onLogout={() => {
-            void logout();
-          }}
-        />
-      </main>
-    );
+    // Where this session lands (docs/51): its organization's Applications, or Home.
+    const onApplications = landing(now.capabilities).screen === "apps";
+    const home = (notice: string | null) =>
+      onApplications ? (
+        <main className="console">
+          <ApplicationsScreen context={context} notice={notice} />
+        </main>
+      ) : (
+        <main className="console">
+          <Home
+            context={context}
+            notice={notice}
+            onLogout={() => {
+              void logout();
+            }}
+          />
+        </main>
+      );
     // A place the session may not open, and one the page does not know, get the same words.
     if (!opens(route, now.capabilities))
       return home(route.screen === "home" ? null : NOT_AVAILABLE);
@@ -283,6 +293,26 @@ export function Shell({ fetcher, stream }: { fetcher?: typeof fetch; stream?: St
       case "home":
       case "unknown":
         return home(null);
+      case "apps":
+        return home(null);
+      case "apps-new":
+        return (
+          <main className="console">
+            <AddApplicationScreen context={context} />
+          </main>
+        );
+      case "keys":
+        return (
+          <main className="console">
+            <KeysScreen
+              context={context}
+              applicationId={route.applicationId}
+              onChoose={(id) => {
+                setRoute({ screen: "keys", applicationId: id });
+              }}
+            />
+          </main>
+        );
       case "monitor":
         return monitoring(route.tab, false);
       case "application":
@@ -351,7 +381,12 @@ export function Shell({ fetcher, stream }: { fetcher?: typeof fetch; stream?: St
               }
         }
       />
-      {capabilities !== null && <NavBar capabilities={capabilities} route={route} />}
+      {capabilities !== null && (
+        <NavBar
+          capabilities={capabilities}
+          route={route.screen === "home" ? landing(capabilities) : route}
+        />
+      )}
       {body()}
       {asking !== null && (
         <StepUpDialog

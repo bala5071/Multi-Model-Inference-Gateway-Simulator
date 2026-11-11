@@ -169,6 +169,10 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   expired previous keys, and every lease attempt compares the ceilings (docs/46) (exists)
 - `signals.py` — the alert signals and their minimums, pure, from one application's rollups or
   durable values of its own; "too few to judge", never 0 (docs/43) (exists)
+- `usagefigures.py` — the console's Applications list figures (`requests`, `error_rate`,
+  `latency_total_p50`) through `signals.evaluate` over the evaluator's window of complete
+  minutes, `window_for` (`since_ms` after a restart with in-memory rollups), `unavailable`,
+  `above_range`; pure (docs/51) (exists)
 - `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
   warning, on the injected clock, `circuit_breaker` events; `admit_attempt` says whether an
   admission is a half-open probe, whose slot frees itself after 120 s (`PROBE_MS`) (exists)
@@ -345,8 +349,9 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   provider endpoints (docs/32), each
   through `requires` (which claims the step-up window for consume-on-use actions), and
   `/v1/auth/capabilities`, what a session may do among `NAVIGATION_ACTIONS`, answered inside
-  `make_requires` with the same `authorize` (docs/50), every answer
-  `Cache-Control: no-store` (exists)
+  `make_requires` with the same `authorize` (docs/50), and the console's reads (docs/51: the
+  plan templates, the organization's figures from the alert rollups, the open incident counts,
+  the mode on every application row), every answer `Cache-Control: no-store` (exists)
 
 Outside the package, `benchmarks/` is a package run with `python -m`:
 
@@ -418,6 +423,9 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
   numbers in `docs/46` (exists)
 - `benchmarks/management_requests.py` — management reads and key writes on the running
   server, beside `/healthz` and `/v1/auth/me`; the numbers in `docs/30` (exists)
+- `benchmarks/console_reads.py` — the Applications list's reads in process (the figures over
+  in-memory rollups, the open incident counts and the list with its modes on SQLite), for a page
+  of 50 and of 100; the numbers in PR 1's description and `docs/51` (exists)
 
 - `benchmarks/report.py` — generates `docs/REPORT.md` and `docs/report/*.png` from the
   benchmarks above (`make report`). Sections 1 to 3 run on the calibrated profiles
@@ -433,8 +441,9 @@ make an unexplained failure pass.
 
 `frontend/` is one page at `/dashboard/` (`index.html`, React, TypeScript, Vite, uPlot; the shell
 in `src/shell/`, docs/50): the monitoring (`src/App.tsx`), which only reads the monitoring API
-(`docs/15`), and the admin console (`src/console/`, docs/47 and docs/49: settings, alert rules,
-channels, incidents), behind one login, one header and one navigation drawn from
+(`docs/15`), and the admin console (`src/console/`, docs/47, docs/49 and docs/51: settings, alert
+rules, channels, incidents, the organization's Applications, Add application, API keys), behind
+one login, one header and one navigation drawn from
 `GET /v1/auth/capabilities` (no role name in `src/`, outside the gateway's fixtures). The whole
 page is under the console's content security policy; `console.html` is the old address, a stub
 whose same-origin script opens the same place on the page. Without accounts (simulated live

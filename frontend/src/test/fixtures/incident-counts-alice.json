@@ -1,0 +1,16 @@
+{
+  "applications": [
+    {
+      "application_id": "north-blog",
+      "pending": 0,
+      "firing": 0,
+      "acknowledged": 1
+    },
+    {
+      "application_id": "north-shop",
+      "pending": 1,
+      "firing": 2,
+      "acknowledged": 0
+    }
+  ]
+}

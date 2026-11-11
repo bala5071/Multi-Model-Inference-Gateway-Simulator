@@ -208,6 +208,9 @@ def documented_endpoints() -> list[Endpoint]:
 ENDPOINTS = documented_endpoints()
 
 
+ORG = "/v1/admin/orgs/{org}"
+
+
 async def test_the_routes_are_the_documented_endpoints() -> None:
     """Every management route, its method and the action it declares, equal the table in
     note 30, and each action's step-up flag equals the permission table's: a route declared
@@ -229,6 +232,8 @@ async def test_the_routes_are_the_documented_endpoints() -> None:
             and route.path.startswith("/v1/admin")
             and "/alert-rules" not in route.path
             and "/incidents" not in route.path  # note 45's, checked against its table there
+            # The console's reads: note 51's, checked against its table in test_console_reads.
+            and route.path.removeprefix(ORG) not in ("/plans", "/metrics")
         ):
             [declaration] = declaration_of(route)
             assert declaration.kind == "requires"

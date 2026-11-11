@@ -173,6 +173,48 @@ async def _capabilities() -> dict[str, Any]:
     return answers
 
 
+async def _console_reads() -> dict[str, Any]:
+    """The Applications list's reads (docs/51), as alice (north's org_admin) gets them: the
+    list with each mode, the figures over a whole window and over one that began at a restart,
+    the open incident counts, the plan templates, and north-shop's keys (never a key itself)."""
+    from gateway.modes import Mode
+    from test_console_reads import console, seed_incidents
+
+    answers: dict[str, Any] = {}
+    async with console() as c:
+        alice = await c.login("alice")
+        # Just after the start: the window reaches before this process's rollups began.
+        c.at_minute(5)
+        c.record("north-shop", 4, status=200, total_ms=12.0)
+        c.evaluated_after(5)
+        answers["metrics-alice-restart.json"] = (await c.get(alice, "/north/metrics")).json()
+        # Later: a whole window, with enough requests to judge north-shop and too few for blog.
+        c.at_minute(100)
+        c.record("north-shop", 14, status=200, total_ms=12.0)
+        c.record("north-shop", 6, status=200, total_ms=180.0)
+        c.record("north-shop", 5, status=502, code="upstream_unavailable")
+        c.record("north-blog", 3, status=200, total_ms=40.0)
+        c.evaluated_after(120)
+        answers["metrics-alice.json"] = (await c.get(alice, "/north/metrics")).json()
+        await c.modes.set_organization_mode("north", Mode.LOCAL_WITH_HOSTED_FALLBACK, 0.0)
+        await c.modes.set_application_mode("north-shop", Mode.LOCAL_WITH_HOSTED_FALLBACK, 0.0)
+        answers["applications-alice.json"] = (await c.get(alice, "/north/applications")).json()
+        await seed_incidents(c.incidents)
+        answers["incident-counts-alice.json"] = (
+            await c.get(alice, "/north/incidents/counts")
+        ).json()
+        answers["plans-alice.json"] = (await c.get(alice, "/north/plans")).json()
+        await c.step_up(alice)
+        keys = "/north/applications/north-shop/keys"
+        for label in ("first", "second"):
+            assert (await c.post(alice, keys, {"label": label})).status_code == 201
+        listed = (await c.get(alice, keys)).json()
+        second = next(k["key_id"] for k in listed["keys"] if k["label"] == "second")
+        assert (await c.post(alice, f"{keys}/{second}/revoke", {})).status_code == 200
+        answers["keys-alice.json"] = (await c.get(alice, keys)).json()
+    return answers
+
+
 async def test_frontend_fixtures_are_what_the_gateway_produces() -> None:
     """The frontend's types and tests are checked against these files.
 
@@ -186,6 +228,7 @@ async def test_frontend_fixtures_are_what_the_gateway_produces() -> None:
         "control-simulated.json": await _simulated_control(),
         "control-off.json": await _plain_control(),
         **await _capabilities(),
+        **await _console_reads(),
     }
     if os.environ.get(UPDATE_ENV) == "1":
         FIXTURES.mkdir(parents=True, exist_ok=True)

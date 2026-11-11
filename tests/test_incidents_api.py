@@ -166,7 +166,12 @@ async def test_each_incident_route_is_documented_and_declares_its_action() -> No
     async with console() as c:
         routes = set()
         for route in c.app.routes:
-            if isinstance(route, APIRoute) and "/incidents" in route.path:
+            # The open counts are note 51's (test_console_reads), checked against its table.
+            if (
+                isinstance(route, APIRoute)
+                and "/incidents" in route.path
+                and not route.path.endswith("/incidents/counts")
+            ):
                 [declaration] = declaration_of(route)
                 assert declaration.kind == "requires", route.path
                 for method in route.methods or ():

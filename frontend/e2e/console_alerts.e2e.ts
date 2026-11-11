@@ -402,14 +402,15 @@ test("a viewer sees every alert page with no write control, no channel and no re
   await picture(page, testInfo, "alert-rules-viewer");
 
   // Channels: not among a viewer's places (the gateway's capabilities answer), and opening the
-  // address draws no channel screen, only home's one sentence (docs/50).
+  // address draws no channel screen, only one sentence where it lands: its organization's
+  // Applications (docs/50, docs/51).
   await expect(
     page.getByRole("navigation", { name: "Sections" }).getByRole("link", { name: "Channels" }),
   ).toHaveCount(0);
   await page.goto("/dashboard/#/channels");
-  await expect(page.getByRole("region", { name: "Home" }).getByRole("alert")).toHaveText(
-    "That page is not available to this account.",
-  );
+  await expect(
+    page.getByRole("region", { name: "Applications" }).getByRole("alert").first(),
+  ).toHaveText("That page is not available to this account.");
   expect(await writeControls(page)).toBe(0);
   await picture(page, testInfo, "channels-viewer");
 

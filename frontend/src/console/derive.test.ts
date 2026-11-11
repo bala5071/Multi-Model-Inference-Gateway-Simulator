@@ -14,6 +14,7 @@ import {
   versionRows,
 } from "./derive";
 import type { ApplicationSettings, OrganizationSettings, Validation } from "./types";
+import { applicationsAlice } from "../test/fixtures";
 
 function application(overrides: Partial<ApplicationSettings> = {}): ApplicationSettings {
   return {
@@ -163,12 +164,10 @@ describe("capRows and limitRows", () => {
         },
       },
     });
-    const summary = (id: string) => ({
-      application_id: id,
-      name: `App ${id}`,
-      organization_id: "acme",
-      plan: "pro",
-    });
+    // An application row as the gateway lists one, renamed.
+    const listed = applicationsAlice.applications[0];
+    if (listed === undefined) throw new Error("the fixture lists no application");
+    const summary = (id: string) => ({ ...listed, application_id: id, name: `App ${id}` });
     const rows = limitRows(organization, [
       { summary: summary("A"), settings: capped },
       { summary: summary("B"), settings: free },

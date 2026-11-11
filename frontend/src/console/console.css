@@ -202,3 +202,53 @@ label.chooser {
 .console-screen h4 {
   margin: 16px 0 8px;
 }
+
+/* The Applications list (docs/51): a link drawn as a button, the status dot beside its word,
+   and a new key's field. The dot is never the only sign: its word is always beside it. */
+a.button {
+  display: inline-block;
+  color: var(--text-primary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  text-decoration: none;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  vertical-align: middle;
+}
+
+.status-firing {
+  background: var(--critical);
+}
+
+.status-attention {
+  background: var(--warning);
+}
+
+.status-ok {
+  background: var(--good);
+}
+
+.status-no_requests {
+  background: transparent;
+  border: 1px solid var(--text-muted);
+}
+
+.key-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.key-field .key {
+  font-family: ui-monospace, monospace;
+  width: 100%;
+  max-width: 640px;
+}

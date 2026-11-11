@@ -829,6 +829,9 @@ async def _scenario(s: StateBackend) -> list[Any]:
         ),
         await inc.recent_resolved(rule.id, ""),
         await inc.recent_resolved_many([(rule.id, ""), (rule.id, "nope")], 0.0),
+        # The Applications list's open counts (docs/51).
+        await inc.open_counts("north"),
+        await inc.open_counts("nowhere"),
     ]
     # Alert channels, their sealed secrets, the outbox, the caps and the summaries (docs/46).
     ch = s.channels

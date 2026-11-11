@@ -7,6 +7,9 @@
 //   #/rules[/<id>]                          an application's alert rules
 //   #/channels                              the organization's alert channels
 //   #/incidents[/<app>[/<incident>]]        incidents
+//   #/apps                                  the organization's applications (docs/51)
+//   #/apps/new                              add an application
+//   #/keys, #/app/<id>/keys                 an application's API keys
 //
 // The dashboard's old hashes (`#/latency`, `#latency`) are read as `#/monitor/latency`, so old
 // links keep working. Anything else is `unknown`: the shell answers it as it answers a place the
@@ -31,6 +34,9 @@ export type Route =
   | { screen: "rules"; applicationId: string | null }
   | { screen: "channels" }
   | { screen: "incidents"; applicationId: string | null; incidentId: string | null }
+  | { screen: "apps" }
+  | { screen: "apps-new" }
+  | { screen: "keys"; applicationId: string | null }
   | { screen: "unknown" };
 
 function isTab(name: string | undefined): name is MonitorTab {
@@ -53,6 +59,12 @@ export function parseRoute(hash: string): Route {
   if (only && isTab(first)) return { screen: "monitor", tab: first };
   if (first === "organization" && only) return { screen: "organization" };
   if (first === "channels" && only) return { screen: "channels" };
+  if (first === "apps" && only) return { screen: "apps" };
+  if (first === "apps" && second === "new" && parts.length === 2) return { screen: "apps-new" };
+  if (first === "keys" && only) return { screen: "keys", applicationId: null };
+  if (first === "app" && parts.length === 3 && parts[2] === "keys" && part(1) !== null) {
+    return { screen: "keys", applicationId: part(1) };
+  }
   if (first === "rules" && parts.length <= 2) return { screen: "rules", applicationId: part(1) };
   if (first === "application" && parts.length <= 2) {
     return { screen: "application", applicationId: part(1) };
@@ -80,6 +92,12 @@ export function routeHash(route: Route): string {
       return "#/organization";
     case "channels":
       return "#/channels";
+    case "apps":
+      return "#/apps";
+    case "apps-new":
+      return "#/apps/new";
+    case "keys":
+      return route.applicationId === null ? "#/keys" : `#/app/${e(route.applicationId)}/keys`;
     case "rules":
       return route.applicationId === null ? "#/rules" : `#/rules/${e(route.applicationId)}`;
     case "incidents":

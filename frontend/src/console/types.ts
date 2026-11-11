@@ -87,6 +87,12 @@ export interface ApplicationSummary {
   name: string;
   organization_id: string;
   plan: string;
+  allowed_models: string[];
+  max_tokens: number | null;
+  requests_per_minute: number | null;
+  created_at_ms: number;
+  /** The mode in force for it: the stricter of its organization's and its own (docs/51). */
+  mode: string;
 }
 
 export interface ApplicationPage {
@@ -300,4 +306,80 @@ export interface Capabilities {
   organization: Record<string, boolean>;
   applications: NamedApplication[];
   more_applications: boolean;
+}
+
+// --- The Applications list and Add application (docs/51). Shapes only; the gateway decides. ---
+
+/** One figure: its value, or why there is none (`too_few`, `incomplete`, `unavailable`,
+ * `above_range`). Never a 0 standing in for "not known". */
+export interface Figure {
+  value: number | null;
+  why_not: string | null;
+}
+
+export interface FigureWindow {
+  minutes: number;
+  first_minute_ms: number;
+  end_ms: number;
+  /** When this process's rollups began, if inside the window (a restart). */
+  since_ms: number | null;
+}
+
+export interface ApplicationFigures {
+  application_id: string;
+  requests: Figure;
+  error_rate: Figure;
+  latency_total_p50: Figure;
+}
+
+/** `GET .../metrics`: one page of the organization's applications, the list's own paging. */
+export interface FiguresPage {
+  window: FigureWindow;
+  applications: ApplicationFigures[];
+  next: string | null;
+}
+
+export interface OpenCounts {
+  application_id: string;
+  pending: number;
+  firing: number;
+  acknowledged: number;
+}
+
+/** `GET .../incidents/counts`: the applications with an open incident only. */
+export interface OpenCountsAnswer {
+  applications: OpenCounts[];
+}
+
+export interface PlanTemplate {
+  name: string;
+  allowed_models: string[];
+  monthly_token_budget: number;
+  max_tokens: number | null;
+  requests_per_minute: number | null;
+}
+
+/** `GET .../plans`: what an application can be created from. */
+export interface PlanList {
+  plans: PlanTemplate[];
+}
+
+/** An application's key as the gateway lists it: never the key, never its HMAC. */
+export interface ApiKeySummary {
+  key_id: string;
+  label: string;
+  state: string;
+  created_at_ms: number;
+  expires_at_ms: number | null;
+  last_used_at_ms: number | null;
+}
+
+export interface KeyPage {
+  keys: ApiKeySummary[];
+  next: string | null;
+}
+
+/** A key just issued or rotated: the one answer that carries it, shown once. */
+export interface IssuedKey extends ApiKeySummary {
+  key: string;
 }

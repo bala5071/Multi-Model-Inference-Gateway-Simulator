@@ -147,6 +147,7 @@ export function Home({
                   { screen: "incidents", applicationId: id, incidentId: null },
                   "incidents.read",
                 ],
+                ["API keys", { screen: "keys", applicationId: id }, "application_keys.list"],
               ];
               return (
                 <li key={id}>

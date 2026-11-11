@@ -78,6 +78,7 @@ class Wired(StrEnum):
     ALERTS_A3 = "alerts A3"  # the incident endpoints (docs/45)
     ALERTS_A4 = "alerts A4"  # the alert channel endpoints (docs/46)
     ALERTS_A5 = "alerts A5"  # an email channel's recipients (docs/48)
+    CONSOLE = "console"  # the console's reads (docs/console-ia-v2-plan.md, docs/51)
     LATER = "later"  # declared; no endpoint is planned in A2
 
 
@@ -146,7 +147,7 @@ def _rows() -> list[Permission]:
         # Applications, and usage, in an organization.
         ("applications.create", o, (_ORG_ADMIN,), False, w.STEP_7),
         ("applications.list", o, (_ORG_ADMIN, "viewer@own_organization"), False, w.STEP_7),
-        ("usage.read_organization", o, (_ORG_ADMIN, "viewer@own_organization"), False, w.LATER),
+        ("usage.read_organization", o, (_ORG_ADMIN, "viewer@own_organization"), False, w.CONSOLE),
         # Model providers and their keys belong to the organization (docs/32): only its
         # org_admin configures them or sets a key; platform_admin may see that they exist and
         # switch one off or on. No action reads a key.
@@ -265,6 +266,8 @@ NAVIGATION_ACTIONS: Mapping[Level, tuple[str, ...]] = {
     Level.ORGANIZATION: (
         "users.list",
         "applications.list",
+        "applications.create",
+        "usage.read_organization",
         "org_settings.read",
         "alert_channels.read",
         "incidents.read_organization",

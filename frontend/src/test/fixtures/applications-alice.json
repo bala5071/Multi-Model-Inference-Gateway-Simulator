@@ -1,0 +1,33 @@
+{
+  "applications": [
+    {
+      "application_id": "north-blog",
+      "name": "Blog",
+      "organization_id": "north",
+      "plan": "pro",
+      "allowed_models": [
+        "economy",
+        "standard"
+      ],
+      "max_tokens": null,
+      "requests_per_minute": null,
+      "created_at_ms": 1750000000000.0,
+      "mode": "local_only"
+    },
+    {
+      "application_id": "north-shop",
+      "name": "Shop",
+      "organization_id": "north",
+      "plan": "pro",
+      "allowed_models": [
+        "economy",
+        "standard"
+      ],
+      "max_tokens": null,
+      "requests_per_minute": null,
+      "created_at_ms": 1750000000000.0,
+      "mode": "local_with_hosted_fallback"
+    }
+  ],
+  "next": null
+}

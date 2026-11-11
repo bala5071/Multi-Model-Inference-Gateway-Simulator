@@ -14,7 +14,10 @@ Where a write has none, its control follows an answer of the same role row (note
   ``alert_channels.write`` is no dry run: without an open window it is refused
   ``step_up_required``, and every step-up refusal is audited
   (``test_a_channel_write_probe_would_be_audited``). So all three follow the channel list's own
-  answer (``alert_channels.read``).
+  answer (``alert_channels.read``);
+- ``application_keys.issue``, ``.rotate`` and ``.revoke`` (docs/51) take step-up, so a probe of
+  any of them would be an audited ``step_up_required`` refusal, and Revoke has no body to
+  refuse: all three follow the key list's own answer (``application_keys.list``).
 
 ``test_sibling_rows_are_equal`` pins each pair's rows equal, so a change to the matrix fails here
 instead of showing a control the gateway would refuse.
@@ -41,6 +44,10 @@ SIBLINGS = (
     ("alert_channels.read", "alert_channels.write"),
     ("alert_channels.read", "alert_channels.disable"),
     ("alert_channels.read", "alert_channels.test"),
+    # An application's keys (docs/51): Issue, Rotate and Revoke follow the key list's answer.
+    ("application_keys.list", "application_keys.issue"),
+    ("application_keys.list", "application_keys.rotate"),
+    ("application_keys.list", "application_keys.revoke"),
 )
 
 Session = tuple[str, str]
