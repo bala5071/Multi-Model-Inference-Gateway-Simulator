@@ -22,6 +22,7 @@ import {
   secret,
   sections,
   type Account,
+  logOut,
 } from "./session";
 
 test.describe.configure({ mode: "serial" });
@@ -54,11 +55,11 @@ const ROLES: Expected[] = [
       "Home",
       "Applications",
       "Organization settings",
+      "Channels",
+      "Incidents",
       "Application settings",
       "Alert rules",
       "API keys",
-      "Channels",
-      "Incidents",
     ],
     landing: "Applications",
     home: [],
@@ -71,9 +72,9 @@ const ROLES: Expected[] = [
       "Home",
       "Applications",
       "Organization settings",
+      "Incidents",
       "Application settings",
       "Alert rules",
-      "Incidents",
     ],
     landing: "Applications",
     home: [],
@@ -82,7 +83,7 @@ const ROLES: Expected[] = [
   {
     account: APP_ADMIN,
     name: "app-admin",
-    navigation: ["Home", "Application settings", "Alert rules", "API keys", "Incidents"],
+    navigation: ["Home", "Incidents", "Application settings", "Alert rules", "API keys"],
     landing: "Home",
     home: ["Your applications"],
     hidden: "#/organization",
@@ -90,7 +91,7 @@ const ROLES: Expected[] = [
   {
     account: APP_READER,
     name: "application-reader",
-    navigation: ["Home", "Application settings", "Alert rules", "Incidents"],
+    navigation: ["Home", "Incidents", "Application settings", "Alert rules"],
     landing: "Home",
     home: ["Your applications"],
     hidden: "#/channels",
@@ -219,7 +220,7 @@ test("logging out leaves the next person at home", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Organization settings", level: 2 }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Log out" }).click();
+  await logOut(page);
   await expect(page.getByRole("region", { name: "Log in", exact: true })).toContainText(
     "Logged out.",
   );

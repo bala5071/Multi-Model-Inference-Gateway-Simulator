@@ -12,6 +12,19 @@ Object.defineProperty(window, "matchMedia", {
   }),
 });
 
+// jsdom has no modal dialog: the open attribute stands in for showModal, and close removes it.
+if (typeof HTMLDialogElement.prototype.showModal !== "function") {
+  HTMLDialogElement.prototype.showModal = function showModal(this: HTMLDialogElement) {
+    this.setAttribute("open", "");
+  };
+}
+if (typeof HTMLDialogElement.prototype.close !== "function") {
+  HTMLDialogElement.prototype.close = function close(this: HTMLDialogElement) {
+    this.removeAttribute("open");
+    this.dispatchEvent(new Event("close"));
+  };
+}
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();

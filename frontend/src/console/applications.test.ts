@@ -12,6 +12,7 @@ import {
   formatMs,
   modeText,
   openText,
+  TOO_FEW,
   windowText,
   WINDOW_WORDS,
 } from "./applications";
@@ -31,7 +32,9 @@ describe("figureText", () => {
     expect(figureText({ value: 25, why_not: null }, "count")).toBe("25");
     expect(figureText({ value: 20, why_not: null }, "percent")).toBe("20.0 %");
     expect(figureText({ value: 13.45, why_not: null }, "ms")).toBe("13 ms");
-    expect(figureText({ value: null, why_not: "too_few" }, "percent")).toBe("too few to judge");
+    // Too few: a dash, which the table explains (docs/54).
+    expect(figureText({ value: null, why_not: "too_few" }, "percent")).toBe(TOO_FEW);
+    expect(TOO_FEW).toBe(String.fromCodePoint(0x2014));
     expect(figureText({ value: null, why_not: "incomplete" }, "count")).toBe("incomplete");
     expect(figureText({ value: null, why_not: "unavailable" }, "ms")).toBe("unavailable");
     expect(figureText({ value: null, why_not: "above_range" }, "ms")).toBe(
@@ -130,8 +133,8 @@ describe("applicationRows", () => {
     expect(blog).toMatchObject({
       mode: "local only",
       requests: "3",
-      errorRate: "too few to judge",
-      p50: "too few to judge",
+      errorRate: TOO_FEW,
+      p50: TOO_FEW,
       open: "1 (1 acknowledged)",
       status: { kind: "attention" },
     });

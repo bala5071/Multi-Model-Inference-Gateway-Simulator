@@ -21,6 +21,7 @@ import type {
   TestSend,
 } from "./types";
 import { TableScroll } from "../components/TableScroll";
+import { Toasted } from "./Toasts";
 
 /**
  * A new signing key, shown this once: the gateway never shows it again. Held in this
@@ -290,11 +291,7 @@ function ChannelView({
           Back to the list
         </button>
       </div>
-      {message !== null && (
-        <p className="notice" role="status">
-          {message}
-        </p>
-      )}
+      <Toasted message={message} />
       {error !== null && (
         <p className="form-error" role="alert">
           {error}
@@ -595,11 +592,7 @@ export function ChannelsScreen({ context }: { context: ConsoleContext }) {
     <div className="console-screen">
       <h2>Channels</h2>
       <EvaluatorBanner api={context.api} />
-      {message !== null && (
-        <p className="notice" role="status">
-          {message}
-        </p>
-      )}
+      <Toasted message={message} />
       {signingKey !== null && (
         <SigningKey
           value={signingKey}

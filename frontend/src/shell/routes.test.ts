@@ -1,4 +1,11 @@
-import { MONITOR_TABS, parseRoute, routeApplication, routeHash, type Route } from "./routes";
+import {
+  crumbs,
+  MONITOR_TABS,
+  parseRoute,
+  routeApplication,
+  routeHash,
+  type Route,
+} from "./routes";
 
 const EVERY: Route[] = [
   { screen: "home" },
@@ -81,5 +88,41 @@ describe("routes", () => {
   it("carries a route's application", () => {
     expect(routeApplication({ screen: "rules", applicationId: "x" })).toBe("x");
     expect(routeApplication({ screen: "channels" })).toBeNull();
+  });
+});
+
+describe("crumbs (docs/54)", () => {
+  const apps = { screen: "apps" } as const;
+  const home = { screen: "home" } as const;
+  const words = (route: Route, landing: Route = apps) =>
+    crumbs(route, "north", landing).map((c) => c.label);
+
+  it("names Home after what it shows, and every other place by its section", () => {
+    expect(words(home)).toEqual(["north", "Applications"]);
+    expect(words(home, home)).toEqual(["Home"]);
+    expect(words({ screen: "unknown" }, home)).toEqual(["Home"]);
+    expect(words({ screen: "monitor", tab: "latency" })).toEqual(["Monitoring", "Latency"]);
+    expect(words({ screen: "organization" })).toEqual(["north", "Organization settings"]);
+    expect(words({ screen: "channels" })).toEqual(["north", "Channels"]);
+    expect(words({ screen: "apps-new" })).toEqual(["north", "Applications", "Add application"]);
+    expect(words({ screen: "keys", applicationId: "north-shop" })).toEqual([
+      "north",
+      "API keys",
+      "north-shop",
+    ]);
+    expect(
+      words({ screen: "incidents", applicationId: "north-shop", incidentId: "inc_1" }),
+    ).toEqual(["north", "Incidents", "north-shop", "inc_1"]);
+  });
+
+  it("links every step but the last, which is where the session is", () => {
+    for (const route of EVERY) {
+      const trail = crumbs(route, "north", apps);
+      expect(trail.at(-1)?.route).toBeNull();
+      // Each link goes somewhere the page knows.
+      for (const crumb of trail.slice(0, -1)) {
+        if (crumb.route !== null) expect(parseRoute(routeHash(crumb.route))).toEqual(crumb.route);
+      }
+    }
   });
 });

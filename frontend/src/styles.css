@@ -351,6 +351,9 @@ button[aria-pressed="true"] {
 
 .table-scroll {
   overflow-x: auto;
+  /* The containing block of what is positioned inside (the visually hidden words of a dash), so it
+     scrolls with the table instead of widening the page. */
+  position: relative;
 }
 
 .data-table {

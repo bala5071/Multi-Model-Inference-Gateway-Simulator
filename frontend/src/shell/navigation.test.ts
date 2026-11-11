@@ -1,5 +1,7 @@
 import type { Capabilities } from "../console/types";
 import { capabilities } from "../test/fixtures";
+import { roleText, roleWords } from "./Header";
+import { initials } from "./UserMenu";
 import {
   allows,
   itemOf,
@@ -122,5 +124,24 @@ describe("applications (docs/51)", () => {
       screen: "keys",
       applicationId: "north-shop",
     });
+  });
+});
+
+describe("initials (docs/54)", () => {
+  it("takes up to two letters for the avatar", () => {
+    expect(initials("admin-e2e")).toBe("AE");
+    expect(initials("someone")).toBe("SO");
+    expect(initials("x")).toBe("X");
+  });
+});
+
+describe("roles as words (docs/54)", () => {
+  it("writes the gateway's role name with spaces for underscores, and keeps its scope", () => {
+    expect(roleWords("a_b_c")).toBe("a b c");
+    expect(roleWords("plain")).toBe("plain");
+    expect(roleText({ role: "x_y", scope_type: "organization", scope_id: "acme" })).toBe(
+      "x y (organization acme)",
+    );
+    expect(roleText({ role: "x_y", scope_type: "platform", scope_id: "" })).toBe("x y");
   });
 });

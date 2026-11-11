@@ -131,11 +131,14 @@ serves at `/dashboard` and the Docker image ships. They are the only packages of
 |---|---|---|
 | react | 19.3.0 | MIT |
 | react-dom | 19.3.0 | MIT |
+| lucide-react | 1.62.0 | ISC |
 | scheduler | 0.28.0 | MIT |
 | uplot | 1.6.32 | MIT |
 
-No font, icon set or other asset of a third party is bundled; the console's icon is an inline
-SVG written here, and so is the dashboard's.
+`lucide-react` (Lucide's icons as React components, ISC) is imported icon by icon, so only the
+icons the page uses are bundled (docs/52, section 15; docs/54). No font file is bundled: the page
+uses the system font stack, and the bundle gate fails on any font file. The product mark is an
+inline SVG written here.
 
 ## Development and test packages of the frontend
 

@@ -1,21 +1,98 @@
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import type { ReactNode } from "react";
 import type { Capabilities } from "../console/types";
-import { itemOf, shownItems, target } from "./navigation";
+import { ITEM_ICONS } from "./icons";
+import { itemOf, shownItems, target, type NavGroup, type NavItem } from "./navigation";
 import { routeHash, type Route } from "./routes";
 
-/** The items the gateway's answer allows, and nothing else (docs/50). */
-export function NavBar({ capabilities, route }: { capabilities: Capabilities; route: Route }) {
+const GROUPS: readonly (NavGroup | null)[] = [null, "Organization", "Application", "Platform"];
+
+/**
+ * The items the gateway's answer allows, and nothing else (docs/50), grouped by level
+ * (docs/54). Each link keeps its label as its name, visible or (collapsed) visually hidden with
+ * a tooltip, so the navigation reads the same whichever way it is drawn.
+ */
+export function NavList({
+  capabilities,
+  route,
+  collapsed = false,
+  onFollow,
+}: {
+  capabilities: Capabilities;
+  route: Route;
+  collapsed?: boolean;
+  onFollow?: () => void;
+}) {
   const current = itemOf(route);
+  const shown = shownItems(capabilities);
   return (
-    <nav className="console-nav" aria-label="Sections">
-      {shownItems(capabilities).map((item) => (
-        <a
-          key={item.id}
-          href={routeHash(target(item, route, capabilities))}
-          aria-current={item.id === current ? "page" : undefined}
-        >
-          {item.label}
-        </a>
-      ))}
+    <nav className="sidebar-nav" aria-label="Sections">
+      {GROUPS.map((group) => {
+        const items = shown.filter((item) => item.group === group);
+        if (items.length === 0) return null;
+        return (
+          <div key={group ?? "top"} className="nav-group">
+            {group !== null && (
+              <div className={collapsed ? "visually-hidden" : "nav-group-label"}>{group}</div>
+            )}
+            <ul>
+              {items.map((item: NavItem) => {
+                const Icon = ITEM_ICONS[item.id];
+                return (
+                  <li key={item.id}>
+                    <a
+                      href={routeHash(target(item, route, capabilities))}
+                      aria-current={item.id === current ? "page" : undefined}
+                      title={collapsed ? item.label : undefined}
+                      onClick={onFollow}
+                    >
+                      <Icon aria-hidden="true" focusable="false" size={18} />
+                      <span className={collapsed ? "visually-hidden" : undefined}>
+                        {item.label}
+                      </span>
+                    </a>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        );
+      })}
     </nav>
+  );
+}
+
+/** The left sidebar: the mark, the navigation, and the button that narrows it to icons. */
+export function Sidebar({
+  capabilities,
+  route,
+  collapsed,
+  onToggle,
+  brand,
+}: {
+  capabilities: Capabilities;
+  route: Route;
+  collapsed: boolean;
+  onToggle: () => void;
+  brand: ReactNode;
+}) {
+  const Toggle = collapsed ? PanelLeftOpen : PanelLeftClose;
+  return (
+    <aside id="sidebar" className="sidebar" aria-label="Sidebar">
+      {brand}
+      <NavList capabilities={capabilities} route={route} collapsed={collapsed} />
+      <button
+        type="button"
+        className="sidebar-toggle quiet"
+        aria-controls="sidebar"
+        aria-expanded={!collapsed}
+        onClick={onToggle}
+      >
+        <Toggle aria-hidden="true" focusable="false" size={18} />
+        <span className={collapsed ? "visually-hidden" : undefined}>
+          {collapsed ? "Expand the sidebar" : "Collapse the sidebar"}
+        </span>
+      </button>
+    </aside>
   );
 }

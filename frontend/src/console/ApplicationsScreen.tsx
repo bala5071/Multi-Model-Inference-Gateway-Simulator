@@ -1,7 +1,14 @@
 import { useState } from "react";
 import { allows, CREATE_APPLICATION } from "../shell/navigation";
 import { routeHash } from "../shell/routes";
-import { applicationRows, windowText, WINDOW_WORDS } from "./applications";
+import {
+  applicationRows,
+  TOO_FEW,
+  TOO_FEW_EXPLAINED,
+  TOO_FEW_WORDS,
+  windowText,
+  WINDOW_WORDS,
+} from "./applications";
 import { orgPath } from "./api";
 import type { ConsoleContext } from "./context";
 import { refusalText } from "./derive";
@@ -63,7 +70,7 @@ export function ApplicationsScreen({
       <EvaluatorBanner api={context.api} />
       {mayCreate && (
         <div className="form-actions">
-          <a className="button" href={routeHash({ screen: "apps-new" })}>
+          <a className="button primary" href={routeHash({ screen: "apps-new" })}>
             Add application
           </a>
         </div>
@@ -144,9 +151,15 @@ function ApplicationTable({
                   <span className="muted figure">({row.id})</span>
                 </th>
                 <td>{row.mode}</td>
-                <td className="figure">{row.requests}</td>
-                <td className="figure">{row.errorRate}</td>
-                <td className="figure">{row.p50}</td>
+                <td className="figure">
+                  <FigureText text={row.requests} />
+                </td>
+                <td className="figure">
+                  <FigureText text={row.errorRate} />
+                </td>
+                <td className="figure">
+                  <FigureText text={row.p50} />
+                </td>
                 <td>{row.open}</td>
                 <td>
                   <span className={`status-dot status-${row.status.kind}`} aria-hidden="true" />{" "}
@@ -164,6 +177,11 @@ function ApplicationTable({
           </tbody>
         </table>
       </TableScroll>
+      {rows.some((row) => [row.requests, row.errorRate, row.p50].includes(TOO_FEW)) && (
+        <p className="muted table-note">
+          {TOO_FEW} {TOO_FEW_EXPLAINED}
+        </p>
+      )}
       <div className="form-actions">
         {onFirst !== null && (
           <button type="button" onClick={onFirst}>
@@ -182,5 +200,19 @@ function ApplicationTable({
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * A figure's text; the dash a figure with too few requests behind it is drawn as carries its
+ * meaning in a tooltip and, for screen readers, in words (docs/54).
+ */
+function FigureText({ text }: { text: string }) {
+  if (text !== TOO_FEW) return <>{text}</>;
+  return (
+    <span className="too-few" title={TOO_FEW_EXPLAINED}>
+      <span aria-hidden="true">{TOO_FEW}</span>
+      <span className="visually-hidden">{TOO_FEW_WORDS}</span>
+    </span>
   );
 }

@@ -342,3 +342,34 @@ def test_the_frontend_asks_only_actions_the_gateway_answers_at_their_level() -> 
     }
     for level, action in asked:
         assert answered.get(action) == level, (level, action)
+
+
+# --- what the console states about the gateway's rules, pinned to its own (docs/54) ---------
+
+
+def _constant(path: Path, name: str) -> str:
+    match = re.search(rf"export const {name} = ([^;]+);", path.read_text(encoding="utf-8"))
+    assert match is not None, f"{name} is not in {path.name}"
+    return match.group(1).strip().strip('"')
+
+
+def test_the_rules_the_login_screens_state_are_the_gateways() -> None:
+    """The login screens show the password rules and the lockout as help text; the gateway still
+    decides. These are its numbers, so the words cannot drift from what it enforces."""
+    from gateway import auth, passwords
+
+    rules = FRONTEND_SRC / "console" / "passwordRules.ts"
+    assert int(_constant(rules, "PASSWORD_MIN_LENGTH")) == passwords.MIN_LENGTH
+    assert int(_constant(rules, "PASSWORD_MAX_LENGTH")) == passwords.MAX_LENGTH
+    assert (_constant(rules, "PRODUCT_NAME"),) == passwords.PRODUCT_NAMES
+    assert int(_constant(rules, "LOCK_FAILURES")) == auth.LOCK_FAILURES
+    assert int(_constant(rules, "LOCK_WINDOW_MINUTES")) * 60_000 == auth.LOCK_WINDOW_MS
+    assert int(_constant(rules, "LOCK_MINUTES")) * 60_000 == auth.LOCK_MS
+
+
+def test_the_minimums_the_applications_list_states_are_the_signals() -> None:
+    from gateway import signals
+
+    figures = FRONTEND_SRC / "console" / "applications.ts"
+    assert int(_constant(figures, "RATE_MINIMUM")) == signals.RATE_MINIMUM
+    assert int(_constant(figures, "P50_MINIMUM")) == signals.percentile_minimum(0.5)

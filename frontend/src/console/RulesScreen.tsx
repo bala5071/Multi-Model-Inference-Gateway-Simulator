@@ -16,6 +16,7 @@ import type {
   RuleValidation,
 } from "./types";
 import { TableScroll } from "../components/TableScroll";
+import { Toasted } from "./Toasts";
 
 interface Loaded {
   rules: AlertRule[];
@@ -114,11 +115,7 @@ export function RulesScreen({
           if (id !== null) onChoose(id);
         }}
       />
-      {message !== null && (
-        <p className="notice" role="status">
-          {message}
-        </p>
-      )}
+      <Toasted message={message} />
       {error !== null && (
         <p className="form-error" role="alert">
           {error}

@@ -25,53 +25,71 @@ export type ItemId =
   | "channels"
   | "incidents";
 
+/** The sidebar's groups (docs/54): the level of what an item opens. Home has none. */
+export type NavGroup = "Organization" | "Application" | "Platform";
+
 export interface NavItem {
   id: ItemId;
   label: string;
+  /** Where the sidebar files it; null for Home, above the groups. */
+  group: NavGroup | null;
   /** Shown when the gateway allows any one of these; with none, always shown. */
   asks: readonly Ask[];
 }
 
+/** In the sidebar's order: Home, then each group's items. */
 export const NAVIGATION: readonly NavItem[] = [
-  { id: "home", label: "Home", asks: [] },
-  { id: "monitor", label: "Monitoring", asks: [{ level: "platform", action: "monitoring.read" }] },
+  { id: "home", label: "Home", group: null, asks: [] },
   {
     id: "apps",
     label: "Applications",
+    group: "Organization",
     asks: [{ level: "organization", action: "applications.list" }],
   },
   {
     id: "organization",
     label: "Organization settings",
+    group: "Organization",
     asks: [{ level: "organization", action: "org_settings.read" }],
-  },
-  {
-    id: "application",
-    label: "Application settings",
-    asks: [{ level: "application", action: "settings.read" }],
-  },
-  {
-    id: "rules",
-    label: "Alert rules",
-    asks: [{ level: "application", action: "alert_rules.read" }],
-  },
-  {
-    id: "keys",
-    label: "API keys",
-    asks: [{ level: "application", action: "application_keys.list" }],
   },
   {
     id: "channels",
     label: "Channels",
+    group: "Organization",
     asks: [{ level: "organization", action: "alert_channels.read" }],
   },
   {
     id: "incidents",
     label: "Incidents",
+    group: "Organization",
     asks: [
       { level: "organization", action: "incidents.read_organization" },
       { level: "application", action: "incidents.read" },
     ],
+  },
+  {
+    id: "application",
+    label: "Application settings",
+    group: "Application",
+    asks: [{ level: "application", action: "settings.read" }],
+  },
+  {
+    id: "rules",
+    label: "Alert rules",
+    group: "Application",
+    asks: [{ level: "application", action: "alert_rules.read" }],
+  },
+  {
+    id: "keys",
+    label: "API keys",
+    group: "Application",
+    asks: [{ level: "application", action: "application_keys.list" }],
+  },
+  {
+    id: "monitor",
+    label: "Monitoring",
+    group: "Platform",
+    asks: [{ level: "platform", action: "monitoring.read" }],
   },
 ];
 
