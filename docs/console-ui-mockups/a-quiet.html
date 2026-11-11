@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mock-up A: Quiet</title>
+<style>
+/* Direction A, "Quiet": a light canvas, a white sidebar, one blue accent, soft tinted pills,
+   roomy 44 px rows. Static mock-up: no script, no external resource, invented values. */
+:root {
+  --canvas: #f6f7f9; --surface: #ffffff; --surface-2: #f1f3f6; --border: #e3e6eb;
+  --text: #1c2026; --text-2: #4f5866; --text-3: #5f6875;
+  --accent: #2257d6; --accent-text: #ffffff; --accent-soft: #e8efff;
+  --ok: #157a3c; --ok-soft: #e4f4ea; --warn: #8a5a00; --warn-soft: #fdf1d8;
+  --bad: #b42318; --bad-soft: #fde8e6; --idle: #5d6673; --idle-soft: #eef0f3;
+  --focus: #2257d6; --radius: 8px; --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not(:has(#light:checked)) {
+    --canvas: #0e1116; --surface: #151a21; --surface-2: #1b212a; --border: #2a313c;
+    --text: #e7eaee; --text-2: #b3bcc8; --text-3: #8e98a5;
+    --accent: #6f9cff; --accent-text: #0b1220; --accent-soft: #1b2a4a;
+    --ok: #5fd08b; --ok-soft: #12301f; --warn: #f2bf5e; --warn-soft: #3a2c0d;
+    --bad: #ff8a80; --bad-soft: #3d1614; --idle: #a3acb8; --idle-soft: #222934;
+    --shadow: none;
+  }
+}
+:root:has(#dark:checked) {
+  --canvas: #0e1116; --surface: #151a21; --surface-2: #1b212a; --border: #2a313c;
+  --text: #e7eaee; --text-2: #b3bcc8; --text-3: #8e98a5;
+  --accent: #6f9cff; --accent-text: #0b1220; --accent-soft: #1b2a4a;
+  --ok: #5fd08b; --ok-soft: #12301f; --warn: #f2bf5e; --warn-soft: #3a2c0d;
+  --bad: #ff8a80; --bad-soft: #3d1614; --idle: #a3acb8; --idle-soft: #222934;
+  --shadow: none;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.45 var(--font); color: var(--text); background: var(--canvas); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+.mock-note { background: var(--warn-soft); color: var(--warn); padding: 6px 16px; font-size: 12px; }
+.mock-note label { margin-left: 12px; }
+.app { display: grid; grid-template-columns: 232px 1fr; min-height: calc(100vh - 30px); }
+.side { background: var(--surface); border-right: 1px solid var(--border); padding: 16px 12px; display: flex; flex-direction: column; gap: 4px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 650; padding: 4px 8px 16px; }
+.brand svg { width: 22px; height: 22px; }
+.group { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-3); padding: 14px 8px 6px; }
+.nav a { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 6px; color: var(--text-2); }
+.nav a svg { width: 16px; height: 16px; flex: none; }
+.nav a:hover { background: var(--surface-2); text-decoration: none; }
+.nav a[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.side .grow { flex: 1; }
+.collapse { color: var(--text-3); font-size: 12px; padding: 8px; }
+.main { display: flex; flex-direction: column; min-width: 0; }
+.top { height: 56px; display: flex; align-items: center; gap: 16px; padding: 0 24px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.crumbs { color: var(--text-3); font-size: 13px; }
+.crumbs b { color: var(--text); font-weight: 600; }
+.top .grow { flex: 1; }
+.org { display: inline-flex; align-items: center; gap: 8px; padding: 5px 10px; border: 1px solid var(--border); border-radius: 999px; font-size: 13px; color: var(--text-2); }
+.user { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); }
+.avatar { width: 28px; height: 28px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-weight: 700; font-size: 12px; }
+.content { padding: 24px; max-width: 1280px; width: 100%; }
+.head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+h1 { font-size: 22px; line-height: 1.25; margin: 0 0 4px; font-weight: 650; }
+.sub { color: var(--text-2); margin: 0; }
+.btn { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-weight: 550; cursor: pointer; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.btn svg { width: 16px; height: 16px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; }
+.banner { display: flex; gap: 10px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); color: var(--text-2); font-size: 13px; background: var(--surface-2); }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+thead th { position: sticky; top: 0; background: var(--surface); text-align: left; font-size: 12px; font-weight: 600; color: var(--text-3); padding: 10px 16px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+thead th button { all: unset; cursor: pointer; display: inline-flex; gap: 4px; align-items: center; }
+thead th[aria-sort] { color: var(--text); }
+tbody td, tbody th { padding: 0 16px; height: 48px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
+tbody tr:hover { background: var(--surface-2); }
+tbody th { font-weight: 600; }
+.id { display: block; font: 12px ui-monospace, "SFMono-Regular", Consolas, monospace; color: var(--text-3); font-weight: 400; }
+.num { text-align: right; }
+.muted { color: var(--text-3); }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.ok { color: var(--ok); background: var(--ok-soft); }
+.warn { color: var(--warn); background: var(--warn-soft); }
+.bad { color: var(--bad); background: var(--bad-soft); }
+.idle { color: var(--idle); background: var(--idle-soft); }
+.mode { font-size: 12px; color: var(--text-2); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; }
+.foot { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-top: 1px solid var(--border); color: var(--text-3); font-size: 13px; }
+@media (max-width: 1100px) {
+  .app { grid-template-columns: 64px 1fr; }
+  .nav a span, .group, .brand span, .collapse { display: none; }
+  .nav a { justify-content: center; }
+}
+@media (max-width: 720px) {
+  .app { grid-template-rows: auto 1fr; }
+  .side .nav { display: flex; gap: 4px; }
+  tbody th { position: sticky; left: 0; background: var(--surface); z-index: 1; }
+  .app { grid-template-columns: 1fr; }
+  .side { flex-direction: row; overflow-x: auto; padding: 8px; border-right: 0; border-bottom: 1px solid var(--border); }
+  .side .grow, .brand { display: none; }
+  .org, .user span { display: none; }
+  .head { flex-direction: column; align-items: flex-start; }
+  .content { padding: 16px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="mock-note">Mock-up A, "Quiet". Static: no script, no external resource. Every value is invented for layout only, not measured.
+  <label><input type="radio" name="theme" id="system" checked> System</label>
+  <label><input type="radio" name="theme" id="light"> Light</label>
+  <label><input type="radio" name="theme" id="dark"> Dark</label>
+</div>
+<div class="app">
+  <nav class="side" aria-label="Sections">
+    <div class="brand"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="20" height="20" rx="6" fill="var(--accent)"/><path d="M7 12h10M12 7v10" stroke="var(--accent-text)" stroke-width="2.2" stroke-linecap="round"/></svg><span>Gateway</span></div>
+    <div class="nav">
+      <a href="#"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 7l6-5 6 5v7H2z" fill="none" stroke="currentColor" stroke-width="1.5"/></svg><span>Home</span></a>
+    </div>
+    <div class="group">Organization</div>
+    <div class="nav">
+      <a href="#" aria-current="page"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="2" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="2" y="9" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="9" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg><span>Applications</span></a>
+      <a href="#"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span>Channels</span></a>
+      <a href="#"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span>Organization settings</span></a>
+      <a href="#"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2l6 11H2z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><span>Incidents</span></a>
+    </div>
+    <div class="grow"></div>
+    <div class="collapse">&lsaquo; Collapse</div>
+  </nav>
+  <div class="main">
+    <header class="top">
+      <div class="crumbs">acme / <b>Applications</b></div>
+      <div class="grow"></div>
+      <span class="org" title="Organization">acme</span>
+      <span class="user"><span class="avatar" aria-hidden="true">AE</span><span>admin-e2e &#9662;</span></span>
+    </header>
+    <main class="content">
+      <div class="head">
+        <div>
+          <h1>Applications</h1>
+          <p class="sub">Requests, errors and latency over the last 60 minutes.</p>
+        </div>
+        <button class="btn primary" type="button"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Add application</button>
+      </div>
+      <section class="card" aria-label="Applications">
+        <div class="banner">Alert evaluation is running. Figures update when a minute completes.</div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col" aria-sort="ascending"><button>Name &#9650;</button></th>
+                <th scope="col">Mode</th>
+                <th scope="col" class="num"><button>Requests</button></th>
+                <th scope="col" class="num"><button>Error rate</button></th>
+                <th scope="col" class="num"><button>p50</button></th>
+                <th scope="col">Open incidents</th>
+                <th scope="col">Status</th>
+                <th scope="col"><span class="muted">Keys</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row"><a href="#">Checkout</a><span class="id">app_7f3a91c2</span></th><td><span class="mode">local only</span></td><td class="num">1,284</td><td class="num">0.4 %</td><td class="num">142 ms</td><td>0</td><td><span class="pill ok">ok</span></td><td><a href="#">API keys</a></td></tr>
+              <tr><th scope="row"><a href="#">Search</a><span class="id">app_19b0de44</span></th><td><span class="mode">local, hosted fallback</span></td><td class="num">8,902</td><td class="num">6.1 %</td><td class="num">311 ms</td><td>2 firing</td><td><span class="pill bad">firing</span></td><td><a href="#">API keys</a></td></tr>
+              <tr><th scope="row"><a href="#">Support bot</a><span class="id">app_c2e8f019</span></th><td><span class="mode">hosted first, local fallback</span></td><td class="num">57</td><td class="num">1.8 %</td><td class="num">1.2 s</td><td>1 acknowledged</td><td><span class="pill warn">attention</span></td><td><a href="#">API keys</a></td></tr>
+              <tr><th scope="row"><a href="#">Nightly batch</a><span class="id">app_5d44a7be</span></th><td><span class="mode">local only</span></td><td class="num">12</td><td class="num muted">too few to judge</td><td class="num muted">too few to judge</td><td>0</td><td><span class="pill ok">ok</span></td><td><a href="#">API keys</a></td></tr>
+              <tr><th scope="row"><a href="#">Sandbox</a><span class="id">app_e0a1f6d3</span></th><td><span class="mode">local only</span></td><td class="num">0</td><td class="num muted">too few to judge</td><td class="num muted">too few to judge</td><td>0</td><td><span class="pill idle">no requests</span></td><td><a href="#">API keys</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="foot"><span>5 applications. Sorting applies to this page.</span><span><button class="btn" type="button" disabled>Previous</button> <button class="btn" type="button">Next</button></span></div>
+      </section>
+    </main>
+  </div>
+</div>
+</body>
+</html>

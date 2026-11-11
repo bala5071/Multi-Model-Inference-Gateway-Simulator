@@ -44,6 +44,7 @@ README's [table](../README.md#measured-results) gathers one from each.
 | [settings-and-alerts-a5-plan.md](settings-and-alerts-a5-plan.md) | A5: email channels, verified recipients, the confirmation caps, the vault's platform scope. Approved; built in PR #42 (note 48) |
 | [console-integration-plan.md](console-integration-plan.md) | One page, one login, navigation by role: P0 to P2. Approved (PR #45); built in PRs #46 and #47 (note 50); P3 onward replaced by the IA v2 plan |
 | [console-ia-v2-plan.md](console-ia-v2-plan.md) | Clients, Applications, the application page, costs, act-as. Approved (PR #48); PR 1 built (note 51), the rest not built |
+| [52-console-ui-plan.md](52-console-ui-plan.md) | The console's UI pass before PR 2: audit, layout, tokens, components, charts, accessibility, visual regression, and three static mock-ups of the Applications list (`console-ui-mockups/`). For approval |
 
 ## Design notes
 

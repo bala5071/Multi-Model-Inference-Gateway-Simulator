@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mock-up C: Cards</title>
+<style>
+/* Direction C, "Cards": stat tiles over the list, a tinted sidebar, larger radius and soft
+   elevation, an indigo accent, two-line rows (name over id, figures with their labels). Static
+   mock-up: no script, no external resource, invented values. */
+:root {
+  --canvas: #f4f5fb; --surface: #ffffff; --surface-2: #f7f8fc; --border: #e2e4f0;
+  --text: #1b1d2a; --text-2: #4a4f66; --text-3: #6a7089;
+  --side: #eceefa; --side-active: #ffffff;
+  --accent: #4338ca; --accent-text: #ffffff; --accent-soft: #e9e8fb;
+  --ok: #166534; --ok-soft: #e3f5e9; --warn: #854d0e; --warn-soft: #fbf0d9;
+  --bad: #b42318; --bad-soft: #fde7e5; --idle: #575d75; --idle-soft: #edeef4;
+  --focus: #4338ca; --radius: 14px;
+  --shadow: 0 1px 2px rgba(27, 29, 42, 0.05), 0 4px 16px rgba(27, 29, 42, 0.05);
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not(:has(#light:checked)) {
+    --canvas: #0f1020; --surface: #171932; --surface-2: #1d2040; --border: #2c3058;
+    --text: #e8e9f5; --text-2: #b9bcd6; --text-3: #9196b8;
+    --side: #12142a; --side-active: #222651;
+    --accent: #a5a1ff; --accent-text: #15123d; --accent-soft: #2a2a5c;
+    --ok: #6ee79a; --ok-soft: #143323; --warn: #f5c56a; --warn-soft: #3a2d10;
+    --bad: #ff9a8f; --bad-soft: #3d1816; --idle: #aeb2cc; --idle-soft: #252847;
+    --shadow: none;
+  }
+}
+:root:has(#dark:checked) {
+  --canvas: #0f1020; --surface: #171932; --surface-2: #1d2040; --border: #2c3058;
+  --text: #e8e9f5; --text-2: #b9bcd6; --text-3: #9196b8;
+  --side: #12142a; --side-active: #222651;
+  --accent: #a5a1ff; --accent-text: #15123d; --accent-soft: #2a2a5c;
+  --ok: #6ee79a; --ok-soft: #143323; --warn: #f5c56a; --warn-soft: #3a2d10;
+  --bad: #ff9a8f; --bad-soft: #3d1816; --idle: #aeb2cc; --idle-soft: #252847;
+  --shadow: none;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.5 var(--font); color: var(--text); background: var(--canvas); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; border-radius: 6px; }
+.mock-note { background: var(--accent-soft); color: var(--text); padding: 6px 16px; font-size: 12px; }
+.mock-note label { margin-left: 12px; }
+.app { display: grid; grid-template-columns: 248px 1fr; min-height: calc(100vh - 30px); }
+.side { background: var(--side); padding: 20px 14px; display: flex; flex-direction: column; gap: 4px; }
+.brand { display: flex; gap: 10px; align-items: center; font-weight: 700; font-size: 15px; padding: 0 10px 18px; }
+.brand svg { width: 26px; height: 26px; }
+.orgcard { background: var(--surface); border-radius: 12px; padding: 10px 12px; margin-bottom: 14px; box-shadow: var(--shadow); }
+.orgcard small { display: block; color: var(--text-3); font-size: 11px; }
+.nav a { display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-radius: 10px; color: var(--text-2); font-weight: 500; }
+.nav a svg { width: 18px; height: 18px; flex: none; }
+.nav a:hover { background: var(--side-active); text-decoration: none; }
+.nav a[aria-current="page"] { background: var(--side-active); color: var(--accent); font-weight: 650; box-shadow: var(--shadow); }
+.side .grow { flex: 1; }
+.main { min-width: 0; }
+.top { display: flex; align-items: center; gap: 12px; padding: 18px 32px 0; }
+.crumbs { color: var(--text-3); font-size: 13px; }
+.top .grow { flex: 1; }
+.user { display: inline-flex; gap: 10px; align-items: center; background: var(--surface); padding: 4px 12px 4px 4px; border-radius: 999px; box-shadow: var(--shadow); font-size: 13px; color: var(--text-2); }
+.avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--accent); color: var(--accent-text); display: grid; place-items: center; font-weight: 700; font-size: 12px; }
+.content { padding: 12px 32px 32px; max-width: 1240px; }
+.head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin: 6px 0 20px; }
+h1 { font-size: 26px; margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+.sub { color: var(--text-2); margin: 4px 0 0; }
+.btn { height: 40px; padding: 0 18px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-weight: 600; cursor: pointer; display: inline-flex; gap: 8px; align-items: center; }
+.btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); box-shadow: var(--shadow); }
+.btn svg { width: 16px; height: 16px; }
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 20px; }
+.tile { background: var(--surface); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow); }
+.tile small { color: var(--text-3); font-size: 12px; font-weight: 600; }
+.tile b { display: block; font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.tile span { color: var(--text-3); font-size: 12px; }
+.card { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+.card-head { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.card-head h2 { font-size: 15px; margin: 0; }
+.card-head span { color: var(--text-3); font-size: 13px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+thead th { position: sticky; top: 0; background: var(--surface-2); text-align: left; font-size: 12px; font-weight: 600; color: var(--text-3); padding: 10px 20px; white-space: nowrap; }
+thead th button { all: unset; cursor: pointer; }
+thead th[aria-sort] { color: var(--accent); }
+tbody td, tbody th { padding: 12px 20px; border-top: 1px solid var(--border); text-align: left; white-space: nowrap; vertical-align: middle; }
+tbody tr:hover { background: var(--surface-2); }
+tbody th { font-weight: 650; }
+.line2 { display: block; font: 12px ui-monospace, Consolas, monospace; color: var(--text-3); font-weight: 400; }
+.num { text-align: right; }
+.num small { display: block; color: var(--text-3); font-size: 11px; }
+.muted { color: var(--text-3); }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 650; }
+.ok { color: var(--ok); background: var(--ok-soft); } .warn { color: var(--warn); background: var(--warn-soft); }
+.bad { color: var(--bad); background: var(--bad-soft); } .idle { color: var(--idle); background: var(--idle-soft); }
+.chip { font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); padding: 2px 8px; border-radius: 8px; color: var(--text-2); }
+.foot { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; border-top: 1px solid var(--border); color: var(--text-3); font-size: 13px; }
+@media (max-width: 1100px) {
+  .app { grid-template-columns: 72px 1fr; }
+  .nav a span, .brand span, .orgcard { display: none; }
+  .nav a { justify-content: center; }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .app { grid-template-rows: auto 1fr; }
+  .side .nav { display: flex; gap: 4px; }
+  tbody th { position: sticky; left: 0; background: var(--surface); z-index: 1; }
+  .app { grid-template-columns: 1fr; }
+  .side { flex-direction: row; overflow-x: auto; padding: 8px; }
+  .side .grow, .brand { display: none; }
+  .top, .content { padding-left: 16px; padding-right: 16px; }
+  .head { flex-direction: column; align-items: flex-start; }
+  .user span:last-child { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="mock-note">Mock-up C, "Cards". Static: no script, no external resource. Every value is invented for layout only, not measured.
+  <label><input type="radio" name="theme" id="system" checked> System</label>
+  <label><input type="radio" name="theme" id="light"> Light</label>
+  <label><input type="radio" name="theme" id="dark"> Dark</label>
+</div>
+<div class="app">
+  <nav class="side" aria-label="Sections">
+    <div class="brand"><svg viewBox="0 0 26 26" aria-hidden="true"><circle cx="13" cy="13" r="11" fill="var(--accent)"/><path d="M8 13a5 5 0 0 1 10 0" fill="none" stroke="var(--accent-text)" stroke-width="2.2" stroke-linecap="round"/><circle cx="13" cy="15.5" r="1.8" fill="var(--accent-text)"/></svg><span>Gateway</span></div>
+    <div class="orgcard"><small>Organization</small>acme</div>
+    <div class="nav">
+      <a href="#"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M2.5 8l6.5-5.5L15.5 8v7.5h-13z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Home</span></a>
+      <a href="#" aria-current="page"><svg viewBox="0 0 18 18" aria-hidden="true"><rect x="2.5" y="2.5" width="5.5" height="5.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="10" y="2.5" width="5.5" height="5.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="2.5" y="10" width="5.5" height="5.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="10" y="10" width="5.5" height="5.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Applications</span></a>
+      <a href="#"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Channels</span></a>
+      <a href="#"><svg viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="2.8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M9 2v2.2M9 13.8V16M2 9h2.2M13.8 9H16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Organization settings</span></a>
+      <a href="#"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 2.5l7 12.5H2z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg><span>Incidents</span></a>
+    </div>
+    <div class="grow"></div>
+  </nav>
+  <div class="main">
+    <header class="top">
+      <div class="crumbs">acme &nbsp;/&nbsp; Applications</div>
+      <div class="grow"></div>
+      <span class="user"><span class="avatar" aria-hidden="true">AE</span><span>admin-e2e &#9662;</span></span>
+    </header>
+    <main class="content">
+      <div class="head">
+        <div><h1>Applications</h1><p class="sub">Requests, errors and latency over the last 60 minutes.</p></div>
+        <button class="btn primary" type="button"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Add application</button>
+      </div>
+      <div class="tiles">
+        <div class="tile"><small>Applications</small><b>5</b><span>on this page</span></div>
+        <div class="tile"><small>Firing</small><b>1</b><span>application with a firing incident</span></div>
+        <div class="tile"><small>Needs attention</small><b>1</b><span>pending or acknowledged</span></div>
+        <div class="tile"><small>Alert evaluation</small><b>ok</b><span>heartbeat from /healthz</span></div>
+      </div>
+      <section class="card" aria-label="Applications">
+        <div class="card-head"><h2>All applications</h2><span>Sorting applies to this page</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th scope="col" aria-sort="ascending"><button>Application &#9650;</button></th>
+              <th scope="col">Mode</th>
+              <th scope="col" class="num"><button>Requests</button></th>
+              <th scope="col" class="num"><button>Error rate</button></th>
+              <th scope="col" class="num"><button>p50</button></th>
+              <th scope="col">Status</th>
+              <th scope="col"></th>
+            </tr></thead>
+            <tbody>
+              <tr><th scope="row"><a href="#">Checkout</a><span class="line2">app_7f3a91c2</span></th><td><span class="chip">local only</span></td><td class="num">1,284</td><td class="num">0.4 %</td><td class="num">142 ms</td><td><span class="pill ok">ok</span></td><td><a href="#">API keys</a></td></tr>
+              <tr><th scope="row"><a href="#">Search</a><span class="line2">app_19b0de44</span></th><td><span class="chip">local, hosted fallback</span></td><td class="num">8,902</td><td class="num">6.1 %</td><td class="num">311 ms</td><td><span class="pill bad">2 firing</span></td><td><a href="#">API keys</a></td></tr>
+              <tr><th scope="row"><a href="#">Support bot</a><span class="line2">app_c2e8f019</span></th><td><span class="chip">hosted first, local fallback</span></td><td class="num">57</td><td class="num">1.8 %</td><td class="num">1.2 s</td><td><span class="pill warn">1 acknowledged</span></td><td><a href="#">API keys</a></td></tr>
+              <tr><th scope="row"><a href="#">Nightly batch</a><span class="line2">app_5d44a7be</span></th><td><span class="chip">local only</span></td><td class="num">12</td><td class="num muted">too few to judge</td><td class="num muted">too few to judge</td><td><span class="pill ok">ok</span></td><td><a href="#">API keys</a></td></tr>
+              <tr><th scope="row"><a href="#">Sandbox</a><span class="line2">app_e0a1f6d3</span></th><td><span class="chip">local only</span></td><td class="num">0</td><td class="num muted">too few to judge</td><td class="num muted">too few to judge</td><td><span class="pill idle">no requests</span></td><td><a href="#">API keys</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="foot"><span>Showing 1 to 5 of 5</span><span><button class="btn" type="button" disabled>Previous</button> <button class="btn" type="button" disabled>Next</button></span></div>
+      </section>
+    </main>
+  </div>
+</div>
+</body>
+</html>
