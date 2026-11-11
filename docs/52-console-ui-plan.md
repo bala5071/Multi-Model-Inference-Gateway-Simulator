@@ -1,7 +1,7 @@
 # 52. Console UI pass: a design system before PR 2 (plan)
 
-Status: **draft, for approval.** Docs and three static mock-ups only. No code until this plan is
-approved. Presentation, structure and accessibility only: no behaviour, permission, route or API
+Status: **approved** (PR #50, 2026-11-11), with the answers in section 13, which override any
+recommendation above that differs. Docs and three static mock-ups only in this PR. Presentation, structure and accessibility only: no behaviour, permission, route or API
 change, no new feature. The design notes that ship with the code are numbered after this one.
 
 Mock-ups to choose a direction from (open locally, no dependency; each has a System / Light /
@@ -298,3 +298,24 @@ sorting until the gateway sorts. **Recommendation: (a)**: presentation only, no 
 **Q10. Headings.** The e2e finds each screen by its level-2 heading. (a) Keep the page title an
 `h2` under a visually hidden `h1` "Gateway"; (b) make the title `h1` and move every test in the
 same PR. **Recommendation: (a)**: the tests and their meaning stay as they are.
+
+## 13. Answers (approved 2026-11-11)
+
+- **Q1: A (Quiet), with B's monospace figures in tables.** Mock-up A's colours are the tokens;
+  table figures (counts, rates, latencies, ids) use the monospace stack with tabular numbers.
+- **Q2: our own components on native elements.** Dialogs use the native `<dialog>` with
+  `showModal()` and the platform's own focus handling (focus moved in, the rest inert, Esc,
+  focus returned); menus follow the WAI-ARIA menu button pattern and tabs the tabs pattern
+  (arrow keys, Home and End, roving tab index). **The axe checks cover every component**: each
+  is rendered by the e2e (on a screen that uses it, or on the dev-only gallery page served to
+  the e2e) and checked in both themes.
+- **Q3: uPlot through `ChartPanel`, plus SVG sparklines.**
+- **Q4: a CI gate at JS 135 kB gzip and CSS 12 kB gzip.**
+- **Q5: pixel baselines in CI's pinned Linux image only.**
+- **Q6: `@axe-core/playwright`.**
+- **Q7: System / Light / Dark, System by default.**
+- **Q8: a new table in `docs/licenses.md` for the frontend's development and test packages,
+  checked by `tests/test_licenses.py`.**
+- **Q9: sort the current page in the browser, labelled on the page.**
+- **Q10: keep the page title at level 2**, under a visually hidden level-1 "Gateway".
+- The decisions listed in #50's description are accepted.
