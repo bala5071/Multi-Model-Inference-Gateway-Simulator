@@ -181,3 +181,18 @@ test("UI3: the typed settings forms, a confirmation, the incidents tabs (docs/55
   await shot(page, "incidents");
   await logOut(page);
 });
+
+test("UI4: the Applications list and an application's Overview (docs/56)", async ({ page }) => {
+  await evaluatorOk(page);
+  await page.goto("/dashboard/");
+  await logIn(page, ADMIN);
+  await expect(page.getByRole("table", { name: "Applications" })).toBeVisible();
+  await shot(page, "applications-list");
+  await page.evaluate(() => {
+    window.location.hash = "#/app/app-one/overview";
+  });
+  await expect(page.getByRole("region", { name: "Figures", exact: true })).toBeVisible();
+  await expect(page.locator(".skeleton")).toHaveCount(0);
+  await shot(page, "application-overview");
+  await logOut(page);
+});

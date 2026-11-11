@@ -262,12 +262,17 @@ for (const who of ALL) {
     await page.goto("/dashboard/");
     await logIn(page, who);
     const role = who.username.replace(/-e2e$/, "");
+    // The landing drawn, not its skeleton while its code arrives (docs/56).
+    await expect(page.getByRole("heading", { level: 2 }).first()).toBeVisible();
+    await expect(page.locator(".skeleton")).toHaveCount(0);
     await picturedAndChecked(page, testInfo, `phone-${role}-landing`);
     await page.getByRole("button", { name: "Open the navigation" }).click();
     const drawer = page.getByRole("dialog", { name: "Navigation" });
     const offered = await drawer.getByRole("link").allTextContents();
     await page.keyboard.press("Escape");
     const narrow = async (slug: string) => {
+      // Its data drawn, not the skeleton while it loads.
+      await expect(page.locator(".skeleton")).toHaveCount(0);
       // No page wider than the phone: wide tables scroll in their own box.
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth),
@@ -302,6 +307,7 @@ for (const who of ALL) {
         await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth),
       ).toBeLessThanOrEqual(0);
       const slug = item.toLowerCase().replaceAll(" ", "-");
+      await expect(page.locator(".skeleton")).toHaveCount(0);
       await picturedAndChecked(page, testInfo, `phone-${role}-${slug}`);
     }
   });

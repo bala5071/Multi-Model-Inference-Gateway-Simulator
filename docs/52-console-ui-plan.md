@@ -593,3 +593,11 @@ Section 15's list, plus deep links and direct URLs a role cannot use, per role, 
    available to this account yet. The charts stay in the platform monitoring.
 2. **The monitoring stays its own item** (`#/monitor/<tab>`, platform admin, loopback, unchanged),
    redrawn with UI3's components and loaded on demand, in the same frame.
+
+### 17.8 The bundle gate (decided 2026-11-11)
+
+After the split, the initial download is about 90 kB gzip, but the gate summed every JS file
+(143,633 B, over 135,000 B): UI4's code adds about 5.2 kB and gzipping files apart about 5.5 kB.
+**Decision: the 135,000 B budget applies to the initial download** (the built page's script and
+its preloaded imports), checked in CI with its control; each on-demand chunk and the total are
+reported, not gated. CSS and fonts unchanged. Note 56 has the numbers.

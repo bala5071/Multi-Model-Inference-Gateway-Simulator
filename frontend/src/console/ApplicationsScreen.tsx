@@ -287,7 +287,7 @@ function ApplicationTable({
           },
         ]}
       />
-      {rows.some((row) => [row.requests, row.errorRate, row.p50].includes(TOO_FEW)) && (
+      {shown.some((row) => [row.requests, row.errorRate, row.p50].includes(TOO_FEW)) && (
         <p className="muted table-note">
           {TOO_FEW} {TOO_FEW_EXPLAINED}
         </p>
