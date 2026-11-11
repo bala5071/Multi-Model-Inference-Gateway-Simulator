@@ -183,6 +183,47 @@ def test_every_dashboard_package_is_in_the_docs_with_its_version_and_an_allowed_
     assert {n: lic for n, (_, lic) in shipped.items() if not is_allowed(lic, allowed)} == {}
 
 
+# The frontend's direct development dependencies before the console's UI work (docs/52) began
+# recording new ones: any other must be in the "Development and test packages" table.
+FRONTEND_DEV_BEFORE_THE_TABLE = frozenset(
+    {
+        "@eslint/js", "@playwright/test", "@testing-library/jest-dom", "@testing-library/react",
+        "@testing-library/user-event", "@types/node", "@types/react", "@types/react-dom",
+        "@vitejs/plugin-react", "eslint", "eslint-plugin-jsx-a11y", "eslint-plugin-react-hooks",
+        "globals", "jsdom", "prettier", "typescript", "typescript-eslint", "vite", "vitest",
+    }
+)  # fmt: skip
+
+
+def documented_frontend_dev_table() -> dict[str, tuple[str, str]]:
+    section = _section("## Development and test packages of the frontend")
+    rows = re.findall(r"^\| ([a-z0-9@/.-]+) \| ([0-9][^|]*) \| ([^|]+) \|$", section, re.MULTILINE)
+    return {name: (version.strip(), license.strip()) for name, version, license in rows}
+
+
+def test_every_new_frontend_dev_package_is_recorded_with_an_allowed_license() -> None:
+    """docs/52, Q8: each row is in the lock file at that version and licence, development only,
+    with an allowed licence; and every direct development dependency added since the table began
+    is one of its rows."""
+    frontend = REPO / "frontend"
+    lock = json.loads((frontend / "package-lock.json").read_text(encoding="utf-8"))
+    declared = json.loads((frontend / "package.json").read_text(encoding="utf-8"))
+    table = documented_frontend_dev_table()
+    assert table, "the table lists no package"
+    allowed = allowed_licenses()
+    for name, (version, license_) in table.items():
+        entry = lock["packages"].get(f"node_modules/{name}")
+        assert entry is not None, name
+        assert (entry["version"], entry.get("license")) == (version, license_), name
+        assert entry.get("dev") is True, f"{name} is not development-only"
+        assert is_allowed(license_, allowed), name
+    added = set(declared["devDependencies"]) - FRONTEND_DEV_BEFORE_THE_TABLE
+    assert added <= set(table), sorted(added - set(table))
+    # Pinned exactly, as the repository pins what it adds.
+    for name in added:
+        assert declared["devDependencies"][name] == table[name][0], name
+
+
 def test_the_mmlu_sample_is_the_recorded_file_with_its_license() -> None:
     section = _section("### MMLU sample")
     folder = REPO / "benchmarks" / "quality"
