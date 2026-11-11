@@ -42,7 +42,7 @@ function masks(page: Page): Locator[] {
     page.locator(".toasts"),
     // Only the boxes drawn: a closed <details> keeps a layout box, and its mask would cover
     // whatever follows it (docs/55).
-    page.locator(".table-scroll").filter({ visible: true }),
+    page.locator(".table-scroll:not(details:not([open]) *)"),
     page.locator(".muted").filter({ hasText: /UTC|restart|minutes/ }),
   ];
 }
