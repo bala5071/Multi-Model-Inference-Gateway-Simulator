@@ -45,18 +45,25 @@ function masks(page: Page): Locator[] {
   ];
 }
 
-async function shot(page: Page, name: string): Promise<void> {
+/**
+ * The whole page in both themes, masked; or, given `part` (a menu, a drawer: drawn above the
+ * page, where a mask would cover it), that part alone, which holds nothing that changes.
+ */
+async function shot(page: Page, name: string, part?: Locator): Promise<void> {
   await page.evaluate(() => document.fonts.ready);
+  const steady = { animations: "disabled", caret: "hide", maxDiffPixelRatio: 0.002 } as const;
   for (const theme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-    await expect(page).toHaveScreenshot(`${name}-${theme}.png`, {
-      fullPage: true,
-      animations: "disabled",
-      caret: "hide",
-      mask: masks(page),
-      maxDiffPixelRatio: 0.002,
-    });
+    if (part === undefined) {
+      await expect(page).toHaveScreenshot(`${name}-${theme}.png`, {
+        ...steady,
+        fullPage: true,
+        mask: masks(page),
+      });
+    } else {
+      await expect(part).toHaveScreenshot(`${name}-${theme}.png`, steady);
+    }
   }
   await page.emulateMedia({ colorScheme: "light" });
 }
@@ -110,13 +117,14 @@ test("the account menu, the collapsed sidebar, and the phone's drawer", async ({
   await logIn(page, ADMIN);
   await page.getByRole("button", { name: /^Account:/ }).click();
   await expect(page.getByRole("menu", { name: "Account" })).toBeVisible();
-  await shot(page, "account-menu");
+  await shot(page, "account-menu", page.locator(".menu-popup"));
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Collapse the sidebar" }).click();
   await shot(page, "sidebar-collapsed");
   await page.getByRole("button", { name: "Expand the sidebar" }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Open the navigation" }).click();
-  await expect(page.getByRole("dialog", { name: "Navigation" })).toBeVisible();
-  await shot(page, "phone-drawer");
+  const drawer = page.getByRole("dialog", { name: "Navigation" });
+  await expect(drawer).toBeVisible();
+  await shot(page, "phone-drawer", drawer);
 });

@@ -6,11 +6,15 @@ import { Brand } from "./Brand";
 import { routeHash, type Crumb } from "./routes";
 import { UserMenu } from "./UserMenu";
 
-/** A role as the gateway names it, with its scope: shown as text, never read for a decision. */
+/** A role as words: the gateway's name with its underscores as spaces, never one named here. */
+export function roleWords(role: string): string {
+  return role.replaceAll("_", " ");
+}
+
+/** A role the gateway names, with its scope: shown as words, never read for a decision. */
 export function roleText(held: HeldRole): string {
-  return held.scope_type === "platform"
-    ? held.role
-    : `${held.role} (${held.scope_type} ${held.scope_id})`;
+  const words = roleWords(held.role);
+  return held.scope_type === "platform" ? words : `${words} (${held.scope_type} ${held.scope_id})`;
 }
 
 const PREFERENCE_WORDS: Record<ThemePreference, string> = {

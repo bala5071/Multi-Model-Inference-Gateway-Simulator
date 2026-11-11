@@ -262,7 +262,8 @@ a.button {
   font-weight: var(--weight-strong);
 }
 
-.drawer-button {
+/* Hidden beside the sidebar: as specific as button.quiet, which would otherwise show it. */
+button.drawer-button {
   display: none;
 }
 
@@ -548,7 +549,7 @@ a.button {
     display: none;
   }
 
-  .drawer-button {
+  button.drawer-button {
     display: inline-flex;
   }
 

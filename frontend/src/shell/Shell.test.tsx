@@ -18,6 +18,7 @@ import {
 import { TOO_FEW, TOO_FEW_EXPLAINED, TOO_FEW_WORDS } from "../console/applications";
 import { LOCKOUT_SENTENCE, PASSWORD_RULES } from "../console/passwordRules";
 import { ToastProvider, Toasted } from "../console/Toasts";
+import { roleWords } from "./Header";
 import { NAVIGATION } from "./navigation";
 import { NOT_AVAILABLE, SESSION_ENDED, Shell } from "./Shell";
 
@@ -318,13 +319,13 @@ describe("home", () => {
     expect(button).toHaveAttribute("aria-expanded", "false");
     await user.click(button);
     const menu = screen.getByRole("menu", { name: "Account" });
-    // The role as the gateway named it, read from its own answer.
+    // The role the gateway named, read from its own answer, as words.
     const [held] = capabilities.olive.roles;
     const who = document.getElementById(menu.getAttribute("aria-describedby") ?? "");
     expect(who).not.toBeNull();
     expect(who).toHaveTextContent("someone");
     expect(who).toHaveTextContent("Organization north");
-    expect(who).toHaveTextContent(`${held?.role ?? "?"} (application north-blog)`);
+    expect(who).toHaveTextContent(`${roleWords(held?.role ?? "?")} (application north-blog)`);
     expect(
       within(menu)
         .getAllByRole("menuitemradio")

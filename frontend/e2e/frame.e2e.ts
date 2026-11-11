@@ -159,6 +159,8 @@ test("each new state, photographed and checked by axe in both themes", async ({
   await form.getByLabel("Password", { exact: true }).fill("");
 
   await logIn(page, ADMIN, scan);
+  // Beside the sidebar there is no drawer button (it is the phone's way to the navigation).
+  await expect(page.getByRole("button", { name: "Open the navigation" })).toBeHidden();
   await accountButton(page).click();
   await expect(page.getByRole("menu", { name: "Account" })).toBeVisible();
   await picturedAndChecked(page, testInfo, "frame-account-menu");
