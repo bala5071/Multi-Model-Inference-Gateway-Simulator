@@ -508,3 +508,15 @@ UI4 (the Applications list, the application page and its tabs, then the monitori
 2. **The key shown once.** Section 4's SecretReveal masks a new API key or signing key until "Show".
    Today both are visible as soon as they are issued (with Copy and "I have stored it").
    Masking is a change on a secret's path.
+
+### 16.7 Answers (2026-11-11)
+
+1. **Organization settings: add the typed edit form.** The same form as the application's, on the
+   organization's endpoints: the dry run (`POST .../settings/validate`) before Save, the step-up
+   when it loosens egress (`org_settings.loosen_egress`), and the controls shown only when the
+   gateway's dry run answers for this account (a refusal shows no Save). It is a new console write
+   but no new permission. The caps, the applications each cap limits and the history stay on the
+   screen. Note 47's "It shows; it changes nothing" is superseded by this answer (note 55 says so).
+2. **The key shown once stays visible**, as today: restyled with the new components, with Copy
+   and "I have stored it", cleared when it is stored or the screen is left. Section 4's masking is
+   dropped.
