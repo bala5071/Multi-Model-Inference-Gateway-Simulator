@@ -109,7 +109,26 @@ nothing new (a correction to the plan's F12). It is read per application of the 
 
 ## Timing
 
-See PR 1's description for the measured cost of each read (`benchmarks/console_reads.py`).
+MEASURED with `uv run python -m benchmarks.console_reads` (3 runs of 300 reads each, after 20
+warm-up reads) at commit 8c13589, on an Intel Core Ultra 7 155H (22 logical cores), 15.4 GB RAM,
+Windows 11, Python 3.12.10; SQLite on the local disk, rollups in memory, every read through the
+whole app in process (session, `requires`, handler). The range is over the three runs.
+
+| Read | p50 (ms) | p99 (ms) |
+|---|---|---|
+| `GET /metrics`, page of 50 | 16.0 to 16.8 | 87.9 to 99.8 |
+| `GET /metrics`, page of 100 | 32.7 to 34.8 | 126.7 to 140.4 |
+| `GET /incidents/counts` (10 applications with a firing incident of 100) | 0.98 to 1.10 | 2.0 to 3.1 |
+| `GET /applications` with modes, page of 50 | 2.05 to 2.11 | 4.3 to 5.1 |
+| `GET /applications` with modes, page of 100 | 2.89 to 2.98 | 6.0 to 6.7 |
+| the mode reads alone, 50 applications | 0.31 to 0.32 | 0.6 to 0.8 |
+| the mode reads alone, 100 applications | 0.61 to 0.63 | 1.5 to 1.8 |
+
+The figures cost about a third of a millisecond an application: each application's hour is
+summed once (`signals.evaluate_many`, `evaluate`'s own code, pinned equal to it by a test) and
+the event loop is given back between applications, as the evaluator does, so a page never holds
+up the requests being served. The request path is not touched: the recorder, the generate and chat handlers are unchanged, and the perf gate
+is at +0.0% on every model. Valkey and Postgres were not measured: neither runs on this machine.
 
 ## Not built here
 
