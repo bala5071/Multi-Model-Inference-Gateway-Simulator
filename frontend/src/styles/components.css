@@ -1,0 +1,510 @@
+/* The shared components (src/ui/, docs/55), on the tokens of tokens.css only. Buttons'
+   primary, quiet and wide styles are frame.css's (docs/54); the other roles are here. */
+
+button.secondary {
+  background: var(--surface);
+  border-color: var(--border-strong);
+}
+
+button.secondary:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+button.danger {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: var(--accent-text);
+  font-weight: var(--weight-medium);
+}
+
+button.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  min-height: 36px;
+  padding: 0 var(--s-3);
+  border-radius: var(--r-md);
+  position: relative;
+}
+
+button.button.small {
+  min-height: 28px;
+  padding: 0 var(--s-2);
+  font-size: var(--text-sm);
+}
+
+.button-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.button-spinner {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+}
+
+/* Fields: the hint and the error under the field. */
+.field-hint {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.field-error {
+  font-size: var(--text-sm);
+  color: var(--bad);
+}
+
+[aria-invalid="true"] {
+  border-color: var(--bad);
+}
+
+.input-with-unit {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.input-with-unit input {
+  width: 160px;
+}
+
+.unit {
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+/* The toggle: a checkbox drawn as a switch, its focus ring the page's own. */
+.toggle-field {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+input.toggle {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 36px;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+input.toggle::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  transition: transform var(--motion);
+}
+
+input.toggle:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+input.toggle:checked::before {
+  background: var(--surface);
+  transform: translateX(16px);
+}
+
+input.toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Chips. */
+.chips-field {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.chips-field legend {
+  padding: 0;
+  font-weight: var(--weight-medium);
+}
+
+.chips {
+  list-style: none;
+  margin: var(--s-1) 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 2px 2px var(--s-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.chip-remove {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-2);
+}
+
+.chip-remove:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.chips-add {
+  display: flex;
+  gap: var(--s-2);
+}
+
+/* Tabs. */
+.ui-tabs {
+  display: flex;
+  gap: var(--s-1);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--s-3);
+  overflow-x: auto;
+}
+
+.ui-tabs [role="tab"] {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-2);
+  padding: var(--s-2) var(--s-3);
+  white-space: nowrap;
+}
+
+.ui-tabs [role="tab"][aria-selected="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: var(--weight-strong);
+}
+
+/* Tables: the header stays while the rows scroll; sortable headers are buttons. */
+.ui-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
+}
+
+.sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-weight: inherit;
+  color: inherit;
+}
+
+.empty-state {
+  padding: var(--s-3) 0;
+}
+
+/* Status pills: a colour and its word. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px var(--s-2);
+  border-radius: var(--r-pill);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.pill-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.pill-ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.pill-warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.pill-bad {
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+
+.pill-idle,
+.pill-info {
+  background: var(--idle-soft);
+  color: var(--idle);
+}
+
+/* Cards and stat tiles. */
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.card-actions {
+  display: flex;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.stat-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--s-3);
+}
+
+.stat-tile {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  padding: var(--s-3);
+}
+
+.stat-tile dt {
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+.stat-tile dd {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-value {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-strong);
+}
+
+.stat-note {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+/* Skeletons: no shimmer under reduced motion (the global rule stops the animation). */
+.skeleton {
+  height: 12px;
+  margin: var(--s-2) 0;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  animation: skeleton 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes skeleton {
+  to {
+    opacity: 0.5;
+  }
+}
+
+/* The tooltip, in the top layer, placed by its component. */
+.tooltip-trigger {
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: help;
+}
+
+.tooltip {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  max-width: 280px;
+  padding: var(--s-1) var(--s-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--e-2);
+  font-size: var(--text-sm);
+}
+
+/* Dialogs on the native <dialog>. */
+.ui-dialog {
+  width: min(460px, calc(100vw - 2 * var(--s-4)));
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--e-2);
+  padding: var(--s-5);
+}
+
+.ui-dialog::backdrop {
+  background: var(--scrim);
+}
+
+.ui-dialog h3 {
+  margin-bottom: var(--s-3);
+}
+
+.dialog-actions {
+  justify-content: flex-end;
+  margin-top: var(--s-4);
+}
+
+.toast-failed {
+  border-left-color: var(--bad);
+}
+
+.toast-failed .toast-icon {
+  color: var(--bad);
+}
+
+/* The typed settings form (docs/55). */
+.setting-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.setting-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--s-3) var(--s-5);
+  padding: var(--s-3) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.setting-row.changed {
+  box-shadow: inset 3px 0 0 var(--accent);
+  padding-left: var(--s-3);
+}
+
+.setting-name {
+  font-family: var(--font-mono);
+  font-weight: var(--weight-medium);
+}
+
+.setting-facts {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1) var(--s-3);
+}
+
+.alias-row {
+  display: flex;
+  gap: var(--s-2);
+  align-items: center;
+  margin-bottom: var(--s-1);
+}
+
+.alias-row input {
+  width: 140px;
+}
+
+.changed-list {
+  margin: 0;
+  padding-left: var(--s-5);
+}
+
+.changed-list del {
+  color: var(--text-2);
+}
+
+.changed-list ins {
+  text-decoration: none;
+  font-weight: var(--weight-medium);
+}
+
+.save-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  margin-top: var(--s-4);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--e-2);
+}
+
+.save-bar-count {
+  flex: 1;
+  font-weight: var(--weight-medium);
+}
+
+.advanced summary {
+  cursor: pointer;
+  font-weight: var(--weight-medium);
+  padding: var(--s-2) 0;
+}
+
+.history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.history li {
+  position: relative;
+  padding: 0 0 var(--s-3) var(--s-5);
+  border-left: 2px solid var(--border);
+  margin-left: var(--s-2);
+}
+
+.history li::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 4px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.history-when {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+@media (max-width: 767px) {
+  .setting-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -1,5 +1,6 @@
 import { Check, ChevronDown, LogOut } from "lucide-react";
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { useId } from "react";
+import { useMenuButton } from "../ui/Menu";
 import { THEME_PREFERENCES, useTheme, type ThemePreference } from "../hooks/useTheme";
 
 const PREFERENCE_WORDS: Record<ThemePreference, string> = {
@@ -17,9 +18,7 @@ export function initials(username: string): string {
 }
 
 /**
- * The account menu (docs/54), to the WAI-ARIA menu button pattern: the button opens it (click,
- * Enter, Space, ArrowDown to the first item, ArrowUp to the last); in it, the arrow keys, Home and
- * End move between items, Escape closes it and gives the focus back to the button, Tab closes it.
+ * The account menu (docs/54), to the WAI-ARIA menu button pattern (`useMenuButton`, docs/55).
  * Who is logged in, the organization and the roles (as the gateway names them, shown as words)
  * describe the menu; the theme is three radio items; Log out is the last item.
  */
@@ -35,87 +34,12 @@ export function UserMenu({
   onLogout: () => void;
 }) {
   const { preference, setPreference } = useTheme();
-  const [open, setOpen] = useState(false);
-  const [focusIndex, setFocusIndex] = useState(0);
-  const buttonRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const items = useRef<(HTMLButtonElement | null)[]>([]);
-  const menuId = useId();
+  const menu = useMenuButton(THEME_PREFERENCES.length + 1);
   const whoId = useId();
-  const count = THEME_PREFERENCES.length + 1;
-
-  useEffect(() => {
-    if (open) items.current[focusIndex]?.focus();
-  }, [open, focusIndex]);
-
-  useEffect(() => {
-    if (!open) return;
-    const outside = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (!menuRef.current?.contains(target) && !buttonRef.current?.contains(target)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", outside);
-    return () => {
-      document.removeEventListener("mousedown", outside);
-    };
-  }, [open]);
-
-  function openAt(index: number) {
-    setFocusIndex(index);
-    setOpen(true);
-  }
-
-  function close(returnFocus: boolean) {
-    setOpen(false);
-    if (returnFocus) buttonRef.current?.focus();
-  }
-
-  function onButtonKey(event: KeyboardEvent<HTMLButtonElement>) {
-    if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      openAt(0);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      openAt(count - 1);
-    }
-  }
-
-  function onMenuKey(event: KeyboardEvent<HTMLDivElement>) {
-    const moves: Record<string, number> = {
-      ArrowDown: (focusIndex + 1) % count,
-      ArrowUp: (focusIndex - 1 + count) % count,
-      Home: 0,
-      End: count - 1,
-    };
-    const next = moves[event.key];
-    if (next !== undefined) {
-      event.preventDefault();
-      setFocusIndex(next);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      close(true);
-    } else if (event.key === "Tab") {
-      close(false);
-    }
-  }
 
   return (
     <div className="user-menu">
-      <button
-        ref={buttonRef}
-        type="button"
-        className="user-menu-button quiet"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={open ? menuId : undefined}
-        onClick={() => {
-          if (open) close(false);
-          else openAt(0);
-        }}
-        onKeyDown={onButtonKey}
-      >
+      <button type="button" className="user-menu-button quiet" {...menu.buttonProps}>
         <span className="avatar" aria-hidden="true">
           {initials(username)}
         </span>
@@ -124,22 +48,14 @@ export function UserMenu({
         <span className="user-menu-name">{username}</span>
         <ChevronDown aria-hidden="true" focusable="false" size={16} />
       </button>
-      {open && (
+      {menu.open && (
         <div className="menu-popup">
           <div id={whoId} className="menu-who">
             <strong>{username}</strong>
             <span>Organization {organizationId}</span>
             {roles.length > 0 && <span>{roles.join(", ")}</span>}
           </div>
-          <div
-            ref={menuRef}
-            id={menuId}
-            role="menu"
-            aria-label="Account"
-            aria-describedby={whoId}
-            tabIndex={-1}
-            onKeyDown={onMenuKey}
-          >
+          <div {...menu.menuProps} aria-label="Account" aria-describedby={whoId}>
             <div role="group" aria-label="Theme" className="menu-group">
               <div className="menu-group-label" aria-hidden="true">
                 Theme
@@ -147,13 +63,10 @@ export function UserMenu({
               {THEME_PREFERENCES.map((p, index) => (
                 <button
                   key={p}
-                  ref={(element) => {
-                    items.current[index] = element;
-                  }}
+                  {...menu.itemProps(index)}
                   type="button"
                   role="menuitemradio"
                   aria-checked={preference === p}
-                  tabIndex={-1}
                   className="menu-item"
                   onClick={() => {
                     setPreference(p);
@@ -171,15 +84,12 @@ export function UserMenu({
             </div>
             <div role="separator" className="menu-separator" />
             <button
-              ref={(element) => {
-                items.current[THEME_PREFERENCES.length] = element;
-              }}
+              {...menu.itemProps(THEME_PREFERENCES.length)}
               type="button"
               role="menuitem"
-              tabIndex={-1}
               className="menu-item"
               onClick={() => {
-                setOpen(false);
+                menu.close(false);
                 onLogout();
               }}
             >

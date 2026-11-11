@@ -16,7 +16,7 @@ import type {
   RuleValidation,
 } from "./types";
 import { TableScroll } from "../components/TableScroll";
-import { Toasted } from "./Toasts";
+import { Toasted } from "../ui/Toasts";
 
 interface Loaded {
   rules: AlertRule[];

@@ -8,7 +8,7 @@ import { EvaluatorBanner } from "./EvaluatorBanner";
 import { useLoad } from "./useLoad";
 import type { ChannelName, IncidentDetail, IncidentPage, RulePage } from "./types";
 import { TableScroll } from "../components/TableScroll";
-import { Toasted } from "./Toasts";
+import { Toasted } from "../ui/Toasts";
 
 /** The states the gateway filters by (docs/45); empty is every state. */
 const STATES = ["", "pending", "firing", "acknowledged", "resolved"];

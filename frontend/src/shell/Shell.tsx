@@ -13,7 +13,7 @@ import { ChangePasswordScreen, LoginScreen } from "../console/LoginScreen";
 import { OrganizationScreen } from "../console/OrganizationScreen";
 import { RulesScreen } from "../console/RulesScreen";
 import { StepUpDialog } from "../console/StepUpDialog";
-import { ToastProvider } from "../console/Toasts";
+import { ToastProvider } from "../ui/Toasts";
 import type { Capabilities, LoginAnswer, MeAnswer, SessionUser } from "../console/types";
 import { Header } from "./Header";
 import { Home, NoAccounts } from "./Home";

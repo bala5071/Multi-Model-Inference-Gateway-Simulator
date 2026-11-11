@@ -4,17 +4,23 @@ import { Chooser } from "./Chooser";
 import type { ConsoleContext } from "./context";
 import {
   canWrite,
+  formatCaps,
+  initialDraft,
   presetRows,
   refusalText,
   settingRows,
-  versionRows,
   type PresetRow,
 } from "./derive";
 import { EditForm } from "./EditForm";
+import { History } from "./History";
+import { displayValue } from "./settingsForm";
 import { useLoad } from "./useLoad";
 import type { ApplicationSettings, Change, PresetList, VersionPage } from "./types";
-import { TableScroll } from "../components/TableScroll";
-import { Toasted } from "./Toasts";
+import { Button } from "../ui/Button";
+import { Card, StatTile, StatTiles } from "../ui/Card";
+import { DataTable } from "../ui/DataTable";
+import { Skeleton } from "../ui/Skeleton";
+import { Toasted } from "../ui/Toasts";
 
 interface Loaded {
   settings: ApplicationSettings;
@@ -37,6 +43,7 @@ async function loadAll(context: ConsoleContext, base: string): Promise<Loaded> {
   return { settings, versions, presets, probe };
 }
 
+/** The presets as cards: what each sets, and Apply where the gateway said this account may. */
 function Presets({
   rows,
   writable,
@@ -51,7 +58,7 @@ function Presets({
   return (
     <ul className="presets">
       {rows.map((preset) => (
-        <li key={preset.name}>
+        <li key={preset.name} className="card">
           <h4>{preset.name}</h4>
           <dl className="facts">
             {preset.values.map(([setting, value]) => (
@@ -62,19 +69,32 @@ function Presets({
             ))}
           </dl>
           {writable && (
-            <button
-              type="button"
+            <Button
               disabled={busy}
               onClick={() => {
                 onApply(preset.name);
               }}
             >
               Apply {preset.name}
-            </button>
+            </Button>
           )}
         </li>
       ))}
     </ul>
+  );
+}
+
+/** Beside each setting in the form: its value in force, where it came from, and its caps. */
+function facts(settings: ApplicationSettings, name: string) {
+  const found = settings.effective[name];
+  if (found === undefined) return null;
+  return (
+    <>
+      <span>In force: {displayValue(name, found.value)}</span>
+      <span>Source: {found.source}</span>
+      {found.capped_by !== null && <span>Capped by: {found.capped_by}</span>}
+      <span>Caps: {formatCaps(found.caps)}</span>
+    </>
   );
 }
 
@@ -141,7 +161,7 @@ export function ApplicationScreen({
           {error}
         </p>
       )}
-      {base !== null && loaded.kind === "loading" && <p className="muted">Loading…</p>}
+      {base !== null && loaded.kind === "loading" && <Skeleton />}
       {base !== null && loaded.kind === "failed" && (
         <p className="form-error" role="alert">
           {refusalText(loaded.error.code, loaded.error.message)}
@@ -149,55 +169,39 @@ export function ApplicationScreen({
       )}
       {base !== null && loaded.kind === "ready" && (
         <>
-          <dl className="facts">
-            <div>
-              <dt>Version</dt>
-              <dd>{loaded.value.settings.version}</dd>
-            </div>
-            <div>
-              <dt>Mode in force</dt>
-              <dd>{loaded.value.settings.mode.effective}</dd>
-            </div>
-            <div>
-              <dt>Access</dt>
-              <dd>{canWrite(loaded.value.probe) ? "May change" : "Read only"}</dd>
-            </div>
-          </dl>
-          <section className="panel" aria-labelledby="in-force-title">
-            <h3 id="in-force-title">Settings in force</h3>
-            <TableScroll table="Settings in force">
-              <table className="data-table" aria-label="Settings in force">
-                <thead>
-                  <tr>
-                    <th scope="col">Setting</th>
-                    <th scope="col">In force</th>
-                    <th scope="col">Source</th>
-                    <th scope="col">Capped by</th>
-                    <th scope="col">Stored</th>
-                    <th scope="col">Caps</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {settingRows(loaded.value.settings).map((row) => (
-                    <tr key={row.name}>
-                      <th scope="row">{row.name}</th>
-                      <td>{row.value}</td>
-                      <td>{row.source}</td>
-                      <td>{row.cappedBy}</td>
-                      <td>{row.stored}</td>
-                      <td>{row.caps}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </TableScroll>
-          </section>
+          <StatTiles>
+            <StatTile label="Version" value={loaded.value.settings.version} />
+            <StatTile label="Mode in force" value={loaded.value.settings.mode.effective} />
+            <StatTile
+              label="Access"
+              value={canWrite(loaded.value.probe) ? "May change" : "Read only"}
+            />
+          </StatTiles>
+          <Card title="Settings in force" label="Settings in force">
+            <DataTable
+              label="Settings in force"
+              rows={settingRows(loaded.value.settings)}
+              rowKey={(row) => row.name}
+              empty="No setting."
+              columns={[
+                { key: "name", header: "Setting", cell: (r) => r.name, rowHeader: true },
+                { key: "value", header: "In force", cell: (r) => r.value },
+                { key: "source", header: "Source", cell: (r) => r.source },
+                { key: "capped", header: "Capped by", cell: (r) => r.cappedBy },
+                { key: "stored", header: "Stored", cell: (r) => r.stored },
+                { key: "caps", header: "Caps", cell: (r) => r.caps },
+              ]}
+            />
+          </Card>
           {canWrite(loaded.value.probe) && (
             <EditForm
               key={`${base}:${loaded.value.settings.version}`}
               context={context}
               base={base}
-              settings={loaded.value.settings}
+              version={loaded.value.settings.version}
+              initial={initialDraft(loaded.value.settings)}
+              stored={new Set(Object.keys(loaded.value.settings.settings))}
+              facts={(name) => facts(loaded.value.settings, name)}
               onSaved={(change) => {
                 done(change, "Saved");
               }}
@@ -206,8 +210,7 @@ export function ApplicationScreen({
               }}
             />
           )}
-          <section className="panel" aria-labelledby="presets-title">
-            <h3 id="presets-title">Presets</h3>
+          <Card title="Presets" label="Presets">
             {loaded.value.presets instanceof ApiError ? (
               <p className="muted">
                 {refusalText(loaded.value.presets.code, loaded.value.presets.message)}
@@ -226,51 +229,16 @@ export function ApplicationScreen({
                 }}
               />
             )}
-          </section>
-          <section className="panel" aria-labelledby="history-title">
-            <h3 id="history-title">History</h3>
-            {loaded.value.versions.versions.length === 0 ? (
-              <p className="muted">Never changed: every value is inherited.</p>
-            ) : (
-              <TableScroll table="History">
-                <table className="data-table" aria-label="History">
-                  <thead>
-                    <tr>
-                      <th scope="col">Version</th>
-                      <th scope="col">Fields changed</th>
-                      <th scope="col">By</th>
-                      <th scope="col">How</th>
-                      <th scope="col">When</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {versionRows(loaded.value.versions.versions).map((row) => (
-                      <tr key={row.version}>
-                        <td>{row.version}</td>
-                        <td>{row.fields}</td>
-                        <td>{row.by}</td>
-                        <td>{row.via}</td>
-                        <td>{row.when}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </TableScroll>
-            )}
-            {canWrite(loaded.value.probe) && loaded.value.settings.version > 0 && (
-              <div className="form-actions">
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => {
-                    void act("Reverted", `${base}/revert`, loaded.value.settings.version);
-                  }}
-                >
-                  Revert to the previous version
-                </button>
-              </div>
-            )}
-          </section>
+          </Card>
+          <History
+            versions={loaded.value.versions.versions}
+            empty="Never changed: every value is inherited."
+            canRevert={canWrite(loaded.value.probe) && loaded.value.settings.version > 0}
+            busy={busy}
+            onRevert={() => {
+              void act("Reverted", `${base}/revert`, loaded.value.settings.version);
+            }}
+          />
         </>
       )}
     </div>

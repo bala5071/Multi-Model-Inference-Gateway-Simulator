@@ -17,7 +17,7 @@ import {
 } from "../test/fixtures";
 import { TOO_FEW, TOO_FEW_EXPLAINED, TOO_FEW_WORDS } from "../console/applications";
 import { LOCKOUT_SENTENCE, PASSWORD_RULES } from "../console/passwordRules";
-import { ToastProvider, Toasted } from "../console/Toasts";
+import { ToastProvider, Toasted } from "../ui/Toasts";
 import { roleWords } from "./Header";
 import { NAVIGATION } from "./navigation";
 import { NOT_AVAILABLE, SESSION_ENDED, Shell } from "./Shell";

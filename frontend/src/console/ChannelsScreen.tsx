@@ -21,7 +21,7 @@ import type {
   TestSend,
 } from "./types";
 import { TableScroll } from "../components/TableScroll";
-import { Toasted } from "./Toasts";
+import { Toasted } from "../ui/Toasts";
 
 /**
  * A new signing key, shown this once: the gateway never shows it again. Held in this
