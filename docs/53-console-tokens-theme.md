@@ -47,6 +47,28 @@ behaviour, permission, route or API change.
   themes and the check to fail on them.
 - **Pictures in both themes**: the same helpers write `<name>-light.png` and `<name>-dark.png`.
 
+## Tables a keyboard can scroll
+
+CI's first run found one serious axe finding the tokens could not fix,
+`scrollable-region-focusable` on application settings: with Linux's fonts the "Settings in force"
+table was wider than its box at 1400 px, and the box held nothing focusable, so a keyboard user
+could not scroll it. This machine's fonts kept it narrower, which is why it passed here.
+
+- **Every table's scroll box** is now `TableScroll` (`frontend/src/components/TableScroll.tsx`):
+  a region that takes focus (`tabindex="0"`) and is named after its table ("Settings in force
+  table"). All sixteen boxes use it, and every table has a name (an `aria-label`, or its
+  `<caption>`). A source check fails on a bare box or an unnamed table.
+- The name is "<table> table" rather than the table's name alone, so it differs from the section
+  around it; the e2e's region locators now match names exactly.
+- `jsx-a11y/no-noninteractive-tabindex` accepts `role="region"` beside its default `tabpanel`.
+- **Regression test** (the Applications spec): at 480 px, narrower than these tables whatever the
+  fonts, every overflowing box on the table screens must be a focusable, named region (and at
+  least one must overflow); Tab alone reaches the settings table's box and the arrow keys scroll
+  it; axe finds nothing serious there in either theme. Run once with the fix removed from
+  `TableScroll`, it failed on this machine (where the 1400 px run had passed); restored, sha256
+  compared.
+- No visual difference, except the focus ring on a box reached by keyboard.
+
 ## Measured
 
 Bundle, by `npm run budget` after `npm run build`, on this machine (the sizes are byte counts, not
@@ -57,8 +79,9 @@ timings, and do not depend on the hardware):
 | Before (main at 7c5f805) | 391,300 B | 120,242 B | 12,204 B | 3,244 B |
 | After (cd05945) | 392,079 B | 120,448 B | 13,754 B | 3,731 B |
 | Change | +779 B | +206 B | +1,550 B | +487 B |
+| After the table fix (c6f014e) | 392,359 B | 120,558 B | 13,754 B | 3,731 B |
 
-Budget: JS 135,000 B and CSS 12,000 B gzip, so 14,552 B and 8,269 B of headroom after this PR.
+Budget: JS 135,000 B and CSS 12,000 B gzip, so 14,442 B and 8,269 B of headroom at c6f014e.
 
 axe, in the e2e run on cd05945: 47 screens, each in the light and the dark system theme (94
 runs), no violation of any impact; the planted control was found in both themes (3 violations
