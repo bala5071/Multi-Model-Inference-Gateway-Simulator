@@ -192,9 +192,10 @@ jobs:
           curl --silent http://127.0.0.1:8000/v1/control > /dev/null
           docker compose logs gateway | grep '"GET /v1/control' | tail -n 1
 
-      - name: The dashboard is served and the gateway is in simulated live mode
+      - name: The page is served and the gateway is in simulated live mode
         run: |
-          curl --silent --fail http://127.0.0.1:8000/dashboard/ | grep --quiet "Gateway monitor"
+          # The one page (docs/50): its title is "Gateway".
+          curl --silent --fail http://127.0.0.1:8000/dashboard/ | grep --quiet "<title>Gateway</title>"
           curl --silent --fail http://127.0.0.1:8000/v1/control | grep --quiet '"active":true'
 
       - name: Stop

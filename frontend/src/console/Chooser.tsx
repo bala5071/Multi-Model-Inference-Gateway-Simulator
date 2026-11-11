@@ -5,9 +5,10 @@ import { useLoad } from "./useLoad";
 import type { ApplicationPage } from "./types";
 
 /**
- * Which application: from the organization's list, or typed when the list is not allowed (an
- * application's own admin or viewer names the one it was given). With `all`, "All
- * applications" can be chosen too (`null`).
+ * Which application: from the organization's list; when that list is refused, from the
+ * applications the gateway's capabilities answer named for this session (an application's own
+ * admin or reader); typed only when it named none. With `all`, "All applications" can be chosen
+ * too (`null`).
  */
 export function Chooser({
   context,
@@ -27,7 +28,15 @@ export function Chooser({
   const [typed, setTyped] = useState(selected ?? "");
 
   if (list.kind === "loading") return <p className="muted">Loading applications…</p>;
-  if (list.kind === "ready") {
+  const named = context.capabilities.applications.map((a) => a.application_id);
+  const options =
+    list.kind === "ready"
+      ? list.value.applications.map((a) => ({
+          id: a.application_id,
+          label: `${a.name} (${a.application_id})`,
+        }))
+      : named.map((id) => ({ id, label: id }));
+  if (list.kind === "ready" || options.length > 0) {
     return (
       <label className="chooser">
         Application
@@ -40,11 +49,14 @@ export function Chooser({
           <option value="" disabled={!all}>
             {all ? "All applications" : "Choose an application"}
           </option>
-          {list.value.applications.map((a) => (
-            <option key={a.application_id} value={a.application_id}>
-              {a.name} ({a.application_id})
+          {options.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.label}
             </option>
           ))}
+          {selected !== null && !options.some((option) => option.id === selected) && (
+            <option value={selected}>{selected}</option>
+          )}
         </select>
       </label>
     );

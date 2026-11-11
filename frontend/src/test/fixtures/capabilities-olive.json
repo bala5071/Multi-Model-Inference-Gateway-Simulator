@@ -1,0 +1,34 @@
+{
+  "roles": [
+    {
+      "role": "viewer",
+      "scope_type": "application",
+      "scope_id": "north-blog"
+    }
+  ],
+  "platform": {
+    "monitoring.read": false,
+    "control.write": false,
+    "playground.use": false
+  },
+  "organization": {
+    "users.list": false,
+    "applications.list": false,
+    "org_settings.read": false,
+    "alert_channels.read": false,
+    "incidents.read_organization": false
+  },
+  "applications": [
+    {
+      "application_id": "north-blog",
+      "actions": {
+        "applications.read": true,
+        "settings.read": true,
+        "alert_rules.read": true,
+        "incidents.read": true,
+        "application_keys.list": false
+      }
+    }
+  ],
+  "more_applications": false
+}

@@ -1,6 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { ConsoleApp } from "./ConsoleApp";
+import { Shell } from "../shell/Shell";
+import { capabilities } from "../test/fixtures";
 import type { ApplicationSettings } from "./types";
 
 const ORG = "/v1/admin/orgs/acme";
@@ -48,6 +49,8 @@ function gateway(options: {
   loggedIn?: boolean;
   probe?: { status: number; code?: string };
   stepUpOnPut?: "validate-says" | "put-says";
+  /** The session ends at this call: it answers 401 session_required. */
+  endsAt?: "put" | "step-up";
 }): Gateway {
   const seen: Seen[] = [];
   let version = 1;
@@ -74,6 +77,9 @@ function gateway(options: {
         return options.loggedIn === true
           ? json(200, { user, csrf_token: CSRF, step_up_until_ms: null })
           : refuse(401, "session_required");
+      case "GET /v1/auth/capabilities":
+        // What the gateway answers an organization's admin (a fixture it produced).
+        return json(200, capabilities.alice);
       case "POST /v1/auth/login": {
         const given = body as { password: string };
         return given.password === PASSWORD
@@ -81,6 +87,7 @@ function gateway(options: {
           : refuse(401, "invalid_credentials");
       }
       case "POST /v1/auth/step-up": {
+        if (options.endsAt === "step-up") return refuse(401, "session_required");
         const given = body as { password: string };
         if (given.password !== PASSWORD) return refuse(403, "step_up_failed");
         steppedUp = true;
@@ -119,6 +126,7 @@ function gateway(options: {
         });
       }
       case `PUT ${APP}`:
+        if (options.endsAt === "put") return refuse(401, "session_required");
         if (options.stepUpOnPut !== undefined && !steppedUp) return refuse(403, "step_up_required");
         steppedUp = false;
         version += 1;
@@ -140,6 +148,9 @@ function dump(storage: Storage): string {
 
 async function openAppOne() {
   const user = userEvent.setup();
+  // The page opens at home; the screen is one of the navigation's items.
+  const sections = await screen.findByRole("navigation", { name: "Sections" });
+  await user.click(within(sections).getByRole("link", { name: "Application settings" }));
   await user.selectOptions(await screen.findByLabelText("Application"), "app-one");
   await screen.findByRole("region", { name: "Settings in force" });
   return user;
@@ -153,10 +164,10 @@ function writeControls() {
   ];
 }
 
-describe("ConsoleApp", () => {
+describe("the settings screens, in the page", () => {
   it("logs in, keeps the CSRF token out of storage, and sends it on every change", async () => {
     const { fetcher, seen } = gateway({ probe: { status: 200 } });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     const user = userEvent.setup();
     const form = await screen.findByRole("region", { name: "Log in" });
     await user.type(within(form).getByLabelText("Username"), "admin-e2e");
@@ -179,16 +190,16 @@ describe("ConsoleApp", () => {
 
   it("asks /v1/auth/me for the session and its CSRF token on a reload, with no login", async () => {
     const { fetcher, seen } = gateway({ loggedIn: true, probe: { status: 200 } });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     await screen.findByRole("button", { name: "Log out" });
     await openAppOne();
     await screen.findByText("May change");
     expect(seen.find((s) => s.path.endsWith("/validate"))?.csrf).toBe(CSRF);
   });
 
-  it("shows a viewer no write control: the gateway refused the dry run", async () => {
+  it("shows no write control when the gateway refused the dry run", async () => {
     const { fetcher } = gateway({ loggedIn: true, probe: { status: 403, code: "forbidden" } });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     await openAppOne();
     await screen.findByText("Read only");
     expect(screen.getByRole("region", { name: "Presets" })).toHaveTextContent("cheap");
@@ -198,13 +209,25 @@ describe("ConsoleApp", () => {
 
   it.each([
     [503, "state_unavailable"],
-    [401, "session_required"],
     [403, "csrf_failed"],
   ])("shows no write control when the dry run answers %i %s", async (status, code) => {
     const { fetcher } = gateway({ loggedIn: true, probe: { status, code } });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     await openAppOne();
     await screen.findByText("Read only");
+    expect(writeControls()).toEqual([]);
+  });
+
+  it("logs in again where it was when the dry run answers 401 session_required", async () => {
+    window.location.hash = "#/application/app-one";
+    const { fetcher } = gateway({
+      loggedIn: true,
+      probe: { status: 401, code: "session_required" },
+    });
+    render(<Shell fetcher={fetcher} />);
+    const login = await screen.findByRole("region", { name: "Log in" });
+    expect(login).toHaveTextContent("Your session has ended. Log in again.");
+    expect(window.location.hash).toBe("#/application/app-one");
     expect(writeControls()).toEqual([]);
   });
 
@@ -214,7 +237,7 @@ describe("ConsoleApp", () => {
       probe: { status: 200 },
       stepUpOnPut: "validate-says",
     });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     const user = await openAppOne();
     const edit = await screen.findByRole("region", { name: "Edit" });
     await user.selectOptions(within(edit).getByLabelText("max_hosted_attempts: change"), "unset");
@@ -244,7 +267,7 @@ describe("ConsoleApp", () => {
       probe: { status: 200 },
       stepUpOnPut: "put-says",
     });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     const user = await openAppOne();
     const edit = await screen.findByRole("region", { name: "Edit" });
     await user.selectOptions(within(edit).getByLabelText("max_hosted_attempts: change"), "set");
@@ -259,13 +282,55 @@ describe("ConsoleApp", () => {
     expect(seen.filter((s) => s.method === "PUT")).toHaveLength(2);
   });
 
+  it("logs in again where it was when a save answers 401 session_required", async () => {
+    const { fetcher, seen } = gateway({ loggedIn: true, probe: { status: 200 }, endsAt: "put" });
+    render(<Shell fetcher={fetcher} />);
+    const user = await openAppOne();
+    const edit = await screen.findByRole("region", { name: "Edit" });
+    await user.selectOptions(within(edit).getByLabelText("max_hosted_attempts: change"), "unset");
+    await screen.findByText(/^Valid\. Changes/);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    const login = await screen.findByRole("region", { name: "Log in" });
+    expect(login).toHaveTextContent("Your session has ended. Log in again.");
+    expect(window.location.hash).toBe("#/application/app-one");
+    // The token is forgotten: the next login carries none.
+    await user.type(within(login).getByLabelText("Username"), "admin-e2e");
+    await user.type(within(login).getByLabelText("Password"), PASSWORD);
+    await user.click(within(login).getByRole("button", { name: "Log in" }));
+    await screen.findByRole("button", { name: "Log out" });
+    expect(seen.filter((s) => s.path === "/v1/auth/login").at(-1)?.csrf).toBeUndefined();
+  });
+
+  it("closes the password prompt and logs in again when the session ends while it is open", async () => {
+    const { fetcher, seen } = gateway({
+      loggedIn: true,
+      probe: { status: 200 },
+      stepUpOnPut: "validate-says",
+      endsAt: "step-up",
+    });
+    render(<Shell fetcher={fetcher} />);
+    const user = await openAppOne();
+    const edit = await screen.findByRole("region", { name: "Edit" });
+    await user.selectOptions(within(edit).getByLabelText("max_hosted_attempts: change"), "unset");
+    await screen.findByText(/saving asks for your password/);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Password"), PASSWORD);
+    await user.click(within(dialog).getByRole("button", { name: "Confirm" }));
+    const login = await screen.findByRole("region", { name: "Log in" });
+    expect(login).toHaveTextContent("Your session has ended. Log in again.");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(seen.some((s) => s.method === "PUT")).toBe(false);
+    for (const input of document.querySelectorAll("input")) expect(input.value).not.toBe(PASSWORD);
+  });
+
   it("changes nothing when the password is not given", async () => {
     const { fetcher, seen } = gateway({
       loggedIn: true,
       probe: { status: 200 },
       stepUpOnPut: "validate-says",
     });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     const user = await openAppOne();
     const edit = await screen.findByRole("region", { name: "Edit" });
     await user.selectOptions(within(edit).getByLabelText("max_hosted_attempts: change"), "unset");

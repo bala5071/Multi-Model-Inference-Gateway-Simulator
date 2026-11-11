@@ -135,7 +135,16 @@ function Output({ run }: { run: Run }) {
   );
 }
 
-export function Playground({ state, control }: { state: MonitorState; control: Control }) {
+/** `loadControl`: whether the gateway lets this session start and stop load (docs/50). */
+export function Playground({
+  state,
+  control,
+  loadControl = true,
+}: {
+  state: MonitorState;
+  control: Control;
+  loadControl?: boolean;
+}) {
   const snapshot = state.snapshot;
   const models = Object.keys(snapshot?.models ?? {});
   // The gateway's applications, offered only when the gateway serves the Playground.
@@ -153,7 +162,7 @@ export function Playground({ state, control }: { state: MonitorState; control: C
     [],
   );
 
-  // Until the viewer chooses, the first application and model the gateway lists.
+  // Until a choice is made, the first application and model the gateway lists.
   const form: PlaygroundForm = {
     application: applications[0] ?? "",
     choose: "model",
@@ -307,10 +316,12 @@ export function Playground({ state, control }: { state: MonitorState; control: C
         <Output run={run} />
       </section>
 
-      <section aria-labelledby="playground-load">
-        <h3 id="playground-load">Load</h3>
-        <LoadControl control={control} />
-      </section>
+      {loadControl && (
+        <section aria-labelledby="playground-load">
+          <h3 id="playground-load">Load</h3>
+          <LoadControl control={control} />
+        </section>
+      )}
     </div>
   );
 }

@@ -98,7 +98,7 @@ async function picture(page: Page, testInfo: TestInfo, name: string): Promise<vo
 
 /** Logs in; an account still on its first password (this file run alone) changes it first. */
 async function logIn(page: Page, who: Account): Promise<void> {
-  await page.goto("/dashboard/console.html");
+  await page.goto("/dashboard/");
   const form = page.getByRole("region", { name: "Log in" });
   await form.getByLabel("Username").fill(who.username);
   await form.getByLabel("Password").fill(who.password());
@@ -117,7 +117,11 @@ async function logIn(page: Page, who: Account): Promise<void> {
 }
 
 async function open(page: Page, section: string): Promise<void> {
-  await page.getByRole("link", { name: section, exact: true }).click();
+  // The page's navigation (Home repeats some of its links).
+  await page
+    .getByRole("navigation", { name: "Sections" })
+    .getByRole("link", { name: section, exact: true })
+    .click();
   await expect(page.getByRole("heading", { name: section, level: 2 })).toBeVisible();
 }
 
@@ -397,10 +401,14 @@ test("a viewer sees every alert page with no write control, no channel and no re
   expect(await writeControls(page)).toBe(0);
   await picture(page, testInfo, "alert-rules-viewer");
 
-  // Channels: the gateway refuses a viewer the list; the console shows nothing of it.
-  await open(page, "Channels");
-  await expect(page.getByRole("main").getByRole("alert")).toHaveText(
-    "Not permitted, or not found.",
+  // Channels: not among a viewer's places (the gateway's capabilities answer), and opening the
+  // address draws no channel screen, only home's one sentence (docs/50).
+  await expect(
+    page.getByRole("navigation", { name: "Sections" }).getByRole("link", { name: "Channels" }),
+  ).toHaveCount(0);
+  await page.goto("/dashboard/#/channels");
+  await expect(page.getByRole("region", { name: "Home" }).getByRole("alert")).toHaveText(
+    "That page is not available to this account.",
   );
   expect(await writeControls(page)).toBe(0);
   await picture(page, testInfo, "channels-viewer");
@@ -429,8 +437,8 @@ test("an application's own admin changes its rules and reads its incidents, but 
 }) => {
   await logIn(page, APP_ADMIN);
   await open(page, "Alert rules");
-  await page.getByLabel("Application id").fill("app-one");
-  await page.getByRole("button", { name: "Open" }).click();
+  // Chosen from the applications the gateway named for this account.
+  await chooseApplication(page, "app-one");
   await expect(page.getByText("May change")).toBeVisible();
   await expect(page.getByRole("button", { name: "Restore default rules" })).toBeVisible();
 
@@ -444,15 +452,19 @@ test("an application's own admin changes its rules and reads its incidents, but 
   await expect(page.getByRole("region", { name: "Incidents" }).getByRole("alert")).toHaveText(
     "Not permitted, or not found.",
   );
-  await page.getByLabel("Application id").fill("app-one");
-  await page.getByRole("button", { name: "Open" }).click();
+  // Chosen from the applications the gateway named for this account.
+  await chooseApplication(page, "app-one");
   await expect(
     row(page.getByRole("region", { name: "Incidents" }), "Key expires within 14 days"),
   ).toBeVisible();
 
-  await open(page, "Channels");
-  await expect(page.getByRole("main").getByRole("alert")).toHaveText(
-    "Not permitted, or not found.",
+  // Channels are not among its places, and their address draws only home's sentence (docs/50).
+  await expect(
+    page.getByRole("navigation", { name: "Sections" }).getByRole("link", { name: "Channels" }),
+  ).toHaveCount(0);
+  await page.goto("/dashboard/#/channels");
+  await expect(page.getByRole("region", { name: "Home" }).getByRole("alert")).toHaveText(
+    "That page is not available to this account.",
   );
 });
 

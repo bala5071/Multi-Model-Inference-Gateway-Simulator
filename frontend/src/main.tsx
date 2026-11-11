@@ -1,15 +1,16 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { App } from "./App";
 import { ThemeProvider } from "./hooks/useTheme";
+import { Shell } from "./shell/Shell";
 import "./styles.css";
+import "./console/console.css";
 
 const root = document.getElementById("root");
 if (root === null) throw new Error("index.html has no #root element");
 createRoot(root).render(
   <StrictMode>
     <ThemeProvider>
-      <App />
+      <Shell />
     </ThemeProvider>
   </StrictMode>,
 );

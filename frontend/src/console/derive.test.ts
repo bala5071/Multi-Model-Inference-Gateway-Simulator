@@ -7,10 +7,8 @@ import {
   formatValue,
   initialDraft,
   limitRows,
-  parseRoute,
   presetRows,
   refusalText,
-  routeHash,
   settingRows,
   verdict,
   versionRows,
@@ -309,20 +307,6 @@ describe("presetRows", () => {
         ],
       },
     ]);
-  });
-});
-
-describe("routes", () => {
-  it("reads and writes the two screens in the hash", () => {
-    expect(parseRoute("")).toEqual({ screen: "application", applicationId: null });
-    expect(parseRoute("#/organization")).toEqual({ screen: "organization" });
-    expect(parseRoute("#/application/app%20one")).toEqual({
-      screen: "application",
-      applicationId: "app one",
-    });
-    expect(routeHash({ screen: "application", applicationId: "a/b" })).toBe("#/application/a%2Fb");
-    expect(routeHash({ screen: "application", applicationId: null })).toBe("#/application");
-    expect(routeHash({ screen: "organization" })).toBe("#/organization");
   });
 });
 

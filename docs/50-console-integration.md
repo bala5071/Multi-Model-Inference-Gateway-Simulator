@@ -1,8 +1,8 @@
 # 50. Console integration: what a session may do
 
 The plan is `docs/console-integration-plan.md` (approved on PR #45). This note covers its
-first step (P1): the gateway's answer to "what can this session do", from which the console's
-navigation will be drawn (P2). Nothing in it changes who may do what: `PERMISSIONS`,
+first step (P1): the gateway's answer to "what can this session do"; and its second (P2,
+below): the one page whose navigation is drawn from that answer. Nothing in it changes who may do what: `PERMISSIONS`,
 `authorize`, `relation`, `ROLE_SCOPES` and `docs/permission-matrix.md` are as they were.
 
 ## The endpoint
@@ -77,12 +77,58 @@ The console will hide what the answer does not allow; every action is still chec
 route. The monitoring endpoints answer anyone on this machine without a session until A8, so
 `monitoring.read` being `false` for an org_admin hides the dashboard, nothing more.
 
+## P2: the one page
+
+The monitoring and the console are one page at `/dashboard/` (`frontend/src/shell/`), under the
+console's content security policy, with one header (user, organization, the roles as the gateway
+names them, theme, Log out) and one navigation.
+
+- **The navigation is the gateway's answer.** `navigation.ts` is the frontend's one map from an
+  item to the actions that show it; whether an action is allowed is read from
+  `GET /v1/auth/capabilities`, asked at login and again at each new section, never on a timer. No
+  built-in role name appears in `frontend/src` outside the gateway's own fixtures
+  (`tests/test_dashboard.py`), and every action the map names is one the gateway answers, at its
+  level.
+- **The shell allows or refuses an item, not one application id.** A place the session may not
+  open, and one the page does not know, draw Home with "That page is not available to this
+  account."; no request is made for that screen. An application named in the address is the
+  screen's to ask about: the answer lists only the first page of an organization's applications.
+- **Home** is drawn from the answer: a platform section, an organization section (its links, the
+  evaluator banner, the open incidents, `OPEN_STATES`, and the sentence that per-organization
+  monitoring is not built yet), the applications of a session that has only those, or "This
+  account has no access to any part of the gateway yet."
+- **Sessions.** Login is drawn in place and the hash is the return target: there is no `?next=`
+  and no redirect. The API client is the one place a `401 session_required` is seen: the CSRF
+  token is forgotten, any password prompt closed, and login drawn with "Your session has ended.
+  Log in again." with the hash kept. A form's unsaved contents are not kept (that would need
+  browser storage). The monitoring's stream, when it reconnects, asks `/v1/auth/me`, so an ended
+  session is noticed there too. Logout sends the next person home (`#/home`). A password that
+  must be changed draws only the change form; capabilities are not asked until it is changed.
+- **Without accounts** (simulated live mode, `/v1/auth/me` answers 404) the page is the
+  monitoring, labelled simulated; a console address, or one the page does not know, shows "This
+  mode has no accounts" where a login would be. The browser reports that 404 in its console: it
+  is the answer the page is built on.
+- **The old addresses.** `/dashboard/console.html#<place>` runs a small same-origin module that
+  opens `/dashboard/#<place>` (a meta refresh would drop the hash; the `<noscript>` refresh and a
+  link are the fallback). The dashboard's old hashes (`#/latency`) open `#/monitor/latency`.
+- **Inside the monitoring**, the Playground tab follows `playground.use` and its load control
+  `control.write`. The monitoring API itself stays readable without a session on this machine
+  until A8: hiding it is a convenience, not its protection.
+- **The application chooser** lists the applications the answer names when the organization's
+  list is refused, instead of asking for a typed id.
+
+Tests: `src/shell/*.test.ts(x)` (navigation for each of the gateway's fixtures, asserted from the
+fixture's own booleans; a hidden place and an unknown one by address; deep-link login; the
+session ending on a screen's call, on a save and with the password prompt open; the forced
+password change; no accounts; logout; storage), and the e2e `shell.e2e.ts` for every role with a
+leak scan (addresses, requests, console, storage, `document.cookie`, the server's output and the
+audit rows) and its planted control.
+
 ## Not built
 
-- The console's use of the answer, the one page, the home screens, deep links and the expired
-  session (P2); the capabilities fixtures for the frontend come with P2's TypeScript type.
-- The platform and organization screens, and the HTTP routes for organizations and roles (P3,
-  with its own plan first).
+- The platform and organization screens (users, organizations, applications and keys), and the
+  HTTP routes for organizations and roles (P3, with its own plan first, at `#/manage/...`).
+- Per-organization monitoring (A8).
 - Timing: not measured. The answer is one organization lookup, at most one page of applications
   (or one resolve per own application assignment), and `authorize` eight times plus five times
   per application considered, in memory.

@@ -273,3 +273,31 @@ export interface TestSend {
   outcome: string;
   delivered: boolean;
 }
+
+// --- What a session may do (P2): GET /v1/auth/capabilities, docs/50. ---
+
+/** One of the session's own roles, as the gateway names it: shown, never interpreted. */
+export interface HeldRole {
+  role: string;
+  scope_type: string;
+  scope_id: string;
+}
+
+/** An application the session can name, and each navigation action's answer on it. */
+export interface NamedApplication {
+  application_id: string;
+  actions: Record<string, boolean>;
+}
+
+/**
+ * `GET /v1/auth/capabilities`: each navigation action as the gateway's `authorize` answers it,
+ * for the platform, the session's organization and the applications it can name. The console
+ * shows only what this says; every action is still checked by its own route.
+ */
+export interface Capabilities {
+  roles: HeldRole[];
+  platform: Record<string, boolean>;
+  organization: Record<string, boolean>;
+  applications: NamedApplication[];
+  more_applications: boolean;
+}

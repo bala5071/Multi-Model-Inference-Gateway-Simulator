@@ -10,15 +10,21 @@ const PORT = 8178;
 
 export default defineConfig({
   ...base,
-  testMatch: "*.tour.ts",
   timeout: 180_000,
-  use: {
-    ...base.use,
-    baseURL: `http://127.0.0.1:${PORT}`,
-    colorScheme: "light",
-    viewport: { width: 1280, height: 720 },
-    trace: "off",
-  },
+  // One project of its own: the main config's projects name their own tests.
+  projects: [
+    {
+      name: "tour",
+      testMatch: "*.tour.ts",
+      use: {
+        ...base.use,
+        baseURL: `http://127.0.0.1:${PORT}`,
+        colorScheme: "light",
+        viewport: { width: 1280, height: 720 },
+        trace: "off",
+      },
+    },
+  ],
   webServer: {
     command: `uv run python -m gateway.serve --port ${PORT} --log-level warning`,
     cwd: "..",

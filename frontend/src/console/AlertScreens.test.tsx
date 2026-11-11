@@ -1,6 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { ConsoleApp } from "./ConsoleApp";
+import { Shell } from "../shell/Shell";
+import { capabilities } from "../test/fixtures";
 import type { AlertRule, Channel, Incident } from "./types";
 
 const ORG = "/v1/admin/orgs/acme";
@@ -124,6 +125,9 @@ function gateway(
     switch (key) {
       case "GET /v1/auth/me":
         return ok({ user, csrf_token: CSRF, step_up_until_ms: null });
+      case "GET /v1/auth/capabilities":
+        // What the gateway answers an organization's admin (a fixture it produced).
+        return ok(capabilities.alice);
       case "POST /v1/auth/step-up":
         if ((body as { password: string }).password !== PASSWORD) {
           return refuse(403, "step_up_failed");
@@ -240,7 +244,7 @@ describe("the evaluator banner", () => {
   ])("shows on %s while /healthz says %s", async (hash, state) => {
     go(hash);
     const { fetcher } = gateway({ health: ok({ status: "ok", alert_evaluator: state }) });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     expect(await screen.findByRole("alert", { name: "Alert evaluation" })).toHaveTextContent(
       `Alert evaluation: ${state}.`,
     );
@@ -249,7 +253,7 @@ describe("the evaluator banner", () => {
   it("shows unreadable when /healthz cannot be read", async () => {
     go("#/incidents");
     const { fetcher } = gateway({ health: "fail" });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     expect(await screen.findByRole("alert", { name: "Alert evaluation" })).toHaveTextContent(
       "unreadable",
     );
@@ -258,7 +262,7 @@ describe("the evaluator banner", () => {
   it("shows nothing when the evaluator is ok", async () => {
     go("#/rules/app-one");
     const { fetcher, seen } = gateway();
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     await screen.findByRole("region", { name: "Rules" });
     await waitFor(() => {
       expect(seen.some((s) => s.path === "/healthz")).toBe(true);
@@ -271,7 +275,7 @@ describe("alert rules", () => {
   it("shows a writer the controls, on the gateway's 422 to the probe", async () => {
     go("#/rules/app-one");
     const { fetcher, seen } = gateway();
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     await screen.findByText("May change");
     expect(screen.getByRole("button", { name: "Edit Key expires within 14 days" })).toBeVisible();
     const probe = seen.find((s) => s.method === "POST" && s.path === `${APP}/alert-rules`);
@@ -282,19 +286,28 @@ describe("alert rules", () => {
   it.each([
     [403, "forbidden"],
     [503, "state_unavailable"],
-    [401, "session_required"],
     [403, "csrf_failed"],
     [200, "accepted the array"],
   ])("shows no write control when the probe answers %i %s", async (status, code) => {
     go("#/rules/app-one");
     const probe = status === 200 ? ok(RULE) : refuse(status, code);
     const { fetcher } = gateway({ probe });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     await screen.findByText("Read only");
     expect(screen.getByRole("region", { name: "Rules" })).toHaveTextContent(
       "Key expires within 14 days",
     );
     expect(writeControls()).toEqual([]);
+  });
+
+  it("logs in again where it was when the probe answers 401 session_required", async () => {
+    go("#/rules/app-one");
+    const { fetcher } = gateway({ probe: refuse(401, "session_required") });
+    render(<Shell fetcher={fetcher} />);
+    const login = await screen.findByRole("region", { name: "Log in" });
+    expect(login).toHaveTextContent("Your session has ended. Log in again.");
+    expect(window.location.hash).toBe("#/rules/app-one");
+    expect(screen.queryByRole("region", { name: "Rules" })).toBeNull();
   });
 });
 
@@ -302,7 +315,7 @@ describe("incidents", () => {
   it("offers Acknowledge on a firing incident when the rule probe says yes", async () => {
     go("#/incidents/app-one/inc_1");
     const { fetcher, seen } = gateway();
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Acknowledge" }));
     await screen.findByText("Acknowledged.");
@@ -312,7 +325,7 @@ describe("incidents", () => {
   it("offers no Acknowledge to an account the rule probe refuses", async () => {
     go("#/incidents/app-one/inc_1");
     const { fetcher } = gateway({ probe: refuse(403, "forbidden") });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     await screen.findByRole("list", { name: "Timeline" });
     expect(writeControls()).toEqual([]);
   });
@@ -320,7 +333,7 @@ describe("incidents", () => {
   it("offers no Acknowledge on an incident that is not firing", async () => {
     go("#/incidents/app-one/inc_1");
     const { fetcher } = gateway({ incident: { ...INCIDENT, state: "acknowledged" } });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     await screen.findByRole("list", { name: "Timeline" });
     expect(screen.queryByRole("button", { name: "Acknowledge" })).toBeNull();
   });
@@ -330,7 +343,7 @@ describe("channels", () => {
   it("shows nothing of channels, and no control, when the gateway refuses the list", async () => {
     go("#/channels");
     const { fetcher } = gateway({ channels: refuse(403, "forbidden") });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     expect(
       await within(await screen.findByRole("main")).findByText("Not permitted, or not found."),
     ).toBeVisible();
@@ -341,7 +354,7 @@ describe("channels", () => {
   it("never renders a webhook's URL, and shows its key once, then forgets it", async () => {
     go("#/channels");
     const { fetcher, seen } = gateway({ channels: ok({ channels: [], next: null }) });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     const user = userEvent.setup();
     const form = await screen.findByRole("region", { name: "New channel" });
     await user.type(within(form).getByLabelText("Name"), "Ops hook");
@@ -378,7 +391,7 @@ describe("channels", () => {
   it("verifies a recipient with the code typed, empties the field and keeps the code nowhere", async () => {
     go("#/channels");
     const { fetcher, seen } = gateway();
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Open On call" }));
     const field = await screen.findByLabelText(`Code for ${ADDRESS}`);
@@ -402,7 +415,7 @@ describe("channels", () => {
       release = resolve;
     });
     const { fetcher, seen } = gateway({ confirmGate });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Open On call" }));
     const field = await screen.findByLabelText(`Code for ${ADDRESS}`);
@@ -421,7 +434,7 @@ describe("channels", () => {
   it("shows no code entry when the confirm probe is refused", async () => {
     go("#/channels");
     const { fetcher } = gateway({ confirmProbe: refuse(403, "forbidden") });
-    render(<ConsoleApp fetcher={fetcher} />);
+    render(<Shell fetcher={fetcher} />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Open On call" }));
     await screen.findByRole("table", { name: "Recipients" });
