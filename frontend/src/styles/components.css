@@ -84,12 +84,15 @@ button.button.small {
   gap: var(--s-2);
 }
 
+.field input.toggle,
 input.toggle {
   appearance: none;
   position: relative;
   flex: none;
   width: 36px;
   height: 20px;
+  /* .field input (frame.css) sets a 40 px minimum and padding: not for a switch. */
+  min-height: 0;
   margin: 0;
   padding: 0;
   border: 1px solid var(--border-strong);
@@ -159,7 +162,7 @@ input.toggle:disabled {
   font-size: var(--text-sm);
 }
 
-.chip-remove {
+button.chip-remove {
   display: inline-grid;
   place-items: center;
   width: 22px;
@@ -171,7 +174,7 @@ input.toggle:disabled {
   color: var(--text-2);
 }
 
-.chip-remove:hover {
+button.chip-remove:hover {
   background: var(--surface);
   color: var(--text);
 }
@@ -214,7 +217,8 @@ input.toggle:disabled {
   background: var(--surface);
 }
 
-.sort-button {
+/* As specific as .console button (console.css), which would draw it boxed. */
+button.sort-button {
   display: inline-flex;
   align-items: center;
   gap: var(--s-1);
@@ -333,7 +337,7 @@ input.toggle:disabled {
 }
 
 /* The tooltip, in the top layer, placed by its component. */
-.tooltip-trigger {
+button.tooltip-trigger {
   padding: 0 2px;
   border: 0;
   background: transparent;
@@ -347,6 +351,11 @@ input.toggle:disabled {
   margin: 0;
   /* The browser's [popover] rule scrolls (overflow: auto); a tooltip's words never need to. */
   overflow: visible;
+  /* It inherits from where it sits in the page (a figure cell: monospace, no wrapping). */
+  font-family: var(--font);
+  font-weight: var(--weight-regular);
+  white-space: normal;
+  text-align: left;
   max-width: 280px;
   padding: var(--s-1) var(--s-2);
   border: 1px solid var(--border);

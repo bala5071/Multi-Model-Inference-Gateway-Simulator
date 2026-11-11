@@ -250,6 +250,8 @@ for (const who of ALL) {
       await expect(drawer).toBeHidden();
       if (app !== undefined) {
         const chooser = page.getByRole("combobox", { name: "Application", exact: true });
+        // The applications the gateway names come after the placeholder: wait for them.
+        await expect.poll(() => chooser.locator("option").count()).toBeGreaterThan(1);
         const labels = await chooser.locator("option").allTextContents();
         const label = labels.find((l) => l.includes(app));
         if (label !== undefined) await chooser.selectOption({ label });

@@ -131,14 +131,27 @@ function Control({
       </fieldset>
     );
   }
+  if (kind === "quality") {
+    // Words, not JSON; nothing typed is "not set" (null), as for a number.
+    return (
+      <TextField
+        label={name}
+        value={typeof value === "string" ? value : ""}
+        placeholder="not set"
+        spellCheck={false}
+        onChange={(event) => {
+          onText(event.target.value === "" ? "null" : JSON.stringify(event.target.value));
+        }}
+      />
+    );
+  }
   return (
     <TextField
-      label={kind === "quality" ? name : `${name} (JSON)`}
-      value={kind === "quality" && typeof value === "string" ? value : text}
+      label={`${name} (JSON)`}
+      value={text}
       spellCheck={false}
       onChange={(event) => {
-        if (kind === "quality") onValue(event.target.value);
-        else onText(event.target.value);
+        onText(event.target.value);
       }}
     />
   );
