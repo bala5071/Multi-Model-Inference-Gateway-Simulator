@@ -204,28 +204,84 @@ describe("connection", () => {
   });
 });
 
-describe("theme", () => {
-  it("follows the system setting, then the choice made here, and remembers it", async () => {
+/** A system setting the test can change, as the operating system would. */
+function fakeSystem(dark: boolean) {
+  const listeners = new Set<() => void>();
+  const query = {
+    matches: dark,
+    media: "(prefers-color-scheme: dark)",
+    addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+    removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+  };
+  vi.stubGlobal("matchMedia", () => query);
+  return {
+    set: (next: boolean) => {
+      query.matches = next;
+      act(() => {
+        for (const listener of listeners) listener();
+      });
+    },
+  };
+}
+
+describe("theme (docs/52, Q7)", () => {
+  it("follows the system by default, then the choice made here, and keeps only the word", async () => {
     const user = open();
+    const theme = screen.getByRole("combobox", { name: "Theme" });
+    expect(theme).toHaveValue("system");
     expect(document.documentElement.dataset.theme).toBe("light");
 
-    await user.click(screen.getByRole("button", { name: "Dark theme" }));
+    await user.selectOptions(theme, "dark");
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(localStorage.getItem("gateway-dashboard-theme")).toBe("dark");
 
-    await user.click(screen.getByRole("button", { name: "Light theme" }));
+    await user.selectOptions(theme, "light");
     expect(document.documentElement.dataset.theme).toBe("light");
+
+    await user.selectOptions(theme, "system");
+    expect(localStorage.getItem("gateway-dashboard-theme")).toBe("system");
+    expect(document.documentElement.dataset.theme).toBe("light");
+    // Only the theme's word is stored, nothing else.
+    expect(Object.keys(localStorage)).toEqual(["gateway-dashboard-theme"]);
   });
 
   it("starts dark when the system is dark, unless a choice was saved", () => {
-    vi.stubGlobal("matchMedia", (query: string) => ({ matches: true, media: query }));
+    fakeSystem(true);
     open();
     expect(document.documentElement.dataset.theme).toBe("dark");
   });
 
-  it("starts from the saved choice", () => {
-    localStorage.setItem("gateway-dashboard-theme", "dark");
+  it("follows a change of the system setting at once while System applies", () => {
+    const system = fakeSystem(false);
     open();
+    expect(document.documentElement.dataset.theme).toBe("light");
+    system.set(true);
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    system.set(false);
+    expect(document.documentElement.dataset.theme).toBe("light");
+  });
+
+  it("keeps a chosen theme when the system setting changes", async () => {
+    const system = fakeSystem(false);
+    const user = open();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Theme" }), "light");
+    system.set(true);
+    expect(document.documentElement.dataset.theme).toBe("light");
+  });
+
+  it.each(["dark", "light"])("starts from a saved choice (%s), as saved before", (saved) => {
+    fakeSystem(saved !== "dark");
+    localStorage.setItem("gateway-dashboard-theme", saved);
+    open();
+    expect(document.documentElement.dataset.theme).toBe(saved);
+    expect(screen.getByRole("combobox", { name: "Theme" })).toHaveValue(saved);
+  });
+
+  it("treats a saved word it does not know as System", () => {
+    fakeSystem(true);
+    localStorage.setItem("gateway-dashboard-theme", "sepia");
+    open();
+    expect(screen.getByRole("combobox", { name: "Theme" })).toHaveValue("system");
     expect(document.documentElement.dataset.theme).toBe("dark");
   });
 });

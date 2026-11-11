@@ -140,12 +140,12 @@ function ApplicationTable({
                   <a href={routeHash({ screen: "application", applicationId: row.id })}>
                     {row.name}
                   </a>{" "}
-                  <span className="muted">({row.id})</span>
+                  <span className="muted figure">({row.id})</span>
                 </th>
                 <td>{row.mode}</td>
-                <td>{row.requests}</td>
-                <td>{row.errorRate}</td>
-                <td>{row.p50}</td>
+                <td className="figure">{row.requests}</td>
+                <td className="figure">{row.errorRate}</td>
+                <td className="figure">{row.p50}</td>
                 <td>{row.open}</td>
                 <td>
                   <span className={`status-dot status-${row.status.kind}`} aria-hidden="true" />{" "}

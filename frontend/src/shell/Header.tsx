@@ -1,4 +1,4 @@
-import { useTheme } from "../hooks/useTheme";
+import { THEME_PREFERENCES, useTheme, type ThemePreference } from "../hooks/useTheme";
 import type { Capabilities, HeldRole, SessionUser } from "../console/types";
 
 /** A role as the gateway names it, with its scope: shown as text, never read for a decision. */
@@ -8,7 +8,16 @@ export function roleText(held: HeldRole): string {
     : `${held.role} (${held.scope_type} ${held.scope_id})`;
 }
 
-/** The page's one header: who is logged in, in which organization, their roles, and Log out. */
+const PREFERENCE_WORDS: Record<ThemePreference, string> = {
+  system: "System",
+  light: "Light",
+  dark: "Dark",
+};
+
+/**
+ * The page's one header: who is logged in, in which organization, their roles, the theme
+ * (System, Light or Dark: docs/52, Q7), and Log out.
+ */
 export function Header({
   user,
   capabilities,
@@ -20,7 +29,7 @@ export function Header({
   simulated: boolean;
   onLogout: (() => void) | null;
 }) {
-  const { theme, toggle } = useTheme();
+  const { preference, setPreference } = useTheme();
   const roles = capabilities?.roles.map(roleText) ?? [];
   return (
     <header className="top">
@@ -32,9 +41,22 @@ export function Header({
           {roles.length > 0 && ` · ${roles.join(", ")}`}
         </span>
       )}
-      <button type="button" onClick={toggle}>
-        {theme === "dark" ? "Light theme" : "Dark theme"}
-      </button>
+      <label className="theme-choice">
+        Theme
+        <select
+          value={preference}
+          onChange={(event) => {
+            const next = THEME_PREFERENCES.find((p) => p === event.target.value);
+            if (next !== undefined) setPreference(next);
+          }}
+        >
+          {THEME_PREFERENCES.map((p) => (
+            <option key={p} value={p}>
+              {PREFERENCE_WORDS[p]}
+            </option>
+          ))}
+        </select>
+      </label>
       {onLogout !== null && (
         <button type="button" onClick={onLogout}>
           Log out

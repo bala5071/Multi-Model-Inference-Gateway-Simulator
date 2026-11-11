@@ -138,7 +138,9 @@ export function ChartPanel(props: ChartPanelProps) {
                 <tr key={x}>
                   <th scope="row">{formatAge(x)}</th>
                   {lines.map((line, index) => (
-                    <td key={line.label}>{formatValue(drawn.ys[index]?.[row] ?? null)}</td>
+                    <td key={line.label} className="figure">
+                      {formatValue(drawn.ys[index]?.[row] ?? null)}
+                    </td>
                   ))}
                 </tr>
               ))}

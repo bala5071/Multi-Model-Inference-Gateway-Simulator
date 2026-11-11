@@ -428,6 +428,9 @@ describe("applications (docs/51)", () => {
     expect(list).toHaveTextContent("Figures over the last 60 minutes.");
     const shop = within(table).getByRole("row", { name: /north-shop/ });
     expect(shop).toHaveTextContent("20.0 %");
+    // Figures in monospace (docs/52, Q1): the error rate, and the application's id.
+    expect(within(shop).getByText("20.0 %")).toHaveClass("figure");
+    expect(within(shop).getByText("(north-shop)")).toHaveClass("figure");
     expect(shop).toHaveTextContent("firing");
     expect(within(shop).getByRole("link", { name: "API keys" })).toHaveAttribute(
       "href",

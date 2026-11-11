@@ -1,40 +1,5 @@
-/* Tokens by role. The theme hook stamps data-theme on <html>, resolving the system
-   setting itself, so the dark values are declared once. */
-:root {
-  color-scheme: light;
-  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
-  --page: #f9f9f7;
-  --surface: #fcfcfb;
-  --text-primary: #0b0b0b;
-  --text-secondary: #52514e;
-  --text-muted: #6f6e69;
-  --grid: #e1e0d9;
-  --border: rgba(11, 11, 11, 0.12);
-  --series-1: #2a78d6;
-  --series-2: #eb6834;
-  --accent: #2a78d6;
-  --track: #cde2fb;
-  --good: #0ca30c;
-  --warning: #fab219;
-  --critical: #d03b3b;
-  --banner: #fdecec;
-}
-
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --page: #0d0d0d;
-  --surface: #1a1a19;
-  --text-primary: #ffffff;
-  --text-secondary: #c3c2b7;
-  --text-muted: #9c9a92;
-  --grid: #2c2c2a;
-  --border: rgba(255, 255, 255, 0.14);
-  --series-1: #3987e5;
-  --series-2: #d95926;
-  --accent: #3987e5;
-  --track: #0d366b;
-  --banner: #3a1616;
-}
+/* The dashboard's and the console's base styles, on the tokens of styles/tokens.css (docs/53):
+   no colour is written here, only token names. */
 
 * {
   box-sizing: border-box;
@@ -42,9 +7,13 @@
 
 body {
   margin: 0;
-  background: var(--page);
-  color: var(--text-primary);
-  font: 14px/1.45 var(--font);
+  background: var(--canvas);
+  color: var(--text);
+  font: var(--text-md) / var(--leading) var(--font);
+}
+
+a {
+  color: var(--accent);
 }
 
 .app {
@@ -62,15 +31,15 @@ p {
 }
 
 h1 {
-  font-size: 20px;
+  font-size: var(--text-xl);
 }
 
 h3 {
-  font-size: 16px;
+  font-size: var(--text-lg);
 }
 
 h4 {
-  font-size: 14px;
+  font-size: var(--text-md);
 }
 
 .top {
@@ -87,10 +56,10 @@ h4 {
 button,
 select {
   font: inherit;
-  color: var(--text-primary);
+  color: var(--text);
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
   padding: 4px 10px;
   cursor: pointer;
 }
@@ -101,13 +70,29 @@ button[aria-pressed="true"] {
 }
 
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
+}
+
+/* Figures in tables (counts, rates, latencies, ids): monospace, digits of one width (docs/52,
+   Q1). Sizes and alignment are the cell's own. */
+.figure {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
 }
 
 .muted,
 .unit {
-  color: var(--text-secondary);
+  color: var(--text-2);
   font-size: 12px;
   font-weight: 400;
 }
@@ -118,7 +103,7 @@ button[aria-pressed="true"] {
 }
 
 .empty {
-  color: var(--text-secondary);
+  color: var(--text-2);
   padding: 24px 0;
 }
 
@@ -126,7 +111,7 @@ button[aria-pressed="true"] {
 
 .status {
   font-size: 12px;
-  color: var(--text-secondary);
+  color: var(--text-2);
 }
 
 .status::before {
@@ -136,20 +121,20 @@ button[aria-pressed="true"] {
   height: 8px;
   border-radius: 50%;
   margin-right: 6px;
-  background: var(--text-muted);
+  background: var(--text-3);
 }
 
 .status-live::before {
-  background: var(--good);
+  background: var(--ok);
 }
 
 .status-disconnected::before {
-  background: var(--critical);
+  background: var(--bad);
 }
 
 .banner {
-  background: var(--banner);
-  border: 1px solid var(--critical);
+  background: var(--bad-soft);
+  border: 1px solid var(--bad);
   border-radius: 6px;
   padding: 8px 12px;
   margin-bottom: 12px;
@@ -176,11 +161,11 @@ button[aria-pressed="true"] {
   border-radius: 0;
   background: none;
   padding: 8px 12px;
-  color: var(--text-secondary);
+  color: var(--text-2);
 }
 
 .tabs button[aria-selected="true"] {
-  color: var(--text-primary);
+  color: var(--text);
   border-bottom-color: var(--accent);
   font-weight: 600;
 }
@@ -222,12 +207,12 @@ button[aria-pressed="true"] {
 }
 
 .badge-healthy {
-  border-color: var(--good);
+  border-color: var(--ok);
 }
 
 .badge-degraded {
-  border-color: var(--critical);
-  background: var(--banner);
+  border-color: var(--bad);
+  background: var(--bad-soft);
 }
 
 .stats {
@@ -243,7 +228,7 @@ button[aria-pressed="true"] {
 }
 
 .stat-label {
-  color: var(--text-secondary);
+  color: var(--text-2);
   font-size: 12px;
 }
 
@@ -268,7 +253,7 @@ button[aria-pressed="true"] {
   border: 1px dashed var(--border);
   border-radius: 6px;
   padding: 10px 12px;
-  color: var(--text-secondary);
+  color: var(--text-2);
   background: repeating-linear-gradient(
     135deg,
     transparent,
@@ -279,7 +264,7 @@ button[aria-pressed="true"] {
 }
 
 .unavailable strong {
-  color: var(--text-primary);
+  color: var(--text);
   font-weight: 600;
 }
 
@@ -299,11 +284,11 @@ button[aria-pressed="true"] {
 }
 
 .meter-warning .meter-fill {
-  background: var(--warning);
+  background: var(--warn);
 }
 
 .meter-exhausted .meter-fill {
-  background: var(--critical);
+  background: var(--bad);
 }
 
 /* Charts */
@@ -342,7 +327,7 @@ button[aria-pressed="true"] {
 
 .paused-note {
   font-size: 12px;
-  color: var(--text-secondary);
+  color: var(--text-2);
   margin-bottom: 4px;
 }
 
@@ -352,12 +337,12 @@ button[aria-pressed="true"] {
 
 .chart .u-legend {
   font: 12px var(--font);
-  color: var(--text-secondary);
+  color: var(--text-2);
   text-align: left;
 }
 
 .chart .u-legend .u-value {
-  color: var(--text-primary);
+  color: var(--text);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
@@ -377,7 +362,7 @@ button[aria-pressed="true"] {
 
 .data-table caption {
   text-align: left;
-  color: var(--text-secondary);
+  color: var(--text-2);
   font-size: 12px;
   padding-bottom: 4px;
 }
@@ -391,7 +376,7 @@ button[aria-pressed="true"] {
 }
 
 .data-table thead th {
-  color: var(--text-secondary);
+  color: var(--text-2);
   font-size: 12px;
   font-weight: 600;
 }
@@ -416,7 +401,7 @@ button[aria-pressed="true"] {
   flex-direction: column;
   gap: 2px;
   font-size: 12px;
-  color: var(--text-secondary);
+  color: var(--text-2);
 }
 
 .events {
@@ -451,7 +436,7 @@ button[aria-pressed="true"] {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  border: 1px solid var(--warning);
+  border: 1px solid var(--warn);
   border-left-width: 6px;
   border-radius: 6px;
   background: var(--surface);
@@ -460,7 +445,7 @@ button[aria-pressed="true"] {
 }
 
 .sim-facts {
-  color: var(--text-secondary);
+  color: var(--text-2);
 }
 
 .speeds {
@@ -473,7 +458,7 @@ button[aria-pressed="true"] {
 .mode-badge {
   font-size: 12px;
   font-weight: 600;
-  border: 1px solid var(--warning);
+  border: 1px solid var(--warn);
   border-radius: 999px;
   padding: 2px 10px;
 }
@@ -507,10 +492,10 @@ button[aria-pressed="true"] {
 input,
 textarea {
   font: inherit;
-  color: var(--text-primary);
+  color: var(--text);
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
   padding: 4px 8px;
 }
 
@@ -536,9 +521,9 @@ button:disabled {
 }
 
 .form-error {
-  border: 1px solid var(--critical);
+  border: 1px solid var(--bad);
   border-radius: 6px;
-  background: var(--banner);
+  background: var(--bad-soft);
   padding: 8px 12px;
   margin: 8px 0;
 }
@@ -551,7 +536,7 @@ button:disabled {
 }
 
 .facts dt {
-  color: var(--text-secondary);
+  color: var(--text-2);
   font-size: 12px;
 }
 
@@ -567,7 +552,7 @@ button:disabled {
 }
 
 .tokens {
-  font-family: ui-monospace, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.7;
   max-height: 220px;
@@ -635,6 +620,14 @@ button:disabled {
 
 .top .who {
   margin-left: auto;
+}
+
+.theme-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  color: var(--text-2);
+  font-size: var(--text-sm);
 }
 
 .home ul {

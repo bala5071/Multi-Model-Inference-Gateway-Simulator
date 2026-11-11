@@ -124,7 +124,7 @@ function ApplicationKeys({
                 <tr key={k.key_id}>
                   <th scope="row">{k.label}</th>
                   <td>
-                    <code>{k.key_id}</code>
+                    <code className="figure">{k.key_id}</code>
                   </td>
                   <td>{k.state}</td>
                   <td>{formatTime(k.created_at_ms)}</td>

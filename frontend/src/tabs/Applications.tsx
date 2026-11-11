@@ -42,7 +42,7 @@ export function Applications({ state }: { state: MonitorState }) {
                 <tr key={id}>
                   <th scope="row">{id}</th>
                   <td>{application.plan}</td>
-                  <td>{formatUsd(application.spend_usd)}</td>
+                  <td className="figure">{formatUsd(application.spend_usd)}</td>
                   <td className="budget">
                     <span>
                       {formatValue(application.used_tokens)} of{" "}
@@ -52,12 +52,16 @@ export function Applications({ state }: { state: MonitorState }) {
                     <Meter label={`${id} token budget used`} ratio={use.ratio} level={use.level} />
                     {use.level !== "ok" && <span className="muted">{LEVEL_TEXT[use.level]}</span>}
                   </td>
-                  <td>{formatValue(application.requests)}</td>
-                  <td>{formatValue(application.rejections_total.budget_exhausted)}</td>
-                  <td>{formatValue(application.rejections_total.queue_full)}</td>
-                  <td>{formatValue(application.rejections_total.rate_limited)}</td>
-                  <td>{formatValue(application.timeout_total)}</td>
-                  <td>{formatValue(application.downgrade_total)}</td>
+                  <td className="figure">{formatValue(application.requests)}</td>
+                  <td className="figure">
+                    {formatValue(application.rejections_total.budget_exhausted)}
+                  </td>
+                  <td className="figure">{formatValue(application.rejections_total.queue_full)}</td>
+                  <td className="figure">
+                    {formatValue(application.rejections_total.rate_limited)}
+                  </td>
+                  <td className="figure">{formatValue(application.timeout_total)}</td>
+                  <td className="figure">{formatValue(application.downgrade_total)}</td>
                 </tr>
               );
             })}
