@@ -3,6 +3,7 @@ import type { MonitorState } from "../api/store";
 import { formatUsd, formatValue } from "../charts/transforms";
 import { Meter } from "../components/Meter";
 import { Unavailable } from "../components/Unavailable";
+import { TableScroll } from "../components/TableScroll";
 
 const LEVEL_TEXT = { ok: "", warning: "Near its budget", exhausted: "Budget used up" } as const;
 
@@ -19,8 +20,8 @@ export function Applications({ state }: { state: MonitorState }) {
         Spend, tokens and requests are for the current budget period of each application.
         Rejections, timeouts and downgrades are counted since the gateway started.
       </p>
-      <div className="table-scroll">
-        <table className="data-table applications">
+      <TableScroll table="Applications">
+        <table className="data-table applications" aria-label="Applications">
           <thead>
             <tr>
               <th scope="col">Application</th>
@@ -42,7 +43,7 @@ export function Applications({ state }: { state: MonitorState }) {
                 <tr key={id}>
                   <th scope="row">{id}</th>
                   <td>{application.plan}</td>
-                  <td>{formatUsd(application.spend_usd)}</td>
+                  <td className="figure">{formatUsd(application.spend_usd)}</td>
                   <td className="budget">
                     <span>
                       {formatValue(application.used_tokens)} of{" "}
@@ -52,18 +53,22 @@ export function Applications({ state }: { state: MonitorState }) {
                     <Meter label={`${id} token budget used`} ratio={use.ratio} level={use.level} />
                     {use.level !== "ok" && <span className="muted">{LEVEL_TEXT[use.level]}</span>}
                   </td>
-                  <td>{formatValue(application.requests)}</td>
-                  <td>{formatValue(application.rejections_total.budget_exhausted)}</td>
-                  <td>{formatValue(application.rejections_total.queue_full)}</td>
-                  <td>{formatValue(application.rejections_total.rate_limited)}</td>
-                  <td>{formatValue(application.timeout_total)}</td>
-                  <td>{formatValue(application.downgrade_total)}</td>
+                  <td className="figure">{formatValue(application.requests)}</td>
+                  <td className="figure">
+                    {formatValue(application.rejections_total.budget_exhausted)}
+                  </td>
+                  <td className="figure">{formatValue(application.rejections_total.queue_full)}</td>
+                  <td className="figure">
+                    {formatValue(application.rejections_total.rate_limited)}
+                  </td>
+                  <td className="figure">{formatValue(application.timeout_total)}</td>
+                  <td className="figure">{formatValue(application.downgrade_total)}</td>
                 </tr>
               );
             })}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
     </>
   );
 }

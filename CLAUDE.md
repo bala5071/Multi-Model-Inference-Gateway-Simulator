@@ -467,6 +467,12 @@ about the gateway.
 - A metric with `available: false` is drawn with the `Unavailable` component, never as 0.
 - Every chart goes through `ChartPanel` (units in the title, pause, table view,
   downsampling).
+- Every colour is a token of `src/styles/tokens.css` (docs/53); `src/styles/contrast.test.ts`
+  checks each pair the page draws (4.5:1 text, 3:1 controls and graphics) in both themes. The
+  theme is System / Light / Dark, System by default; only the word is stored.
+- `npm run budget` (CI, after the build): JS at most 135 kB, CSS at most 12 kB, gzip level 9.
+- The e2e runs axe (`e2e/a11y.ts`) on every pictured screen in both themes; a serious or
+  critical finding fails it.
 - `npm run build` writes to `src/gateway/dashboard/`, which is not tracked.
 
 - The dashboard must label simulated live mode on every tab (`SimulationBanner`).

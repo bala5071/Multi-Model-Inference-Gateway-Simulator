@@ -1,4 +1,4 @@
-/* The admin console's own pieces, on the dashboard's tokens (styles.css), so both themes
+/* The admin console's own pieces, on the tokens of styles/tokens.css (docs/53), so both themes
    apply unchanged. */
 
 .console-nav {
@@ -10,13 +10,13 @@
 
 .console-nav a {
   padding: 8px 12px;
-  color: var(--text-secondary);
+  color: var(--text-2);
   text-decoration: none;
   border-bottom: 2px solid transparent;
 }
 
 .console-nav a[aria-current="page"] {
-  color: var(--text-primary);
+  color: var(--text);
   border-bottom-color: var(--accent);
 }
 
@@ -39,7 +39,7 @@ label.chooser {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  color: var(--text-secondary);
+  color: var(--text-2);
 }
 
 .chooser {
@@ -52,9 +52,9 @@ label.chooser {
 .console select,
 .console button {
   font: inherit;
-  color: var(--text-primary);
+  color: var(--text);
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: 4px;
   padding: 4px 8px;
 }
@@ -89,8 +89,8 @@ label.chooser {
 }
 
 .notice {
-  color: var(--text-primary);
-  border-left: 3px solid var(--warning);
+  color: var(--text);
+  border-left: 3px solid var(--warn);
   padding-left: 8px;
 }
 
@@ -115,7 +115,7 @@ label.chooser {
 .dialog-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -124,7 +124,7 @@ label.chooser {
 
 .dialog {
   background: var(--surface);
-  color: var(--text-primary);
+  color: var(--text);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 20px;
@@ -138,11 +138,11 @@ label.chooser {
 /* C2: the alert screens. */
 
 .evaluator-banner {
-  border: 1px solid var(--warning);
+  border: 1px solid var(--warn);
   border-left-width: 4px;
   border-radius: 4px;
   padding: 8px 12px;
-  color: var(--text-primary);
+  color: var(--text);
   background: var(--surface);
 }
 
@@ -165,7 +165,7 @@ label.chooser {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  color: var(--text-secondary);
+  color: var(--text-2);
 }
 
 .console-form label.inline {
@@ -176,9 +176,9 @@ label.chooser {
 
 .console textarea {
   font: inherit;
-  color: var(--text-primary);
+  color: var(--text);
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: 4px;
   padding: 4px 8px;
 }
@@ -207,9 +207,9 @@ label.chooser {
    and a new key's field. The dot is never the only sign: its word is always beside it. */
 a.button {
   display: inline-block;
-  color: var(--text-primary);
+  color: var(--text);
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: 6px;
   padding: 4px 10px;
   text-decoration: none;
@@ -220,25 +220,25 @@ a.button {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: var(--text-muted);
+  background: var(--text-3);
   vertical-align: middle;
 }
 
 .status-firing {
-  background: var(--critical);
+  background: var(--bad);
 }
 
 .status-attention {
-  background: var(--warning);
+  background: var(--warn);
 }
 
 .status-ok {
-  background: var(--good);
+  background: var(--ok);
 }
 
 .status-no_requests {
   background: transparent;
-  border: 1px solid var(--text-muted);
+  border: 1px solid var(--text-3);
 }
 
 .key-field {
@@ -248,7 +248,7 @@ a.button {
 }
 
 .key-field .key {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   width: 100%;
   max-width: 640px;
 }

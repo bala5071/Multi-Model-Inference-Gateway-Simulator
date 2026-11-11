@@ -319,3 +319,39 @@ same PR. **Recommendation: (a)**: the tests and their meaning stay as they are.
 - **Q9: sort the current page in the browser, labelled on the page.**
 - **Q10: keep the page title at level 2**, under a visually hidden level-1 "Gateway".
 - The decisions listed in #50's description are accepted.
+
+## 14. UI1 (tokens and theme): decisions made from the code before it (2026-11-11)
+
+Scope, as asked: the tokens, the three-way theme and the monospace figures, with the plan's UI1
+checks (the contrast test, the bundle gate, the axe check). No layout or component change. Each
+decision is listed in UI1's description so it can be objected to.
+
+1. **One token file, the plan's names.** `frontend/src/styles/tokens.css` holds direction A's
+   values under the plan's names (`--canvas`, `--text-2`, `--ok-soft`, ...); `styles.css` and
+   `console.css` use only those. The charts' own colours stay as a data group (`--series-1`,
+   `--series-2`, `--grid`, `--track`), read by `TimeChart` as today.
+2. **The theme is resolved in script and stamped on `<html>`** (`data-theme="light"` or
+   `"dark"`), as today; System follows the operating system live. Before the script runs, a
+   `prefers-color-scheme` rule on `:root:not([data-theme])` gives the dark values, so a dark
+   system never flashes light. The dark values are therefore written twice; a test pins the two
+   blocks equal.
+3. **The control is a native `<select>` labelled "Theme"** (System, Light, Dark) in the existing
+   header, where the "Dark theme" button was. The user menu comes with UI2's frame.
+   `localStorage` keeps only the word, under the same key; a saved "light" or "dark" from before
+   keeps its meaning.
+4. **Warning colours change hue.** The old bright yellow (`--warning`, #fab219) is 1.79:1 on the
+   surface, under the 3:1 non-text minimum; mock-up A's amber replaces it on dots, borders and
+   meters, as its words already sit beside it.
+5. **Monospace figures** take a `figure` class on the cells that hold counts, rates, latencies
+   and ids: the Applications list, the keys table's ids, the charts' table view and the
+   monitoring's Applications tab. Alignment and sizes are unchanged (no layout change).
+6. **The bundle gate** is `frontend/scripts/bundle-budget.mjs` (`npm run budget`), gzip level 9,
+   1 kB = 1000 B, run by CI's frontend job after the build. Its own figures are the "before" and
+   "after" of each PR (Vite's are printed beside them but not used).
+7. **axe** (`@axe-core/playwright`, pinned) runs on every screen each role's e2e opens and on the
+   simulated monitoring, in the light and dark system themes; serious or critical violations fail
+   the run. A violation the tokens cannot fix stops this PR for a decision instead of being
+   switched off.
+8. **Visual regression moves to UI2.** UI1's pictures would be replaced by UI2's frame at once;
+   the pinned-image job and its baselines start with the frame.
+9. Design note: `docs/53-console-tokens-theme.md`.

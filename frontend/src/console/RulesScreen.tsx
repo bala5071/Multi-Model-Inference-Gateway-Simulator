@@ -15,6 +15,7 @@ import type {
   RulePage,
   RuleValidation,
 } from "./types";
+import { TableScroll } from "../components/TableScroll";
 
 interface Loaded {
   rules: AlertRule[];
@@ -146,8 +147,8 @@ export function RulesScreen({
             {loaded.value.rules.length === 0 ? (
               <p className="muted">This application has no alert rule.</p>
             ) : (
-              <div className="table-scroll">
-                <table className="data-table">
+              <TableScroll table="Rules">
+                <table className="data-table" aria-label="Rules">
                   <thead>
                     <tr>
                       <th scope="col">Rule</th>
@@ -241,7 +242,7 @@ export function RulesScreen({
                     })}
                   </tbody>
                 </table>
-              </div>
+              </TableScroll>
             )}
             {writable && (
               <div className="form-actions">

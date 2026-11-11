@@ -68,7 +68,7 @@ test("capture the README pictures", async ({ page }) => {
   await openTab(page, "Capacity");
   // The premium model is the one under load, below the other two. The whole page is taken,
   // so that the simulated-mode banner at the top is in the picture with its charts.
-  const premium = page.getByRole("region", { name: "premium capacity" });
+  const premium = page.getByRole("region", { name: "premium capacity", exact: true });
   await expect(premium.locator("canvas").first()).toBeVisible();
   await still(page, "capacity", true);
   await openTab(page, "Applications");

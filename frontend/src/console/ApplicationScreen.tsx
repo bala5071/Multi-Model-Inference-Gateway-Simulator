@@ -13,6 +13,7 @@ import {
 import { EditForm } from "./EditForm";
 import { useLoad } from "./useLoad";
 import type { ApplicationSettings, Change, PresetList, VersionPage } from "./types";
+import { TableScroll } from "../components/TableScroll";
 
 interface Loaded {
   settings: ApplicationSettings;
@@ -167,8 +168,8 @@ export function ApplicationScreen({
           </dl>
           <section className="panel" aria-labelledby="in-force-title">
             <h3 id="in-force-title">Settings in force</h3>
-            <div className="table-scroll">
-              <table className="data-table">
+            <TableScroll table="Settings in force">
+              <table className="data-table" aria-label="Settings in force">
                 <thead>
                   <tr>
                     <th scope="col">Setting</th>
@@ -192,7 +193,7 @@ export function ApplicationScreen({
                   ))}
                 </tbody>
               </table>
-            </div>
+            </TableScroll>
           </section>
           {canWrite(loaded.value.probe) && (
             <EditForm
@@ -234,8 +235,8 @@ export function ApplicationScreen({
             {loaded.value.versions.versions.length === 0 ? (
               <p className="muted">Never changed: every value is inherited.</p>
             ) : (
-              <div className="table-scroll">
-                <table className="data-table">
+              <TableScroll table="History">
+                <table className="data-table" aria-label="History">
                   <thead>
                     <tr>
                       <th scope="col">Version</th>
@@ -257,7 +258,7 @@ export function ApplicationScreen({
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </TableScroll>
             )}
             {canWrite(loaded.value.probe) && loaded.value.settings.version > 0 && (
               <div className="form-actions">

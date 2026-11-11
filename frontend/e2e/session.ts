@@ -4,6 +4,7 @@
 // secret on the page.
 
 import { expect, type Locator, type Page, type TestInfo } from "@playwright/test";
+import { picturedAndChecked } from "./a11y";
 
 export const NOT_AVAILABLE = "That page is not available to this account.";
 export const SESSION_ENDED = "Your session has ended. Log in again.";
@@ -186,12 +187,8 @@ export async function picture(
   masked: Locator[] = [],
 ): Promise<void> {
   expect(await visibleSecrets(page)).toEqual([]);
-  await page.screenshot({
-    path: testInfo.outputPath(`${name}.png`),
-    fullPage: true,
-    mask: masked,
-    maskColor: "#555555",
-  });
+  // In both themes, each checked by axe in both (docs/53).
+  await picturedAndChecked(page, testInfo, name, masked);
 }
 
 /**
@@ -204,11 +201,11 @@ export async function logIn(
   scan?: Scan,
   testInfo?: TestInfo,
 ): Promise<void> {
-  const form = page.getByRole("region", { name: "Log in" });
+  const form = page.getByRole("region", { name: "Log in", exact: true });
   await form.getByLabel("Username").fill(who.username);
   await form.getByLabel("Password").fill(secret(who.second));
   await form.getByRole("button", { name: "Log in" }).click();
-  const change = page.getByRole("region", { name: "Change your password" });
+  const change = page.getByRole("region", { name: "Change your password", exact: true });
   await expect(sections(page).or(change).or(form.getByRole("alert"))).toBeVisible();
   if (await sections(page).isVisible()) {
     await scan?.step(page);

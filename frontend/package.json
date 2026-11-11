@@ -14,6 +14,8 @@
     "test": "vitest run",
     "check": "npm run lint && npm run format:check && npm run typecheck && npm run test",
     "e2e": "npm run build && playwright test",
+    "budget": "node scripts/bundle-budget.mjs",
+    "budget:control": "node scripts/budget-control.mjs",
     "screenshots": "npm run build && playwright test --config playwright.capture.config.ts",
     "tour": "npm run build && playwright test --config playwright.tour.config.ts"
   },
@@ -23,6 +25,7 @@
     "uplot": "^1.6.32"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
     "@eslint/js": "^9.39.5",
     "@playwright/test": "^1.64.0",
     "@testing-library/jest-dom": "^6.9.1",

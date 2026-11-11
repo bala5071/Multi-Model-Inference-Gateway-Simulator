@@ -9,6 +9,7 @@ import type {
   OrganizationSettings,
   VersionPage,
 } from "./types";
+import { TableScroll } from "../components/TableScroll";
 
 interface Loaded {
   settings: OrganizationSettings;
@@ -77,8 +78,8 @@ export function OrganizationScreen({ context }: { context: ConsoleContext }) {
           </dl>
           <section className="panel" aria-labelledby="caps-title">
             <h3 id="caps-title">Caps</h3>
-            <div className="table-scroll">
-              <table className="data-table">
+            <TableScroll table="Caps">
+              <table className="data-table" aria-label="Caps">
                 <thead>
                   <tr>
                     <th scope="col">Setting</th>
@@ -96,7 +97,7 @@ export function OrganizationScreen({ context }: { context: ConsoleContext }) {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </TableScroll>
           </section>
           <section className="panel" aria-labelledby="limits-title">
             <h3 id="limits-title">Applications each cap limits</h3>
@@ -107,8 +108,8 @@ export function OrganizationScreen({ context }: { context: ConsoleContext }) {
             ) : limitRows(loaded.value.settings, loaded.value.applications).length === 0 ? (
               <p className="muted">The organization has set no cap.</p>
             ) : (
-              <div className="table-scroll">
-                <table className="data-table">
+              <TableScroll table="Applications each cap limits">
+                <table className="data-table" aria-label="Applications each cap limits">
                   <thead>
                     <tr>
                       <th scope="col">Cap</th>
@@ -126,7 +127,7 @@ export function OrganizationScreen({ context }: { context: ConsoleContext }) {
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </TableScroll>
             )}
           </section>
           <section className="panel" aria-labelledby="org-history-title">
@@ -134,8 +135,8 @@ export function OrganizationScreen({ context }: { context: ConsoleContext }) {
             {loaded.value.versions.versions.length === 0 ? (
               <p className="muted">No cap has been set.</p>
             ) : (
-              <div className="table-scroll">
-                <table className="data-table">
+              <TableScroll table="History">
+                <table className="data-table" aria-label="History">
                   <thead>
                     <tr>
                       <th scope="col">Version</th>
@@ -157,7 +158,7 @@ export function OrganizationScreen({ context }: { context: ConsoleContext }) {
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </TableScroll>
             )}
           </section>
         </>

@@ -4,6 +4,7 @@ import { ApiError } from "./api";
 import type { ConsoleContext } from "./context";
 import { refusalText } from "./derive";
 import type { AlertRule, RuleBody, RuleValidation } from "./types";
+import { TableScroll } from "../components/TableScroll";
 
 /** What the editor edits: an existing rule (saved with PUT), or a new one (POST). */
 export interface Editing {
@@ -99,8 +100,8 @@ export function RuleEditor({
       <p className="muted">
         Values are JSON. Each change is checked by the gateway before it can be saved.
       </p>
-      <div className="table-scroll">
-        <table className="data-table edit-table">
+      <TableScroll table="Rule fields">
+        <table className="data-table edit-table" aria-label="Rule fields">
           <thead>
             <tr>
               <th scope="col">Field</th>
@@ -126,7 +127,7 @@ export function RuleEditor({
             ))}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
       <div className="verdict" role="status" aria-label="Rule check">
         {!ready && <p className="form-error">Not JSON: {unparsed.join(", ")}.</p>}
         {ready && validation === null && <p className="muted">Checking…</p>}

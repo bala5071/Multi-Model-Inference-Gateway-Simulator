@@ -1,0 +1,142 @@
+/* The design tokens (docs/52, docs/53): direction A, "Quiet", with monospace figures. Every
+   colour of the page is one of these; styles.css and console.css use nothing else.
+
+   The theme hook stamps data-theme="light" or "dark" on <html> (System follows the operating
+   system live). Until it runs, a system that prefers dark gets the dark values from the media
+   rule below, so the page never flashes light. The dark values are therefore written twice;
+   src/styles/contrast.test.ts pins the two blocks equal and checks every pair's contrast. */
+
+:root {
+  color-scheme: light;
+
+  /* Type: the system stack, no font file (the CSP serves fonts from nowhere else). */
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, monospace;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+  --text-2xl: 22px;
+  --weight-regular: 400;
+  --weight-medium: 550;
+  --weight-strong: 650;
+  --leading: 1.45;
+
+  /* Spacing, on a 4 px base. */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+
+  /* Radius and elevation. */
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-pill: 999px;
+  --e-1: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --e-2: 0 8px 24px rgba(16, 24, 40, 0.16);
+  /* Behind a dialog, in both themes. */
+  --scrim: rgba(0, 0, 0, 0.45);
+
+  /* Motion: none at all under prefers-reduced-motion (styles.css). */
+  --motion: 120ms;
+
+  /* Surfaces and text. */
+  --canvas: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #f1f3f6;
+  --border: #e3e6eb;
+  --border-strong: #7d8794;
+  --text: #1c2026;
+  --text-2: #4f5866;
+  --text-3: #5f6875;
+
+  /* The accent, and the focus ring drawn in it. */
+  --accent: #2257d6;
+  --accent-text: #ffffff;
+  --accent-soft: #e8efff;
+  --focus: #2257d6;
+
+  /* Status: each with a soft background for pills and notices; never colour alone. */
+  --ok: #157a3c;
+  --ok-soft: #e4f4ea;
+  --warn: #8a5a00;
+  --warn-soft: #fdf1d8;
+  --bad: #b42318;
+  --bad-soft: #fde8e6;
+  --idle: #5d6673;
+  --idle-soft: #eef0f3;
+
+  /* Data: the charts' lines, their grid, and a meter's track. */
+  --series-1: #2257d6;
+  --series-2: #c2410c;
+  --grid: #e3e6eb;
+  --track: #d4e0fb;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --e-1: none;
+  --e-2: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --canvas: #0e1116;
+  --surface: #151a21;
+  --surface-2: #1b212a;
+  --border: #2a313c;
+  --border-strong: #788393;
+  --text: #e7eaee;
+  --text-2: #b3bcc8;
+  --text-3: #8e98a5;
+  --accent: #6f9cff;
+  --accent-text: #0b1220;
+  --accent-soft: #1b2a4a;
+  --focus: #6f9cff;
+  --ok: #5fd08b;
+  --ok-soft: #12301f;
+  --warn: #f2bf5e;
+  --warn-soft: #3a2c0d;
+  --bad: #ff8a80;
+  --bad-soft: #3d1614;
+  --idle: #a3acb8;
+  --idle-soft: #222934;
+  --series-1: #6f9cff;
+  --series-2: #f0915e;
+  --grid: #2a313c;
+  --track: #1b2a4a;
+}
+
+/* Before the theme hook has run: the same dark values, for a system that prefers dark. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --e-1: none;
+    --e-2: 0 8px 24px rgba(0, 0, 0, 0.5);
+    --canvas: #0e1116;
+    --surface: #151a21;
+    --surface-2: #1b212a;
+    --border: #2a313c;
+    --border-strong: #788393;
+    --text: #e7eaee;
+    --text-2: #b3bcc8;
+    --text-3: #8e98a5;
+    --accent: #6f9cff;
+    --accent-text: #0b1220;
+    --accent-soft: #1b2a4a;
+    --focus: #6f9cff;
+    --ok: #5fd08b;
+    --ok-soft: #12301f;
+    --warn: #f2bf5e;
+    --warn-soft: #3a2c0d;
+    --bad: #ff8a80;
+    --bad-soft: #3d1614;
+    --idle: #a3acb8;
+    --idle-soft: #222934;
+    --series-1: #6f9cff;
+    --series-2: #f0915e;
+    --grid: #2a313c;
+    --track: #1b2a4a;
+  }
+}

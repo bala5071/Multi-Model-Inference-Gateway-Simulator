@@ -29,6 +29,7 @@ import {
   sections,
   type Account,
 } from "./session";
+import { checkAccessible, findingsIn } from "./a11y";
 
 test.describe.configure({ mode: "serial" });
 
@@ -279,4 +280,90 @@ test("leak scan control: an issued key planted in storage and in the address is 
   await page.evaluate(() => {
     sessionStorage.removeItem("planted");
   });
+});
+
+test("narrow screens: every table that overflows is reached and scrolled by keyboard (docs/53)", async ({
+  page,
+}, testInfo) => {
+  // 480 px is narrower than these tables on any machine, whatever its fonts: their boxes
+  // overflow here even where they would not at 1400 px (CI's Linux fonts did, this machine's
+  // did not), so this test fails without the fix everywhere.
+  await page.setViewportSize({ width: 480, height: 900 });
+  await page.goto("/dashboard/");
+  await logIn(page, ADMIN);
+  const screens: [string, string][] = [
+    ["#/application/app-one", "Application settings"],
+    ["#/organization", "Organization settings"],
+    ["#/rules/app-one", "Alert rules"],
+    ["#/app/app-one/keys", "API keys"],
+    ["#/apps", "Applications"],
+    ["#/incidents", "Incidents"],
+  ];
+  let overflowing = 0;
+  for (const [hash, heading] of screens) {
+    await page.goto(`/dashboard/${hash}`);
+    await expect(page.getByRole("heading", { name: heading, level: 2 })).toBeVisible();
+    await expect(page.locator(".table-scroll").first()).toBeVisible();
+    const boxes = await page.locator(".table-scroll").evaluateAll((elements) =>
+      elements.map((element) => ({
+        overflows: element.scrollWidth > element.clientWidth,
+        tabindex: element.getAttribute("tabindex"),
+        role: element.getAttribute("role"),
+        name: element.getAttribute("aria-label"),
+      })),
+    );
+    for (const box of boxes.filter((b) => b.overflows)) {
+      overflowing += 1;
+      expect(box, hash).toMatchObject({ tabindex: "0", role: "region" });
+      expect(box.name, hash).toMatch(/\S table$/);
+    }
+  }
+  // The width did force overflow: otherwise the checks above would have checked nothing.
+  expect(overflowing).toBeGreaterThan(0);
+
+  // Keyboard only: Tab reaches the settings table's box, and the arrow keys scroll it.
+  await page.goto("/dashboard/#/application/app-one");
+  const box = page.getByRole("region", { name: "Settings in force table", exact: true });
+  await expect(box).toBeVisible();
+  for (let presses = 0; presses < 80; presses += 1) {
+    if (await box.evaluate((element) => element === document.activeElement)) break;
+    await page.keyboard.press("Tab");
+  }
+  await expect(box).toBeFocused();
+  const before = await box.evaluate((element) => element.scrollLeft);
+  for (let presses = 0; presses < 5; presses += 1) await page.keyboard.press("ArrowRight");
+  await expect.poll(() => box.evaluate((element) => element.scrollLeft)).toBeGreaterThan(before);
+
+  // And axe finds nothing serious at this width, in both themes.
+  await checkAccessible(page, testInfo, "application-settings-narrow");
+});
+
+test("accessibility check control: planted violations are found in both themes", async ({
+  page,
+}, testInfo) => {
+  await page.goto("/dashboard/");
+  await logIn(page, ORG_READER);
+  await expect(region(page, "Applications")).toBeVisible();
+  // Planted by this test, not the page: a button with no name, an image with no text, and text
+  // at 4.48:1 (#777 on white, under 4.5:1). axe must report all three in each theme, or a clean
+  // run of the check (docs/53) could not be trusted.
+  await page.evaluate(() => {
+    const box = document.createElement("div");
+    box.id = "planted";
+    box.style.cssText = "background:#ffffff;color:#777777;padding:8px";
+    box.innerHTML =
+      '<button type="button"></button><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">' +
+      "<p>planted low-contrast text</p>";
+    document.querySelector("main")?.append(box);
+  });
+  const found = await findingsIn(page, "planted-control");
+  for (const theme of ["light", "dark"]) {
+    const rules = found.filter((f) => f.theme === theme).map((f) => f.rule);
+    expect(rules).toEqual(expect.arrayContaining(["button-name", "image-alt", "color-contrast"]));
+  }
+  // And the check every screen goes through fails on them (they are serious or critical).
+  await expect(checkAccessible(page, testInfo, "planted-control-check")).rejects.toThrow(
+    /serious or critical accessibility findings/,
+  );
+  await page.evaluate(() => document.getElementById("planted")?.remove());
 });

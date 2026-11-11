@@ -137,6 +137,23 @@ serves at `/dashboard` and the Docker image ships. They are the only packages of
 No font, icon set or other asset of a third party is bundled; the console's icon is an inline
 SVG written here, and so is the dashboard's.
 
+## Development and test packages of the frontend
+
+Packages the console's UI work (docs/52) adds to `frontend/package.json`'s development
+dependencies, and what they bring with them. None is bundled into what the gateway serves; they
+run in the test suites only. `tests/test_licenses.py` checks each row against
+`frontend/package-lock.json` (version, licence, development-only) and fails on a direct
+development dependency that is neither here nor among those the frontend had before this table.
+
+| Package | Version | License |
+|---|---|---|
+| @axe-core/playwright | 4.14.0 | MPL-2.0 |
+| axe-core | 4.14.0 | MPL-2.0 |
+
+`@axe-core/playwright` runs the axe accessibility rules in the e2e suites (docs/52, Q6; docs/53);
+`axe-core` is the rule engine it injects into the page under test. Both are used unmodified, so
+MPL-2.0's file-level terms ask nothing of this repository.
+
 ## Bundled data
 
 ### Common-password blocklist

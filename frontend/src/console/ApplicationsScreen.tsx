@@ -8,6 +8,7 @@ import { refusalText } from "./derive";
 import { EvaluatorBanner } from "./EvaluatorBanner";
 import { useLoad } from "./useLoad";
 import type { ApplicationPage, FiguresPage, Health, OpenCountsAnswer } from "./types";
+import { TableScroll } from "../components/TableScroll";
 
 /** The page size of the list and of its figures: the same, so they name the same applications. */
 export const PAGE_SIZE = 50;
@@ -119,7 +120,7 @@ function ApplicationTable({
   return (
     <>
       <p className="muted">Figures over the {span}.</p>
-      <div className="table-scroll">
+      <TableScroll table="Applications">
         <table className="data-table" aria-label="Applications">
           <thead>
             <tr>
@@ -140,12 +141,12 @@ function ApplicationTable({
                   <a href={routeHash({ screen: "application", applicationId: row.id })}>
                     {row.name}
                   </a>{" "}
-                  <span className="muted">({row.id})</span>
+                  <span className="muted figure">({row.id})</span>
                 </th>
                 <td>{row.mode}</td>
-                <td>{row.requests}</td>
-                <td>{row.errorRate}</td>
-                <td>{row.p50}</td>
+                <td className="figure">{row.requests}</td>
+                <td className="figure">{row.errorRate}</td>
+                <td className="figure">{row.p50}</td>
                 <td>{row.open}</td>
                 <td>
                   <span className={`status-dot status-${row.status.kind}`} aria-hidden="true" />{" "}
@@ -162,7 +163,7 @@ function ApplicationTable({
             ))}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
       <div className="form-actions">
         {onFirst !== null && (
           <button type="button" onClick={onFirst}>

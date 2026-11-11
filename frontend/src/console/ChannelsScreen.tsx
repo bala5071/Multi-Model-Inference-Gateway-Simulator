@@ -20,6 +20,7 @@ import type {
   Recipient,
   TestSend,
 } from "./types";
+import { TableScroll } from "../components/TableScroll";
 
 /**
  * A new signing key, shown this once: the gateway never shows it again. Held in this
@@ -421,7 +422,7 @@ function ChannelView({
               <p className="muted">
                 Nothing is sent to an address until it is verified with the code mailed to it.
               </p>
-              <div className="table-scroll">
+              <TableScroll table="Recipients">
                 <table className="data-table" aria-label="Recipients">
                   <thead>
                     <tr>
@@ -498,7 +499,7 @@ function ChannelView({
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </TableScroll>
               {canManage && (
                 <form
                   className="inline-form"
@@ -537,7 +538,7 @@ function ChannelView({
           {loaded.value.deliveries.deliveries.length === 0 ? (
             <p className="muted">Nothing delivered yet.</p>
           ) : (
-            <div className="table-scroll">
+            <TableScroll table="Deliveries">
               <table className="data-table" aria-label="Deliveries">
                 <thead>
                   <tr>
@@ -562,7 +563,7 @@ function ChannelView({
                   ))}
                 </tbody>
               </table>
-            </div>
+            </TableScroll>
           )}
         </>
       )}
@@ -638,8 +639,8 @@ export function ChannelsScreen({ context }: { context: ConsoleContext }) {
               {loaded.value.channels.length === 0 ? (
                 <p className="muted">The organization has no channel.</p>
               ) : (
-                <div className="table-scroll">
-                  <table className="data-table">
+                <TableScroll table="Channel list">
+                  <table className="data-table" aria-label="Channel list">
                     <thead>
                       <tr>
                         <th scope="col">Channel</th>
@@ -679,7 +680,7 @@ export function ChannelsScreen({ context }: { context: ConsoleContext }) {
                       ))}
                     </tbody>
                   </table>
-                </div>
+                </TableScroll>
               )}
             </section>
             {canManage && (
