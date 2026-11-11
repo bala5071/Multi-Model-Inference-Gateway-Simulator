@@ -6,7 +6,12 @@ import { formatTime, refusalText } from "./derive";
 import { KeyShownOnce } from "./KeyShownOnce";
 import { useLoad } from "./useLoad";
 import type { ApiKeySummary, IssuedKey, KeyPage } from "./types";
-import { TableScroll } from "../components/TableScroll";
+import { Button } from "../ui/Button";
+import { DataTable } from "../ui/DataTable";
+import { ConfirmDialog } from "../ui/Dialog";
+import { NumberField, TextField } from "../ui/Field";
+import { Skeleton } from "../ui/Skeleton";
+import { StatusPill, toneOf } from "../ui/StatusPill";
 
 function failure(error: unknown): string {
   if (error instanceof ApiError) return refusalText(error.code, error.message);
@@ -80,11 +85,10 @@ function ApplicationKeys({
       setError(failure(caught));
     } finally {
       setBusy(false);
-      setRevoking(null);
     }
   }
 
-  if (listed.kind === "loading") return <p className="muted">Loading keys…</p>;
+  if (listed.kind === "loading") return <Skeleton label="Loading keys…" />;
   if (listed.kind === "failed") {
     return (
       <p className="form-error" role="alert">
@@ -104,99 +108,100 @@ function ApplicationKeys({
           }}
         />
       )}
-      {keys.length === 0 ? (
-        <p className="muted">This application has no keys yet.</p>
-      ) : (
-        <TableScroll table="Keys">
-          <table className="data-table" aria-label="Keys">
-            <thead>
-              <tr>
-                <th scope="col">Label</th>
-                <th scope="col">Key id</th>
-                <th scope="col">State</th>
-                <th scope="col">Created</th>
-                <th scope="col">Expires</th>
-                <th scope="col">Last used</th>
-                <th scope="col">Change</th>
-              </tr>
-            </thead>
-            <tbody>
-              {keys.map((k) => (
-                <tr key={k.key_id}>
-                  <th scope="row">{k.label}</th>
-                  <td>
-                    <code className="figure">{k.key_id}</code>
-                  </td>
-                  <td>{k.state}</td>
-                  <td>{formatTime(k.created_at_ms)}</td>
-                  <td>{when(k.expires_at_ms, "never")}</td>
-                  <td>{when(k.last_used_at_ms, "not yet")}</td>
-                  <td>
-                    {k.state !== "revoked" && (
-                      <div className="form-actions">
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => {
-                            const hours = Number(graceHours);
-                            void act(() =>
-                              context.api.send<IssuedKey>("POST", `${base}/${k.key_id}/rotate`, {
-                                grace_hours: hours,
-                              }),
-                            );
-                          }}
-                        >
-                          Rotate {k.label}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => {
-                            setRevoking(k);
-                          }}
-                        >
-                          Revoke {k.label}
-                        </button>
-                      </div>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </TableScroll>
-      )}
-      {revoking !== null && (
-        <div className="panel" role="alertdialog" aria-label="Revoke a key">
+      <DataTable
+        label="Keys"
+        rows={keys}
+        rowKey={(k) => k.key_id}
+        empty="This application has no keys yet."
+        columns={[
+          {
+            key: "label",
+            header: "Label",
+            cell: (k) => k.label,
+            rowHeader: true,
+            sortValue: (k) => k.label,
+          },
+          { key: "id", header: "Key id", cell: (k) => <code className="figure">{k.key_id}</code> },
+          {
+            key: "state",
+            header: "State",
+            cell: (k) => <StatusPill tone={toneOf(k.state)}>{k.state}</StatusPill>,
+            sortValue: (k) => k.state,
+          },
+          {
+            key: "created",
+            header: "Created",
+            cell: (k) => formatTime(k.created_at_ms),
+            sortValue: (k) => k.created_at_ms,
+          },
+          { key: "expires", header: "Expires", cell: (k) => when(k.expires_at_ms, "never") },
+          {
+            key: "used",
+            header: "Last used",
+            cell: (k) => when(k.last_used_at_ms, "not yet"),
+            sortValue: (k) => k.last_used_at_ms,
+          },
+          {
+            key: "change",
+            header: "Change",
+            cell: (k) =>
+              k.state !== "revoked" && (
+                <div className="row-actions">
+                  <Button
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => {
+                      const hours = Number(graceHours);
+                      void act(() =>
+                        context.api.send<IssuedKey>("POST", `${base}/${k.key_id}/rotate`, {
+                          grace_hours: hours,
+                        }),
+                      );
+                    }}
+                  >
+                    Rotate {k.label}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    disabled={busy}
+                    onClick={() => {
+                      setRevoking(k);
+                    }}
+                  >
+                    Revoke {k.label}
+                  </Button>
+                </div>
+              ),
+          },
+        ]}
+      />
+      <ConfirmDialog
+        open={revoking !== null}
+        title="Revoke a key"
+        confirmLabel="Revoke"
+        busy={busy}
+        onCancel={() => {
+          setRevoking(null);
+        }}
+        onConfirm={() => {
+          if (revoking === null) return;
+          const id = revoking.key_id;
+          // The confirmation closes first: a step-up, if asked, is its own dialog.
+          setRevoking(null);
+          void act(async () => {
+            await context.api.send("POST", `${base}/${id}/revoke`, {});
+            return null;
+          });
+        }}
+      >
+        {revoking !== null && (
           <p>
             Revoke <strong>{revoking.label}</strong> ({revoking.key_id})? Requests with it are
             refused at once. This cannot be undone.
           </p>
-          <div className="form-actions">
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                const id = revoking.key_id;
-                void act(async () => {
-                  await context.api.send("POST", `${base}/${id}/revoke`, {});
-                  return null;
-                });
-              }}
-            >
-              Revoke
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setRevoking(null);
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
+        )}
+      </ConfirmDialog>
       <form
         className="panel"
         aria-label="Issue a key"
@@ -206,33 +211,29 @@ function ApplicationKeys({
         }}
       >
         <h3>Issue a key</h3>
-        <label>
-          Label
-          <input
-            value={label}
-            maxLength={64}
-            required
-            onChange={(event) => {
-              setLabel(event.target.value);
-            }}
-          />
-        </label>
-        <label>
-          When rotating, keep the old key for (hours)
-          <input
-            type="number"
-            min={0}
-            max={168}
-            value={graceHours}
-            onChange={(event) => {
-              setGraceHours(event.target.value);
-            }}
-          />
-        </label>
+        <TextField
+          label="Label"
+          value={label}
+          maxLength={64}
+          required
+          onChange={(event) => {
+            setLabel(event.target.value);
+          }}
+        />
+        <NumberField
+          label="When rotating, keep the old key for (hours)"
+          unit="hours"
+          min={0}
+          max={168}
+          value={graceHours}
+          onChange={(event) => {
+            setGraceHours(event.target.value);
+          }}
+        />
         <div className="form-actions">
-          <button type="submit" disabled={busy || label === ""}>
+          <Button type="submit" variant="primary" loading={busy} disabled={label === ""}>
             Issue a key
-          </button>
+          </Button>
         </div>
         <p className="muted">Each change asks for your password again. A new key is shown once.</p>
       </form>

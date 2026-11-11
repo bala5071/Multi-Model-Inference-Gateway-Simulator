@@ -32,7 +32,8 @@ export interface SettingRow {
   caps: string;
 }
 
-function formatCaps(caps: Record<string, Json>): string {
+/** Each level's cap over a setting, in words; "none" where no level caps it. */
+export function formatCaps(caps: Record<string, Json>): string {
   const entries = Object.entries(caps);
   if (entries.length === 0) return "none";
   return entries.map(([level, value]) => `${level}: ${formatValue(value)}`).join("; ");

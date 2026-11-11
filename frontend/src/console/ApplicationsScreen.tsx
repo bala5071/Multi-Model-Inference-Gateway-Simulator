@@ -16,6 +16,7 @@ import { EvaluatorBanner } from "./EvaluatorBanner";
 import { useLoad } from "./useLoad";
 import type { ApplicationPage, FiguresPage, Health, OpenCountsAnswer } from "./types";
 import { TableScroll } from "../components/TableScroll";
+import { Tooltip } from "../ui/Tooltip";
 
 /** The page size of the list and of its figures: the same, so they name the same applications. */
 export const PAGE_SIZE = 50;
@@ -210,9 +211,9 @@ function ApplicationTable({
 function FigureText({ text }: { text: string }) {
   if (text !== TOO_FEW) return <>{text}</>;
   return (
-    <span className="too-few" title={TOO_FEW_EXPLAINED}>
+    <Tooltip text={TOO_FEW_EXPLAINED} className="too-few">
       <span aria-hidden="true">{TOO_FEW}</span>
       <span className="visually-hidden">{TOO_FEW_WORDS}</span>
-    </span>
+    </Tooltip>
   );
 }

@@ -40,7 +40,9 @@ function masks(page: Page): Locator[] {
     page.locator(".evaluator-banner"),
     page.locator("time"),
     page.locator(".toasts"),
-    page.locator(".table-scroll"),
+    // Only the boxes drawn: a closed <details> keeps a layout box, and its mask would cover
+    // whatever follows it (docs/55).
+    page.locator(".table-scroll:not(details:not([open]) *)"),
     page.locator(".muted").filter({ hasText: /UTC|restart|minutes/ }),
   ];
 }
@@ -49,7 +51,12 @@ function masks(page: Page): Locator[] {
  * The whole page in both themes, masked; or, given `part` (a menu, a drawer: drawn above the
  * page, where a mask would cover it), that part alone, which holds nothing that changes.
  */
-async function shot(page: Page, name: string, part?: Locator): Promise<void> {
+async function shot(
+  page: Page,
+  name: string,
+  part?: Locator,
+  partMasks: Locator[] = [],
+): Promise<void> {
   await page.evaluate(() => document.fonts.ready);
   const steady = { animations: "disabled", caret: "hide", maxDiffPixelRatio: 0.002 } as const;
   for (const theme of ["light", "dark"] as const) {
@@ -62,7 +69,7 @@ async function shot(page: Page, name: string, part?: Locator): Promise<void> {
         mask: masks(page),
       });
     } else {
-      await expect(part).toHaveScreenshot(`${name}-${theme}.png`, steady);
+      await expect(part).toHaveScreenshot(`${name}-${theme}.png`, { ...steady, mask: partMasks });
     }
   }
   await page.emulateMedia({ colorScheme: "light" });
@@ -127,4 +134,52 @@ test("the account menu, the collapsed sidebar, and the phone's drawer", async ({
   const drawer = page.getByRole("dialog", { name: "Navigation" });
   await expect(drawer).toBeVisible();
   await shot(page, "phone-drawer", drawer);
+});
+
+test("UI3: the typed settings forms, a confirmation, the incidents tabs (docs/55)", async ({
+  page,
+}) => {
+  await evaluatorOk(page);
+  await page.goto("/dashboard/");
+  await logIn(page, ADMIN);
+  const sectionsNav = page.getByRole("navigation", { name: "Sections" });
+  const chooser = page.getByRole("combobox", { name: "Application", exact: true });
+
+  await sectionsNav.getByRole("link", { name: "Application settings", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Application settings", level: 2, exact: true }),
+  ).toBeVisible();
+  await chooser.selectOption({ label: "App two (app-two)" });
+  await expect(page.getByRole("region", { name: "Edit", exact: true })).toBeVisible();
+  await shot(page, "settings-form");
+
+  await sectionsNav.getByRole("link", { name: "Organization settings", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Organization settings", level: 2, exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("region", { name: "Edit", exact: true })).toBeVisible();
+  await shot(page, "organization-form");
+
+  await sectionsNav.getByRole("link", { name: "API keys", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "API keys", level: 2, exact: true }),
+  ).toBeVisible();
+  await chooser.selectOption({ label: "App one (app-one)" });
+  await page
+    .getByRole("button", { name: /^Revoke / })
+    .first()
+    .click();
+  const dialog = page.getByRole("alertdialog", { name: "Revoke a key" });
+  await expect(dialog).toBeVisible();
+  // The whole dialog; its sentence names the run's key id, so that sentence is masked.
+  await shot(page, "confirm-dialog", dialog, [dialog.locator(".dialog-body")]);
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+
+  await sectionsNav.getByRole("link", { name: "Incidents", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Incidents", level: 2, exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Every state", exact: true })).toBeVisible();
+  await shot(page, "incidents");
+  await logOut(page);
 });

@@ -16,6 +16,7 @@ const TEXT: [string, string][] = [
     ["accent", bg], // links
   ]),
   ["accent-text", "accent"], // a primary button's label
+  ["accent-text", "bad"], // a danger button's label (docs/55)
   ["accent", "accent-soft"], // the current navigation item
   ["text", "accent-soft"],
   ["ok", "ok-soft"],
@@ -41,6 +42,7 @@ const NON_TEXT: [string, string][] = [
     ["series-2", bg],
   ]),
   ["accent", "track"], // a meter's fill on its track
+  ["surface", "accent"], // a toggle's thumb on its track when on (docs/55)
   ["warn", "track"],
   ["bad", "track"],
 ];

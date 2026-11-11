@@ -1,4 +1,4 @@
-import { CircleCheck, X } from "lucide-react";
+import { CircleAlert, CircleCheck, X } from "lucide-react";
 import {
   createContext,
   useCallback,
@@ -12,17 +12,24 @@ import {
 /** How long a toast stays before it goes by itself; the person can dismiss it sooner. */
 export const TOAST_MS = 8000;
 
+/** A change's result (`done`), or a failure (`failed`: announced at once, `role="alert"`). */
+export type ToastTone = "done" | "failed";
+
 interface Toast {
   id: number;
   text: string;
+  tone: ToastTone;
 }
 
-const Context = createContext<(text: string) => void>(() => undefined);
+type Show = (text: string, tone?: ToastTone) => void;
+
+const Context = createContext<Show>(() => undefined);
 
 /**
  * The page's toasts (docs/54): the result of a change, said once, in a polite live region, in
- * the corner, then gone. Never the only place an error is shown (errors stay beside their form),
- * and never a secret: what they say is the screen's own sentence about what was done.
+ * the corner, then gone. Never the only place an error is shown (errors stay beside their form;
+ * a failure toast only repeats one), and never a secret: what they say is the screen's own
+ * sentence about what was done.
  */
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -37,9 +44,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const show = useCallback(
-    (text: string) => {
+    (text: string, tone: ToastTone = "done") => {
       const id = next.current++;
-      setToasts((now) => [...now, { id, text }]);
+      setToasts((now) => [...now, { id, text, tone }]);
       timers.current.set(
         id,
         window.setTimeout(() => {
@@ -62,8 +69,16 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
       <div className="toasts" aria-live="polite">
         {toasts.map((toast) => (
-          <div key={toast.id} className="toast" role="status">
-            <CircleCheck aria-hidden="true" focusable="false" size={18} className="toast-icon" />
+          <div
+            key={toast.id}
+            className={toast.tone === "failed" ? "toast toast-failed" : "toast"}
+            role={toast.tone === "failed" ? "alert" : "status"}
+          >
+            {toast.tone === "failed" ? (
+              <CircleAlert aria-hidden="true" focusable="false" size={18} className="toast-icon" />
+            ) : (
+              <CircleCheck aria-hidden="true" focusable="false" size={18} className="toast-icon" />
+            )}
             <span>{toast.text}</span>
             <button
               type="button"
@@ -83,7 +98,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 }
 
 /** Shows a toast. */
-export function useToast(): (text: string) => void {
+export function useToast(): Show {
   return useContext(Context);
 }
 

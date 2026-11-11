@@ -17,7 +17,7 @@ import {
 } from "../test/fixtures";
 import { TOO_FEW, TOO_FEW_EXPLAINED, TOO_FEW_WORDS } from "../console/applications";
 import { LOCKOUT_SENTENCE, PASSWORD_RULES } from "../console/passwordRules";
-import { ToastProvider, Toasted } from "../console/Toasts";
+import { ToastProvider, Toasted } from "../ui/Toasts";
 import { roleWords } from "./Header";
 import { NAVIGATION } from "./navigation";
 import { NOT_AVAILABLE, SESSION_ENDED, Shell } from "./Shell";
@@ -579,6 +579,40 @@ describe("applications (docs/51)", () => {
     expect(within(shown).getByLabelText("API key")).toHaveValue(PLANTED_KEY);
   });
 
+  it("asks before revoking a key, in a dialog whose Cancel comes first and sends nothing", async () => {
+    window.location.hash = "#/app/north-shop/keys";
+    const { fetcher, seen } = gateway("in", capabilities.alice);
+    const user = open(fetcher);
+    const keys = await screen.findByRole("table", { name: "Keys" });
+    const [first] = keysAlice.keys.filter((k) => k.state !== "revoked");
+    const label = first?.label ?? "";
+    const revokes = () => seen.filter((s) => s.method === "POST" && s.path.endsWith("/revoke"));
+
+    await user.click(within(keys).getByRole("button", { name: `Revoke ${label}` }));
+    let dialog = await screen.findByRole("alertdialog", { name: "Revoke a key" });
+    expect(dialog).toHaveTextContent(`Revoke ${label}`);
+    expect(dialog).toHaveTextContent("This cannot be undone.");
+    const buttons = within(dialog).getAllByRole("button");
+    expect(buttons.map((b) => b.textContent)).toEqual(["Cancel", "Revoke"]);
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(revokes()).toEqual([]);
+
+    await user.click(within(keys).getByRole("button", { name: `Revoke ${label}` }));
+    dialog = await screen.findByRole("alertdialog", { name: "Revoke a key" });
+    await user.click(within(dialog).getByRole("button", { name: "Revoke" }));
+    // The confirmation closed; the gateway still asks for the password, in its own dialog.
+    const stepUp = await screen.findByRole("dialog", { name: "Confirm with your password" });
+    await user.type(within(stepUp).getByLabelText("Password"), PASSWORD);
+    await user.click(within(stepUp).getByRole("button", { name: "Confirm" }));
+    await waitFor(() => {
+      expect(revokes().length).toBeGreaterThan(0);
+    });
+    expect(revokes().every((s) => s.path.includes(`/keys/${first?.key_id ?? ""}/revoke`))).toBe(
+      true,
+    );
+  });
+
   it("gives an application's own admin its keys from home", async () => {
     const { fetcher } = gateway("in", capabilities.nina);
     open(fetcher);
@@ -615,6 +649,25 @@ describe("applications (docs/51)", () => {
     expect(login).toHaveTextContent(SESSION_ENDED);
     expect(window.location.hash).toBe("#/app/north-shop/keys");
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+describe("the phone's drawer (docs/54, docs/55)", () => {
+  it("closes when a link is followed, the place already shown included", async () => {
+    window.location.hash = "#/apps";
+    const { fetcher } = gateway("in", capabilities.alice);
+    const user = open(fetcher);
+    await screen.findByRole("heading", { name: "Applications", level: 2 });
+    const drawer = () => document.querySelector<HTMLDialogElement>("dialog.drawer");
+    await user.click(screen.getByRole("button", { name: "Open the navigation" }));
+    expect(drawer()?.open).toBe(true);
+    // The place does not change: the drawer must close all the same.
+    await user.click(within(drawer() as HTMLElement).getByRole("link", { name: "Applications" }));
+    expect(drawer()?.open).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Open the navigation" }));
+    await user.click(within(drawer() as HTMLElement).getByRole("link", { name: "Incidents" }));
+    expect(drawer()?.open).toBe(false);
+    expect(window.location.hash).toBe("#/incidents");
   });
 });
 
@@ -769,8 +822,13 @@ describe("a figure with too few requests behind it (docs/54)", () => {
     open(fetcher);
     const table = await screen.findByRole("table", { name: "Applications" });
     const blog = within(table).getByRole("row", { name: /north-blog/ });
-    const dash = within(blog).getAllByTitle(TOO_FEW_EXPLAINED)[0];
+    // The meaning is a tooltip that describes the dash (docs/55): it takes the focus, and opens on
+    // focus as well as hover, where a title attribute opened on hover only.
+    const dash = within(blog).getAllByRole("button", { description: TOO_FEW_EXPLAINED })[0];
     expect(dash).toHaveTextContent(`${TOO_FEW}${TOO_FEW_WORDS}`);
+    expect(screen.getAllByRole("tooltip", { hidden: true })[0]).toHaveTextContent(
+      TOO_FEW_EXPLAINED,
+    );
     expect(screen.getByText(`${TOO_FEW} ${TOO_FEW_EXPLAINED}`)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Add application" })).toHaveClass("primary");
   });

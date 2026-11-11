@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { followsProbe, incidentRows, incidentTimeline, notificationRows } from "./alerts";
 import { ApiError, applicationPath, orgPath, probeRefusedBody, type WriteProbe } from "./api";
 import { Chooser } from "./Chooser";
@@ -7,11 +7,23 @@ import { refusalText } from "./derive";
 import { EvaluatorBanner } from "./EvaluatorBanner";
 import { useLoad } from "./useLoad";
 import type { ChannelName, IncidentDetail, IncidentPage, RulePage } from "./types";
-import { TableScroll } from "../components/TableScroll";
-import { Toasted } from "./Toasts";
+import { Button } from "../ui/Button";
+import { Card, StatTile, StatTiles } from "../ui/Card";
+import { DataTable } from "../ui/DataTable";
+import { Skeleton } from "../ui/Skeleton";
+import { StatusPill, toneOf } from "../ui/StatusPill";
+import { TabPanel, Tabs } from "../ui/Tabs";
+import { Toasted } from "../ui/Toasts";
 
-/** The states the gateway filters by (docs/45); empty is every state. */
-const STATES = ["", "pending", "firing", "acknowledged", "resolved"];
+/** The states the gateway filters by (docs/45), as tabs; "all" asks for every state. */
+const STATES = [
+  { id: "all", label: "Every state" },
+  { id: "pending", label: "pending" },
+  { id: "firing", label: "firing" },
+  { id: "acknowledged", label: "acknowledged" },
+  { id: "resolved", label: "resolved" },
+] as const;
+type StateTab = (typeof STATES)[number]["id"];
 
 async function ruleNamesOf(
   context: ConsoleContext,
@@ -42,9 +54,10 @@ function IncidentList({
   applicationId: string | null;
   onOpen: (applicationId: string, incidentId: string) => void;
 }) {
-  const [state, setState] = useState("");
+  const [state, setState] = useState<StateTab>("all");
+  const tabs = useId();
   const org = context.user.organization_id;
-  const query = `?limit=100${state === "" ? "" : `&state=${encodeURIComponent(state)}`}`;
+  const query = `?limit=100${state === "all" ? "" : `&state=${encodeURIComponent(state)}`}`;
   const path =
     applicationId === null
       ? `${orgPath(org)}/incidents${query}`
@@ -60,76 +73,76 @@ function IncidentList({
   });
 
   return (
-    <section className="panel" aria-label="Incidents">
-      <h3>{applicationId === null ? "Incidents in the organization" : "Incidents"}</h3>
-      <label className="chooser">
-        State
-        <select
-          value={state}
-          onChange={(event) => {
-            setState(event.target.value);
-          }}
-        >
-          {STATES.map((s) => (
-            <option key={s} value={s}>
-              {s === "" ? "Every state" : s}
-            </option>
-          ))}
-        </select>
-      </label>
-      {loaded.kind === "loading" && <p className="muted">Loading…</p>}
-      {loaded.kind === "failed" && (
-        <p className="form-error" role="alert">
-          {refusalText(loaded.error.code, loaded.error.message)}
-        </p>
-      )}
-      {loaded.kind === "ready" &&
-        (loaded.value.page.incidents.length === 0 ? (
-          <p className="muted">No incident.</p>
+    <Card
+      label="Incidents"
+      title={applicationId === null ? "Incidents in the organization" : "Incidents"}
+    >
+      <Tabs label="State" prefix={tabs} tabs={STATES} selected={state} onSelect={setState} />
+      <TabPanel prefix={tabs} selected={state}>
+        {loaded.kind === "failed" ? (
+          <p className="form-error" role="alert">
+            {refusalText(loaded.error.code, loaded.error.message)}
+          </p>
         ) : (
-          <TableScroll table="Incidents">
-            <table className="data-table" aria-label="Incidents">
-              <thead>
-                <tr>
-                  <th scope="col">Rule</th>
-                  <th scope="col">Application</th>
-                  <th scope="col">State</th>
-                  <th scope="col">Severity</th>
-                  <th scope="col">Value</th>
-                  <th scope="col">Opened</th>
-                  <th scope="col">Resolved</th>
-                  <th scope="col">Details</th>
-                </tr>
-              </thead>
-              <tbody>
-                {incidentRows(loaded.value.page.incidents, loaded.value.names).map((row) => (
-                  <tr key={row.id}>
-                    <th scope="row">{row.rule}</th>
-                    <td>{row.application}</td>
-                    <td>{row.state}</td>
-                    <td>{row.severity}</td>
-                    <td>{row.value}</td>
-                    <td>{row.opened}</td>
-                    <td>{row.resolved}</td>
-                    <td>
-                      {row.applicationId !== null && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (row.applicationId !== null) onOpen(row.applicationId, row.id);
-                          }}
-                        >
-                          Open {row.rule}
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </TableScroll>
-        ))}
-    </section>
+          <DataTable
+            label="Incidents"
+            loading={loaded.kind === "loading"}
+            rows={
+              loaded.kind === "ready"
+                ? incidentRows(loaded.value.page.incidents, loaded.value.names)
+                : []
+            }
+            rowKey={(row) => row.id}
+            empty="No incident."
+            columns={[
+              {
+                key: "rule",
+                header: "Rule",
+                cell: (r) => r.rule,
+                rowHeader: true,
+                sortValue: (r) => r.rule,
+              },
+              {
+                key: "app",
+                header: "Application",
+                cell: (r) => r.application,
+                sortValue: (r) => r.application,
+              },
+              {
+                key: "state",
+                header: "State",
+                cell: (r) => <StatusPill tone={toneOf(r.state)}>{r.state}</StatusPill>,
+                sortValue: (r) => r.state,
+              },
+              { key: "severity", header: "Severity", cell: (r) => r.severity },
+              { key: "value", header: "Value", cell: (r) => r.value },
+              {
+                key: "opened",
+                header: "Opened",
+                cell: (r) => r.opened,
+                sortValue: (r) => r.opened,
+              },
+              { key: "resolved", header: "Resolved", cell: (r) => r.resolved },
+              {
+                key: "details",
+                header: "Details",
+                cell: (r) =>
+                  r.applicationId !== null && (
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        if (r.applicationId !== null) onOpen(r.applicationId, r.id);
+                      }}
+                    >
+                      Open {r.rule}
+                    </Button>
+                  ),
+              },
+            ]}
+          />
+        )}
+      </TabPanel>
+    </Card>
   );
 }
 
@@ -193,9 +206,9 @@ function IncidentView({
   return (
     <section className="panel" aria-label="Incident">
       <div className="form-actions">
-        <button type="button" onClick={onBack}>
+        <Button variant="quiet" onClick={onBack}>
           Back to the list
-        </button>
+        </Button>
       </div>
       <Toasted message={message} />
       {error !== null && (
@@ -203,7 +216,7 @@ function IncidentView({
           {error}
         </p>
       )}
-      {loaded.kind === "loading" && <p className="muted">Loading…</p>}
+      {loaded.kind === "loading" && <Skeleton />}
       {loaded.kind === "failed" && (
         <p className="form-error" role="alert">
           {refusalText(loaded.error.code, loaded.error.message)}
@@ -212,35 +225,31 @@ function IncidentView({
       {loaded.kind === "ready" && (
         <>
           <h3>{loaded.value.rule}</h3>
-          <dl className="facts">
-            <div>
-              <dt>State</dt>
-              <dd>{loaded.value.incident.state}</dd>
-            </div>
-            <div>
-              <dt>Severity</dt>
-              <dd>{loaded.value.incident.severity}</dd>
-            </div>
-            <div>
-              <dt>Application</dt>
-              <dd>{applicationId}</dd>
-            </div>
-            <div>
-              <dt>Series</dt>
-              <dd>{loaded.value.incident.series ?? "-"}</dd>
-            </div>
-          </dl>
+          <StatTiles>
+            <StatTile
+              label="State"
+              value={
+                <StatusPill tone={toneOf(loaded.value.incident.state)}>
+                  {loaded.value.incident.state}
+                </StatusPill>
+              }
+            />
+            <StatTile label="Severity" value={loaded.value.incident.severity} />
+            <StatTile label="Application" value={applicationId} />
+            <StatTile label="Series" value={loaded.value.incident.series ?? "-"} />
+          </StatTiles>
           {loaded.value.incident.state === "firing" && followsProbe(loaded.value.probe) && (
             <div className="form-actions">
-              <button
-                type="button"
-                disabled={busy}
+              <Button
+                variant="primary"
+                loading={busy}
+                loadingText="Acknowledging…"
                 onClick={() => {
                   void acknowledge();
                 }}
               >
                 Acknowledge
-              </button>
+              </Button>
             </div>
           )}
           <h4>Timeline</h4>
@@ -252,34 +261,23 @@ function IncidentView({
             ))}
           </ol>
           <h4>Notifications</h4>
-          {loaded.value.incident.notifications.length === 0 ? (
-            <p className="muted">No notification.</p>
-          ) : (
-            <TableScroll table="Notifications">
-              <table className="data-table" aria-label="Notifications">
-                <thead>
-                  <tr>
-                    <th scope="col">Kind</th>
-                    <th scope="col">State</th>
-                    <th scope="col">At</th>
-                    <th scope="col">Reason</th>
-                    <th scope="col">Deliveries</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {notificationRows(loaded.value.incident, loaded.value.channels).map((n) => (
-                    <tr key={`${n.at}:${n.kind}`}>
-                      <td>{n.kind}</td>
-                      <td>{n.state}</td>
-                      <td>{n.at}</td>
-                      <td>{n.reason}</td>
-                      <td>{n.deliveries}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </TableScroll>
-          )}
+          <DataTable
+            label="Notifications"
+            rows={notificationRows(loaded.value.incident, loaded.value.channels)}
+            rowKey={(n) => `${n.at}:${n.kind}`}
+            empty="No notification."
+            columns={[
+              { key: "kind", header: "Kind", cell: (n) => n.kind },
+              {
+                key: "state",
+                header: "State",
+                cell: (n) => <StatusPill tone={toneOf(n.state)}>{n.state}</StatusPill>,
+              },
+              { key: "at", header: "At", cell: (n) => n.at },
+              { key: "reason", header: "Reason", cell: (n) => n.reason },
+              { key: "deliveries", header: "Deliveries", cell: (n) => n.deliveries },
+            ]}
+          />
         </>
       )}
     </section>

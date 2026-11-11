@@ -5,6 +5,7 @@ import type { ConsoleContext } from "./context";
 import { refusalText } from "./derive";
 import type { AlertRule, RuleBody, RuleValidation } from "./types";
 import { TableScroll } from "../components/TableScroll";
+import { Button } from "../ui/Button";
 
 /** What the editor edits: an existing rule (saved with PUT), or a new one (POST). */
 export interface Editing {
@@ -168,18 +169,19 @@ export function RuleEditor({
         </p>
       )}
       <div className="form-actions">
-        <button
-          type="button"
-          disabled={busy || validation?.valid !== true}
+        <Button
+          variant="primary"
+          loading={busy}
+          disabled={validation?.valid !== true}
           onClick={() => {
             void save();
           }}
         >
           Save rule
-        </button>
-        <button type="button" onClick={onCancel} disabled={busy}>
+        </Button>
+        <Button variant="quiet" onClick={onCancel} disabled={busy}>
           Cancel
-        </button>
+        </Button>
       </div>
     </section>
   );

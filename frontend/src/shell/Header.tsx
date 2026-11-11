@@ -107,6 +107,19 @@ export function Header({
   useEffect(() => {
     if (drawerOpen && drawerRef.current?.open === false) drawerRef.current.showModal();
   }, [drawerOpen]);
+  // A link followed to the place already shown changes nothing, so it closes the drawer itself
+  // (by mouse or by Enter: both are a click on the link).
+  useEffect(() => {
+    const dialog = drawerRef.current;
+    if (dialog === null) return;
+    const onClick = (event: MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest("a") !== null) closeDrawer();
+    };
+    dialog.addEventListener("click", onClick);
+    return () => {
+      dialog.removeEventListener("click", onClick);
+    };
+  }, [closeDrawer, drawer]);
   const showAccount = account && user !== null && onLogout !== null;
   return (
     <header className={`top ${withSidebar ? "top-with-sidebar" : ""}`}>

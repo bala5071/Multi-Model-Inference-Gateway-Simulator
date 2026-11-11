@@ -20,8 +20,15 @@ import type {
   Recipient,
   TestSend,
 } from "./types";
-import { TableScroll } from "../components/TableScroll";
-import { Toasted } from "./Toasts";
+import { Button } from "../ui/Button";
+import { Card, StatTile, StatTiles } from "../ui/Card";
+import { DataTable } from "../ui/DataTable";
+import { ConfirmDialog } from "../ui/Dialog";
+import { SelectField, TextareaField, TextField } from "../ui/Field";
+import { Skeleton } from "../ui/Skeleton";
+import { StatusPill, toneOf } from "../ui/StatusPill";
+import { Toasted } from "../ui/Toasts";
+import { Toggle } from "../ui/Toggle";
 
 /**
  * A new signing key, shown this once: the gateway never shows it again. Held in this
@@ -39,8 +46,7 @@ function SigningKey({ value, onDone }: { value: string; onDone: () => void }) {
       </p>
       <code className="key">{value}</code>
       <div className="form-actions">
-        <button
-          type="button"
+        <Button
           onClick={() => {
             navigator.clipboard.writeText(value).then(
               () => {
@@ -53,10 +59,10 @@ function SigningKey({ value, onDone }: { value: string; onDone: () => void }) {
           }}
         >
           Copy the key
-        </button>
-        <button type="button" onClick={onDone}>
+        </Button>
+        <Button variant="primary" onClick={onDone}>
           I have stored it
-        </button>
+        </Button>
       </div>
       {copied !== null && (
         <p className="muted" role="status">
@@ -121,70 +127,58 @@ function CreateChannel({
           void submit(event);
         }}
       >
-        <label>
-          Type
-          <select
-            value={type}
-            onChange={(event) => {
-              setType(event.target.value);
-            }}
-          >
-            <option value="webhook">webhook</option>
-            <option value="email">email</option>
-          </select>
-        </label>
-        <label>
-          Name
-          <input
-            value={name}
-            onChange={(event) => {
-              setName(event.target.value);
-            }}
-          />
-        </label>
+        <SelectField
+          label="Type"
+          value={type}
+          onChange={(event) => {
+            setType(event.target.value);
+          }}
+        >
+          <option value="webhook">webhook</option>
+          <option value="email">email</option>
+        </SelectField>
+        <TextField
+          label="Name"
+          value={name}
+          onChange={(event) => {
+            setName(event.target.value);
+          }}
+        />
         {type === "webhook" ? (
-          <label>
-            Webhook URL
-            <input
-              value={url}
-              autoComplete="off"
-              spellCheck={false}
-              onChange={(event) => {
-                setUrl(event.target.value);
-              }}
-            />
-          </label>
-        ) : (
-          <label>
-            Recipients (one address a line)
-            <textarea
-              value={recipients}
-              rows={3}
-              onChange={(event) => {
-                setRecipients(event.target.value);
-              }}
-            />
-          </label>
-        )}
-        <label className="inline">
-          <input
-            type="checkbox"
-            checked={isDefault}
+          <TextField
+            label="Webhook URL"
+            hint="Only its origin is shown after this; the gateway keeps the rest sealed."
+            value={url}
+            autoComplete="off"
+            spellCheck={false}
             onChange={(event) => {
-              setIsDefault(event.target.checked);
+              setUrl(event.target.value);
             }}
           />
-          An organization default (rules sending to the organization&apos;s defaults use it)
-        </label>
+        ) : (
+          <TextareaField
+            label="Recipients (one address a line)"
+            value={recipients}
+            rows={3}
+            onChange={(event) => {
+              setRecipients(event.target.value);
+            }}
+          />
+        )}
+        <Toggle
+          label="An organization default (rules sending to the organization's defaults use it)"
+          checked={isDefault}
+          onChange={setIsDefault}
+        />
         {error !== null && (
           <p className="form-error" role="alert">
             {error}
           </p>
         )}
         <div className="form-actions">
-          <button type="submit" disabled={busy}>
+          <Button type="submit" variant="primary" loading={busy}>
             Create channel
-          </button>
+          </Button>
         </div>
       </form>
     </section>
@@ -212,20 +206,18 @@ function CodeEntry({
         onConfirm(given);
       }}
     >
-      <label>
-        Code for {address}
-        <input
-          value={code}
-          autoComplete="one-time-code"
-          spellCheck={false}
-          onChange={(event) => {
-            setCode(event.target.value);
-          }}
-        />
-      </label>
-      <button type="submit" disabled={busy || code === ""}>
+      <TextField
+        label={`Code for ${address}`}
+        value={code}
+        autoComplete="one-time-code"
+        spellCheck={false}
+        onChange={(event) => {
+          setCode(event.target.value);
+        }}
+      />
+      <Button type="submit" size="sm" disabled={busy || code === ""}>
         Confirm
-      </button>
+      </Button>
     </form>
   );
 }
@@ -287,9 +279,9 @@ function ChannelView({
   return (
     <section className="panel" aria-label="Channel">
       <div className="form-actions">
-        <button type="button" onClick={onClose}>
+        <Button variant="quiet" onClick={onClose}>
           Back to the list
-        </button>
+        </Button>
       </div>
       <Toasted message={message} />
       {error !== null && (
@@ -297,7 +289,7 @@ function ChannelView({
           {error}
         </p>
       )}
-      {loaded.kind === "loading" && <p className="muted">Loading…</p>}
+      {loaded.kind === "loading" && <Skeleton />}
       {loaded.kind === "failed" && (
         <p className="form-error" role="alert">
           {refusalText(loaded.error.code, loaded.error.message)}
@@ -307,41 +299,22 @@ function ChannelView({
         <>
           <h3>{loaded.value.channel.name}</h3>
           {channelRows([loaded.value.channel]).map((row) => (
-            <dl className="facts" key={row.id}>
-              <div>
-                <dt>Type</dt>
-                <dd>{row.type}</dd>
-              </div>
-              <div>
-                <dt>Enabled</dt>
-                <dd>{row.enabled}</dd>
-              </div>
-              <div>
-                <dt>Default</dt>
-                <dd>{row.isDefault}</dd>
-              </div>
-              <div>
-                <dt>Target</dt>
-                <dd>{row.target}</dd>
-              </div>
-              <div>
-                <dt>Last delivered</dt>
-                <dd>{row.lastDelivered}</dd>
-              </div>
-              <div>
-                <dt>Last failed</dt>
-                <dd>{row.lastFailed}</dd>
-              </div>
-              <div>
-                <dt>Failures in a row</dt>
-                <dd>{row.failures}</dd>
-              </div>
-            </dl>
+            <StatTiles key={row.id}>
+              <StatTile label="Type" value={row.type} />
+              <StatTile
+                label="Enabled"
+                value={<StatusPill tone={toneOf(row.enabled)}>{row.enabled}</StatusPill>}
+              />
+              <StatTile label="Default" value={row.isDefault} />
+              <StatTile label="Target" value={row.target} />
+              <StatTile label="Last delivered" value={row.lastDelivered} />
+              <StatTile label="Last failed" value={row.lastFailed} />
+              <StatTile label="Failures in a row" value={row.failures} />
+            </StatTiles>
           ))}
           {canManage && (
             <div className="form-actions">
-              <button
-                type="button"
+              <Button
                 disabled={busy}
                 onClick={() => {
                   void act(
@@ -351,10 +324,9 @@ function ChannelView({
                 }}
               >
                 Test send
-              </button>
+              </Button>
               {loaded.value.channel.enabled && (
-                <button
-                  type="button"
+                <Button
                   disabled={busy}
                   onClick={() => {
                     void act(
@@ -364,139 +336,135 @@ function ChannelView({
                   }}
                 >
                   Disable
-                </button>
+                </Button>
               )}
-              {deleting ? (
-                <>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => {
-                      setBusy(true);
-                      context
-                        .guarded(() => send("DELETE", ""))
-                        .then(
-                          () => {
-                            onDeleted(`Deleted ${loaded.value.channel.name}.`);
-                          },
-                          (failure: unknown) => {
-                            if (failure instanceof ApiError) {
-                              setError(refusalText(failure.code, failure.message));
-                            }
-                            setBusy(false);
-                            setDeleting(false);
-                          },
-                        );
-                    }}
-                  >
-                    Delete it
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setDeleting(false);
-                    }}
-                  >
-                    Keep it
-                  </button>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => {
-                    setDeleting(true);
-                  }}
-                >
-                  Delete
-                </button>
-              )}
+              <Button
+                variant="danger"
+                disabled={busy}
+                onClick={() => {
+                  setDeleting(true);
+                }}
+              >
+                Delete
+              </Button>
             </div>
           )}
+          <ConfirmDialog
+            open={deleting}
+            title="Delete this channel"
+            confirmLabel="Delete it"
+            busy={busy}
+            onCancel={() => {
+              setDeleting(false);
+            }}
+            onConfirm={() => {
+              // The confirmation closes first: a step-up, if asked, is its own dialog.
+              setDeleting(false);
+              setBusy(true);
+              context
+                .guarded(() => send("DELETE", ""))
+                .then(
+                  () => {
+                    onDeleted(`Deleted ${loaded.value.channel.name}.`);
+                  },
+                  (failure: unknown) => {
+                    if (failure instanceof ApiError) {
+                      setError(refusalText(failure.code, failure.message));
+                    }
+                    setBusy(false);
+                  },
+                );
+            }}
+          >
+            <p>
+              Delete <strong>{loaded.value.channel.name}</strong>? Nothing more is sent through it.
+              This cannot be undone.
+            </p>
+          </ConfirmDialog>
           {loaded.value.channel.type === "email" && (
             <>
               <h4>Recipients</h4>
               <p className="muted">
                 Nothing is sent to an address until it is verified with the code mailed to it.
               </p>
-              <TableScroll table="Recipients">
-                <table className="data-table" aria-label="Recipients">
-                  <thead>
-                    <tr>
-                      <th scope="col">Address</th>
-                      <th scope="col">State</th>
-                      <th scope="col">Added</th>
-                      <th scope="col">Verified</th>
-                      <th scope="col">Code valid until</th>
-                      <th scope="col">Change</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {recipientRows(loaded.value.channel.recipients ?? []).map((r) => (
-                      <tr key={r.id}>
-                        <th scope="row">{r.address}</th>
-                        <td>{r.state}</td>
-                        <td>{r.added}</td>
-                        <td>{r.verified}</td>
-                        <td>{r.unverified ? r.expires : "-"}</td>
-                        <td>
-                          <div className="row-actions">
-                            {r.unverified && followsProbe(loaded.value.confirmProbe) && (
-                              <>
-                                <CodeEntry
-                                  address={r.address}
-                                  busy={busy}
-                                  onConfirm={(code) => {
-                                    void act(
-                                      () =>
-                                        send<Recipient>(
-                                          "POST",
-                                          `/recipients/${encodeURIComponent(r.id)}/confirm`,
-                                          { code },
-                                        ),
-                                      (answer) => `${answer.address} is ${answer.state}.`,
-                                    );
-                                  }}
-                                />
-                                <button
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() => {
-                                    void act(
-                                      () =>
-                                        send<{ confirmation: string }>(
-                                          "POST",
-                                          `/recipients/${encodeURIComponent(r.id)}/resend`,
-                                        ),
-                                      (answer) => `Code sent again: ${answer.confirmation}.`,
-                                    );
-                                  }}
-                                >
-                                  Send the code again to {r.address}
-                                </button>
-                              </>
-                            )}
-                            {canManage && (
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => {
-                                  void act(
-                                    () => send("DELETE", `/recipients/${encodeURIComponent(r.id)}`),
-                                    () => `Removed ${r.address}.`,
-                                  );
-                                }}
-                              >
-                                Remove {r.address}
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </TableScroll>
+              <DataTable
+                label="Recipients"
+                rows={recipientRows(loaded.value.channel.recipients ?? [])}
+                rowKey={(r) => r.id}
+                empty="No recipient."
+                columns={[
+                  { key: "address", header: "Address", cell: (r) => r.address, rowHeader: true },
+                  {
+                    key: "state",
+                    header: "State",
+                    cell: (r) => <StatusPill tone={toneOf(r.state)}>{r.state}</StatusPill>,
+                  },
+                  { key: "added", header: "Added", cell: (r) => r.added },
+                  { key: "verified", header: "Verified", cell: (r) => r.verified },
+                  {
+                    key: "expires",
+                    header: "Code valid until",
+                    cell: (r) => (r.unverified ? r.expires : "-"),
+                  },
+                  {
+                    key: "change",
+                    header: "Change",
+                    cell: (r) => (
+                      <div className="row-actions">
+                        {r.unverified && followsProbe(loaded.value.confirmProbe) && (
+                          <>
+                            <CodeEntry
+                              address={r.address}
+                              busy={busy}
+                              onConfirm={(code) => {
+                                void act(
+                                  () =>
+                                    send<Recipient>(
+                                      "POST",
+                                      `/recipients/${encodeURIComponent(r.id)}/confirm`,
+                                      { code },
+                                    ),
+                                  (answer) => `${answer.address} is ${answer.state}.`,
+                                );
+                              }}
+                            />
+                            <Button
+                              size="sm"
+                              disabled={busy}
+                              onClick={() => {
+                                void act(
+                                  () =>
+                                    send<{ confirmation: string }>(
+                                      "POST",
+                                      `/recipients/${encodeURIComponent(r.id)}/resend`,
+                                    ),
+                                  (answer) => `Code sent again: ${answer.confirmation}.`,
+                                );
+                              }}
+                            >
+                              Send the code again to {r.address}
+                            </Button>
+                          </>
+                        )}
+                        {canManage && (
+                          <Button
+                            size="sm"
+                            disabled={busy}
+                            onClick={() => {
+                              void act(
+                                () => send("DELETE", `/recipients/${encodeURIComponent(r.id)}`),
+                                () => `Removed ${r.address}.`,
+                              );
+                            }}
+                          >
+                            Remove {r.address}
+                          </Button>
+                        )}
+                      </div>
+                    ),
+                  },
+                ]}
+              />
               {canManage && (
                 <form
                   className="inline-form"
@@ -515,53 +483,45 @@ function ChannelView({
                     );
                   }}
                 >
-                  <label>
-                    Add a recipient
-                    <input
-                      value={adding}
-                      onChange={(event) => {
-                        setAdding(event.target.value);
-                      }}
-                    />
-                  </label>
-                  <button type="submit" disabled={busy || adding === ""}>
+                  <TextField
+                    label="Add a recipient"
+                    value={adding}
+                    onChange={(event) => {
+                      setAdding(event.target.value);
+                    }}
+                  />
+                  <Button type="submit" disabled={busy || adding === ""}>
                     Add
-                  </button>
+                  </Button>
                 </form>
               )}
             </>
           )}
           <h4>Deliveries</h4>
-          {loaded.value.deliveries.deliveries.length === 0 ? (
-            <p className="muted">Nothing delivered yet.</p>
-          ) : (
-            <TableScroll table="Deliveries">
-              <table className="data-table" aria-label="Deliveries">
-                <thead>
-                  <tr>
-                    <th scope="col">Notification</th>
-                    <th scope="col">State</th>
-                    <th scope="col">Attempts</th>
-                    <th scope="col">Last code</th>
-                    <th scope="col">Next attempt</th>
-                    <th scope="col">Updated</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {deliveryRows(loaded.value.deliveries.deliveries).map((d) => (
-                    <tr key={d.id}>
-                      <td>{d.notification}</td>
-                      <td>{d.state}</td>
-                      <td>{d.attempts}</td>
-                      <td>{d.lastCode}</td>
-                      <td>{d.next}</td>
-                      <td>{d.updated}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </TableScroll>
-          )}
+          <DataTable
+            label="Deliveries"
+            rows={deliveryRows(loaded.value.deliveries.deliveries)}
+            rowKey={(d) => d.id}
+            empty="Nothing delivered yet."
+            columns={[
+              { key: "notification", header: "Notification", cell: (d) => d.notification },
+              {
+                key: "state",
+                header: "State",
+                cell: (d) => <StatusPill tone={toneOf(d.state)}>{d.state}</StatusPill>,
+                sortValue: (d) => d.state,
+              },
+              { key: "attempts", header: "Attempts", cell: (d) => d.attempts },
+              { key: "code", header: "Last code", cell: (d) => d.lastCode },
+              { key: "next", header: "Next attempt", cell: (d) => d.next },
+              {
+                key: "updated",
+                header: "Updated",
+                cell: (d) => d.updated,
+                sortValue: (d) => d.updated,
+              },
+            ]}
+          />
         </>
       )}
     </section>
@@ -601,7 +561,7 @@ export function ChannelsScreen({ context }: { context: ConsoleContext }) {
           }}
         />
       )}
-      {loaded.kind === "loading" && <p className="muted">Loading…</p>}
+      {loaded.kind === "loading" && <Skeleton />}
       {loaded.kind === "failed" && (
         <p className="form-error" role="alert">
           {refusalText(loaded.error.code, loaded.error.message)}
@@ -627,55 +587,49 @@ export function ChannelsScreen({ context }: { context: ConsoleContext }) {
           />
         ) : (
           <>
-            <section className="panel" aria-label="Channel list">
-              <h3>Channel list</h3>
-              {loaded.value.channels.length === 0 ? (
-                <p className="muted">The organization has no channel.</p>
-              ) : (
-                <TableScroll table="Channel list">
-                  <table className="data-table" aria-label="Channel list">
-                    <thead>
-                      <tr>
-                        <th scope="col">Channel</th>
-                        <th scope="col">Type</th>
-                        <th scope="col">Enabled</th>
-                        <th scope="col">Default</th>
-                        <th scope="col">Target</th>
-                        <th scope="col">Last delivered</th>
-                        <th scope="col">Last failed</th>
-                        <th scope="col">Failures in a row</th>
-                        <th scope="col">Details</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {channelRows(loaded.value.channels).map((row) => (
-                        <tr key={row.id}>
-                          <th scope="row">{row.name}</th>
-                          <td>{row.type}</td>
-                          <td>{row.enabled}</td>
-                          <td>{row.isDefault}</td>
-                          <td>{row.target}</td>
-                          <td>{row.lastDelivered}</td>
-                          <td>{row.lastFailed}</td>
-                          <td>{row.failures}</td>
-                          <td>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setMessage(null);
-                                setSelected(row.id);
-                              }}
-                            >
-                              Open {row.name}
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </TableScroll>
-              )}
-            </section>
+            <Card title="Channel list" label="Channel list">
+              <DataTable
+                label="Channel list"
+                rows={channelRows(loaded.value.channels)}
+                rowKey={(row) => row.id}
+                empty="The organization has no channel."
+                columns={[
+                  {
+                    key: "name",
+                    header: "Channel",
+                    cell: (r) => r.name,
+                    rowHeader: true,
+                    sortValue: (r) => r.name,
+                  },
+                  { key: "type", header: "Type", cell: (r) => r.type, sortValue: (r) => r.type },
+                  {
+                    key: "enabled",
+                    header: "Enabled",
+                    cell: (r) => <StatusPill tone={toneOf(r.enabled)}>{r.enabled}</StatusPill>,
+                  },
+                  { key: "default", header: "Default", cell: (r) => r.isDefault },
+                  { key: "target", header: "Target", cell: (r) => r.target },
+                  { key: "delivered", header: "Last delivered", cell: (r) => r.lastDelivered },
+                  { key: "failed", header: "Last failed", cell: (r) => r.lastFailed },
+                  { key: "failures", header: "Failures in a row", cell: (r) => r.failures },
+                  {
+                    key: "details",
+                    header: "Details",
+                    cell: (r) => (
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          setMessage(null);
+                          setSelected(r.id);
+                        }}
+                      >
+                        Open {r.name}
+                      </Button>
+                    ),
+                  },
+                ]}
+              />
+            </Card>
             {canManage && (
               <CreateChannel
                 context={context}

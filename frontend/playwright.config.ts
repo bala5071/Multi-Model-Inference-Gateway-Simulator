@@ -108,6 +108,14 @@ export default defineConfig({
       use: { baseURL: `http://127.0.0.1:${CONSOLE_PORT}`, trace: "off", screenshot: "off" },
     },
     {
+      // The components and the typed settings forms (docs/55): the CSP trial, the keyboard,
+      // every new state under axe, every role at a phone's width.
+      name: "components",
+      testMatch: "components.e2e.ts",
+      dependencies: ["frame"],
+      use: { baseURL: `http://127.0.0.1:${CONSOLE_PORT}`, trace: "off", screenshot: "off" },
+    },
+    {
       // Visual regression (docs/54): compared only on CI's pinned Playwright image (VISUAL=1);
       // skipped everywhere else. Baselines live in e2e/visual/, refreshed only by a reviewed commit.
       name: "visual",

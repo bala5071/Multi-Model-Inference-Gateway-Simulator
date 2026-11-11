@@ -373,3 +373,16 @@ def test_the_minimums_the_applications_list_states_are_the_signals() -> None:
     figures = FRONTEND_SRC / "console" / "applications.ts"
     assert int(_constant(figures, "RATE_MINIMUM")) == signals.RATE_MINIMUM
     assert int(_constant(figures, "P50_MINIMUM")) == signals.percentile_minimum(0.5)
+
+
+def test_the_kinds_the_settings_form_draws_are_the_gateways() -> None:
+    """The typed settings form (docs/55) draws each setting by its kind. The gateway does not
+    send the kind, so the console keeps a copy of the catalogue's names and kinds; this pins the
+    copy to the catalogue, so a control cannot drift from what the gateway stores."""
+    from gateway.settings import CATALOGUE
+
+    source = (FRONTEND_SRC / "console" / "settingKinds.ts").read_text(encoding="utf-8")
+    block = re.search(r"export const SETTING_KINDS[^{]*\{(.*?)\};", source, re.S)
+    assert block is not None, "SETTING_KINDS is not in settingKinds.ts"
+    kinds = dict(re.findall(r"^\s*(\w+): \"(\w+)\",$", block.group(1), re.M))
+    assert kinds == {name: setting.kind.value for name, setting in CATALOGUE.items()}
