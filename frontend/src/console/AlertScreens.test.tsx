@@ -408,6 +408,32 @@ describe("channels", () => {
     expect(kept()).not.toContain(CODE);
   });
 
+  it("asks before deleting a channel, Cancel first, and sends nothing until it is confirmed", async () => {
+    go("#/channels");
+    const { fetcher, seen } = gateway();
+    render(<Shell fetcher={fetcher} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Open On call" }));
+    const channel = await screen.findByRole("region", { name: "Channel" });
+    await user.click(await within(channel).findByRole("button", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Delete this channel" });
+    expect(dialog).toHaveTextContent("This cannot be undone.");
+    expect(within(dialog).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "Cancel",
+      "Delete it",
+    ]);
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(seen.some((s) => s.method === "DELETE")).toBe(false);
+    await user.click(within(channel).getByRole("button", { name: "Delete" }));
+    await user.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Delete it" }),
+    );
+    await waitFor(() => {
+      expect(seen.some((s) => s.method === "DELETE")).toBe(true);
+    });
+  });
+
   it("empties the code's field as soon as it is sent, before the gateway answers", async () => {
     go("#/channels");
     let release: () => void = () => undefined;

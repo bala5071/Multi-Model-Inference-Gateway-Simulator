@@ -107,10 +107,24 @@ function gateway(options: {
       case `GET ${ORG}/settings/presets`:
         return json(200, { presets: { cheap: { max_hosted_attempts: 1 } } });
       case `POST ${APP}/validate`: {
-        const change = body as { set: object; unset: string[] };
+        const change = body as { set: Record<string, unknown>; unset: string[] };
         const empty = Object.keys(change.set).length === 0 && change.unset.length === 0;
         if (empty && options.probe !== undefined && options.probe.status !== 200) {
           return refuse(options.probe.status, options.probe.code ?? "forbidden");
+        }
+        // 99 attempts is looser than a cap: the dry run refuses it.
+        if (change.set.max_hosted_attempts === 99) {
+          return json(200, {
+            valid: false,
+            code: "settings_invalid",
+            message: "Looser than the platform's cap.",
+            invalid_setting: "max_hosted_attempts",
+            refusals: [{ setting: "max_hosted_attempts", level: "platform" }],
+            changed: [],
+            settings: {},
+            loosens: [],
+            step_up_required: false,
+          });
         }
         return json(200, {
           valid: true,
@@ -405,6 +419,25 @@ describe("the typed settings form (docs/55)", () => {
       set: { max_hosted_attempts: 1 },
       unset: [],
     });
+  });
+
+  it("offers Save only once the gateway's dry run says the change is valid", async () => {
+    const { fetcher, seen } = gateway({ loggedIn: true, probe: { status: 200 } });
+    render(<Shell fetcher={fetcher} />);
+    const user = await openAppOne();
+    const edit = await screen.findByRole("region", { name: "Edit" });
+    const field = within(edit).getByRole("spinbutton", { name: "max_hosted_attempts" });
+    await user.clear(field);
+    await user.type(field, "99");
+    await screen.findByText(/^Refused \(max_hosted_attempts\)/);
+    const save = within(edit).getByRole("button", { name: "Save" });
+    expect(save).toBeDisabled();
+    await user.click(save);
+    expect(seen.some((s) => s.method === "PUT")).toBe(false);
+    await user.clear(field);
+    await user.type(field, "1");
+    await screen.findByText(/^Valid\. Changes/);
+    expect(within(edit).getByRole("button", { name: "Save" })).toBeEnabled();
   });
 
   it("discards every change from the Save bar, and the bar goes", async () => {
