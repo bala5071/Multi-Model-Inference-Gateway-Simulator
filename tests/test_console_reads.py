@@ -54,6 +54,7 @@ from gateway.incidents import (
     SqliteIncidentStore,
 )
 from gateway.localonly import LocalOnlyPolicy
+from gateway.management import ManagementService, NotPermittedError
 from gateway.migrations import MIGRATIONS, MigrationRunner
 from gateway.modes import InMemoryModeStore, Mode
 from gateway.permissions import PERMISSIONS
@@ -305,6 +306,30 @@ async def test_no_read_is_audited() -> None:
                     await c.get(session, path(endpoint, organization))
         after = connection.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
     assert after == before
+
+
+async def test_behind_requires_the_services_own_checks_still_refuse() -> None:
+    """The second layer (docs/30): the management service checks the action itself, so a route
+    whose ``requires`` were broken would still refuse."""
+    async with console() as c:
+        service = c.world.accounts.service
+        actors = {u: await service.actor_for(await _user(c, u)) for u in ("alice", "vera", "sid")}
+        management = ManagementService(c.world.keys, c.world.templates, c.world.accounts.audit,
+                                       c.world.accounts.epoch)  # fmt: skip
+        assert (await management.page_for_usage("north", None, 10, actor=actors["vera"])).items
+        assert management.plan_templates("north", actor=actors["alice"])
+        with pytest.raises(NotPermittedError):
+            await management.page_for_usage("north", None, 10, actor=actors["sid"])
+        with pytest.raises(NotPermittedError):
+            management.plan_templates("north", actor=actors["vera"])
+        with pytest.raises(NotPermittedError):
+            management.plan_templates("north", actor=actors["sid"])
+
+
+async def _user(c: Console, username: str) -> Any:
+    found = await c.world.accounts.store.find_user(username)
+    assert found is not None
+    return found
 
 
 # --- the figures ------------------------------------------------------------------------------

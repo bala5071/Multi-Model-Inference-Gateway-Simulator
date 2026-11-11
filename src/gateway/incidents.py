@@ -234,10 +234,11 @@ class IncidentStore(Protocol):
 
 
 # The open incidents of one organization by application and state (docs/51): one statement on
-# ``incidents_by_organization``, the same text for SQLite (``?``) and Postgres (``$1``).
+# ``incidents_by_organization``, the same text for SQLite (``?``) and Postgres (``$1``). The empty
+# application id is left out by ``count_open``, which every store's answer goes through.
 OPEN_COUNTS_SQL = (
     "SELECT application_id, state, COUNT(*) FROM incidents"
-    " WHERE organization_id = $1 AND state <> 'resolved' AND application_id <> ''"
+    " WHERE organization_id = $1 AND state <> 'resolved'"
     " GROUP BY application_id, state"
 )
 
