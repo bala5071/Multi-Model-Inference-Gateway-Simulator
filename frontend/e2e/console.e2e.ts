@@ -110,6 +110,11 @@ function row(region: Locator, name: string): Locator {
 
 async function change(page: Page, setting: string, mode: "keep" | "set" | "unset", value?: string) {
   const edit = page.getByRole("region", { name: "Edit", exact: true });
+  // The JSON editing is under "Advanced" now (docs/55), on the same draft as the typed form.
+  const advanced = edit.locator("details.advanced");
+  if (!(await advanced.evaluate((d) => (d as HTMLDetailsElement).open))) {
+    await edit.getByText("Advanced: edit as JSON").click();
+  }
   await edit.getByLabel(`${setting}: change`).selectOption(mode);
   if (value !== undefined) await edit.getByLabel(`${setting}: value`).fill(value);
 }
@@ -208,7 +213,8 @@ test("application settings: in force and why, checked edits, step-up when loosen
   await expect(page.getByRole("dialog")).toHaveCount(0);
 
   const history = page.getByRole("region", { name: "History", exact: true });
-  await expect(history.getByRole("row")).toHaveCount(3); // the header and two versions
+  // History is a timeline now (docs/55): one item a version.
+  await expect(history.getByRole("listitem")).toHaveCount(2);
   await expect(history).toContainText("max_hosted_attempts");
 
   // Back to version 1's values, which tightens: no password.
@@ -236,8 +242,21 @@ test("organization settings: the caps, the applications each one limits, the his
   const history = page.getByRole("region", { name: "History", exact: true });
   await expect(history).toContainText("the operator (CLI)");
   await expect(history).toContainText("cli");
-  // This screen shows; it changes nothing, for any account.
-  expect(await writeControls(page)).toBe(0);
+  // The organization's admin may change its caps (docs/52 section 16.7, which superseded "it
+  // shows; it changes nothing"): the gateway's dry run answered for this account, so the typed
+  // form is here. A change is checked by the gateway, then discarded (nothing is written, so the
+  // tests after this one see the same caps).
+  await expect(page.getByText("May change")).toBeVisible();
+  const edit = page.getByRole("region", { name: "Edit", exact: true });
+  await edit.getByRole("spinbutton", { name: "requests_per_minute" }).fill("500");
+  await expect(edit.getByRole("region", { name: "Changes", exact: true })).toContainText(
+    "600 requests a minute",
+  );
+  await expect(page.getByRole("status", { name: "Check result" })).toContainText("Valid.");
+  await expect(page.getByRole("button", { name: "Save" })).toBeEnabled();
+  await picture(page, testInfo, "organization-settings-form");
+  await page.getByRole("button", { name: "Discard" }).click();
+  await expect(page.getByRole("region", { name: "Save changes" })).toHaveCount(0);
   await picture(page, testInfo, "organization-settings");
 });
 
@@ -258,7 +277,10 @@ test("a viewer sees no write controls on either screen", async ({ page }, testIn
 
   await sections(page).getByRole("link", { name: "Organization settings" }).click();
   await expect(page.getByRole("region", { name: "Caps", exact: true })).toBeVisible();
+  // The gateway's dry run refused this account: no form, no Revert (docs/55).
+  await expect(page.getByText("Read only")).toBeVisible();
   expect(await writeControls(page)).toBe(0);
+  await expect(page.getByRole("main").getByRole("spinbutton")).toHaveCount(0);
 });
 
 test("an application's own admin names its application and cannot read the organization's caps", async ({

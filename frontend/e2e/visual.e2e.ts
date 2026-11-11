@@ -128,3 +128,39 @@ test("the account menu, the collapsed sidebar, and the phone's drawer", async ({
   await expect(drawer).toBeVisible();
   await shot(page, "phone-drawer", drawer);
 });
+
+test("UI3: the typed settings forms, a confirmation, the incidents tabs (docs/55)", async ({
+  page,
+}) => {
+  await evaluatorOk(page);
+  await page.goto("/dashboard/");
+  await logIn(page, ADMIN);
+  const sectionsNav = page.getByRole("navigation", { name: "Sections" });
+  const chooser = page.getByRole("combobox", { name: "Application", exact: true });
+
+  await sectionsNav.getByRole("link", { name: "Application settings", exact: true }).click();
+  await chooser.selectOption({ label: "App two (app-two)" });
+  await expect(page.getByRole("region", { name: "Edit", exact: true })).toBeVisible();
+  await shot(page, "settings-form");
+
+  await sectionsNav.getByRole("link", { name: "Organization settings", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Edit", exact: true })).toBeVisible();
+  await shot(page, "organization-form");
+
+  await sectionsNav.getByRole("link", { name: "API keys", exact: true }).click();
+  await chooser.selectOption({ label: "App one (app-one)" });
+  await page
+    .getByRole("button", { name: /^Revoke / })
+    .first()
+    .click();
+  const dialog = page.getByRole("alertdialog", { name: "Revoke a key" });
+  await expect(dialog).toBeVisible();
+  // The key's label and id are the run's: the dialog's words are masked by its own part shot.
+  await shot(page, "confirm-dialog", dialog.getByRole("button", { name: "Cancel" }).locator(".."));
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+
+  await sectionsNav.getByRole("link", { name: "Incidents", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Every state", exact: true })).toBeVisible();
+  await shot(page, "incidents");
+  await logOut(page);
+});

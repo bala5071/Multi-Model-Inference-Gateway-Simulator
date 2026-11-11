@@ -345,6 +345,8 @@ input.toggle:disabled {
   position: fixed;
   inset: auto;
   margin: 0;
+  /* The browser's [popover] rule scrolls (overflow: auto); a tooltip's words never need to. */
+  overflow: visible;
   max-width: 280px;
   padding: var(--s-1) var(--s-2);
   border: 1px solid var(--border);

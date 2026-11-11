@@ -652,6 +652,25 @@ describe("applications (docs/51)", () => {
   });
 });
 
+describe("the phone's drawer (docs/54, docs/55)", () => {
+  it("closes when a link is followed, the place already shown included", async () => {
+    window.location.hash = "#/apps";
+    const { fetcher } = gateway("in", capabilities.alice);
+    const user = open(fetcher);
+    await screen.findByRole("heading", { name: "Applications", level: 2 });
+    const drawer = () => document.querySelector<HTMLDialogElement>("dialog.drawer");
+    await user.click(screen.getByRole("button", { name: "Open the navigation" }));
+    expect(drawer()?.open).toBe(true);
+    // The place does not change: the drawer must close all the same.
+    await user.click(within(drawer() as HTMLElement).getByRole("link", { name: "Applications" }));
+    expect(drawer()?.open).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Open the navigation" }));
+    await user.click(within(drawer() as HTMLElement).getByRole("link", { name: "Incidents" }));
+    expect(drawer()?.open).toBe(false);
+    expect(window.location.hash).toBe("#/incidents");
+  });
+});
+
 describe("the frame (docs/54)", () => {
   it("groups the sidebar by level, keeps each label as its name when collapsed, and keeps only the word", async () => {
     const { fetcher } = gateway("in", capabilities.alice);
