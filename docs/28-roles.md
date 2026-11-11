@@ -56,8 +56,8 @@ the session's next request (tested).
 `step_up_required` unless the session's step-up window is open. **`consume`** (A5, docs/32): step-up that one successful
 call uses up, so each such change needs a fresh password. **Wired**: `now` (enforced today, through
 the CLI's `--as`), `step 7` (the management endpoints), `A5` (provider keys and modes), `A8`
-(monitoring, control and the Playground: local only until then), `later` (declared, no endpoint
-planned in A2).
+(monitoring, control and the Playground: local only until then), `console` (the console's reads,
+docs/51), `later` (declared, no endpoint planned in A2).
 
 | Action | Level | Allowed | Step-up | Wired |
 |---|---|---|---|---|
@@ -77,7 +77,7 @@ planned in A2).
 | `roles.list` | organization | `org_admin@own_organization`, `platform_admin@platform` | | now |
 | `applications.create` | organization | `org_admin@own_organization` | | step 7 |
 | `applications.list` | organization | `org_admin@own_organization`, `viewer@own_organization` | | step 7 |
-| `usage.read_organization` | organization | `org_admin@own_organization`, `viewer@own_organization` | | later |
+| `usage.read_organization` | organization | `org_admin@own_organization`, `viewer@own_organization` | | console |
 | `providers.list` | organization | `org_admin@own_organization` | | A5 |
 | `providers.status` | organization | `org_admin@own_organization`, `platform_admin@platform` | | A5 |
 | `providers.create` | organization | `org_admin@own_organization` | yes | A5 |

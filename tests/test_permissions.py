@@ -8,7 +8,9 @@ them, which the table checking itself could not show.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
+import json
 import re
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -485,3 +487,26 @@ def test_a_route_without_a_declaration_is_found() -> None:
     assert declaration_of(route) == []
     assert not hasattr(forgotten, DECLARATION)
     assert RouteDeclaration("public", None, "x").kind == "public"
+
+
+# Every cell of the table but `wired`: each action's level, its allowed role@relation pairs, its
+# step-up and consume flags, as a sha256. A change to who may do what changes it; moving an
+# action's `wired` label (docs/51: `usage.read_organization`, later to console) does not. The
+# value was the same on main before docs/51 and after. A new row (the IA v2 plan's Q1 and Q4)
+# updates it in its own reviewed commit, never to make an unexplained failure pass.
+WHO_MAY_DO_WHAT = "106578744f1c8c85a0a2ec07677364bde58415be9ac16841bc3828b521d9cf43"
+
+
+def test_who_may_do_what_is_pinned() -> None:
+    cells = sorted(
+        [
+            action,
+            row.level.value,
+            sorted(f"{role.value}@{relation.value}" for role, relation in row.allowed),
+            row.step_up,
+            row.consume,
+        ]
+        for action, row in PERMISSIONS.items()
+    )
+    digest = hashlib.sha256(json.dumps(cells).encode()).hexdigest()
+    assert (len(cells), digest) == (59, WHO_MAY_DO_WHAT)
