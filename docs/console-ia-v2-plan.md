@@ -459,3 +459,45 @@ of it folded into `docs/console-integration-plan.md`.
 - **Q4: (a).** `prices.read` and `prices.write` in PR 4, in their own marked commit.
 - **Q5: (a).** **Q6: C.** **Q7: (a).** **Q8: (a).** **Q9: (a).**
 - The ten decisions listed in #48's description are accepted.
+
+## 14. PR 1: decisions made from the code, before its code (2026-11-11)
+
+Each is listed in PR 1's description so it can be objected to. None changes who may do what.
+
+1. **"Add application" follows the capabilities answer, not a refused-body probe.** The rule
+   that a direct URL to a screen a session cannot use draws the landing with no request for
+   that screen's data (10.1) needs the shell to know before the screen asks anything. So
+   `applications.create` joins `NAVIGATION_ACTIONS` (no step-up flag), pinned to
+   `GET /v1/admin/orgs/{org}/plans`, the Add form's first read, which declares that action. The
+   answer is the gateway's `authorize`, as for every navigation item.
+2. **Issue, Rotate and Revoke follow the key list's answer** (`application_keys.list`), pinned
+   equal in `tests/test_console_probes.py`'s `SIBLINGS`. A write probe of a step-up action is
+   refused `step_up_required`, and every such refusal is an audit row
+   (`test_a_channel_write_probe_would_be_audited`); Revoke has no body to refuse.
+3. **The window is the last 60 complete minutes**, the evaluator's own (a minute is complete
+   25 s after it ends), and the figures are `signals.evaluate`'s: requests, `error_rate` (5xx
+   over requests) and `latency_total_p50`, with the alerts' minimums, so the list and the
+   alerts never disagree. Below a minimum the figure is "too few to judge", never 0.
+4. **A p50 above the histogram's last edge** is answered `above_range`, not a number: JSON has
+   no infinity.
+5. **The organization metrics read answers one page of application rows** (the list's paging,
+   the same order), with no organization totals: those come with the organization keys of PR 3.
+6. **`window` accepts only `60m`** in PR 1; `24h` comes with PR 3.
+7. **Since a restart:** with in-memory rollups, a window that starts before the process started
+   carries `since_ms`, shown "since HH:MM UTC (restart)".
+8. **The status dot is a pure frontend function** of the incident counts, the evaluator's
+   heartbeat and the request count, always with its word beside it (firing, attention, ok, no
+   requests, unknown); it decides nothing.
+9. **Incident counts leave out the built-in `channel_delivery_failing` incidents** (kept under
+   the empty application id): they belong to no application; the Incidents screen shows them.
+10. **Correction to F12:** an application's settings read already returns its mode
+    (`mode.effective`), so Q8 shows the organization's readers nothing new. The list reads the
+    mode per application of the page (at most 100 reads), timed in PR 1.
+11. **Landing in PR 1:** an organization session lands on Applications. A platform session and
+    an application-only session keep Home until PR 3 (Clients) and PR 2 (the application page).
+12. **Until PR 2:** a row's name opens the application's settings, and "API keys" joins the
+    navigation with the application chooser (`#/keys`, then `#/app/<id>/keys`), as Alert rules
+    has; PR 2 moves both under the application page.
+13. **The e2e drives real traffic:** the org_admin spec issues a key through the page, sends
+    requests with it, and waits for the next complete minute to show them. The key is in the
+    leak scan's list, with its own planted control.
