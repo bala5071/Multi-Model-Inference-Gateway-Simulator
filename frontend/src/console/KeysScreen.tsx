@@ -6,6 +6,7 @@ import { formatTime, refusalText } from "./derive";
 import { KeyShownOnce } from "./KeyShownOnce";
 import { useLoad } from "./useLoad";
 import type { ApiKeySummary, IssuedKey, KeyPage } from "./types";
+import { TableScroll } from "../components/TableScroll";
 
 function failure(error: unknown): string {
   if (error instanceof ApiError) return refusalText(error.code, error.message);
@@ -106,7 +107,7 @@ function ApplicationKeys({
       {keys.length === 0 ? (
         <p className="muted">This application has no keys yet.</p>
       ) : (
-        <div className="table-scroll">
+        <TableScroll table="Keys">
           <table className="data-table" aria-label="Keys">
             <thead>
               <tr>
@@ -163,7 +164,7 @@ function ApplicationKeys({
               ))}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
       )}
       {revoking !== null && (
         <div className="panel" role="alertdialog" aria-label="Revoke a key">

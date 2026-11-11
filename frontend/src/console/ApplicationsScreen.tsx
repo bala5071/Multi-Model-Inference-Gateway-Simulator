@@ -8,6 +8,7 @@ import { refusalText } from "./derive";
 import { EvaluatorBanner } from "./EvaluatorBanner";
 import { useLoad } from "./useLoad";
 import type { ApplicationPage, FiguresPage, Health, OpenCountsAnswer } from "./types";
+import { TableScroll } from "../components/TableScroll";
 
 /** The page size of the list and of its figures: the same, so they name the same applications. */
 export const PAGE_SIZE = 50;
@@ -119,7 +120,7 @@ function ApplicationTable({
   return (
     <>
       <p className="muted">Figures over the {span}.</p>
-      <div className="table-scroll">
+      <TableScroll table="Applications">
         <table className="data-table" aria-label="Applications">
           <thead>
             <tr>
@@ -162,7 +163,7 @@ function ApplicationTable({
             ))}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
       <div className="form-actions">
         {onFirst !== null && (
           <button type="button" onClick={onFirst}>

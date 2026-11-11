@@ -7,6 +7,7 @@ import { refusalText } from "./derive";
 import { EvaluatorBanner } from "./EvaluatorBanner";
 import { useLoad } from "./useLoad";
 import type { ChannelName, IncidentDetail, IncidentPage, RulePage } from "./types";
+import { TableScroll } from "../components/TableScroll";
 
 /** The states the gateway filters by (docs/45); empty is every state. */
 const STATES = ["", "pending", "firing", "acknowledged", "resolved"];
@@ -85,8 +86,8 @@ function IncidentList({
         (loaded.value.page.incidents.length === 0 ? (
           <p className="muted">No incident.</p>
         ) : (
-          <div className="table-scroll">
-            <table className="data-table">
+          <TableScroll table="Incidents">
+            <table className="data-table" aria-label="Incidents">
               <thead>
                 <tr>
                   <th scope="col">Rule</th>
@@ -125,7 +126,7 @@ function IncidentList({
                 ))}
               </tbody>
             </table>
-          </div>
+          </TableScroll>
         ))}
     </section>
   );
@@ -257,7 +258,7 @@ function IncidentView({
           {loaded.value.incident.notifications.length === 0 ? (
             <p className="muted">No notification.</p>
           ) : (
-            <div className="table-scroll">
+            <TableScroll table="Notifications">
               <table className="data-table" aria-label="Notifications">
                 <thead>
                   <tr>
@@ -280,7 +281,7 @@ function IncidentView({
                   ))}
                 </tbody>
               </table>
-            </div>
+            </TableScroll>
           )}
         </>
       )}

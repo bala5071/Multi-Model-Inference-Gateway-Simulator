@@ -3,6 +3,7 @@ import type { MonitorState } from "../api/store";
 import { formatUsd, formatValue } from "../charts/transforms";
 import { Meter } from "../components/Meter";
 import { Unavailable } from "../components/Unavailable";
+import { TableScroll } from "../components/TableScroll";
 
 const LEVEL_TEXT = { ok: "", warning: "Near its budget", exhausted: "Budget used up" } as const;
 
@@ -19,8 +20,8 @@ export function Applications({ state }: { state: MonitorState }) {
         Spend, tokens and requests are for the current budget period of each application.
         Rejections, timeouts and downgrades are counted since the gateway started.
       </p>
-      <div className="table-scroll">
-        <table className="data-table applications">
+      <TableScroll table="Applications">
+        <table className="data-table applications" aria-label="Applications">
           <thead>
             <tr>
               <th scope="col">Application</th>
@@ -67,7 +68,7 @@ export function Applications({ state }: { state: MonitorState }) {
             })}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
     </>
   );
 }

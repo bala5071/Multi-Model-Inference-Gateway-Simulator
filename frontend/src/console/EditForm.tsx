@@ -11,6 +11,7 @@ import {
   type FieldMode,
 } from "./derive";
 import type { ApplicationSettings, Change, Validation } from "./types";
+import { TableScroll } from "../components/TableScroll";
 
 /**
  * The edit form of an application's settings. Every change is sent to the gateway's dry run
@@ -104,8 +105,8 @@ export function EditForm({
       <p className="muted">
         Values are JSON. Each change is checked by the gateway before it can be saved.
       </p>
-      <div className="table-scroll">
-        <table className="data-table edit-table">
+      <TableScroll table="Edit">
+        <table className="data-table edit-table" aria-label="Edit">
           <thead>
             <tr>
               <th scope="col">Setting</th>
@@ -144,7 +145,7 @@ export function EditForm({
             ))}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
       <div className="verdict" role="status" aria-label="Check result">
         {shown.kind === "nothing" && <p className="muted">No change yet.</p>}
         {shown.kind === "unparsed" && (

@@ -201,11 +201,11 @@ export async function logIn(
   scan?: Scan,
   testInfo?: TestInfo,
 ): Promise<void> {
-  const form = page.getByRole("region", { name: "Log in" });
+  const form = page.getByRole("region", { name: "Log in", exact: true });
   await form.getByLabel("Username").fill(who.username);
   await form.getByLabel("Password").fill(secret(who.second));
   await form.getByRole("button", { name: "Log in" }).click();
-  const change = page.getByRole("region", { name: "Change your password" });
+  const change = page.getByRole("region", { name: "Change your password", exact: true });
   await expect(sections(page).or(change).or(form.getByRole("alert"))).toBeVisible();
   if (await sections(page).isVisible()) {
     await scan?.step(page);

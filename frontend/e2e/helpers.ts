@@ -8,7 +8,7 @@ export async function openTab(page: Page, name: string): Promise<void> {
 /** The Load section of the Playground tab, which is opened first. */
 export async function loadSection(page: Page): Promise<Locator> {
   await openTab(page, "Playground");
-  return page.getByRole("region", { name: "Load" });
+  return page.getByRole("region", { name: "Load", exact: true });
 }
 
 export async function startPreset(page: Page, preset: string): Promise<void> {
@@ -32,7 +32,7 @@ export async function capacityPanel(page: Page, model: string, title: RegExp): P
   await openTab(page, "Capacity");
   const panel = page
     .getByRole("region", { name: `${model} capacity` })
-    .getByRole("region", { name: title });
+    .getByRole("region", { name: title, exact: true });
   await panel.getByRole("button", { name: "Table" }).click();
   // The chart's own legend is a table too; the table view is the one with a caption.
   await expect(panel.locator("table.data-table")).toBeVisible();

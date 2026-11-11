@@ -282,6 +282,62 @@ test("leak scan control: an issued key planted in storage and in the address is 
   });
 });
 
+test("narrow screens: every table that overflows is reached and scrolled by keyboard (docs/53)", async ({
+  page,
+}, testInfo) => {
+  // 480 px is narrower than these tables on any machine, whatever its fonts: their boxes
+  // overflow here even where they would not at 1400 px (CI's Linux fonts did, this machine's
+  // did not), so this test fails without the fix everywhere.
+  await page.setViewportSize({ width: 480, height: 900 });
+  await page.goto("/dashboard/");
+  await logIn(page, ADMIN);
+  const screens: [string, string][] = [
+    ["#/application/app-one", "Application settings"],
+    ["#/organization", "Organization settings"],
+    ["#/rules/app-one", "Alert rules"],
+    ["#/app/app-one/keys", "API keys"],
+    ["#/apps", "Applications"],
+    ["#/incidents", "Incidents"],
+  ];
+  let overflowing = 0;
+  for (const [hash, heading] of screens) {
+    await page.goto(`/dashboard/${hash}`);
+    await expect(page.getByRole("heading", { name: heading, level: 2 })).toBeVisible();
+    await expect(page.locator(".table-scroll").first()).toBeVisible();
+    const boxes = await page.locator(".table-scroll").evaluateAll((elements) =>
+      elements.map((element) => ({
+        overflows: element.scrollWidth > element.clientWidth,
+        tabindex: element.getAttribute("tabindex"),
+        role: element.getAttribute("role"),
+        name: element.getAttribute("aria-label"),
+      })),
+    );
+    for (const box of boxes.filter((b) => b.overflows)) {
+      overflowing += 1;
+      expect(box, hash).toMatchObject({ tabindex: "0", role: "region" });
+      expect(box.name, hash).toMatch(/\S table$/);
+    }
+  }
+  // The width did force overflow: otherwise the checks above would have checked nothing.
+  expect(overflowing).toBeGreaterThan(0);
+
+  // Keyboard only: Tab reaches the settings table's box, and the arrow keys scroll it.
+  await page.goto("/dashboard/#/application/app-one");
+  const box = page.getByRole("region", { name: "Settings in force table", exact: true });
+  await expect(box).toBeVisible();
+  for (let presses = 0; presses < 80; presses += 1) {
+    if (await box.evaluate((element) => element === document.activeElement)) break;
+    await page.keyboard.press("Tab");
+  }
+  await expect(box).toBeFocused();
+  const before = await box.evaluate((element) => element.scrollLeft);
+  for (let presses = 0; presses < 5; presses += 1) await page.keyboard.press("ArrowRight");
+  await expect.poll(() => box.evaluate((element) => element.scrollLeft)).toBeGreaterThan(before);
+
+  // And axe finds nothing serious at this width, in both themes.
+  await checkAccessible(page, testInfo, "application-settings-narrow");
+});
+
 test("accessibility check control: planted violations are found in both themes", async ({
   page,
 }, testInfo) => {

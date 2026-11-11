@@ -74,9 +74,9 @@ test("simulated live mode has no accounts: the console's address says so, never 
   // The console's old address keeps its place (the stub's script), then the page explains.
   await page.goto("/dashboard/console.html#/organization");
   await expect(page).toHaveURL(/\/dashboard\/#\/organization$/);
-  const panel = page.getByRole("region", { name: "This mode has no accounts" });
+  const panel = page.getByRole("region", { name: "This mode has no accounts", exact: true });
   await expect(panel).toContainText("simulated live mode");
-  await expect(page.getByRole("region", { name: "Log in" })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Log in", exact: true })).toHaveCount(0);
   await expect(page.getByRole("navigation", { name: "Sections" })).toHaveCount(0);
   // For the PR (git-ignored run output): this mode has no account, so no secret to show.
   await picturedAndChecked(page, testInfo, "no-accounts");

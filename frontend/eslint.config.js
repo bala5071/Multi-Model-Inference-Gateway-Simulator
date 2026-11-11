@@ -19,6 +19,12 @@ export default tseslint.config(
       "@typescript-eslint/restrict-template-expressions": ["error", { allowNumber: true }],
       eqeqeq: "error",
       "no-console": "error",
+      // A table's scroll box is a focusable region so a keyboard can scroll it (docs/53, axe's
+      // scrollable-region-focusable): region joins the rule's default tabpanel.
+      "jsx-a11y/no-noninteractive-tabindex": [
+        "error",
+        { tags: [], roles: ["tabpanel", "region"], allowExpressionValues: true },
+      ],
     },
   },
   {

@@ -117,10 +117,10 @@ for (const role of ROLES) {
     await logIn(page, role.account, scan, testInfo);
 
     await expect(sections(page).getByRole("link")).toHaveText(role.navigation);
-    const home = page.getByRole("region", { name: role.landing });
+    const home = page.getByRole("region", { name: role.landing, exact: true });
     await expect(home).toBeVisible();
     for (const region of role.home) {
-      await expect(home.getByRole("region", { name: region })).toBeVisible();
+      await expect(home.getByRole("region", { name: region, exact: true })).toBeVisible();
     }
     await picture(page, testInfo, `home-${role.name}`);
 
@@ -134,7 +134,7 @@ for (const role of ROLES) {
     // One it does not show, opened by its address: where it lands, with one sentence.
     await page.goto(`/dashboard/${role.hidden}`);
     await expect(
-      page.getByRole("region", { name: role.landing }).getByRole("alert").first(),
+      page.getByRole("region", { name: role.landing, exact: true }).getByRole("alert").first(),
     ).toHaveText(NOT_AVAILABLE);
     await scan.step(page);
     await picture(page, testInfo, `hidden-${role.name}`);
@@ -160,7 +160,7 @@ test("a deep link from logged out returns to its place after login", async ({
   const scan = new Scan();
   scan.watch(page);
   await page.goto("/dashboard/#/rules/app-one");
-  await expect(page.getByRole("region", { name: "Log in" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Log in", exact: true })).toBeVisible();
   await picture(page, testInfo, "login");
   await logIn(page, ADMIN, scan);
   await expect(page.getByRole("heading", { name: "Alert rules", level: 2 })).toBeVisible();
@@ -197,7 +197,7 @@ test("a session ended elsewhere sends the page to login, and back to its place",
 
   // The next section the page opens learns it: login, where it was, with the reason.
   await sections(page).getByRole("link", { name: "Channels", exact: true }).click();
-  const login = page.getByRole("region", { name: "Log in" });
+  const login = page.getByRole("region", { name: "Log in", exact: true });
   await expect(login).toContainText(SESSION_ENDED);
   expect(new URL(page.url()).hash).toBe("#/channels");
   await picture(page, testInfo, "session-ended");
@@ -210,7 +210,7 @@ test("a session ended elsewhere sends the page to login, and back to its place",
 test("the console's old address opens the same place on the one page", async ({ page }) => {
   await page.goto("/dashboard/console.html#/channels");
   await expect(page).toHaveURL(/\/dashboard\/#\/channels$/);
-  await expect(page.getByRole("region", { name: "Log in" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Log in", exact: true })).toBeVisible();
 });
 
 test("logging out leaves the next person at home", async ({ page }) => {
@@ -220,7 +220,9 @@ test("logging out leaves the next person at home", async ({ page }) => {
     page.getByRole("heading", { name: "Organization settings", level: 2 }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Log out" }).click();
-  await expect(page.getByRole("region", { name: "Log in" })).toContainText("Logged out.");
+  await expect(page.getByRole("region", { name: "Log in", exact: true })).toContainText(
+    "Logged out.",
+  );
   expect(new URL(page.url()).hash).toBe("#/home");
 });
 
@@ -242,7 +244,7 @@ test("leak scan control: a password planted in storage and in the address is fou
   }, marker);
   // The organization's reader lands on its Applications (docs/51).
   await expect(
-    page.getByRole("region", { name: "Applications" }).getByRole("alert").first(),
+    page.getByRole("region", { name: "Applications", exact: true }).getByRole("alert").first(),
   ).toHaveText(NOT_AVAILABLE);
   const found = await scan.leaks(page);
   expect(found).toContainEqual(["session storage", ORG_READER.second]);

@@ -101,7 +101,7 @@ async function picture(page: Page, testInfo: TestInfo, name: string): Promise<vo
 /** Logs in; an account still on its first password (this file run alone) changes it first. */
 async function logIn(page: Page, who: Account): Promise<void> {
   await page.goto("/dashboard/");
-  const form = page.getByRole("region", { name: "Log in" });
+  const form = page.getByRole("region", { name: "Log in", exact: true });
   await form.getByLabel("Username").fill(who.username);
   await form.getByLabel("Password").fill(who.password());
   await form.getByRole("button", { name: "Log in" }).click();
@@ -111,7 +111,7 @@ async function logIn(page: Page, who: Account): Promise<void> {
   if (await loggedIn.isVisible()) return;
   await form.getByLabel("Password").fill(who.first());
   await form.getByRole("button", { name: "Log in" }).click();
-  const change = page.getByRole("region", { name: "Change your password" });
+  const change = page.getByRole("region", { name: "Change your password", exact: true });
   await change.getByLabel("Current password").fill(who.first());
   await change.getByLabel("New password").fill(who.password());
   await change.getByRole("button", { name: "Change password" }).click();
@@ -249,7 +249,7 @@ test("alert rules: state and last value, defaults marked, the checked editor wit
   await firingIncident(page);
   await open(page, "Alert rules");
   await chooseApplication(page, "App one (app-one)");
-  const rules = page.getByRole("region", { name: "Rules" });
+  const rules = page.getByRole("region", { name: "Rules", exact: true });
   await expect(page.getByText("May change")).toBeVisible();
   const expiring = row(rules, "Key expires within 14 days");
   await expect(expiring).toContainText("firing");
@@ -259,7 +259,7 @@ test("alert rules: state and last value, defaults marked, the checked editor wit
 
   // An edit, checked by the gateway at each change, with the last hour's preview.
   await rules.getByRole("button", { name: "Edit Error rate above 5 percent" }).click();
-  const editor = page.getByRole("region", { name: "Rule editor" });
+  const editor = page.getByRole("region", { name: "Rule editor", exact: true });
   const check = page.getByRole("status", { name: "Rule check" });
   await expect(check).toContainText("Valid.");
   await expect(check).toContainText("Over the last hour the condition never held.");
@@ -304,16 +304,16 @@ test("channels: a webhook shows only its origin and its key once; an email chann
   test.setTimeout(150_000);
   await logIn(page, ADMIN);
   await open(page, "Channels");
-  const list = page.getByRole("region", { name: "Channel list" });
+  const list = page.getByRole("region", { name: "Channel list", exact: true });
   await expect(list).toContainText("The organization has no channel.");
 
   // A webhook: the step-up asked for, the key shown once, the URL never shown again.
-  const create = page.getByRole("region", { name: "New channel" });
+  const create = page.getByRole("region", { name: "New channel", exact: true });
   await create.getByLabel("Name").fill("Ops hook");
   await create.getByLabel("Webhook URL").fill(hookUrl());
   await create.getByRole("button", { name: "Create channel" }).click();
   await stepUp(page, ADMIN);
-  const key = page.getByRole("region", { name: "Signing key" });
+  const key = page.getByRole("region", { name: "Signing key", exact: true });
   await expect(key).toContainText("shown once");
   const signingKey = (await key.locator("code").textContent()) ?? "";
   madeInRun.push(signingKey);
@@ -339,7 +339,7 @@ test("channels: a webhook shows only its origin and its key once; an email chann
   await picture(page, testInfo, "channels-admin");
 
   await list.getByRole("button", { name: "Open On call" }).click();
-  const channel = page.getByRole("region", { name: "Channel" });
+  const channel = page.getByRole("region", { name: "Channel", exact: true });
   const recipients = channel.getByRole("table", { name: "Recipients" });
   await expect(row(recipients, recipient())).toContainText("unverified");
   const code = await mailedCode(page.request, recipient());
@@ -398,7 +398,7 @@ test("a viewer sees every alert page with no write control, no channel and no re
   await chooseApplication(page, "App one (app-one)");
   await expect(page.getByText("Read only")).toBeVisible();
   await expect(
-    row(page.getByRole("region", { name: "Rules" }), "Key expires within 14 days"),
+    row(page.getByRole("region", { name: "Rules", exact: true }), "Key expires within 14 days"),
   ).toBeVisible();
   expect(await writeControls(page)).toBe(0);
   await picture(page, testInfo, "alert-rules-viewer");
@@ -411,18 +411,18 @@ test("a viewer sees every alert page with no write control, no channel and no re
   ).toHaveCount(0);
   await page.goto("/dashboard/#/channels");
   await expect(
-    page.getByRole("region", { name: "Applications" }).getByRole("alert").first(),
+    page.getByRole("region", { name: "Applications", exact: true }).getByRole("alert").first(),
   ).toHaveText("That page is not available to this account.");
   expect(await writeControls(page)).toBe(0);
   await picture(page, testInfo, "channels-viewer");
 
   await open(page, "Incidents");
-  const incidents = page.getByRole("region", { name: "Incidents" });
+  const incidents = page.getByRole("region", { name: "Incidents", exact: true });
   // Still firing (the admin acknowledges it later): Acknowledge would be offered if allowed.
   await expect(row(incidents, "Key expires within 14 days")).toContainText("firing");
   await picture(page, testInfo, "incidents-viewer");
   await incidents.getByRole("button", { name: "Open Key expires within 14 days" }).click();
-  const incident = page.getByRole("region", { name: "Incident" });
+  const incident = page.getByRole("region", { name: "Incident", exact: true });
   await expect(incident.getByRole("list", { name: "Timeline" })).toContainText("Opened");
   await expect(incident).toContainText("firing");
   expect(await writeControls(page)).toBe(0);
@@ -448,17 +448,17 @@ test("an application's own admin changes its rules and reads its incidents, but 
   // The Incidents link carries the application: its list is this account's to read.
   await open(page, "Incidents");
   await expect(
-    row(page.getByRole("region", { name: "Incidents" }), "Key expires within 14 days"),
+    row(page.getByRole("region", { name: "Incidents", exact: true }), "Key expires within 14 days"),
   ).toBeVisible();
   // The organization's list is not.
   await page.goto("/dashboard/console.html#/incidents");
-  await expect(page.getByRole("region", { name: "Incidents" }).getByRole("alert")).toHaveText(
-    "Not permitted, or not found.",
-  );
+  await expect(
+    page.getByRole("region", { name: "Incidents", exact: true }).getByRole("alert"),
+  ).toHaveText("Not permitted, or not found.");
   // Chosen from the applications the gateway named for this account.
   await chooseApplication(page, "app-one");
   await expect(
-    row(page.getByRole("region", { name: "Incidents" }), "Key expires within 14 days"),
+    row(page.getByRole("region", { name: "Incidents", exact: true }), "Key expires within 14 days"),
   ).toBeVisible();
 
   // Channels are not among its places, and their address draws only home's sentence (docs/50).
@@ -466,9 +466,9 @@ test("an application's own admin changes its rules and reads its incidents, but 
     page.getByRole("navigation", { name: "Sections" }).getByRole("link", { name: "Channels" }),
   ).toHaveCount(0);
   await page.goto("/dashboard/#/channels");
-  await expect(page.getByRole("region", { name: "Home" }).getByRole("alert")).toHaveText(
-    "That page is not available to this account.",
-  );
+  await expect(
+    page.getByRole("region", { name: "Home", exact: true }).getByRole("alert"),
+  ).toHaveText("That page is not available to this account.");
 });
 
 test("incidents: the organization's list, an incident's timeline and notifications, and Acknowledge", async ({
@@ -478,12 +478,12 @@ test("incidents: the organization's list, an incident's timeline and notificatio
   await logIn(page, ADMIN);
   await firingIncident(page);
   await open(page, "Incidents");
-  const incidents = page.getByRole("region", { name: "Incidents" });
+  const incidents = page.getByRole("region", { name: "Incidents", exact: true });
   await expect(row(incidents, "Key expires within 14 days")).toContainText("firing");
   await expect(row(incidents, "Key expires within 14 days")).toContainText("app-one");
   await picture(page, testInfo, "incidents-admin");
   await incidents.getByRole("button", { name: "Open Key expires within 14 days" }).click();
-  const incident = page.getByRole("region", { name: "Incident" });
+  const incident = page.getByRole("region", { name: "Incident", exact: true });
   await expect(incident.getByRole("heading", { name: "Key expires within 14 days" })).toBeVisible();
   const timeline = incident.getByRole("list", { name: "Timeline" });
   await expect(timeline).toContainText("Opened");
@@ -522,12 +522,12 @@ test("leak scan: no webhook URL, signing key, confirmation code or recipient add
   const address = `scan-${secret("CONSOLE_E2E_RECIPIENT_TAG")}@example.com`;
   await logIn(page, ADMIN);
   await open(page, "Channels");
-  const create = page.getByRole("region", { name: "New channel" });
+  const create = page.getByRole("region", { name: "New channel", exact: true });
   await create.getByLabel("Name").fill("Scan hook");
   await create.getByLabel("Webhook URL").fill(url);
   await create.getByRole("button", { name: "Create channel" }).click();
   await stepUp(page, ADMIN);
-  const key = page.getByRole("region", { name: "Signing key" });
+  const key = page.getByRole("region", { name: "Signing key", exact: true });
   const signingKey = (await key.locator("code").textContent()) ?? "";
   await key.getByRole("button", { name: "I have stored it" }).click();
 
@@ -536,9 +536,9 @@ test("leak scan: no webhook URL, signing key, confirmation code or recipient add
   await create.getByLabel("Recipients (one address a line)").fill(address);
   await create.getByRole("button", { name: "Create channel" }).click();
   await stepUp(page, ADMIN);
-  const list = page.getByRole("region", { name: "Channel list" });
+  const list = page.getByRole("region", { name: "Channel list", exact: true });
   await list.getByRole("button", { name: "Open Scan mail" }).click();
-  const channel = page.getByRole("region", { name: "Channel" });
+  const channel = page.getByRole("region", { name: "Channel", exact: true });
   const code = await mailedCode(page.request, address);
   await channel.getByLabel(`Code for ${address}`).fill(code);
   await channel.getByRole("button", { name: "Confirm" }).click();
