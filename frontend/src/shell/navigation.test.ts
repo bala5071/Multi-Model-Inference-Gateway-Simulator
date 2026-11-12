@@ -96,7 +96,7 @@ describe("the application page (docs/56)", () => {
       "incidents",
       "keys",
     ]);
-    // A viewer of north-blog: no keys.
+    // olive reads north-blog, without its keys.
     expect(appTabs(capabilities.olive, "north-blog")).toEqual([
       "overview",
       "settings",
