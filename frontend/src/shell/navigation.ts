@@ -4,7 +4,7 @@
 // the same `authorize` its routes use. Hiding an item is a convenience; every route still checks.
 
 import type { Capabilities } from "../console/types";
-import { routeApplication, type Route } from "./routes";
+import { APP_TABS, type AppTab, type Route } from "./routes";
 
 export type Level = "platform" | "organization" | "application";
 
@@ -14,18 +14,12 @@ export interface Ask {
   action: string;
 }
 
-export type ItemId =
-  | "home"
-  | "monitor"
-  | "apps"
-  | "organization"
-  | "application"
-  | "rules"
-  | "keys"
-  | "channels"
-  | "incidents";
+export type ItemId = "home" | "monitor" | "apps" | "organization" | "channels" | "incidents";
 
-/** The sidebar's groups (docs/54): the level of what an item opens. Home has none. */
+/**
+ * The sidebar's groups (docs/54): the level of what an item opens. Home has none. "Application"
+ * holds the applications a session that cannot list its organization's is named for (docs/56).
+ */
 export type NavGroup = "Organization" | "Application" | "Platform";
 
 export interface NavItem {
@@ -62,28 +56,7 @@ export const NAVIGATION: readonly NavItem[] = [
     id: "incidents",
     label: "Incidents",
     group: "Organization",
-    asks: [
-      { level: "organization", action: "incidents.read_organization" },
-      { level: "application", action: "incidents.read" },
-    ],
-  },
-  {
-    id: "application",
-    label: "Application settings",
-    group: "Application",
-    asks: [{ level: "application", action: "settings.read" }],
-  },
-  {
-    id: "rules",
-    label: "Alert rules",
-    group: "Application",
-    asks: [{ level: "application", action: "alert_rules.read" }],
-  },
-  {
-    id: "keys",
-    label: "API keys",
-    group: "Application",
-    asks: [{ level: "application", action: "application_keys.list" }],
+    asks: [{ level: "organization", action: "incidents.read_organization" }],
   },
   {
     id: "monitor",
@@ -105,8 +78,18 @@ export const ORGANIZATION_INCIDENTS: Ask = {
   level: "organization",
   action: "incidents.read_organization",
 };
-/** For an application, its incidents: where the Incidents link goes without the above. */
-export const APPLICATION_INCIDENTS: Ask = { level: "application", action: "incidents.read" };
+/**
+ * Each tab of an application's page and the application action that shows it (docs/56). The
+ * Overview follows `applications.read`: the page itself (its figures follow
+ * `usage.read_organization`, said on the tab).
+ */
+export const APP_TAB_ACTIONS: Record<AppTab, string> = {
+  overview: "applications.read",
+  settings: "settings.read",
+  rules: "alert_rules.read",
+  incidents: "incidents.read",
+  keys: "application_keys.list",
+};
 
 /** What the gateway answered for `ask`: for an application action, on any it named. */
 export function allows(capabilities: Capabilities, ask: Ask): boolean {
@@ -131,19 +114,53 @@ export function shownItems(capabilities: Capabilities): NavItem[] {
   return NAVIGATION.filter((item) => isShown(item, capabilities));
 }
 
-/** The item a route belongs to; none for a route the page does not know. */
-export function itemOf(route: Route): ItemId | null {
-  if (route.screen === "unknown") return null;
-  return route.screen === "apps-new" ? "apps" : route.screen;
+/**
+ * The tabs of an application's page the gateway allows this session, in their order: those it
+ * allowed on that application when it named it; for one it did not name (the answer lists only
+ * the first page of an organization's applications), those it allowed on any, and the tab's own
+ * screen then asks the gateway, which refuses one the session cannot use.
+ */
+export function appTabs(capabilities: Capabilities, applicationId: string): AppTab[] {
+  const named = capabilities.applications.find((a) => a.application_id === applicationId);
+  return APP_TABS.filter((tab) =>
+    named !== undefined
+      ? named.actions[APP_TAB_ACTIONS[tab]] === true
+      : allows(capabilities, { level: "application", action: APP_TAB_ACTIONS[tab] }),
+  );
 }
 
 /**
- * Where `#/home` takes this session (docs/51): its organization's Applications when the gateway
- * allows it the list, Home otherwise (a platform session until Clients, an application-only one
- * until the application page).
+ * The applications the sidebar lists by name (docs/56): for a session that cannot list its
+ * organization's, the ones the gateway named for it with their page allowed. None otherwise:
+ * such a session opens them from the list.
+ */
+export function appLinks(capabilities: Capabilities): string[] {
+  if (allows(capabilities, LIST_APPLICATIONS)) return [];
+  return namedWith(capabilities, APP_TAB_ACTIONS.overview);
+}
+
+/**
+ * What a route belongs to, for asking the capabilities again at each new section: an item, or
+ * an application's page (one per application). None for a route the page does not know.
+ */
+export function itemOf(route: Route): string | null {
+  if (route.screen === "unknown") return null;
+  if (route.screen === "apps-new") return "apps";
+  if (route.screen === "app") return `app:${route.applicationId ?? ""}`;
+  return route.screen;
+}
+
+/**
+ * Where `#/home` takes this session (console-ia-v2-plan 2.1): its organization's Applications when
+ * the gateway allows it the list; the page of its one application when it names exactly one;
+ * Home otherwise (a platform session until Clients, one of several applications, no access).
  */
 export function landing(capabilities: Capabilities): Route {
-  return allows(capabilities, LIST_APPLICATIONS) ? { screen: "apps" } : { screen: "home" };
+  if (allows(capabilities, LIST_APPLICATIONS)) return { screen: "apps" };
+  const own = appLinks(capabilities);
+  return own.length === 1 && own[0] !== undefined
+    ? { screen: "app", applicationId: own[0], tab: "overview", incidentId: null }
+    : { screen: "home" };
 }
 
 /**
@@ -153,6 +170,14 @@ export function landing(capabilities: Capabilities): Route {
  * first page of an organization's applications, so it cannot be the judge of one id).
  */
 export function opens(route: Route, capabilities: Capabilities): boolean {
+  if (route.screen === "app") {
+    // No application named: the shell takes it to the landing, for a session the gateway lets
+    // use that tab on some application (an old `#/keys` and the like).
+    if (route.applicationId === null) {
+      return allows(capabilities, { level: "application", action: APP_TAB_ACTIONS[route.tab] });
+    }
+    return appTabs(capabilities, route.applicationId).includes(route.tab);
+  }
   const id = itemOf(route);
   const item = NAVIGATION.find((candidate) => candidate.id === id);
   if (item === undefined || !isShown(item, capabilities)) return false;
@@ -163,9 +188,8 @@ export function opens(route: Route, capabilities: Capabilities): boolean {
   return true;
 }
 
-/** Where an item's link goes from `current`: the application in view is carried along. */
-export function target(item: NavItem, current: Route, capabilities: Capabilities): Route {
-  const application = routeApplication(current);
+/** Where an item's link goes from `current`. */
+export function target(item: NavItem, current: Route): Route {
   switch (item.id) {
     case "home":
       return { screen: "home" };
@@ -177,18 +201,7 @@ export function target(item: NavItem, current: Route, capabilities: Capabilities
       return { screen: "channels" };
     case "apps":
       return { screen: "apps" };
-    case "keys":
-      return { screen: "keys", applicationId: application };
-    case "application":
-      return { screen: "application", applicationId: application };
-    case "rules":
-      return { screen: "rules", applicationId: application };
-    case "incidents": {
-      // Without the organization's list, the first application whose incidents it may read.
-      const first = allows(capabilities, ORGANIZATION_INCIDENTS)
-        ? null
-        : (namedWith(capabilities, APPLICATION_INCIDENTS.action)[0] ?? null);
-      return { screen: "incidents", applicationId: application ?? first, incidentId: null };
-    }
+    case "incidents":
+      return { screen: "incidents" };
   }
 }

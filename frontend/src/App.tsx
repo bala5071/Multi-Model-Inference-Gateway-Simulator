@@ -1,7 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import { DisconnectedBanner } from "./components/DisconnectedBanner";
 import { SimulationBanner } from "./components/SimulationBanner";
-import { Tabs } from "./components/Tabs";
 import { useControl } from "./hooks/useControl";
 import { useMonitorStream, type StreamOptions } from "./hooks/useMonitorStream";
 import type { MonitorTab } from "./shell/routes";
@@ -11,6 +10,8 @@ import { Events } from "./tabs/Events";
 import { Latency } from "./tabs/Latency";
 import { Overview } from "./tabs/Overview";
 import { Playground } from "./tabs/Playground";
+import { StatusPill, type Tone } from "./ui/StatusPill";
+import { TabPanel, Tabs } from "./ui/Tabs";
 
 const TABS: readonly { id: MonitorTab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -22,6 +23,12 @@ const TABS: readonly { id: MonitorTab; label: string }[] = [
 ];
 
 const STATUS_TEXT = { connecting: "Connecting…", live: "Live", disconnected: "Disconnected" };
+/** The stream's state as a pill: its colour, beside its word (docs/56). */
+const STATUS_TONE: Record<keyof typeof STATUS_TEXT, Tone> = {
+  connecting: "warn",
+  live: "ok",
+  disconnected: "bad",
+};
 
 /** What the gateway allows inside the monitoring; everything without accounts. */
 export interface MonitoringAllows {
@@ -60,6 +67,7 @@ export function App({
   const simulated = control.status?.simulation.active === true;
   const tabs = TABS.filter((t) => t.id !== "playground" || allows.playground);
   const shown = tabs.some((t) => t.id === tab) ? tab : "overview";
+  const prefix = useId();
 
   useEffect(() => {
     onSimulated?.(simulated);
@@ -75,12 +83,20 @@ export function App({
     <div className={status === "disconnected" ? "monitor stale" : "monitor"}>
       <div className="monitor-bar">
         <h2>Monitoring</h2>
-        <span className={`status status-${status}`}>{STATUS_TEXT[status]}</span>
+        <span role="status">
+          <StatusPill tone={STATUS_TONE[status]}>{STATUS_TEXT[status]}</StatusPill>
+        </span>
       </div>
       <SimulationBanner control={control} />
       <DisconnectedBanner status={status} lastUpdate={lastUpdate} />
-      <Tabs tabs={tabs} selected={shown} onSelect={onSelectTab} />
-      <main id="tab-panel" role="tabpanel" aria-labelledby={`tab-${shown}`}>
+      <Tabs
+        label="Monitoring sections"
+        prefix={prefix}
+        tabs={tabs}
+        selected={shown}
+        onSelect={onSelectTab}
+      />
+      <TabPanel prefix={prefix} selected={shown}>
         {shown === "overview" && <Overview state={state} />}
         {shown === "latency" && <Latency state={state} />}
         {shown === "capacity" && <Capacity state={state} />}
@@ -89,7 +105,7 @@ export function App({
         {shown === "playground" && (
           <Playground state={state} control={control} loadControl={allows.loadControl} />
         )}
-      </main>
+      </TabPanel>
     </div>
   );
 }

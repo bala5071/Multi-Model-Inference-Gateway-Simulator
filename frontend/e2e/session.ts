@@ -163,7 +163,7 @@ export class Scan {
 // --- steps --------------------------------------------------------------------------------------
 
 export function sections(page: Page): Locator {
-  return page.getByRole("navigation", { name: "Sections" });
+  return page.getByRole("navigation", { name: "Sections", exact: true });
 }
 
 /** The planted secrets visible on the page: its text and every field's value. */

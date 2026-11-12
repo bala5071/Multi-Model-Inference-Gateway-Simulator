@@ -1,7 +1,6 @@
 import { useId, useState } from "react";
 import { followsProbe, incidentRows, incidentTimeline, notificationRows } from "./alerts";
 import { ApiError, applicationPath, orgPath, probeRefusedBody, type WriteProbe } from "./api";
-import { Chooser } from "./Chooser";
 import type { ConsoleContext } from "./context";
 import { refusalText } from "./derive";
 import { EvaluatorBanner } from "./EvaluatorBanner";
@@ -285,53 +284,62 @@ function IncidentView({
 }
 
 /**
- * Incidents, open and recent: the organization's, or one application's (for an account that
- * may not read the organization's, the application it names), each with its timeline, its
- * notifications and their deliveries, and Acknowledge where the gateway says this account may.
+ * The organization's incidents (docs/56): every application's, open and recent, filtered by state;
+ * opening one goes to that application's page, on its Incidents tab.
  */
 export function IncidentsScreen({
+  context,
+  onOpen,
+}: {
+  context: ConsoleContext;
+  onOpen: (applicationId: string, incidentId: string) => void;
+}) {
+  return (
+    <div className="console-screen">
+      <h2>Incidents</h2>
+      <EvaluatorBanner api={context.api} />
+      <IncidentList context={context} applicationId={null} onOpen={onOpen} />
+    </div>
+  );
+}
+
+/**
+ * One application's incidents, the Incidents tab of its page: the list, or one incident with its
+ * timeline, its notifications and their deliveries, and Acknowledge where the gateway says this
+ * account may.
+ */
+export function ApplicationIncidents({
   context,
   applicationId,
   incidentId,
   onRoute,
 }: {
   context: ConsoleContext;
-  applicationId: string | null;
+  applicationId: string;
   incidentId: string | null;
-  onRoute: (applicationId: string | null, incidentId: string | null) => void;
+  onRoute: (incidentId: string | null) => void;
 }) {
   return (
     <div className="console-screen">
-      <h2>Incidents</h2>
       <EvaluatorBanner api={context.api} />
-      {applicationId !== null && incidentId !== null ? (
+      {incidentId !== null ? (
         <IncidentView
           context={context}
           applicationId={applicationId}
           incidentId={incidentId}
           onBack={() => {
-            onRoute(applicationId, null);
+            onRoute(null);
           }}
         />
       ) : (
-        <>
-          <Chooser
-            all
-            context={context}
-            selected={applicationId}
-            onChoose={(id) => {
-              onRoute(id, null);
-            }}
-          />
-          <IncidentList
-            key={applicationId ?? "*"}
-            context={context}
-            applicationId={applicationId}
-            onOpen={(app, id) => {
-              onRoute(app, id);
-            }}
-          />
-        </>
+        <IncidentList
+          key={applicationId}
+          context={context}
+          applicationId={applicationId}
+          onOpen={(_, id) => {
+            onRoute(id);
+          }}
+        />
       )}
     </div>
   );
