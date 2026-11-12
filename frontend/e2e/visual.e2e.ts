@@ -119,6 +119,9 @@ for (const [who, name] of ROLES) {
     await page.goto("/dashboard/");
     await logIn(page, who);
     await expect(page.getByRole("button", { name: /^Account:/ })).toBeVisible();
+    // The landing drawn, not its skeleton while its code or data arrive (docs/56).
+    await expect(page.getByRole("heading", { level: 2 }).first()).toBeVisible();
+    await expect(page.locator(".skeleton")).toHaveCount(0);
     await shot(page, `landing-${name}`);
     await logOut(page);
   });
