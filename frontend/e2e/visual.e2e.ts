@@ -49,6 +49,8 @@ function masks(page: Page): Locator[] {
   ];
 }
 
+// Soft: a shot that differs is reported and the test goes on, so both themes and every later
+// shot are taken and compared in the same run (docs/56).
 /**
  * The whole page in both themes, masked; or, given `part` (a menu, a drawer: drawn above the
  * page, where a mask would cover it), that part alone, which holds nothing that changes.
@@ -65,13 +67,15 @@ async function shot(
     await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     if (part === undefined) {
-      await expect(page).toHaveScreenshot(`${name}-${theme}.png`, {
+      await expect.soft(page).toHaveScreenshot(`${name}-${theme}.png`, {
         ...steady,
         fullPage: true,
         mask: masks(page),
       });
     } else {
-      await expect(part).toHaveScreenshot(`${name}-${theme}.png`, { ...steady, mask: partMasks });
+      await expect
+        .soft(part)
+        .toHaveScreenshot(`${name}-${theme}.png`, { ...steady, mask: partMasks });
     }
   }
   await page.emulateMedia({ colorScheme: "light" });
