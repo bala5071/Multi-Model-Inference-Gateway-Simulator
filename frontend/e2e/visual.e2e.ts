@@ -19,7 +19,9 @@ import {
   type Account,
 } from "./session";
 
-test.describe.configure({ mode: "serial" });
+// In order on the config's one worker, but not serial: a shot that differs does not skip the
+// shots after it, so one run compares (and, for new ones, writes) every baseline (docs/56).
+test.describe.configure({ mode: "default" });
 test.skip(process.env.VISUAL !== "1", "visual baselines are compared on CI's pinned image only");
 
 /** Waits until the alert evaluator says ok, so its banner is not drawn on one run and not another. */
