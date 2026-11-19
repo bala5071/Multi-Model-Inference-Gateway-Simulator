@@ -4,6 +4,10 @@ import { roleText, roleWords } from "./Header";
 import { initials } from "./UserMenu";
 import {
   allows,
+  APP_TAB_ACTIONS,
+  appLinks,
+  appTabs,
+  isShown,
   itemOf,
   landing,
   NAVIGATION,
@@ -12,6 +16,10 @@ import {
   target,
   type ItemId,
 } from "./navigation";
+import type { APP_TABS } from "./routes";
+
+const page = (applicationId: string, tab: (typeof APP_TABS)[number]) =>
+  ({ screen: "app", applicationId, tab, incidentId: null }) as const;
 
 function item(id: ItemId) {
   const found = NAVIGATION.find((candidate) => candidate.id === id);
@@ -46,6 +54,7 @@ describe("navigation", () => {
     expect(allows(only({}), { level: "platform", action: "monitoring.read" })).toBe(false);
     expect(opens({ screen: "channels" }, only({}))).toBe(false);
     expect(opens({ screen: "home" }, only({}))).toBe(true);
+    expect(opens(page("north-shop", "overview"), only({}))).toBe(false);
   });
 
   it("opens nothing the page does not know", () => {
@@ -60,42 +69,85 @@ describe("navigation", () => {
     expect(opens({ screen: "monitor", tab: "playground" }, capabilities.root)).toBe(true);
   });
 
-  it("leaves one application's id to the gateway: the item decides", () => {
-    // olive can name north-blog only; north-shop is the screen's to ask about.
-    expect(opens({ screen: "application", applicationId: "north-shop" }, capabilities.olive)).toBe(
-      true,
-    );
+  it("sends Incidents to the organization's list, and keeps it for the organization's sessions", () => {
+    expect(target(item("incidents"), { screen: "home" })).toEqual({ screen: "incidents" });
+    expect(isShown(item("incidents"), capabilities.alice)).toBe(true);
+    // An application's own sessions read their incidents on its page (docs/56).
+    expect(isShown(item("incidents"), capabilities.olive)).toBe(false);
+    expect(opens({ screen: "incidents" }, capabilities.olive)).toBe(false);
   });
 
-  it("sends Incidents to the organization's list, or to the first application it may read", () => {
-    const home = { screen: "home" } as const;
-    expect(target(item("incidents"), home, capabilities.alice)).toEqual({
-      screen: "incidents",
-      applicationId: null,
-      incidentId: null,
-    });
-    expect(target(item("incidents"), home, capabilities.olive)).toEqual({
-      screen: "incidents",
-      applicationId: "north-blog",
-      incidentId: null,
-    });
-  });
-
-  it("carries the application in view from one screen to the next", () => {
-    const rules = { screen: "rules", applicationId: "north-shop" } as const;
-    expect(target(item("application"), rules, capabilities.alice)).toEqual({
-      screen: "application",
-      applicationId: "north-shop",
-    });
-    expect(target(item("monitor"), rules, capabilities.root)).toEqual({
+  it("keeps the monitoring's tab when it is already open", () => {
+    const latency = { screen: "monitor", tab: "latency" } as const;
+    expect(target(item("monitor"), latency)).toEqual(latency);
+    expect(target(item("monitor"), page("x", "rules"))).toEqual({
       screen: "monitor",
       tab: "overview",
     });
   });
 });
 
+describe("the application page (docs/56)", () => {
+  it("shows the tabs the gateway allowed on that application, in their order", () => {
+    expect(appTabs(capabilities.nina, "north-shop")).toEqual([
+      "overview",
+      "settings",
+      "rules",
+      "incidents",
+      "keys",
+    ]);
+    // olive reads north-blog, without its keys.
+    expect(appTabs(capabilities.olive, "north-blog")).toEqual([
+      "overview",
+      "settings",
+      "rules",
+      "incidents",
+    ]);
+    // Each tab follows its own action.
+    for (const [tab, action] of Object.entries(APP_TAB_ACTIONS)) {
+      const without = only({
+        applications: [
+          {
+            application_id: "a",
+            actions: Object.fromEntries(
+              Object.values(APP_TAB_ACTIONS).map((each) => [each, each !== action]),
+            ),
+          },
+        ],
+      });
+      expect(appTabs(without, "a")).not.toContain(tab);
+      expect(opens(page("a", tab as (typeof APP_TABS)[number]), without)).toBe(false);
+    }
+  });
+
+  it("leaves an application the answer did not name to the gateway: any named one's tabs", () => {
+    // olive names north-blog only; north-shop is the page's to ask about, with olive's tabs.
+    expect(appTabs(capabilities.olive, "north-shop")).toEqual(
+      appTabs(capabilities.olive, "north-blog"),
+    );
+    expect(opens(page("north-shop", "settings"), capabilities.olive)).toBe(true);
+    expect(opens(page("north-shop", "keys"), capabilities.olive)).toBe(false);
+  });
+
+  it("names the applications in the sidebar only for a session that cannot list them", () => {
+    expect(appLinks(capabilities.nina)).toEqual(["north-shop"]);
+    expect(appLinks(capabilities.olive)).toEqual(["north-blog"]);
+    expect(appLinks(capabilities.alice)).toEqual([]);
+    expect(appLinks(capabilities.root)).toEqual([]);
+  });
+
+  it("opens an address with no application only where some application allows its tab", () => {
+    const none = (tab: (typeof APP_TABS)[number]) =>
+      ({ screen: "app", applicationId: null, tab, incidentId: null }) as const;
+    expect(opens(none("settings"), capabilities.olive)).toBe(true);
+    expect(opens(none("keys"), capabilities.olive)).toBe(false);
+    expect(opens(none("keys"), capabilities.nina)).toBe(true);
+    expect(opens(none("overview"), only({}))).toBe(false);
+  });
+});
+
 describe("applications (docs/51)", () => {
-  it("lands a session on its applications only when the answer allows the list", () => {
+  it("lands a session as console-ia-v2-plan 2.1 says", () => {
     expect(landing(only({ organization: { "applications.list": true } }))).toEqual({
       screen: "apps",
     });
@@ -103,6 +155,17 @@ describe("applications (docs/51)", () => {
       screen: "home",
     });
     expect(landing(only({ platform: { "monitoring.read": true } }))).toEqual({ screen: "home" });
+    // One application: its page.
+    expect(landing(capabilities.nina)).toEqual(page("north-shop", "overview"));
+    expect(landing(capabilities.alice)).toEqual({ screen: "apps" });
+    // Several, without the list: Home, which lists them.
+    const several = only({
+      applications: [
+        { application_id: "a", actions: { "applications.read": true } },
+        { application_id: "b", actions: { "applications.read": true } },
+      ],
+    });
+    expect(landing(several)).toEqual({ screen: "home" });
   });
 
   it("opens the Add form only when the answer allows creating an application", () => {
@@ -114,16 +177,6 @@ describe("applications (docs/51)", () => {
     });
     expect(opens({ screen: "apps-new" }, creating)).toBe(true);
     expect(itemOf({ screen: "apps-new" })).toBe("apps");
-  });
-
-  it("opens the keys only with an application whose keys' list is allowed", () => {
-    expect(opens({ screen: "keys", applicationId: null }, capabilities.nina)).toBe(true);
-    expect(opens({ screen: "keys", applicationId: null }, capabilities.olive)).toBe(false);
-    const rules = { screen: "rules", applicationId: "north-shop" } as const;
-    expect(target(item("keys"), rules, capabilities.alice)).toEqual({
-      screen: "keys",
-      applicationId: "north-shop",
-    });
   });
 });
 

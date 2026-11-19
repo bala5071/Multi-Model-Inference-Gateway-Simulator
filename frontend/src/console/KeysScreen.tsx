@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { ApiError, applicationPath } from "./api";
-import { Chooser } from "./Chooser";
 import type { ConsoleContext } from "./context";
 import { formatTime, refusalText } from "./derive";
 import { KeyShownOnce } from "./KeyShownOnce";
@@ -32,25 +31,13 @@ function when(ms: number | null, none: string): string {
 export function KeysScreen({
   context,
   applicationId,
-  onChoose,
 }: {
   context: ConsoleContext;
-  applicationId: string | null;
-  onChoose: (id: string) => void;
+  applicationId: string;
 }) {
   return (
-    <section className="console-screen panel" aria-labelledby="keys-title">
-      <h2 id="keys-title">API keys</h2>
-      <Chooser
-        context={context}
-        selected={applicationId}
-        onChoose={(id) => {
-          if (id !== null) onChoose(id);
-        }}
-      />
-      {applicationId !== null && (
-        <ApplicationKeys key={applicationId} context={context} applicationId={applicationId} />
-      )}
+    <section className="console-screen" aria-label="API keys">
+      <ApplicationKeys key={applicationId} context={context} applicationId={applicationId} />
     </section>
   );
 }

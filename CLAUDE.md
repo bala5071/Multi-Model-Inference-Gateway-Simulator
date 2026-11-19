@@ -470,9 +470,14 @@ about the gateway.
 - Every colour is a token of `src/styles/tokens.css` (docs/53); `src/styles/contrast.test.ts`
   checks each pair the page draws (4.5:1 text, 3:1 controls and graphics) in both themes. The
   theme is System / Light / Dark, System by default; only the word is stored.
-- `npm run budget` (CI, after the build): JS at most 135 kB, CSS at most 12 kB, gzip level 9.
+- `npm run budget` (CI, after the build): the initial JS download at most 135 kB, CSS at most
+  12 kB, gzip level 9 (docs/56).
 - The e2e runs axe (`e2e/a11y.ts`) on every pictured screen in both themes; a serious or
   critical finding fails it.
+- The application page (docs/56): `#/app/<id>/<tab>`, each tab from the capabilities answer, the old
+  addresses mapped in `routes.ts`; the Overview shows only what the gateway returns. Split by
+  route: `npm run budget` gates the **initial download** at 135 kB (each on-demand chunk and the
+  total reported), and fails if the monitoring or the application page loads first.
 - The components (docs/55) are in `src/ui/`, our own on native elements (dialogs on `<dialog>`,
   the tooltip on `popover`); the typed settings form draws each setting by its kind, a copy of the
   gateway's `CATALOGUE` in `src/console/settingKinds.ts` pinned by `tests/test_dashboard.py`; the

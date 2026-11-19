@@ -2,6 +2,7 @@ import type { MonitorState } from "../api/store";
 import type { ModelPoint } from "../api/types";
 import { ChartPanel, type PanelLine } from "../charts/ChartPanel";
 import { formatValue, toColumns } from "../charts/transforms";
+import { Card } from "../ui/Card";
 
 // When several seconds share one drawn point the largest is kept: a latency chart is
 // read for its spikes.
@@ -47,8 +48,7 @@ export function Latency({ state }: { state: MonitorState }) {
         const points = state.modelSeries[name] ?? [];
         const slo = model.slo.slo_p99_ms;
         return (
-          <section key={name} className="model-section" aria-label={`${name} latency`}>
-            <h3>{name}</h3>
+          <Card key={name} className="model-section" title={name} label={`${name} latency`}>
             <div className="panels">
               {METRICS.map((metric) => (
                 <ChartPanel
@@ -68,7 +68,7 @@ export function Latency({ state }: { state: MonitorState }) {
                 />
               ))}
             </div>
-          </section>
+          </Card>
         );
       })}
     </>

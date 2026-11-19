@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { ApiError, applicationSettingsPath, orgPath, probeWrite, type WriteProbe } from "./api";
-import { Chooser } from "./Chooser";
 import type { ConsoleContext } from "./context";
 import {
   canWrite,
@@ -98,27 +97,23 @@ function facts(settings: ApplicationSettings, name: string) {
   );
 }
 
-/** One application's settings: what is in force and why, the edit form, presets, history. */
+/**
+ * One application's settings, the Settings tab of its page (docs/56): what is in force and why,
+ * the edit form, presets, history.
+ */
 export function ApplicationScreen({
   context,
   applicationId,
-  onChoose,
 }: {
   context: ConsoleContext;
-  applicationId: string | null;
-  onChoose: (id: string) => void;
+  applicationId: string;
 }) {
   const [reloads, setReloads] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const base =
-    applicationId === null
-      ? null
-      : applicationSettingsPath(context.user.organization_id, applicationId);
-  const loaded = useLoad(`settings:${base ?? ""}:${reloads}`, () =>
-    base === null ? Promise.reject(new ApiError(0, "none", "")) : loadAll(context, base),
-  );
+  const base = applicationSettingsPath(context.user.organization_id, applicationId);
+  const loaded = useLoad(`settings:${base}:${reloads}`, () => loadAll(context, base));
 
   function done(change: Change, what: string) {
     setMessage(`${what} as version ${change.version}.`);
@@ -147,27 +142,19 @@ export function ApplicationScreen({
 
   return (
     <div className="console-screen">
-      <h2>Application settings</h2>
-      <Chooser
-        context={context}
-        selected={applicationId}
-        onChoose={(id) => {
-          if (id !== null) onChoose(id);
-        }}
-      />
       <Toasted message={message} />
       {error !== null && (
         <p className="form-error" role="alert">
           {error}
         </p>
       )}
-      {base !== null && loaded.kind === "loading" && <Skeleton />}
-      {base !== null && loaded.kind === "failed" && (
+      {loaded.kind === "loading" && <Skeleton />}
+      {loaded.kind === "failed" && (
         <p className="form-error" role="alert">
           {refusalText(loaded.error.code, loaded.error.message)}
         </p>
       )}
-      {base !== null && loaded.kind === "ready" && (
+      {loaded.kind === "ready" && (
         <>
           <StatTiles>
             <StatTile label="Version" value={loaded.value.settings.version} />

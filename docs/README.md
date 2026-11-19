@@ -44,7 +44,7 @@ README's [table](../README.md#measured-results) gathers one from each.
 | [settings-and-alerts-a5-plan.md](settings-and-alerts-a5-plan.md) | A5: email channels, verified recipients, the confirmation caps, the vault's platform scope. Approved; built in PR #42 (note 48) |
 | [console-integration-plan.md](console-integration-plan.md) | One page, one login, navigation by role: P0 to P2. Approved (PR #45); built in PRs #46 and #47 (note 50); P3 onward replaced by the IA v2 plan |
 | [console-ia-v2-plan.md](console-ia-v2-plan.md) | Clients, Applications, the application page, costs, act-as. Approved (PR #48); PR 1 built (note 51), the rest not built |
-| [52-console-ui-plan.md](52-console-ui-plan.md) | The console's UI pass before PR 2: audit, layout, tokens, components, charts, accessibility, visual regression, and three static mock-ups of the Applications list (`console-ui-mockups/`). Approved (PR #50); UI1 built (note 53); reordered in its section 15; UI2 built (note 54); UI3 planned in its section 16 and built (note 55) |
+| [52-console-ui-plan.md](52-console-ui-plan.md) | The console's UI pass before PR 2: audit, layout, tokens, components, charts, accessibility, visual regression, and three static mock-ups of the Applications list (`console-ui-mockups/`). Approved (PR #50); UI1 built (note 53); reordered in its section 15; UI2 built (note 54); UI3 planned in its section 16 and built (note 55); UI4 in section 17 (note 56) |
 
 ## Design notes
 
@@ -109,6 +109,7 @@ and the last column points out the main cases.
 | [53 Console tokens and theme](53-console-tokens-theme.md) | UI1 of the UI plan (52): every colour a token (direction A), System / Light / Dark with System by default, monospace figures in tables; the contrast test for every colour pair, the bundle budget gate, axe on every pictured screen in both themes | Presentation only; no layout change yet |
 | [54 Console frame and auth screens](54-console-frame-auth.md) | UI2: the sidebar (grouped, collapsible, icons), breadcrumbs and the account menu (menu button pattern); the login and forced password change redesigned (autocomplete, show/hide, Caps Lock, the rules pinned to the gateway's, the lockout rule); toasts; the CSP trial, keyboard-only checks, visual regression on CI's pinned image | Presentation only |
 | [55 Console components and typed settings forms](55-console-components-settings-form.md) | UI3: the shared components (buttons by role, fields, toggle, chips, tabs, tables that sort the current page, pills, cards, skeletons, tooltip, native dialogs and confirmations, toasts); the typed settings form on the application's and the organization's settings (kinds pinned to the gateway's catalogue, the dry run before Save, JSON under Advanced); Alert rules, Channels, Incidents and API keys converted | Presentation; one console write (organization settings), no permission change |
+| [56 Console application page](56-console-application-page.md) | UI4: the application page and its tabs at `#/app/<id>/<tab>` (old addresses mapped), the landing on one application, the Overview from what the gateway returns (60-minute figures, no series), the list's search and filters on the page, the monitoring on UI3's components, the split by route and the gate on the initial download | Presentation; no backend change |
 
 ## Which numbers to trust for what
 

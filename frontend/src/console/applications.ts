@@ -173,3 +173,29 @@ export function applicationRows(
     };
   });
 }
+
+/** What the list's search and filters ask for (docs/56): on the page shown only. */
+export interface RowFilter {
+  /** Words in the name or the id, any case; empty asks for every row. */
+  text: string;
+  /** A mode in words (`modeText`), or "" for any. */
+  mode: string;
+  /** A status kind, or "" for any. */
+  status: StatusKind | "";
+}
+
+/** The page's rows the search and filters keep, in their order. Pure. */
+export function filterRows(rows: readonly ApplicationRow[], filter: RowFilter): ApplicationRow[] {
+  const words = filter.text.trim().toLowerCase();
+  return rows.filter(
+    (row) =>
+      (words === "" ||
+        row.name.toLowerCase().includes(words) ||
+        row.id.toLowerCase().includes(words)) &&
+      (filter.mode === "" || row.mode === filter.mode) &&
+      (filter.status === "" || row.status.kind === filter.status),
+  );
+}
+
+/** What the page says about the search and filters, and how much of the page they keep. */
+export const FILTER_NOTE = "Search and filters apply to the applications on this page only.";

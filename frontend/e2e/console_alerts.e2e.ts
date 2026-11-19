@@ -126,14 +126,29 @@ async function logIn(page: Page, who: Account): Promise<void> {
 async function open(page: Page, section: string): Promise<void> {
   // The page's navigation (Home repeats some of its links).
   await page
-    .getByRole("navigation", { name: "Sections" })
+    .getByRole("navigation", { name: "Sections", exact: true })
     .getByRole("link", { name: section, exact: true })
     .click();
   await expect(page.getByRole("heading", { name: section, level: 2 })).toBeVisible();
 }
 
-async function chooseApplication(page: Page, label: string): Promise<void> {
-  await page.getByRole("combobox", { name: "Application", exact: true }).selectOption({ label });
+/**
+ * An application's tab (docs/56), opened by its address as a link does: the rules and an
+ * application's incidents are tabs of its page now, no longer a section with a dropdown.
+ */
+async function openTab(
+  page: Page,
+  applicationId: string,
+  tab: "rules" | "incidents",
+): Promise<void> {
+  await page.evaluate((hash) => {
+    window.location.hash = hash;
+  }, `#/app/${applicationId}/${tab}`);
+  await expect(
+    page
+      .getByRole("navigation", { name: "Application sections" })
+      .getByRole("link", { name: tab === "rules" ? "Alert rules" : "Incidents", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
 }
 
 function row(region: Locator, name: string | RegExp): Locator {
@@ -212,11 +227,13 @@ test("every alert page shows the evaluator banner while /healthz says stale or u
           .alert_evaluator,
     )
     .toBe("ok");
-  for (const section of ["Alert rules", "Channels", "Incidents"]) {
+  for (const section of ["Channels", "Incidents"]) {
     await open(page, section);
     await expect(page.getByRole("main").getByRole("heading", { level: 2 })).toHaveText(section);
     await expect(page.getByRole("alert", { name: "Alert evaluation" })).toHaveCount(0);
   }
+  await openTab(page, "app-one", "rules");
+  await expect(page.getByRole("alert", { name: "Alert evaluation" })).toHaveCount(0);
   // The other states, as the gateway would answer them.
   for (const [state, shown] of [
     ["stale", "stale"],
@@ -226,13 +243,18 @@ test("every alert page shows the evaluator banner while /healthz says stale or u
     await page.route("**/healthz", (route) =>
       route.fulfill({ json: { status: "ok", alert_evaluator: state } }),
     );
-    for (const section of ["Alert rules", "Channels", "Incidents"]) {
+    for (const section of ["Channels", "Incidents"]) {
       await page.goto("/dashboard/console.html#/organization");
       await open(page, section);
       await expect(page.getByRole("alert", { name: "Alert evaluation" })).toContainText(
         `Alert evaluation: ${shown}.`,
       );
     }
+    await page.goto("/dashboard/console.html#/organization");
+    await openTab(page, "app-one", "rules");
+    await expect(page.getByRole("alert", { name: "Alert evaluation" })).toContainText(
+      `Alert evaluation: ${shown}.`,
+    );
     await page.unroute("**/healthz");
   }
   // /healthz not answering at all: shown as unreadable, never hidden.
@@ -252,8 +274,7 @@ test("alert rules: state and last value, defaults marked, the checked editor wit
   test.setTimeout(180_000);
   await logIn(page, ADMIN);
   await firingIncident(page);
-  await open(page, "Alert rules");
-  await chooseApplication(page, "App one (app-one)");
+  await openTab(page, "app-one", "rules");
   const rules = page.getByRole("region", { name: "Rules", exact: true });
   await expect(page.getByText("May change")).toBeVisible();
   const expiring = row(rules, "Key expires within 14 days");
@@ -399,8 +420,7 @@ test("a viewer sees every alert page with no write control, no channel and no re
   const lines: string[] = [];
   page.on("console", (message) => lines.push(message.text()));
   await logIn(page, VIEWER);
-  await open(page, "Alert rules");
-  await chooseApplication(page, "App one (app-one)");
+  await openTab(page, "app-one", "rules");
   await expect(page.getByText("Read only")).toBeVisible();
   await expect(
     row(page.getByRole("region", { name: "Rules", exact: true }), "Key expires within 14 days"),
@@ -412,7 +432,9 @@ test("a viewer sees every alert page with no write control, no channel and no re
   // address draws no channel screen, only one sentence where it lands: its organization's
   // Applications (docs/50, docs/51).
   await expect(
-    page.getByRole("navigation", { name: "Sections" }).getByRole("link", { name: "Channels" }),
+    page
+      .getByRole("navigation", { name: "Sections", exact: true })
+      .getByRole("link", { name: "Channels" }),
   ).toHaveCount(0);
   await page.goto("/dashboard/#/channels");
   await expect(
@@ -444,35 +466,34 @@ test("an application's own admin changes its rules and reads its incidents, but 
   page,
 }) => {
   await logIn(page, APP_ADMIN);
-  await open(page, "Alert rules");
-  // Chosen from the applications the gateway named for this account.
-  await chooseApplication(page, "app-one");
+  // Its one application's page is where it lands (docs/56); the rules are a tab of it.
+  await openTab(page, "app-one", "rules");
   await expect(page.getByText("May change")).toBeVisible();
   await expect(page.getByRole("button", { name: "Restore default rules" })).toBeVisible();
 
-  // The Incidents link carries the application: its list is this account's to read.
-  await open(page, "Incidents");
+  // Its application's incidents are this account's to read, on the same page.
+  await openTab(page, "app-one", "incidents");
   await expect(
     row(page.getByRole("region", { name: "Incidents", exact: true }), "Key expires within 14 days"),
   ).toBeVisible();
-  // The organization's list is not.
+  // The organization's list is not: its address draws the landing's sentence, and asks nothing.
+  const asked: string[] = [];
+  page.on("request", (request) => asked.push(request.url()));
   await page.goto("/dashboard/console.html#/incidents");
   await expect(
-    page.getByRole("region", { name: "Incidents", exact: true }).getByRole("alert"),
-  ).toHaveText("Not permitted, or not found.");
-  // Chosen from the applications the gateway named for this account.
-  await chooseApplication(page, "app-one");
-  await expect(
-    row(page.getByRole("region", { name: "Incidents", exact: true }), "Key expires within 14 days"),
-  ).toBeVisible();
+    page.getByRole("region", { name: "App one", exact: true }).getByRole("alert").first(),
+  ).toHaveText("That page is not available to this account.");
+  expect(asked.filter((url) => /\/orgs\/[^/]+\/incidents/.test(url))).toEqual([]);
 
-  // Channels are not among its places, and their address draws only home's sentence (docs/50).
+  // Channels are not among its places, and their address draws only that sentence (docs/50).
   await expect(
-    page.getByRole("navigation", { name: "Sections" }).getByRole("link", { name: "Channels" }),
+    page
+      .getByRole("navigation", { name: "Sections", exact: true })
+      .getByRole("link", { name: "Channels" }),
   ).toHaveCount(0);
   await page.goto("/dashboard/#/channels");
   await expect(
-    page.getByRole("region", { name: "Home", exact: true }).getByRole("alert"),
+    page.getByRole("region", { name: "App one", exact: true }).getByRole("alert").first(),
   ).toHaveText("That page is not available to this account.");
 });
 

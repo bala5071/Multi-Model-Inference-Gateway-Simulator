@@ -7,6 +7,7 @@ import {
 } from "../test/fixtures";
 import {
   applicationRows,
+  filterRows,
   applicationStatus,
   figureText,
   formatMs,
@@ -15,6 +16,8 @@ import {
   TOO_FEW,
   windowText,
   WINDOW_WORDS,
+  type ApplicationRow,
+  type StatusKind,
 } from "./applications";
 import type { Figure, OpenCounts } from "./types";
 
@@ -153,5 +156,43 @@ describe("applicationRows", () => {
         keys: false,
       });
     }
+  });
+});
+
+describe("filterRows (docs/56)", () => {
+  const row = (id: string, name: string, mode: string, kind: StatusKind): ApplicationRow => ({
+    id,
+    name,
+    mode,
+    requests: "0",
+    errorRate: "0",
+    p50: "0",
+    open: "0",
+    status: { kind, words: kind },
+    keys: true,
+  });
+  const rows = [
+    row("north-shop", "Shop", "local only", "ok"),
+    row("north-blog", "Blog", "hosted first, local fallback", "firing"),
+  ];
+
+  it("keeps every row with no search or filter, in the page's order", () => {
+    expect(filterRows(rows, { text: "", mode: "", status: "" })).toEqual(rows);
+  });
+
+  it("searches the name or the id, any case, and filters by mode and status", () => {
+    expect(filterRows(rows, { text: "SHOP", mode: "", status: "" }).map((r) => r.id)).toEqual([
+      "north-shop",
+    ]);
+    expect(filterRows(rows, { text: "north-b", mode: "", status: "" }).map((r) => r.id)).toEqual([
+      "north-blog",
+    ]);
+    expect(filterRows(rows, { text: "", mode: "local only", status: "" }).map((r) => r.id)).toEqual(
+      ["north-shop"],
+    );
+    expect(filterRows(rows, { text: "", mode: "", status: "firing" }).map((r) => r.id)).toEqual([
+      "north-blog",
+    ]);
+    expect(filterRows(rows, { text: "shop", mode: "", status: "firing" })).toEqual([]);
   });
 });

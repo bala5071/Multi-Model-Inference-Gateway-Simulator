@@ -1,26 +1,87 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { App } from "../App";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { StreamOptions } from "../hooks/useMonitorStream";
 import { ApiError, sessionApi } from "../console/api";
-import { AddApplicationScreen } from "../console/AddApplicationScreen";
-import { ApplicationScreen } from "../console/ApplicationScreen";
 import { ApplicationsScreen } from "../console/ApplicationsScreen";
-import { ChannelsScreen } from "../console/ChannelsScreen";
 import type { ConsoleContext } from "../console/context";
-import { IncidentsScreen } from "../console/IncidentsScreen";
-import { KeysScreen } from "../console/KeysScreen";
 import { ChangePasswordScreen, LoginScreen } from "../console/LoginScreen";
-import { OrganizationScreen } from "../console/OrganizationScreen";
-import { RulesScreen } from "../console/RulesScreen";
 import { StepUpDialog } from "../console/StepUpDialog";
+import { Skeleton } from "../ui/Skeleton";
 import { ToastProvider } from "../ui/Toasts";
 import type { Capabilities, LoginAnswer, MeAnswer, SessionUser } from "../console/types";
 import { Header } from "./Header";
 import { Home, NoAccounts } from "./Home";
-import { allows, itemOf, landing, LOAD_CONTROL, opens, PLAYGROUND } from "./navigation";
+import {
+  allows,
+  appTabs,
+  itemOf,
+  landing,
+  LIST_APPLICATIONS,
+  LOAD_CONTROL,
+  opens,
+  PLAYGROUND,
+} from "./navigation";
 import { Brand } from "./Brand";
 import { NavList, Sidebar } from "./NavBar";
 import { crumbs, parseRoute, routeHash, type Route } from "./routes";
+
+// Loaded on demand (docs/56): the login, the frame and the first screen come first; these come
+// from the same origin when a session opens them (the CSP's script-src 'self').
+const App = lazy(() => import("../App").then((m) => ({ default: m.App })));
+const ApplicationPage = lazy(() =>
+  import("../console/ApplicationPage").then((m) => ({ default: m.ApplicationPage })),
+);
+const AddApplicationScreen = lazy(() =>
+  import("../console/AddApplicationScreen").then((m) => ({ default: m.AddApplicationScreen })),
+);
+const OrganizationScreen = lazy(() =>
+  import("../console/OrganizationScreen").then((m) => ({ default: m.OrganizationScreen })),
+);
+const ChannelsScreen = lazy(() =>
+  import("../console/ChannelsScreen").then((m) => ({ default: m.ChannelsScreen })),
+);
+const IncidentsScreen = lazy(() =>
+  import("../console/IncidentsScreen").then((m) => ({ default: m.IncidentsScreen })),
+);
+
+/** A screen loaded on demand, with a skeleton while its code arrives. */
+function OnDemand({ children }: { children: ReactNode }) {
+  return <Suspense fallback={<Skeleton />}>{children}</Suspense>;
+}
+
+/** An application's page in the frame's main area (docs/56), its code loaded on demand. */
+function AppPageView({
+  context,
+  page,
+  applicationId,
+  notice,
+  onRoute,
+  onName,
+}: {
+  context: ConsoleContext;
+  page: Extract<Route, { screen: "app" }>;
+  applicationId: string;
+  notice: string | null;
+  onRoute: (route: Route) => void;
+  onName: (name: string | null) => void;
+}) {
+  return (
+    <main className="console">
+      <OnDemand>
+        <ApplicationPage
+          key={applicationId}
+          context={context}
+          applicationId={applicationId}
+          tab={page.tab}
+          incidentId={page.incidentId}
+          tabs={appTabs(context.capabilities, applicationId)}
+          onRoute={onRoute}
+          onName={onName}
+          notice={notice}
+        />
+      </OnDemand>
+    </main>
+  );
+}
 
 export const CAPABILITIES_PATH = "/v1/auth/capabilities";
 export const SESSION_ENDED = "Your session has ended. Log in again.";
@@ -91,6 +152,8 @@ export function Shell({ fetcher, stream }: { fetcher?: typeof fetch; stream?: St
   const [simulated, setSimulated] = useState(false);
   const [route, setRoute] = useRoute();
   const [collapsed, setCollapsed] = useState(savedCollapsed);
+  // The name of the application whose page is shown, for the breadcrumb, once the page read it.
+  const [appName, setAppName] = useState<string | null>(null);
   const mainRef = useRef<HTMLDivElement>(null);
 
   /** The session's next state: kept in the ref at once, for the callbacks that read it. */
@@ -216,23 +279,25 @@ export function Shell({ fetcher, stream }: { fetcher?: typeof fetch; stream?: St
 
   function monitoring(tab: Extract<Route, { screen: "monitor" }>["tab"], everything: boolean) {
     return (
-      <App
-        tab={tab}
-        onSelectTab={(next) => {
-          setRoute({ screen: "monitor", tab: next });
-        }}
-        stream={stream}
-        allows={
-          everything || capabilities === null
-            ? undefined
-            : {
-                playground: allows(capabilities, PLAYGROUND),
-                loadControl: allows(capabilities, LOAD_CONTROL),
-              }
-        }
-        onSimulated={setSimulated}
-        onReconnect={everything ? undefined : recheck}
-      />
+      <OnDemand>
+        <App
+          tab={tab}
+          onSelectTab={(next) => {
+            setRoute({ screen: "monitor", tab: next });
+          }}
+          stream={stream}
+          allows={
+            everything || capabilities === null
+              ? undefined
+              : {
+                  playground: allows(capabilities, PLAYGROUND),
+                  loadControl: allows(capabilities, LOAD_CONTROL),
+                }
+          }
+          onSimulated={setSimulated}
+          onReconnect={everything ? undefined : recheck}
+        />
+      </OnDemand>
     );
   }
 
@@ -290,13 +355,30 @@ export function Shell({ fetcher, stream }: { fetcher?: typeof fetch; stream?: St
       capabilities: now.capabilities,
       guarded,
     };
-    // Where this session lands (docs/51): its organization's Applications, or Home.
-    const onApplications = landing(now.capabilities).screen === "apps";
+    const land = landing(now.capabilities);
+    const appPage = (
+      page: Extract<Route, { screen: "app" }>,
+      applicationId: string,
+      notice: string | null,
+    ) => (
+      <AppPageView
+        context={context}
+        page={page}
+        applicationId={applicationId}
+        notice={notice}
+        onRoute={setRoute}
+        onName={setAppName}
+      />
+    );
+    // Where this session lands (console-ia-v2-plan 2.1): its organization's Applications, its one
+    // application's page, or Home.
     const home = (notice: string | null) =>
-      onApplications ? (
+      land.screen === "apps" ? (
         <main className="console">
           <ApplicationsScreen context={context} notice={notice} />
         </main>
+      ) : land.screen === "app" && land.applicationId !== null ? (
+        appPage(land, land.applicationId, notice)
       ) : (
         <main className="console">
           <Home
@@ -320,70 +402,44 @@ export function Shell({ fetcher, stream }: { fetcher?: typeof fetch; stream?: St
       case "apps-new":
         return (
           <main className="console">
-            <AddApplicationScreen context={context} />
-          </main>
-        );
-      case "keys":
-        return (
-          <main className="console">
-            <KeysScreen
-              context={context}
-              applicationId={route.applicationId}
-              onChoose={(id) => {
-                setRoute({ screen: "keys", applicationId: id });
-              }}
-            />
+            <OnDemand>
+              <AddApplicationScreen context={context} />
+            </OnDemand>
           </main>
         );
       case "monitor":
         return monitoring(route.tab, false);
-      case "application":
-        return (
-          <main className="console">
-            <ApplicationScreen
-              context={context}
-              applicationId={route.applicationId}
-              onChoose={(id) => {
-                setRoute({ screen: "application", applicationId: id });
-              }}
-            />
-          </main>
-        );
+      case "app":
+        // No application named (an old `#/application` and the like): the landing (docs/56).
+        if (route.applicationId === null) return home(null);
+        return appPage(route, route.applicationId, null);
       case "organization":
         return (
           <main className="console">
-            <OrganizationScreen context={context} />
-          </main>
-        );
-      case "rules":
-        return (
-          <main className="console">
-            <RulesScreen
-              context={context}
-              applicationId={route.applicationId}
-              onChoose={(id) => {
-                setRoute({ screen: "rules", applicationId: id });
-              }}
-            />
+            <OnDemand>
+              <OrganizationScreen context={context} />
+            </OnDemand>
           </main>
         );
       case "channels":
         return (
           <main className="console">
-            <ChannelsScreen context={context} />
+            <OnDemand>
+              <ChannelsScreen context={context} />
+            </OnDemand>
           </main>
         );
       case "incidents":
         return (
           <main className="console">
-            <IncidentsScreen
-              context={context}
-              applicationId={route.applicationId}
-              incidentId={route.incidentId}
-              onRoute={(applicationId, incidentId) => {
-                setRoute({ screen: "incidents", applicationId, incidentId });
-              }}
-            />
+            <OnDemand>
+              <IncidentsScreen
+                context={context}
+                onOpen={(applicationId, incidentId) => {
+                  setRoute({ screen: "app", applicationId, tab: "incidents", incidentId });
+                }}
+              />
+            </OnDemand>
           </main>
         );
     }
@@ -391,6 +447,10 @@ export function Shell({ fetcher, stream }: { fetcher?: typeof fetch; stream?: St
 
   const shown =
     capabilities === null ? null : route.screen === "home" ? landing(capabilities) : route;
+  const trailContext = {
+    listsApplications: capabilities !== null && allows(capabilities, LIST_APPLICATIONS),
+    applicationName: appName,
+  };
   const withSidebar = session.kind === "in" && capabilities !== null && shown !== null;
   const doLogout = () => {
     void logout();
@@ -433,7 +493,11 @@ export function Shell({ fetcher, stream }: { fetcher?: typeof fetch; stream?: St
             onLogout={user === null ? null : doLogout}
             withSidebar={withSidebar}
             account={session.kind !== "change"}
-            trail={withSidebar && user !== null ? crumbs(route, user.organization_id, shown) : null}
+            trail={
+              withSidebar && user !== null
+                ? crumbs(route, user.organization_id, shown, trailContext)
+                : null
+            }
             drawer={withSidebar ? <NavList capabilities={capabilities} route={shown} /> : null}
           />
           <div ref={mainRef} className="frame-content" tabIndex={-1}>

@@ -193,10 +193,9 @@ function dump(storage: Storage): string {
 
 async function openAppOne() {
   const user = userEvent.setup();
-  // The page opens at home; the screen is one of the navigation's items.
-  const sections = await screen.findByRole("navigation", { name: "Sections" });
-  await user.click(within(sections).getByRole("link", { name: "Application settings" }));
-  await user.selectOptions(await screen.findByLabelText("Application"), "app-one");
+  // The page opens at home; the settings are a tab of the application's page (docs/56).
+  await screen.findByRole("navigation", { name: "Sections" });
+  window.location.hash = "#/app/app-one/settings";
   await screen.findByRole("region", { name: "Settings in force" });
   return user;
 }
@@ -339,7 +338,7 @@ describe("the settings screens, in the page", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
     const login = await screen.findByRole("region", { name: "Log in" });
     expect(login).toHaveTextContent("Your session has ended. Log in again.");
-    expect(window.location.hash).toBe("#/application/app-one");
+    expect(window.location.hash).toBe("#/app/app-one/settings");
     // The token is forgotten: the next login carries none.
     await user.type(within(login).getByLabelText("Username"), "admin-e2e");
     await user.type(within(login).getByLabelText("Password"), PASSWORD);
