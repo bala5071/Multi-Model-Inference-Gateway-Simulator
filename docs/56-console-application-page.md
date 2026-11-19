@@ -88,6 +88,27 @@ mutation W10), and on a font file and an on-demand chunk loaded first. CSS (12 k
 - Playwright's role lookup matches names by substring, so "Sections" also found the page's
   "Application sections": the e2e's lookups of the sidebar are exact.
 
+## No Home on the way to the landing
+
+Two light visual shots of the application landings once passed against the old Home baseline,
+before the visual test waited for the drawn landing. Investigated (PR #54):
+
+- **The page never draws Home on the way.** A frame log installed before the page's first
+  script records, on every animation frame and every DOM change, the heading, the sidebar, the
+  skeletons and the main text. From login to the drawn landing it holds no Home for an
+  organization admin ("Asking the gateway...", then Applications) or an application's admin or
+  reader ("Asking the gateway...", the skeleton while the page's code arrives, then the page).
+  The landing is decided in the same render in which the capabilities arrive; before that the
+  page says it is asking. `application_page.e2e.ts` keeps this as a test for the three sessions,
+  and it fails on a Home drawn for a few milliseconds (mutation W13).
+- **It was the screenshot's timing and the comparison's tolerance.** `logIn` returns when the
+  account button appears, which it does while the page is still asking; the light shot came
+  first and caught that near-blank frame. Playwright's comparison ignores per-pixel changes under
+  its threshold (white against the pale canvas) and allows 0.2% of pixels: against the sparse old
+  Home, such a frame differs by a few thousand glyph pixels (3,680 on this machine, with its own
+  fonts), at the edge of the 2,800 allowed. Visual regression compares a settled page; it is not
+  a flash detector, the frame log is. The visual test now waits for the drawn landing.
+
 ## Checks
 
 The `application-page` e2e project: the login fetches neither on-demand chunk and each comes when
