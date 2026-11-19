@@ -7,7 +7,7 @@
 
 import { expect, test, type Browser, type Page, type TestInfo } from "@playwright/test";
 import { picturedAndChecked } from "./a11y";
-import { ADMIN, APP_ADMIN, OPERATOR, ORG_READER, Scan, logIn } from "./session";
+import { ADMIN, APP_ADMIN, APP_READER, OPERATOR, ORG_READER, Scan, logIn } from "./session";
 
 test.describe.configure({ mode: "serial" });
 
@@ -200,3 +200,70 @@ test("an organization reader and an application's admin: the Overview says what 
   await picturedAndChecked(page, testInfo, "ui4-overview-app-admin");
   await page.context().close();
 });
+
+/**
+ * A frame log of the page from its first script: on every animation frame (what is painted) and
+ * on every change of the DOM (what could be painted), the level-2 heading, the sidebar's links,
+ * how many skeletons, and the start of the main area's text, each state once, with its time.
+ */
+async function frameLog(page: Page): Promise<() => Promise<string[]>> {
+  await page.addInitScript(() => {
+    const log: string[] = [];
+    let last = "";
+    const state = () => {
+      const main = document.querySelector(".frame-content");
+      const h2 = [...document.querySelectorAll(".frame-content h2")]
+        .map((e) => e.textContent)
+        .join("|");
+      const nav = [...document.querySelectorAll('nav[aria-label="Sections"] a')]
+        .map((a) => a.textContent)
+        .join(",");
+      const skeletons = document.querySelectorAll(".skeleton").length;
+      const text = (main?.textContent ?? "").replace(/\s+/g, " ").slice(0, 48);
+      return `h2=[${h2}] nav=[${nav}] skeletons=${String(skeletons)} main="${text}"`;
+    };
+    const record = (how: string) => {
+      const now = state();
+      if (now !== last) {
+        log.push(`${String(Math.round(performance.now())).padStart(6)}ms ${how} ${now}`);
+        last = now;
+      }
+    };
+    const frame = () => {
+      record("frame");
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+    new MutationObserver(() => {
+      record("dom");
+    }).observe(document, { subtree: true, childList: true, characterData: true });
+    Object.assign(window, { frameLog: log });
+  });
+  return () => page.evaluate(() => (window as unknown as { frameLog: string[] }).frameLog);
+}
+
+for (const [who, landing] of [
+  [ADMIN, "Applications"],
+  [APP_ADMIN, "App one"],
+  [APP_READER, "App one"],
+] as const) {
+  test(`${who.username}: Home is never drawn on the way to its landing, ${landing} (docs/56)`, async ({
+    browser,
+  }, testInfo) => {
+    const page = await freshPage(browser, testInfo);
+    const frames = await frameLog(page);
+    await page.goto("/dashboard/");
+    await logIn(page, who);
+    await expect(page.getByRole("heading", { name: landing, level: 2, exact: true })).toBeVisible();
+    await expect(page.locator(".skeleton")).toHaveCount(0);
+    const log = await frames();
+    const newline = String.fromCharCode(10);
+    process.stdout.write(`frame log, ${who.username}:${newline}${log.join(newline)}${newline}`);
+    // From the first script to the drawn landing, no frame and no DOM state held Home.
+    expect(
+      log.filter((line) => line.includes("h2=[Home]") || line.includes("Your applications")),
+    ).toEqual([]);
+    expect(log.at(-1)).toContain(`h2=[${landing}]`);
+    await page.context().close();
+  });
+}
