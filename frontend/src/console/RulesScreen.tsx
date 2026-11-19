@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { isOpen, ruleBody, ruleRows, type RuleRow } from "./alerts";
 import { ApiError, applicationPath, probeRefusedBody, type WriteProbe } from "./api";
+import { Chooser } from "./Chooser";
 import type { ConsoleContext } from "./context";
 import { canWrite, refusalText } from "./derive";
 import { EvaluatorBanner } from "./EvaluatorBanner";
@@ -67,18 +68,23 @@ async function loadAll(context: ConsoleContext, app: string): Promise<Loaded> {
 export function RulesScreen({
   context,
   applicationId,
+  onChoose,
 }: {
   context: ConsoleContext;
-  applicationId: string;
+  applicationId: string | null;
+  onChoose: (id: string) => void;
 }) {
   const [reloads, setReloads] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<Editing | null>(null);
-  const app = applicationPath(context.user.organization_id, applicationId);
-  const loaded = useLoad(`rules:${app}:${reloads}`, () => loadAll(context, app));
-  const base = `${app}/alert-rules`;
+  const app =
+    applicationId === null ? null : applicationPath(context.user.organization_id, applicationId);
+  const loaded = useLoad(`rules:${app ?? ""}:${reloads}`, () =>
+    app === null ? Promise.reject(new ApiError(0, "none", "")) : loadAll(context, app),
+  );
+  const base = app === null ? "" : `${app}/alert-rules`;
 
   function reload(note: string | null) {
     setMessage(note);
@@ -104,20 +110,28 @@ export function RulesScreen({
   const writable = loaded.kind === "ready" && canWrite(loaded.value.probe);
   return (
     <div className="console-screen">
+      <h2>Alert rules</h2>
       <EvaluatorBanner api={context.api} />
+      <Chooser
+        context={context}
+        selected={applicationId}
+        onChoose={(id) => {
+          if (id !== null) onChoose(id);
+        }}
+      />
       <Toasted message={message} />
       {error !== null && (
         <p className="form-error" role="alert">
           {error}
         </p>
       )}
-      {loaded.kind === "loading" && <Skeleton />}
-      {loaded.kind === "failed" && (
+      {app !== null && loaded.kind === "loading" && <Skeleton />}
+      {app !== null && loaded.kind === "failed" && (
         <p className="form-error" role="alert">
           {refusalText(loaded.error.code, loaded.error.message)}
         </p>
       )}
-      {loaded.kind === "ready" && (
+      {app !== null && loaded.kind === "ready" && (
         <>
           <StatTiles>
             <StatTile label="Rules" value={loaded.value.rules.length} />

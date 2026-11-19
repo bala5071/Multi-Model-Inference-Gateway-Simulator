@@ -175,14 +175,7 @@ export function AddApplicationScreen({ context }: { context: ConsoleContext }) {
           {stored && (
             <p role="status">
               The key is no longer shown.{" "}
-              <a
-                href={routeHash({
-                  screen: "app",
-                  applicationId: created.application_id,
-                  tab: "keys",
-                  incidentId: null,
-                })}
-              >
+              <a href={routeHash({ screen: "keys", applicationId: created.application_id })}>
                 Its API keys
               </a>
             </p>

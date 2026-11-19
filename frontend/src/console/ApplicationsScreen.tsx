@@ -3,14 +3,11 @@ import { allows, CREATE_APPLICATION } from "../shell/navigation";
 import { routeHash } from "../shell/routes";
 import {
   applicationRows,
-  filterRows,
-  FILTER_NOTE,
   TOO_FEW,
   TOO_FEW_EXPLAINED,
+  TOO_FEW_WORDS,
   windowText,
   WINDOW_WORDS,
-  type RowFilter,
-  type StatusKind,
 } from "./applications";
 import { orgPath } from "./api";
 import type { ConsoleContext } from "./context";
@@ -18,34 +15,11 @@ import { refusalText } from "./derive";
 import { EvaluatorBanner } from "./EvaluatorBanner";
 import { useLoad } from "./useLoad";
 import type { ApplicationPage, FiguresPage, Health, OpenCountsAnswer } from "./types";
-import { FigureText } from "./FigureText";
-import { Button } from "../ui/Button";
-import { DataTable } from "../ui/DataTable";
-import { SelectField, TextField } from "../ui/Field";
-import { Skeleton } from "../ui/Skeleton";
-import { StatusPill, type Tone } from "../ui/StatusPill";
-
-const STATUS_KINDS: readonly StatusKind[] = ["firing", "attention", "ok", "no_requests", "unknown"];
-const STATUS_LABELS: Record<StatusKind, string> = {
-  firing: "firing",
-  attention: "attention",
-  ok: "ok",
-  no_requests: "no requests",
-  unknown: "unknown",
-};
-/** A status's colour; its word is always written beside it. */
-const STATUS_TONES: Record<StatusKind, Tone> = {
-  firing: "bad",
-  attention: "warn",
-  ok: "ok",
-  no_requests: "idle",
-  unknown: "info",
-};
+import { TableScroll } from "../components/TableScroll";
+import { Tooltip } from "../ui/Tooltip";
 
 /** The page size of the list and of its figures: the same, so they name the same applications. */
 export const PAGE_SIZE = 50;
-
-const LOADING = `Loading applications${String.fromCodePoint(0x2026)}`;
 
 interface Loaded {
   page: ApplicationPage;
@@ -102,7 +76,7 @@ export function ApplicationsScreen({
           </a>
         </div>
       )}
-      {loaded.kind === "loading" && <Skeleton label={LOADING} lines={4} />}
+      {loaded.kind === "loading" && <p className="muted">Loading applications…</p>}
       {loaded.kind === "failed" && (
         <p className="form-error" role="alert">
           {refusalText(loaded.error.code, loaded.error.message)}
@@ -112,7 +86,6 @@ export function ApplicationsScreen({
         <ApplicationTable
           loaded={loaded.value}
           context={context}
-          mayCreate={mayCreate}
           onNext={(next) => {
             setCursors([...cursors, next]);
           }}
@@ -132,17 +105,14 @@ export function ApplicationsScreen({
 function ApplicationTable({
   loaded,
   context,
-  mayCreate,
   onNext,
   onFirst,
 }: {
   loaded: Loaded;
   context: ConsoleContext;
-  mayCreate: boolean;
   onNext: (cursor: string) => void;
   onFirst: (() => void) | null;
 }) {
-  const [filter, setFilter] = useState<RowFilter>({ text: "", mode: "", status: "" });
   const rows = applicationRows(
     loaded.page,
     loaded.figures,
@@ -151,159 +121,99 @@ function ApplicationTable({
     context.capabilities,
   );
   const span = windowText(loaded.figures?.window ?? null);
-  if (rows.length === 0 && onFirst === null) {
-    return (
-      <div className="empty-state">
-        <h3>No applications yet</h3>
-        <p>
-          An application is one client of the gateway: it has its own API keys, a copy of a plan
-          template&apos;s models and limits, its settings, alert rules and incidents, and its own
-          figures.
-        </p>
-        {mayCreate ? (
-          <p>Add one to issue its first key.</p>
-        ) : (
-          <p className="muted">An administrator of this organization can add one.</p>
-        )}
-      </div>
-    );
+  if (rows.length === 0) {
+    return <p className="muted">This organization has no applications yet.</p>;
   }
-  const shown = filterRows(rows, filter);
-  const modes = [...new Set(rows.map((row) => row.mode))];
   const next = loaded.page.next;
-  const open = (id: string, tab: "overview" | "keys") =>
-    routeHash({ screen: "app", applicationId: id, tab, incidentId: null });
   return (
     <>
-      <div className="list-filters" role="search" aria-label="Applications on this page">
-        <TextField
-          label="Search"
-          type="search"
-          value={filter.text}
-          placeholder="Name or id"
-          onChange={(event) => {
-            setFilter({ ...filter, text: event.target.value });
-          }}
-        />
-        <SelectField
-          label="Mode"
-          value={filter.mode}
-          onChange={(event) => {
-            setFilter({ ...filter, mode: event.target.value });
-          }}
-        >
-          <option value="">Any mode</option>
-          {modes.map((mode) => (
-            <option key={mode} value={mode}>
-              {mode}
-            </option>
-          ))}
-        </SelectField>
-        <SelectField
-          label="Status"
-          value={filter.status}
-          onChange={(event) => {
-            setFilter({ ...filter, status: event.target.value as RowFilter["status"] });
-          }}
-        >
-          <option value="">Any status</option>
-          {STATUS_KINDS.map((kind) => (
-            <option key={kind} value={kind}>
-              {STATUS_LABELS[kind]}
-            </option>
-          ))}
-        </SelectField>
-      </div>
-      <p className="muted">
-        {FILTER_NOTE} Figures over the {span}.{" "}
-        <span role="status">
-          Showing {shown.length} of {rows.length}.
-        </span>
-      </p>
-      <DataTable
-        label="Applications"
-        rows={shown}
-        rowKey={(row) => row.id}
-        empty="No application on this page matches the search and filters."
-        columns={[
-          {
-            key: "name",
-            header: "Name",
-            rowHeader: true,
-            sortValue: (row) => row.name,
-            cell: (row) => (
-              <>
-                <a href={open(row.id, "overview")}>{row.name}</a>{" "}
-                <span className="muted figure">({row.id})</span>
-              </>
-            ),
-          },
-          { key: "mode", header: "Mode", cell: (row) => row.mode, sortValue: (row) => row.mode },
-          {
-            key: "requests",
-            header: `Requests (${WINDOW_WORDS})`,
-            cell: (row) => (
-              <span className="figure">
-                <FigureText text={row.requests} />
-              </span>
-            ),
-          },
-          {
-            key: "errors",
-            header: "Error rate",
-            cell: (row) => (
-              <span className="figure">
-                <FigureText text={row.errorRate} />
-              </span>
-            ),
-          },
-          {
-            key: "p50",
-            header: "p50 latency (to within about 19%)",
-            cell: (row) => (
-              <span className="figure">
-                <FigureText text={row.p50} />
-              </span>
-            ),
-          },
-          { key: "open", header: "Open incidents", cell: (row) => row.open },
-          {
-            key: "status",
-            header: "Status",
-            sortValue: (row) => row.status.words,
-            cell: (row) => (
-              <StatusPill tone={STATUS_TONES[row.status.kind]}>{row.status.words}</StatusPill>
-            ),
-          },
-          {
-            key: "keys",
-            header: "Keys",
-            cell: (row) =>
-              row.keys ? (
-                <a href={open(row.id, "keys")}>API keys</a>
-              ) : (
-                <span className="muted">-</span>
-              ),
-          },
-        ]}
-      />
-      {shown.some((row) => [row.requests, row.errorRate, row.p50].includes(TOO_FEW)) && (
+      <p className="muted">Figures over the {span}.</p>
+      <TableScroll table="Applications">
+        <table className="data-table" aria-label="Applications">
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">Mode</th>
+              <th scope="col">Requests ({WINDOW_WORDS})</th>
+              <th scope="col">Error rate</th>
+              <th scope="col">p50 latency (to within about 19%)</th>
+              <th scope="col">Open incidents</th>
+              <th scope="col">Status</th>
+              <th scope="col">Keys</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id}>
+                <th scope="row">
+                  <a href={routeHash({ screen: "application", applicationId: row.id })}>
+                    {row.name}
+                  </a>{" "}
+                  <span className="muted figure">({row.id})</span>
+                </th>
+                <td>{row.mode}</td>
+                <td className="figure">
+                  <FigureText text={row.requests} />
+                </td>
+                <td className="figure">
+                  <FigureText text={row.errorRate} />
+                </td>
+                <td className="figure">
+                  <FigureText text={row.p50} />
+                </td>
+                <td>{row.open}</td>
+                <td>
+                  <span className={`status-dot status-${row.status.kind}`} aria-hidden="true" />{" "}
+                  {row.status.words}
+                </td>
+                <td>
+                  {row.keys ? (
+                    <a href={routeHash({ screen: "keys", applicationId: row.id })}>API keys</a>
+                  ) : (
+                    <span className="muted">-</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableScroll>
+      {rows.some((row) => [row.requests, row.errorRate, row.p50].includes(TOO_FEW)) && (
         <p className="muted table-note">
           {TOO_FEW} {TOO_FEW_EXPLAINED}
         </p>
       )}
       <div className="form-actions">
-        {onFirst !== null && <Button onClick={onFirst}>First page</Button>}
+        {onFirst !== null && (
+          <button type="button" onClick={onFirst}>
+            First page
+          </button>
+        )}
         {next !== null && (
-          <Button
+          <button
+            type="button"
             onClick={() => {
               onNext(next);
             }}
           >
             Next page
-          </Button>
+          </button>
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * A figure's text; the dash a figure with too few requests behind it is drawn as carries its
+ * meaning in a tooltip and, for screen readers, in words (docs/54).
+ */
+function FigureText({ text }: { text: string }) {
+  if (text !== TOO_FEW) return <>{text}</>;
+  return (
+    <Tooltip text={TOO_FEW_EXPLAINED} className="too-few">
+      <span aria-hidden="true">{TOO_FEW}</span>
+      <span className="visually-hidden">{TOO_FEW_WORDS}</span>
+    </Tooltip>
   );
 }

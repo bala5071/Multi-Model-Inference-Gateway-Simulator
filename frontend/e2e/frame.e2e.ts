@@ -171,10 +171,8 @@ test("each new state, photographed and checked by axe in both themes", async ({
   await page.getByRole("button", { name: "Expand the sidebar" }).click();
 
   // A change's result as a toast: a preset that only tightens (no step-up).
-  // App two's Settings tab (docs/56), by its address as a link does.
-  await page.evaluate(() => {
-    window.location.hash = "#/app/app-two/settings";
-  });
+  await sections(page).getByRole("link", { name: "Application settings", exact: true }).click();
+  await page.getByRole("combobox", { name: "Application", exact: true }).selectOption("app-two");
   const presets = page.getByRole("region", { name: "Presets", exact: true });
   await presets.getByRole("button", { name: "Apply cheap" }).click();
   const toast = page.locator(".toasts").getByRole("status");
@@ -201,7 +199,7 @@ test("a phone: the sidebar is a drawer, opened from the top bar and closed by a 
   await page.getByRole("button", { name: "Open the navigation" }).click();
   const drawer = page.getByRole("dialog", { name: "Navigation" });
   await expect(drawer).toBeVisible();
-  await expect(drawer.getByRole("navigation", { name: "Sections", exact: true })).toBeVisible();
+  await expect(drawer.getByRole("navigation", { name: "Sections" })).toBeVisible();
   await picturedAndChecked(page, testInfo, "frame-phone-drawer");
   await drawer.getByRole("link", { name: "Incidents", exact: true }).click();
   await expect(drawer).toBeHidden();

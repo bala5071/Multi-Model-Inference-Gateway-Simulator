@@ -76,9 +76,10 @@ async function firstLogIn(page: Page, who: Account) {
   await change.getByLabel("Current password", { exact: true }).fill(who.first());
   await change.getByLabel("New password", { exact: true }).fill(who.password());
   await change.getByRole("button", { name: "Change password" }).click();
-  // Where it lands (console-ia-v2-plan 2.1): its organization's Applications, its one
-  // application's page, or Home. Logged in: the account menu is there.
-  await expect(page.getByRole("button", { name: /^Account:/ })).toBeVisible();
+  // Where it lands (docs/51): its organization's Applications, or Home.
+  await expect(
+    page.getByRole("heading", { name: /^(Home|Applications)$/, level: 2 }),
+  ).toBeVisible();
 }
 
 async function logIn(page: Page, account: Account) {
@@ -92,15 +93,12 @@ async function logIn(page: Page, account: Account) {
 
 /** The page's navigation: Home repeats some of its links, so they are found here. */
 function sections(page: Page): Locator {
-  return page.getByRole("navigation", { name: "Sections", exact: true });
+  return page.getByRole("navigation", { name: "Sections" });
 }
 
-/** An application's Settings tab (docs/56), by its address, as following a link does. */
 async function openApplication(page: Page, label: string): Promise<void> {
-  const id = /\(([^)]+)\)$/.exec(label)?.[1] ?? label;
-  await page.evaluate((hash) => {
-    window.location.hash = hash;
-  }, `#/app/${id}/settings`);
+  await sections(page).getByRole("link", { name: "Application settings" }).click();
+  await page.getByRole("combobox", { name: "Application", exact: true }).selectOption({ label });
   await expect(page.getByRole("region", { name: "Settings in force", exact: true })).toBeVisible();
 }
 
@@ -297,9 +295,8 @@ test("an application's own admin names its application and cannot read the organ
   // The organization's settings are not among its places, and opening them by address says so.
   await expect(sections(page).getByRole("link", { name: "Organization settings" })).toHaveCount(0);
   await page.goto("/dashboard/#/organization");
-  // It lands on its one application's page (docs/56), with the one sentence.
   await expect(
-    page.getByRole("region", { name: "App one", exact: true }).getByRole("alert").first(),
+    page.getByRole("region", { name: "Home", exact: true }).getByRole("alert"),
   ).toHaveText("That page is not available to this account.");
 });
 

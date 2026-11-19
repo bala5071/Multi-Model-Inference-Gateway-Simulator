@@ -19,9 +19,7 @@ import {
   type Account,
 } from "./session";
 
-// In order on the config's one worker, but not serial: a shot that differs does not skip the
-// shots after it, so one run compares (and, for new ones, writes) every baseline (docs/56).
-test.describe.configure({ mode: "default" });
+test.describe.configure({ mode: "serial" });
 test.skip(process.env.VISUAL !== "1", "visual baselines are compared on CI's pinned image only");
 
 /** Waits until the alert evaluator says ok, so its banner is not drawn on one run and not another. */
@@ -49,8 +47,6 @@ function masks(page: Page): Locator[] {
   ];
 }
 
-// Soft: a shot that differs is reported and the test goes on, so both themes and every later
-// shot are taken and compared in the same run (docs/56).
 /**
  * The whole page in both themes, masked; or, given `part` (a menu, a drawer: drawn above the
  * page, where a mask would cover it), that part alone, which holds nothing that changes.
@@ -67,15 +63,13 @@ async function shot(
     await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     if (part === undefined) {
-      await expect.soft(page).toHaveScreenshot(`${name}-${theme}.png`, {
+      await expect(page).toHaveScreenshot(`${name}-${theme}.png`, {
         ...steady,
         fullPage: true,
         mask: masks(page),
       });
     } else {
-      await expect
-        .soft(part)
-        .toHaveScreenshot(`${name}-${theme}.png`, { ...steady, mask: partMasks });
+      await expect(part).toHaveScreenshot(`${name}-${theme}.png`, { ...steady, mask: partMasks });
     }
   }
   await page.emulateMedia({ colorScheme: "light" });
@@ -119,9 +113,6 @@ for (const [who, name] of ROLES) {
     await page.goto("/dashboard/");
     await logIn(page, who);
     await expect(page.getByRole("button", { name: /^Account:/ })).toBeVisible();
-    // The landing drawn, not its skeleton while its code or data arrive (docs/56).
-    await expect(page.getByRole("heading", { level: 2 }).first()).toBeVisible();
-    await expect(page.locator(".skeleton")).toHaveCount(0);
     await shot(page, `landing-${name}`);
     await logOut(page);
   });
@@ -151,15 +142,14 @@ test("UI3: the typed settings forms, a confirmation, the incidents tabs (docs/55
   await evaluatorOk(page);
   await page.goto("/dashboard/");
   await logIn(page, ADMIN);
-  const sectionsNav = page.getByRole("navigation", { name: "Sections", exact: true });
-  // An application's tab (docs/56), by its address as a link does.
-  const openTab = async (hash: string) => {
-    await page.evaluate((h) => {
-      window.location.hash = h;
-    }, hash);
-  };
+  const sectionsNav = page.getByRole("navigation", { name: "Sections" });
+  const chooser = page.getByRole("combobox", { name: "Application", exact: true });
 
-  await openTab("#/app/app-two/settings");
+  await sectionsNav.getByRole("link", { name: "Application settings", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Application settings", level: 2, exact: true }),
+  ).toBeVisible();
+  await chooser.selectOption({ label: "App two (app-two)" });
   await expect(page.getByRole("region", { name: "Edit", exact: true })).toBeVisible();
   await shot(page, "settings-form");
 
@@ -170,8 +160,11 @@ test("UI3: the typed settings forms, a confirmation, the incidents tabs (docs/55
   await expect(page.getByRole("region", { name: "Edit", exact: true })).toBeVisible();
   await shot(page, "organization-form");
 
-  await openTab("#/app/app-one/keys");
-  await expect(page.getByRole("table", { name: "Keys" })).toBeVisible();
+  await sectionsNav.getByRole("link", { name: "API keys", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "API keys", level: 2, exact: true }),
+  ).toBeVisible();
+  await chooser.selectOption({ label: "App one (app-one)" });
   await page
     .getByRole("button", { name: /^Revoke / })
     .first()
@@ -188,20 +181,5 @@ test("UI3: the typed settings forms, a confirmation, the incidents tabs (docs/55
   ).toBeVisible();
   await expect(page.getByRole("tab", { name: "Every state", exact: true })).toBeVisible();
   await shot(page, "incidents");
-  await logOut(page);
-});
-
-test("UI4: the Applications list and an application's Overview (docs/56)", async ({ page }) => {
-  await evaluatorOk(page);
-  await page.goto("/dashboard/");
-  await logIn(page, ADMIN);
-  await expect(page.getByRole("table", { name: "Applications" })).toBeVisible();
-  await shot(page, "applications-list");
-  await page.evaluate(() => {
-    window.location.hash = "#/app/app-one/overview";
-  });
-  await expect(page.getByRole("region", { name: "Figures", exact: true })).toBeVisible();
-  await expect(page.locator(".skeleton")).toHaveCount(0);
-  await shot(page, "application-overview");
   await logOut(page);
 });

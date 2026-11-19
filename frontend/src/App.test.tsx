@@ -106,8 +106,7 @@ describe("layout", () => {
       "aria-selected",
       "true",
     );
-    // The panel is named by its tab (UI3's Tabs, docs/56: the ids come from useId now).
-    expect(screen.getByRole("tabpanel", { name: "Applications" })).toBeInTheDocument();
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "tab-applications");
     expect(screen.queryByRole("article")).not.toBeInTheDocument();
 
     await user.keyboard("{ArrowRight}");

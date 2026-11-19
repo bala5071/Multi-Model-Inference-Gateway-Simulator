@@ -2,7 +2,6 @@ import type { MonitorState } from "../api/store";
 import { ChartPanel } from "../charts/ChartPanel";
 import { formatValue, toColumns, toPercent } from "../charts/transforms";
 import { Unavailable } from "../components/Unavailable";
-import { Card } from "../ui/Card";
 
 export function Capacity({ state }: { state: MonitorState }) {
   const snapshot = state.snapshot;
@@ -19,7 +18,8 @@ export function Capacity({ state }: { state: MonitorState }) {
         const maxBatch = model.batch.max_size;
         const kvCapacity = model.kv.capacity_tokens;
         return (
-          <Card key={name} className="model-section" title={name} label={`${name} capacity`}>
+          <section key={name} className="model-section" aria-label={`${name} capacity`}>
+            <h3>{name}</h3>
             <div className="panels">
               {model.queue.available ? (
                 <ChartPanel
@@ -84,7 +84,7 @@ export function Capacity({ state }: { state: MonitorState }) {
                 <Unavailable what="Prefix cache hit rate" />
               )}
             </div>
-          </Card>
+          </section>
         );
       })}
     </>

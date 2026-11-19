@@ -165,33 +165,29 @@ test("org reader: the same list, no Add application and no keys; the Add form by
   expect(await scan.leaks(page)).toEqual([]);
 });
 
-test("app admin: lands on its application's page, its keys a tab; Applications by address refused", async ({
+test("app admin: its application's keys from home; Applications by address refused", async ({
   page,
 }, testInfo) => {
   const scan = new Scan();
   scan.watch(page);
   await page.goto("/dashboard/");
   await logIn(page, APP_ADMIN, scan);
-  // One application: its page is the landing (console-ia-v2-plan 2.1, docs/56).
-  const own = region(page, "App one");
-  await own
-    .getByRole("navigation", { name: "Application sections" })
-    .getByRole("link", { name: "API keys" })
-    .click();
+  const home = region(page, "Your applications");
+  await home.getByRole("link", { name: "API keys" }).click();
   const keys = page.getByRole("table", { name: "Keys" });
   await expect(keys).toContainText("expiring");
   await expect(page.getByRole("form", { name: "Issue a key" })).toBeVisible();
   await picture(page, testInfo, "keys-app-admin");
-  await refusedByAddress(page, "#/apps", "App one");
-  await refusedByAddress(page, "#/apps/new", "App one");
+  await refusedByAddress(page, "#/apps", "Home");
+  await refusedByAddress(page, "#/apps/new", "Home");
   await picture(page, testInfo, "hidden-applications-app-admin");
   expect(await scan.leaks(page)).toEqual([]);
 });
 
-for (const [who, name, landing] of [
-  [APP_READER, "application-reader", "App one"],
-  [OPERATOR, "platform-admin", "Home"],
-  [NO_ROLE, "no-role", "Home"],
+for (const [who, name] of [
+  [APP_READER, "application-reader"],
+  [OPERATOR, "platform-admin"],
+  [NO_ROLE, "no-role"],
 ] as const) {
   test(`${name}: no Applications and no keys; each by address refused`, async ({
     page,
@@ -203,7 +199,7 @@ for (const [who, name, landing] of [
     await expect(sections(page).getByRole("link", { name: "Applications" })).toHaveCount(0);
     await expect(sections(page).getByRole("link", { name: "API keys" })).toHaveCount(0);
     for (const hash of ["#/apps", "#/apps/new", "#/keys", "#/app/app-one/keys"]) {
-      await refusedByAddress(page, hash, landing);
+      await refusedByAddress(page, hash, "Home");
     }
     await picture(page, testInfo, `hidden-applications-${name}`);
     expect(await scan.leaks(page)).toEqual([]);
@@ -295,12 +291,11 @@ test("narrow screens: every table that overflows is reached and scrolled by keyb
   await page.setViewportSize({ width: 480, height: 900 });
   await page.goto("/dashboard/");
   await logIn(page, ADMIN);
-  // An application's tabs are headed by its name (docs/56); the old addresses still open them.
   const screens: [string, string][] = [
-    ["#/application/app-one", "App one"],
+    ["#/application/app-one", "Application settings"],
     ["#/organization", "Organization settings"],
-    ["#/rules/app-one", "App one"],
-    ["#/app/app-one/keys", "App one"],
+    ["#/rules/app-one", "Alert rules"],
+    ["#/app/app-one/keys", "API keys"],
     ["#/apps", "Applications"],
     ["#/incidents", "Incidents"],
   ];

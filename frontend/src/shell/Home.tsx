@@ -5,14 +5,13 @@ import type { Capabilities, IncidentPage } from "../console/types";
 import { useLoad } from "../console/useLoad";
 import {
   allows,
-  appTabs,
   isShown,
   NAVIGATION,
   ORGANIZATION_INCIDENTS,
   target,
   type ItemId,
 } from "./navigation";
-import { APP_TAB_WORDS, routeHash, type Route } from "./routes";
+import { routeHash, type Route } from "./routes";
 
 /** The incident states counted as open (`OPEN_STATES` in the gateway's incidents.py). */
 export const OPEN_STATES = ["pending", "firing", "acknowledged"] as const;
@@ -36,7 +35,7 @@ function ItemLink({
   if (item === undefined || !isShown(item, capabilities)) return null;
   return (
     <li>
-      <a href={routeHash(target(item, from))}>{item.label}</a>
+      <a href={routeHash(target(item, from, capabilities))}>{item.label}</a>
     </li>
   );
 }
@@ -113,8 +112,9 @@ export function Home({
           <h3 id="home-organization">Organization {user.organization_id}</h3>
           <EvaluatorBanner api={context.api} />
           <ul>
-            <ItemLink id="apps" capabilities={capabilities} />
             <ItemLink id="organization" capabilities={capabilities} />
+            <ItemLink id="application" capabilities={capabilities} />
+            <ItemLink id="rules" capabilities={capabilities} />
             <ItemLink id="channels" capabilities={capabilities} />
             <ItemLink id="incidents" capabilities={capabilities} />
           </ul>
@@ -139,19 +139,26 @@ export function Home({
           <ul>
             {capabilities.applications.map((application) => {
               const id = application.application_id;
-              // Each tab of its page the gateway allows on it (docs/56).
+              const links: [string, Route, string][] = [
+                ["Settings", { screen: "application", applicationId: id }, "settings.read"],
+                ["Alert rules", { screen: "rules", applicationId: id }, "alert_rules.read"],
+                [
+                  "Incidents",
+                  { screen: "incidents", applicationId: id, incidentId: null },
+                  "incidents.read",
+                ],
+                ["API keys", { screen: "keys", applicationId: id }, "application_keys.list"],
+              ];
               return (
                 <li key={id}>
                   <strong>{id}</strong>
-                  {appTabs(capabilities, id).map((tab) => (
-                    <a
-                      key={tab}
-                      className="home-link"
-                      href={routeHash({ screen: "app", applicationId: id, tab, incidentId: null })}
-                    >
-                      {APP_TAB_WORDS[tab]}
-                    </a>
-                  ))}
+                  {links
+                    .filter(([, , action]) => application.actions[action] === true)
+                    .map(([label, route]) => (
+                      <a key={label} className="home-link" href={routeHash(route)}>
+                        {label}
+                      </a>
+                    ))}
                 </li>
               );
             })}
