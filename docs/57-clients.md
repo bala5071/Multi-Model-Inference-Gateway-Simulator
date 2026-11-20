@@ -60,6 +60,44 @@ What this makes possible: the application hour keys give each application a 24-p
 series, and the minute rollups already give 60 per-minute points. The client view's one
 application uses them as a table. **The Overview tab's chart is not added** here.
 
+## Bounds (15.6, condition 1)
+
+`uv run python -m benchmarks.rollup_bounds` (5,000 applications, 50 organizations, one answered
+request per application at minute 30 of each of 27 hours; commit e30f5ed):
+
+- **In memory** (this machine: Intel Core Ultra 7 155H, 22 logical cores, 15.4 GB, Windows 11,
+  Python 3.12.10; the same counts on CI's runner): 130,000 application hour keys (26 per
+  application: hour 0 of 0 to 26 is forgotten), 1,300 organization hour keys, 100 organization
+  minute keys and 10,000 minute keys; the rollups grew by **74.4 MiB** (`tracemalloc`). The bound
+  is per subject, whatever the traffic: 26 hour keys and the minutes of the last 120 minutes; a
+  key holds at most the recorder's fixed field names.
+- **Valkey** (CI's `valkey` job, CI's hardware: AMD EPYC 9V74, 4 logical cores, 15.6 GB, Linux,
+  Python 3.12.16; run 44769978009): 135,000 application hour keys, **24.7 MiB** (`MEMORY USAGE`,
+  192 bytes a key), each with a `PTTL` of 26.0 hours; 1,350 organization hour keys (0.2 MiB,
+  26.0 hours); 1,350 organization minute keys (0.2 MiB, 2.0 hours). All 27 hours are present
+  because the run writes them within seconds; in a running gateway an hour key's last write is
+  in its hour (or one flush later), so at most 27 hours of a subject are alive: 5,000 x 27 =
+  135,000 keys, the count above.
+- **Old hours expire**: in memory, `tests/test_recorder_hours.py` holds 30 hours and finds
+  exactly the newest 26; on a real Valkey, the hours' keep shortened to 300 ms, every hour key is
+  gone within seconds while the minute keys stay (`test_valkey_hour_keys_are_gone_once_their_time_is_up`,
+  CI's `valkey` job, which now runs every valkey test: it ran `tests/test_valkey.py` only).
+
+## Timing (15.6, condition 2)
+
+Each three runs; this machine is the one named above, CI's is the `valkey` job's.
+
+- **The alert evaluator's cycle**, 1,000 applications on SQLite, before (commit df291e3, in a
+  worktree) and after (with every application's 26 hours and the organization's keys held
+  beside the minutes): `uv run python -m benchmarks.alert_evaluation --sqlite-only --sizes 1000`.
+  First cycle 310.3 to 419.0 ms before, 358.0 to 389.3 ms after; steady cycles 190.7 to 306.1 ms
+  before, 143.3 to 287.0 ms after; 417 and 61 store calls in both. The evaluator reads minutes
+  only, so the change is within the runs' spread. (The old 0.25 to 0.40 s was docs/45's.)
+- **One flush** (CI's hardware, `benchmarks.rollup_bounds --valkey`, 100 applications x 10
+  requests, 50 flushes): the minute keys alone 1.960 ms mean (p99 3.178 ms); with the hour and
+  organization keys 4.982 ms mean (p99 6.382 ms). Off the request path, once every 10 s: one
+  `ROLLUP_ADD` per kind and the counting-since marker, each a round trip.
+
 ## Not built
 
 Creating an organization (PR 3b); a chart on the Overview tab; tokens and estimated cost on the

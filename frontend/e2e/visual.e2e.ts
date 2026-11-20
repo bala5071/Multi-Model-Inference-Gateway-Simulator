@@ -46,6 +46,8 @@ function masks(page: Page): Locator[] {
     // whatever follows it (docs/55).
     page.locator(".table-scroll:not(details:not([open]) *)"),
     page.locator(".muted").filter({ hasText: /UTC|restart|minutes/ }),
+    // A Clients window that began at the restart says when (docs/57).
+    page.locator(".notice").filter({ hasText: /UTC|restart/ }),
   ];
 }
 
@@ -203,5 +205,28 @@ test("UI4: the Applications list and an application's Overview (docs/56)", async
   await expect(page.getByRole("region", { name: "Figures", exact: true })).toBeVisible();
   await expect(page.locator(".skeleton")).toHaveCount(0);
   await shot(page, "application-overview");
+  await logOut(page);
+});
+
+test("PR 3a: a client and one of its applications, as the platform owner (docs/57)", async ({
+  page,
+}) => {
+  await evaluatorOk(page);
+  await page.goto("/dashboard/");
+  await logIn(page, OPERATOR);
+  // The landing itself is "landing-platform-admin" above.
+  await expect(page.getByRole("table", { name: "Clients" })).toBeVisible();
+  await page.evaluate(() => {
+    window.location.hash = "#/clients/acme";
+  });
+  await expect(page.getByRole("table", { name: "Applications" })).toBeVisible();
+  await expect(page.locator(".skeleton")).toHaveCount(0);
+  await shot(page, "client-view");
+  await page.evaluate(() => {
+    window.location.hash = "#/clients/acme/app-one";
+  });
+  await expect(page.getByRole("table", { name: "App one, each minute" })).toBeVisible();
+  await expect(page.locator(".skeleton")).toHaveCount(0);
+  await shot(page, "client-application");
   await logOut(page);
 });

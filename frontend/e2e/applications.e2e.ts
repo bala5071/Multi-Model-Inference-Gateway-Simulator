@@ -190,7 +190,7 @@ test("app admin: lands on its application's page, its keys a tab; Applications b
 
 for (const [who, name, landing] of [
   [APP_READER, "application-reader", "App one"],
-  [OPERATOR, "platform-admin", "Home"],
+  [OPERATOR, "platform-admin", "Clients"],
   [NO_ROLE, "no-role", "Home"],
 ] as const) {
   test(`${name}: no Applications and no keys; each by address refused`, async ({
