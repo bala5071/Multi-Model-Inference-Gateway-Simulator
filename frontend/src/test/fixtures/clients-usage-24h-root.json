@@ -1,0 +1,112 @@
+{
+  "window": {
+    "name": "24h",
+    "bucket_ms": 3600000,
+    "first_ms": 1793541600000,
+    "end_ms": 1793628000000,
+    "since_ms": 1793613600000.0,
+    "since_reason": "restarted"
+  },
+  "organizations": [
+    {
+      "organization_id": "default",
+      "requests": {
+        "value": 0.0,
+        "why_not": null
+      },
+      "error_rate": {
+        "value": null,
+        "why_not": "too_few"
+      },
+      "fallback_rate": {
+        "value": null,
+        "why_not": "too_few"
+      },
+      "open_incidents": {
+        "pending": 0,
+        "firing": 0,
+        "acknowledged": 0
+      }
+    },
+    {
+      "organization_id": "north",
+      "requests": {
+        "value": 29.0,
+        "why_not": null
+      },
+      "error_rate": {
+        "value": 10.344827586206897,
+        "why_not": null
+      },
+      "fallback_rate": {
+        "value": null,
+        "why_not": "too_few"
+      },
+      "open_incidents": {
+        "pending": 0,
+        "firing": 1,
+        "acknowledged": 0
+      }
+    },
+    {
+      "organization_id": "solo",
+      "requests": {
+        "value": 0.0,
+        "why_not": null
+      },
+      "error_rate": {
+        "value": null,
+        "why_not": "too_few"
+      },
+      "fallback_rate": {
+        "value": null,
+        "why_not": "too_few"
+      },
+      "open_incidents": {
+        "pending": 0,
+        "firing": 0,
+        "acknowledged": 0
+      }
+    },
+    {
+      "organization_id": "south",
+      "requests": {
+        "value": 30.0,
+        "why_not": null
+      },
+      "error_rate": {
+        "value": 0.0,
+        "why_not": null
+      },
+      "fallback_rate": {
+        "value": 100.0,
+        "why_not": null
+      },
+      "open_incidents": {
+        "pending": 1,
+        "firing": 0,
+        "acknowledged": 0
+      }
+    }
+  ],
+  "totals": {
+    "requests": {
+      "value": 59.0,
+      "why_not": null
+    },
+    "error_rate": {
+      "value": 5.084745762711864,
+      "why_not": null
+    },
+    "fallback_rate": {
+      "value": 100.0,
+      "why_not": null
+    },
+    "open_incidents": {
+      "pending": 1,
+      "firing": 1,
+      "acknowledged": 0
+    }
+  },
+  "next": null
+}

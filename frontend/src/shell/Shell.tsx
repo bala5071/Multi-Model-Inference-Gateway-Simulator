@@ -42,6 +42,13 @@ const ChannelsScreen = lazy(() =>
 const IncidentsScreen = lazy(() =>
   import("../console/IncidentsScreen").then((m) => ({ default: m.IncidentsScreen })),
 );
+// Clients (docs/57): the platform owner's pages, one chunk for both.
+const ClientsScreen = lazy(() =>
+  import("../console/ClientsScreen").then((m) => ({ default: m.ClientsScreen })),
+);
+const ClientScreen = lazy(() =>
+  import("../console/ClientsScreen").then((m) => ({ default: m.ClientScreen })),
+);
 
 /** A screen loaded on demand, with a skeleton while its code arrives. */
 function OnDemand({ children }: { children: ReactNode }) {
@@ -370,12 +377,18 @@ export function Shell({ fetcher, stream }: { fetcher?: typeof fetch; stream?: St
         onName={setAppName}
       />
     );
-    // Where this session lands (console-ia-v2-plan 2.1): its organization's Applications, its one
-    // application's page, or Home.
+    // Where this session lands (console-ia-v2-plan 2.1): its organization's Applications, the
+    // platform's Clients (docs/57), its one application's page, or Home.
     const home = (notice: string | null) =>
       land.screen === "apps" ? (
         <main className="console">
           <ApplicationsScreen context={context} notice={notice} />
+        </main>
+      ) : land.screen === "clients" ? (
+        <main className="console">
+          <OnDemand>
+            <ClientsScreen context={context} notice={notice} />
+          </OnDemand>
         </main>
       ) : land.screen === "app" && land.applicationId !== null ? (
         appPage(land, land.applicationId, notice)
@@ -399,6 +412,27 @@ export function Shell({ fetcher, stream }: { fetcher?: typeof fetch; stream?: St
         return home(null);
       case "apps":
         return home(null);
+      case "clients":
+        return (
+          <main className="console">
+            <OnDemand>
+              <ClientsScreen context={context} />
+            </OnDemand>
+          </main>
+        );
+      case "client":
+        return (
+          <main className="console">
+            <OnDemand>
+              <ClientScreen
+                key={route.organizationId}
+                context={context}
+                organizationId={route.organizationId}
+                applicationId={route.applicationId}
+              />
+            </OnDemand>
+          </main>
+        );
       case "apps-new":
         return (
           <main className="console">

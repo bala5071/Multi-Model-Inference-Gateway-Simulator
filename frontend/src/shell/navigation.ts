@@ -14,7 +14,8 @@ export interface Ask {
   action: string;
 }
 
-export type ItemId = "home" | "monitor" | "apps" | "organization" | "channels" | "incidents";
+export type ItemId =
+  "home" | "monitor" | "clients" | "apps" | "organization" | "channels" | "incidents";
 
 /**
  * The sidebar's groups (docs/54): the level of what an item opens. Home has none. "Application"
@@ -59,6 +60,12 @@ export const NAVIGATION: readonly NavItem[] = [
     asks: [{ level: "organization", action: "incidents.read_organization" }],
   },
   {
+    id: "clients",
+    label: "Clients",
+    group: "Platform",
+    asks: [{ level: "platform", action: "organizations.list" }],
+  },
+  {
     id: "monitor",
     label: "Monitoring",
     group: "Platform",
@@ -73,6 +80,8 @@ export const LOAD_CONTROL: Ask = { level: "platform", action: "control.write" };
 export const CREATE_APPLICATION: Ask = { level: "organization", action: "applications.create" };
 /** The organization's application list: where such a session lands (docs/51). */
 export const LIST_APPLICATIONS: Ask = { level: "organization", action: "applications.list" };
+/** The platform's organizations: Clients, where a platform session lands (docs/57). */
+export const LIST_CLIENTS: Ask = { level: "platform", action: "organizations.list" };
 /** The organization's own incidents, for the Incidents link and the home screen's count. */
 export const ORGANIZATION_INCIDENTS: Ask = {
   level: "organization",
@@ -146,17 +155,20 @@ export function appLinks(capabilities: Capabilities): string[] {
 export function itemOf(route: Route): string | null {
   if (route.screen === "unknown") return null;
   if (route.screen === "apps-new") return "apps";
+  if (route.screen === "client") return "clients";
   if (route.screen === "app") return `app:${route.applicationId ?? ""}`;
   return route.screen;
 }
 
 /**
  * Where `#/home` takes this session (console-ia-v2-plan 2.1): its organization's Applications when
- * the gateway allows it the list; the page of its one application when it names exactly one;
- * Home otherwise (a platform session until Clients, one of several applications, no access).
+ * the gateway allows it the list; Clients for a platform session the gateway lets list the
+ * organizations (docs/57); the page of its one application when it names exactly one; Home
+ * otherwise (one of several applications, no access).
  */
 export function landing(capabilities: Capabilities): Route {
   if (allows(capabilities, LIST_APPLICATIONS)) return { screen: "apps" };
+  if (allows(capabilities, LIST_CLIENTS)) return { screen: "clients" };
   const own = appLinks(capabilities);
   return own.length === 1 && own[0] !== undefined
     ? { screen: "app", applicationId: own[0], tab: "overview", incidentId: null }
@@ -201,6 +213,8 @@ export function target(item: NavItem, current: Route): Route {
       return { screen: "channels" };
     case "apps":
       return { screen: "apps" };
+    case "clients":
+      return { screen: "clients" };
     case "incidents":
       return { screen: "incidents" };
   }

@@ -11,6 +11,9 @@
 //   #/app/<id>/<tab>                        an application's page: overview, settings, rules,
 //                                           incidents, keys (console-ia-v2-plan 2.2)
 //   #/app/<id>/incidents/<incident>         one of its incidents
+//   #/clients                               the platform owner's clients (docs/57)
+//   #/clients/<org>                         one client's applications, metrics only
+//   #/clients/<org>/<app>                   one of them over time
 //
 // Old hashes keep working (2.2): `#/application/<id>` is the page's settings, `#/rules/<id>` its
 // rules, `#/incidents/<app>[/<incident>]` its incidents, `#/app/<id>` its overview;
@@ -44,6 +47,8 @@ export type Route =
   | { screen: "apps" }
   | { screen: "apps-new" }
   | { screen: "app"; applicationId: string | null; tab: AppTab; incidentId: string | null }
+  | { screen: "clients" }
+  | { screen: "client"; organizationId: string; applicationId: string | null }
   | { screen: "unknown" };
 
 function isTab(name: string | undefined): name is MonitorTab {
@@ -76,6 +81,15 @@ export function parseRoute(hash: string): Route {
   if (first === "channels" && only) return { screen: "channels" };
   if (first === "apps" && only) return { screen: "apps" };
   if (first === "apps" && second === "new" && parts.length === 2) return { screen: "apps-new" };
+  if (first === "clients") {
+    if (only) return { screen: "clients" };
+    const organizationId = part(1);
+    if (organizationId === null || parts.length > 3) return { screen: "unknown" };
+    if (parts.length === 2) return { screen: "client", organizationId, applicationId: null };
+    const applicationId = part(2);
+    if (applicationId === null) return { screen: "unknown" };
+    return { screen: "client", organizationId, applicationId };
+  }
   if (first === "app") {
     const id = part(1);
     if (id === null) return only ? app(null, "overview") : { screen: "unknown" };
@@ -115,6 +129,12 @@ export function routeHash(route: Route): string {
       return "#/apps";
     case "apps-new":
       return "#/apps/new";
+    case "clients":
+      return "#/clients";
+    case "client": {
+      const client = `#/clients/${e(route.organizationId)}`;
+      return route.applicationId === null ? client : `${client}/${e(route.applicationId)}`;
+    }
     case "app": {
       if (route.applicationId === null) return "#/app";
       const page = `#/app/${e(route.applicationId)}/${route.tab}`;
@@ -179,7 +199,22 @@ export function crumbs(
     case "home":
     case "unknown":
       if (landing.screen === "app") return crumbs(landing, organizationId, landing, context);
+      if (landing.screen === "clients") return [last("Clients")];
       return landing.screen === "apps" ? [org, last("Applications")] : [last("Home")];
+    case "clients":
+      return [last("Clients")];
+    case "client": {
+      const clients: Crumb = { label: "Clients", route: { screen: "clients" } };
+      if (route.applicationId === null) return [clients, last(route.organizationId)];
+      return [
+        clients,
+        {
+          label: route.organizationId,
+          route: { screen: "client", organizationId: route.organizationId, applicationId: null },
+        },
+        last(route.applicationId),
+      ];
+    }
     case "monitor":
       return [
         { label: "Monitoring", route: { screen: "monitor", tab: "overview" } },
