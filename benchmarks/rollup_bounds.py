@@ -104,8 +104,15 @@ async def on_valkey(
     # A throwaway secret: it names the keys and lives in this function only.
     secret = secrets.token_bytes(32)
     prefix = f"gwbench:{secrets.token_hex(8)}:"
+    # One call adds a whole hour of 5,000 applications at once, far more than a 10 s flush holds:
+    # a longer timeout than the server's, so the measurement is not cut short.
     counters = ValkeyCounters(
-        Redis.from_url(url, decode_responses=True), clock, SystemEpoch(), secret, prefix=prefix
+        Redis.from_url(url, decode_responses=True),
+        clock,
+        SystemEpoch(),
+        secret,
+        prefix=prefix,
+        timeout_ms=30_000,
     )
     rollups = ValkeyAlertRollups(counters)
     epoch = Epoch()
