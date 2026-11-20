@@ -36,6 +36,7 @@ from typing import Any, TypeVar, cast
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from gateway.alertrecorder import HOUR_KINDS, ORG_MINUTE, ExtraKey
 from gateway.alertrollups import MinuteRollup
 from gateway.audit import (
     AuditAction,
@@ -222,6 +223,8 @@ return 1
 
 # How long a rollup, a batch id and the restart marker are kept (the plan's two hours).
 ROLLUP_KEEP_MS = 2 * 60 * 60 * 1000
+# How long an hour key, its batch id and the hours' restart marker are kept (docs/57): 26 hours.
+HOURS_KEEP_MS = 26 * 60 * 60 * 1000
 INCOMPLETE = "incomplete"
 
 
@@ -652,9 +655,16 @@ class ValkeyAlertRollups:
     def __init__(self, counters: ValkeyCounters) -> None:
         self._c = counters
         self._restart = counters.rollup_name("rollup-restart", "")
+        # The hours' own restart marker (kept as long as an hour key) and the minute since which
+        # the hour and organization keys have been counted (docs/57): one key each.
+        self._restart_hours = counters.rollup_name("rollup-restart-hours", "")
+        self._since = counters.rollup_name("rollup-extras-since", "")
 
     def _key(self, application_id: str, minute: int) -> str:
         return self._c.rollup_name("rollup", f"{application_id}\x00{minute}")
+
+    def _extra_key(self, kind: str, subject: str, bucket: int) -> str:
+        return self._c.rollup_name(f"rollup-{kind}", f"{subject}\x00{bucket}")
 
     async def add(self, batch: str, deltas: Mapping[tuple[str, int], Mapping[str, int]]) -> None:
         keys = [self._c.rollup_name("rollup-batch", batch)]
@@ -678,10 +688,86 @@ class ValkeyAlertRollups:
         await self._c.call(mark)
 
     async def note_restart(self, minute: int) -> None:
-        """The store restarted: every minute up to ``minute`` lost its counts."""
+        """The store restarted: every minute up to ``minute`` lost its counts, and every hour
+        that began at or before it."""
         await self._c.call(
             partial(self._c.rollup_restart, keys=[self._restart], args=[minute, ROLLUP_KEEP_MS])
         )
+        await self._c.call(
+            partial(
+                self._c.rollup_restart, keys=[self._restart_hours], args=[minute, HOURS_KEEP_MS]
+            )
+        )
+
+    async def add_extras(self, batch: str, extras: Mapping[ExtraKey, Mapping[str, int]]) -> None:
+        """The hour and organization keys' counts (docs/57): one ``ROLLUP_ADD`` per kind, each
+        kept as long as its kind (``HOURS_KEEP_MS`` or ``ROLLUP_KEEP_MS``), each taken once per
+        ``batch``; then the minute since which they are counted, set once."""
+        kinds = sorted({kind for kind, _, _ in extras})
+        for kind in kinds:
+            keep = HOURS_KEEP_MS if kind in HOUR_KINDS else ROLLUP_KEEP_MS
+            keys = [self._c.rollup_name("rollup-batch", f"{batch}\x00{kind}")]
+            args: list[str | int] = [keep]
+            for (k, subject, bucket), counts in sorted(extras.items()):
+                if k != kind:
+                    continue
+                keys.append(self._extra_key(kind, subject, bucket))
+                args.append(len(counts))
+                for name, n in sorted(counts.items()):
+                    args += [name, n]
+            await self._c.call(partial(self._c.rollup_add, keys=keys, args=args))
+        # The first minute these counts are sure to cover: an organization minute's own, or, with
+        # only hour keys, the last minute of their hour (claiming less, never more).
+        minutes = [b for k, _, b in extras if k == ORG_MINUTE] or [
+            (b + 1) * 60 - 1 for k, _, b in extras if k in HOUR_KINDS
+        ]
+        if minutes:
+            first = min(minutes)
+            await self._c.call(partial(self._c.client.set, self._since, first, nx=True))
+
+    async def mark_incomplete_extras(self, keys: Sequence[ExtraKey]) -> None:
+        async def mark() -> None:
+            async with self._c.client.pipeline(transaction=True) as pipe:
+                for kind, subject, bucket in keys:
+                    name = self._extra_key(kind, subject, bucket)
+                    pipe.hset(name, INCOMPLETE, 1)
+                    pipe.pexpire(name, HOURS_KEEP_MS if kind in HOUR_KINDS else ROLLUP_KEEP_MS)
+                await pipe.execute()
+
+        await self._c.call(mark)
+
+    async def read_extras(
+        self, kind: str, wanted: Sequence[tuple[str, Sequence[int]]]
+    ) -> tuple[list[list[MinuteRollup]], int | None]:
+        """One pipeline for every (subject, bucket) asked, the restart mark of the kind and the
+        minute since which the kind is counted. An hour that began at or before a restart is
+        incomplete."""
+        hours = kind in HOUR_KINDS
+
+        async def fetch() -> list[Any]:
+            async with self._c.client.pipeline(transaction=False) as pipe:
+                for subject, buckets in wanted:
+                    for bucket in buckets:
+                        pipe.hgetall(self._extra_key(kind, subject, bucket))
+                pipe.get(self._restart_hours if hours else self._restart)
+                pipe.get(self._since)
+                found: list[Any] = await pipe.execute()
+                return found
+
+        *found, restart, since = await self._c.call(fetch)
+        restarted = int(restart) if restart is not None else -1
+        answers = iter(found)
+        result = []
+        for subject, buckets in wanted:
+            rollups = []
+            for bucket in buckets:
+                fields = next(answers)
+                counts = {str(k): int(v) for k, v in fields.items() if k != INCOMPLETE}
+                first_minute = bucket * 60 if hours else bucket
+                incomplete = INCOMPLETE in fields or first_minute <= restarted
+                rollups.append(MinuteRollup(subject, bucket, counts, incomplete))
+            result.append(rollups)
+        return result, int(since) if since is not None else None
 
     async def read(self, application_id: str, minutes: Sequence[int]) -> list[MinuteRollup]:
         [rollups] = await self.read_many([(application_id, minutes)])

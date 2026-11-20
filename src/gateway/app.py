@@ -1587,6 +1587,8 @@ class AlertNote:
 
     kind: str
     application_id: str | None = None
+    # Its organization, for the recorder's organization keys (docs/57).
+    organization_id: str | None = None
     ttft_ms: float | None = None
     total_ms: float | None = None
     downgraded: bool = False
@@ -1636,6 +1638,7 @@ class AlertOutcomeMiddleware:
             hosted_attempts=trace.hosted_attempts if trace is not None else 0,
             hosted=trace is not None and trace.provider_class == HOSTED,
             downgraded=note.downgraded,
+            organization_id=note.organization_id,
         )
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
@@ -4617,6 +4620,7 @@ def create_app(
             found = keyed(await keys.authenticate(credentials.strip()))
             if (note := noted()) is not None:
                 note.application_id = found.application.id
+                note.organization_id = found.application.organization_id
             return found
 
         @app.post("/v1/generate", response_model=GenerateResponse)
@@ -4752,6 +4756,7 @@ def create_app(
                 found = keyed(await keys.authenticate(credentials.strip()))
                 if (note := noted()) is not None:
                     note.application_id = found.application.id
+                    note.organization_id = found.application.organization_id
             except InvalidApiKeyError:
                 return _openai_error(
                     401,
