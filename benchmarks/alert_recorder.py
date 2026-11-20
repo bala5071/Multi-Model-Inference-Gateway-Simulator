@@ -59,7 +59,12 @@ def run(calls: int) -> list[WriteTimes]:
     def answered(recorder: AlertRecorder) -> Callable[[], None]:
         def step() -> None:
             recorder.record(
-                next(applications), kind="generate", status=200, ttft_ms=42.0, total_ms=380.0
+                next(applications),
+                kind="generate",
+                status=200,
+                ttft_ms=42.0,
+                total_ms=380.0,
+                organization_id="org1",
             )
 
         return step
@@ -74,10 +79,17 @@ def run(calls: int) -> list[WriteTimes]:
             fallbacks=("connect_error",),
             hosted_attempts=2,
             hosted=True,
+            organization_id="org1",
         )
 
     def refused() -> None:
-        flushed.record(next(applications), kind="generate", status=429, code="rate_limited")
+        flushed.record(
+            next(applications),
+            kind="generate",
+            status=429,
+            code="rate_limited",
+            organization_id="org1",
+        )
 
     return [
         _times("answered, flushed", calls, answered(flushed)),

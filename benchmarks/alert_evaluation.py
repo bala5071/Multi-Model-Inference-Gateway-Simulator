@@ -38,8 +38,8 @@ from typing import Any
 import asyncpg
 
 from benchmarks.calibrate import describe_machine
-from gateway.alertrecorder import MINUTE_MS
-from gateway.alertrollups import InMemoryAlertRollups
+from gateway.alertrecorder import APP_HOUR, MINUTE_MS, ORG_HOUR, ORG_MINUTE, ExtraKey
+from gateway.alertrollups import KEEP_HOURS, InMemoryAlertRollups
 from gateway.alertrules import default_rules
 from gateway.alerts.caps import AlertCaps
 from gateway.alerts.channels import ChannelService
@@ -129,19 +129,19 @@ async def _seed(state: StateBackend, size: int, epoch: EpochSource) -> None:
 def _rollups(size: int, now_ms: float) -> InMemoryAlertRollups:
     rollups = InMemoryAlertRollups()
     minute = int(now_ms // MINUTE_MS)
+    hour = minute // 60
     for i in range(size):
         failed = 10 if i % 10 == 0 else 0
         refused = 2 if i % 20 == 5 else 0
-        rollups.absorb(
-            {
-                (f"app{i:05d}", m): {
-                    "requests": 40,
-                    "status:5xx": failed,
-                    "reject:budget_exhausted": refused,
-                }
-                for m in range(minute - 70, minute + 5)
-            }
-        )
+        counts = {"requests": 40, "status:5xx": failed, "reject:budget_exhausted": refused}
+        # The hourly counts the recorder keeps beside the minutes (docs/57): each application's
+        # 26 hours, and the organization's minutes and hours, so the store holds what it would.
+        extras: dict[ExtraKey, dict[str, int]] = {
+            (APP_HOUR, f"app{i:05d}", h): counts for h in range(hour - KEEP_HOURS + 1, hour + 1)
+        }
+        extras.update({(ORG_MINUTE, ORG, m): counts for m in range(minute - 70, minute + 5)})
+        extras.update({(ORG_HOUR, ORG, h): counts for h in range(hour - KEEP_HOURS + 1, hour + 1)})
+        rollups.absorb({(f"app{i:05d}", m): counts for m in range(minute - 70, minute + 5)}, extras)
     return rollups
 
 
@@ -216,7 +216,7 @@ async def _measure(name: str, state: StateBackend, size: int) -> CycleTimes:
     )  # fmt: skip
 
 
-async def run(sizes: Sequence[int], url: str, env: Mapping[str, str]) -> list[CycleTimes]:
+async def run(sizes: Sequence[int], url: str | None, env: Mapping[str, str]) -> list[CycleTimes]:
     results = []
     for size in sizes:
         with tempfile.TemporaryDirectory() as folder:
@@ -228,6 +228,8 @@ async def run(sizes: Sequence[int], url: str, env: Mapping[str, str]) -> list[Cy
                 )
             finally:
                 connection.close()
+        if url is None:  # --sqlite-only
+            continue
         schema = f"gwbench_{secrets.token_hex(8)}"
         admin = await asyncpg.connect(url)
         await admin.execute(f"CREATE SCHEMA {schema}")
@@ -248,15 +250,21 @@ async def run(sizes: Sequence[int], url: str, env: Mapping[str, str]) -> list[Cy
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Time one alert evaluation cycle.")
     parser.add_argument("--sizes", type=int, nargs="+", default=list(SIZES))
+    parser.add_argument(
+        "--sqlite-only",
+        action="store_true",
+        help="time the SQLite file only, with no Postgres",
+    )
     args = parser.parse_args(argv)
     if any(size < 1 for size in args.sizes):
         parser.error("--sizes must be at least 1")
-    url = os.environ.get(URL_ENV)
-    if not url:
+    url = None if args.sqlite_only else os.environ.get(URL_ENV)
+    if not url and not args.sqlite_only:
         parser.error(f"set {URL_ENV} to the Postgres to measure against")
 
     machine = describe_machine()
-    print("MEASURED on this machine: real time, a SQLite file and a real Postgres.")
+    stores = "a SQLite file" if url is None else "a SQLite file and a real Postgres"
+    print(f"MEASURED on this machine: real time, {stores}.")
     for key in ("cpu", "logical_cores", "ram_gb", "os", "python"):
         print(f"{key}: {machine[key]}")
     print(f"default rules per application: 8 (5 enabled); steady cycles: {STEADY_CYCLES}")
