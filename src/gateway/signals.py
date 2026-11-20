@@ -185,6 +185,28 @@ def evaluate_many(
     return {name: _value(name, None, counts) for name in names}
 
 
+def evaluate_counts(
+    wanted: Sequence[tuple[str, str | None]], rollups: Sequence[MinuteRollup]
+) -> dict[str, SignalValue]:
+    """Each (signal, parameter) of ``wanted`` over ``rollups`` summed, with ``evaluate``'s own
+    values and minimums, for any run of buckets (minutes or hours, of one application or one
+    organization, or of several summed): the console's client figures (docs/57), which are not
+    an alert rule's window, so no window is checked. An incomplete bucket makes every value
+    incomplete, as in ``evaluate``."""
+    for name, parameter in wanted:
+        signal = SIGNALS.get(name)
+        if signal is None or name not in FROM_ROLLUPS:
+            raise ValueError(f"{name!r} is not a signal computed from rollups")
+        if (parameter is None) != (not signal.parameters) or (
+            parameter is not None and parameter not in signal.parameters
+        ):
+            raise ValueError(f"{name} does not take the parameter {parameter!r}")
+    if any(r.incomplete for r in rollups):
+        return {name: INCOMPLETE for name, _ in wanted}
+    counts = _summed(rollups)
+    return {name: _value(name, parameter, counts) for name, parameter in wanted}
+
+
 # --- the durable signals: values the evaluator reads from the stores (A3) -----------------------
 
 

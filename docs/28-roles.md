@@ -62,8 +62,8 @@ docs/51), `later` (declared, no endpoint planned in A2).
 | Action | Level | Allowed | Step-up | Wired |
 |---|---|---|---|---|
 | `organizations.create` | platform | `platform_admin@platform` | yes | now |
-| `organizations.list` | platform | `platform_admin@platform` | | now |
-| `usage.aggregate` | platform | `platform_admin@platform` | | later |
+| `organizations.list` | platform | `platform_admin@platform` | | console |
+| `usage.aggregate` | platform | `platform_admin@platform` | | console |
 | `organizations.disable` | organization | `platform_admin@platform` | yes | now |
 | `organizations.enable` | organization | `platform_admin@platform` | yes | now |
 | `users.create` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | now |

@@ -64,6 +64,9 @@ ROUTES: dict[str, tuple[str, str]] = {
     "monitoring.read": ("GET", "/v1/monitor/snapshot"),
     "control.write": ("POST", "/v1/control/load/start"),
     "playground.use": ("POST", "/v1/playground/generate"),
+    # Clients, the platform owner's landing (docs/57).
+    "organizations.list": ("GET", "/v1/admin/orgs"),
+    "usage.aggregate": ("GET", "/v1/admin/platform/usage"),
     "users.list": ("GET", "/v1/admin/orgs/{org}/users"),
     "applications.list": ("GET", "/v1/admin/orgs/{org}/applications"),
     # The Add application form's first read (docs/51).
