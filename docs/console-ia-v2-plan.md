@@ -578,3 +578,22 @@ baselines each looked at, screenshots per role.
    (`docker-compose.valkey.yml`); Docker Desktop is not running here, and starting servers is
    yours. Either you start it and I time it here, or the Valkey numbers come from CI's `valkey` job,
    labelled as CI's hardware, not this machine's.
+
+### 15.6 Answers (approved 2026-11-20)
+
+Sections 15.1 to 15.4 are approved as written, with these conditions:
+
+1. **Bounds**: the Valkey key count and memory for the hourly counts at 5,000 applications over
+   26 hours are stated, old hours are shown to expire, and the same bound is stated for the
+   in-memory recorder.
+2. **The evaluator cycle** is timed again after the recorder change (it was 0.25 to 0.40 s at 1,000
+   applications), before and after reported.
+3. **Windows from memory** are labelled "since the gateway restarted"; a 24-hour figure never looks
+   complete when it is not.
+4. **The organization list and the Clients summaries** have a page size and a cap, with tests at the
+   cap.
+5. **Same bytes** for missing and forbidden on all four new routes, for every role, plus the leak
+   scan with planted controls.
+
+**Valkey timing** comes from CI's `valkey` job, labelled as CI's hardware; the request path is timed
+here, on SQLite and in memory, against the perf gate. No server and no Docker are started here.
