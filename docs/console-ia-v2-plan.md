@@ -501,3 +501,80 @@ Each is listed in PR 1's description so it can be objected to. None changes who 
 13. **The e2e drives real traffic:** the org_admin spec issues a key through the page, sends
     requests with it, and waits for the next complete minute to show them. The key is in the
     leak scan's list, with its own planted control.
+
+## 15. PR 3a (Clients): decisions made from the code, before its code (2026-11-19)
+
+PR 3 is split: **3a** here (Clients, the owner's client view, the recorder's hour and
+organization keys, the organization list); **3b**, plan-first, creates an organization (Q6 C) and
+is not in 3a. This section is 3a's plan; **it adds routes and a permission row, so no code is
+written before it is approved.**
+
+### 15.1 Routes (all under `/v1/admin`, local only, `requires()` with one action, `no-store`)
+
+| Route | Action | Answers (fixed fields, nothing else) |
+|---|---|---|
+| `GET /v1/admin/orgs?after=&limit=` | `organizations.list` (exists; `wired` to `console`) | id, name, kind, enabled, application count; a page at a time |
+| `GET /v1/admin/platform/usage?window=60m\|24h&after=&limit=` | `usage.aggregate` (exists; `wired` to `console`) | per organization of the page: requests, error rate, fallback rate, open-incident counts by state (Q2), the window and whether it is incomplete; and the platform's totals over the same window |
+| `GET /v1/admin/platform/orgs/{org}/applications/metrics?window=60m\|24h&after=&limit=` | **new row** `usage.read_client_applications` | per application of that client: id, name, requests, error rate, fallback rate, p50, open-incident counts by state |
+| `GET /v1/admin/platform/orgs/{org}/applications/{app}/metrics?window=60m\|24h` | the same row | that application over time: per minute (60m) or per hour (24h), the same fields |
+
+- **The new row** (section 13, Q1): `usage.read_client_applications`, level organization (the
+  client), allowed `platform_admin@platform` only, no step-up, wired console. In **its own
+  commit**: `permissions.py`, the regenerated `docs/permission-matrix.md`, docs/28's table, the
+  `WHO_MAY_DO_WHAT` pin (59 rows to 60, a new sha256) and the tests that pin it.
+- **Its tests** (section 13): each answer's field names equal the allowlist exactly; never a key or
+  key id, setting, mode, channel or target, rule, incident text or id, provider, prompt or
+  response. A missing application, one of another organization and a missing organization answer
+  the same 403 bytes as a forbidden one, for every role. **Every other refusal stays and is
+  pinned**: platform_admin asks each action listed in section 13 through the real routes on an
+  existing client, and each answers 403 `forbidden`.
+- `NAVIGATION_ACTIONS` gains `organizations.list` and `usage.aggregate` (no step-up), so the
+  capabilities answer can show **Clients**; the route pins and the agreement tests take the four
+  new routes.
+
+### 15.2 The recorder (Q3 (b))
+
+`AlertRecorder.record` takes the organization id `app.py` already has. Each request also adds to
+the application's **hour** key, and to the organization's **minute** and **hour** keys: the same
+fixed fields. Hours are kept 26 hours, minutes 120 minutes: in memory by the same `_forget` rule
+(bounded by the applications and organizations seen), in Valkey by TTL through the flusher's
+pipeline (off the request path). Postgres holds no rollups. Measured before and after with
+`benchmarks/alert_recorder.py` (the in-memory record, on the request path) and the flush (Valkey),
+three runs each, hardware recorded.
+
+**What it makes possible:** the application hour keys give each application a 24-point hourly
+series, and the minute rollups already give 60 per-minute points. That would make per-application
+series possible for the Overview tab through a per-application read. **3a does not add that read
+or the chart**: it says so in its report, as you asked.
+
+### 15.3 The pages (lazy chunks)
+
+- **Clients** (`#/clients`): the platform landing (2.1) and a sidebar item under Platform, shown
+  from `organizations.list`. A health strip (the evaluator's heartbeat from `/healthz`, the stores
+  from `/readyz`, the platform's totals), then one row per organization a page of 50: name and id,
+  kind, enabled, applications, requests, error rate, fallback rate, open incidents by state, the
+  health dot (2.4's rule: red firing, amber pending or acknowledged, green neither, grey unknown
+  when the evaluator is not ok or the window incomplete). A window switch: last 60 minutes, last
+  24 hours. "Platform settings are environment variables" in one line.
+- **One client** (`#/clients/<org>`): the banner "Viewing as platform owner: metrics only", one row
+  per application with the fields above, and a row opens that application's metrics over time
+  (table view; whether a chart is drawn is yours to say, 15.2). Nothing editable, no link to the
+  client's settings, rules, channels, incidents or keys.
+- Both load on demand; the bundle gate is kept; the initial download and every chunk before and
+  after are reported.
+
+### 15.4 What 3a carries
+
+Section 10.1's list, the mutation checks of section 13 for the row (allowed for org_admin; the
+allowlist gains a field; a missing application answers differently from a forbidden one; the row
+granted step-up-free write) plus one per new route and the recorder's forgetting, the leak scan
+with planted controls, per-role e2e and direct addresses, axe in both themes, CI-image visual
+baselines each looked at, screenshots per role.
+
+### 15.5 Open, asked before any code
+
+1. Approve 15.1 to 15.4 (routes, the row, the recorder, the pages).
+2. **Valkey timings.** The flush's before/after timing needs a Valkey on this machine
+   (`docker-compose.valkey.yml`); Docker Desktop is not running here, and starting servers is
+   yours. Either you start it and I time it here, or the Valkey numbers come from CI's `valkey` job,
+   labelled as CI's hardware, not this machine's.
