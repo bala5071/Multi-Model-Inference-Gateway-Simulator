@@ -148,6 +148,11 @@ def _rows() -> list[Permission]:
         ("applications.create", o, (_ORG_ADMIN,), False, w.STEP_7),
         ("applications.list", o, (_ORG_ADMIN, "viewer@own_organization"), False, w.STEP_7),
         ("usage.read_organization", o, (_ORG_ADMIN, "viewer@own_organization"), False, w.CONSOLE),
+        # The platform owner's view of one client's applications, metrics only (console-ia-v2-plan
+        # section 13, docs/57): counts, rates and percentiles from a fixed allowlist, never a key,
+        # setting, mode, channel, rule, incident text or provider. Act-as stays the only way to
+        # change anything in a client.
+        ("usage.read_client_applications", o, (_PLATFORM,), False, w.CONSOLE),
         # Model providers and their keys belong to the organization (docs/32): only its
         # org_admin configures them or sets a key; platform_admin may see that they exist and
         # switch one off or on. No action reads a key.

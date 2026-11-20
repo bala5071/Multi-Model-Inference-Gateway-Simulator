@@ -78,6 +78,7 @@ docs/51), `later` (declared, no endpoint planned in A2).
 | `applications.create` | organization | `org_admin@own_organization` | | step 7 |
 | `applications.list` | organization | `org_admin@own_organization`, `viewer@own_organization` | | step 7 |
 | `usage.read_organization` | organization | `org_admin@own_organization`, `viewer@own_organization` | | console |
+| `usage.read_client_applications` | organization | `platform_admin@platform` | | console |
 | `providers.list` | organization | `org_admin@own_organization` | | A5 |
 | `providers.status` | organization | `org_admin@own_organization`, `platform_admin@platform` | | A5 |
 | `providers.create` | organization | `org_admin@own_organization` | yes | A5 |
@@ -129,7 +130,10 @@ docs/51), `later` (declared, no endpoint planned in A2).
 - **What platform_admin cannot do**, by construction: it holds no organization or application
   relation, so nothing at application level is ever allowed to it (application keys, roles,
   provider keys, modes, an application's usage or audit entries). A test asserts it for every
-  application-level action.
+  application-level action. `usage.read_client_applications` (docs/57) is at organization level:
+  a client's applications' counts, rates and percentiles from a fixed allowlist, metrics only;
+  every other read and write in a client stays refused to it (a test asks each through its
+  route), and acting as a member of the client stays the only way to change anything there.
 
 ## Granting, beyond the table
 
