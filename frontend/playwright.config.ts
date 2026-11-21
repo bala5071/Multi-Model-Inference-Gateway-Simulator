@@ -124,6 +124,14 @@ export default defineConfig({
       use: { baseURL: `http://127.0.0.1:${CONSOLE_PORT}`, trace: "off", screenshot: "off" },
     },
     {
+      // Clients (docs/57): the platform owner's pages, every other role refused, the chunk on
+      // demand, the keyboard, a phone's width, every new state under axe.
+      name: "clients",
+      testMatch: "clients.e2e.ts",
+      dependencies: ["application-page"],
+      use: { baseURL: `http://127.0.0.1:${CONSOLE_PORT}`, trace: "off", screenshot: "off" },
+    },
+    {
       // Visual regression (docs/54): compared only on CI's pinned Playwright image (VISUAL=1);
       // skipped everywhere else. Baselines live in e2e/visual/, refreshed only by a reviewed commit.
       name: "visual",

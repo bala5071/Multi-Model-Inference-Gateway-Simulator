@@ -383,3 +383,96 @@ export interface KeyPage {
 export interface IssuedKey extends ApiKeySummary {
   key: string;
 }
+
+// --- Clients (docs/57): the platform owner's reads. Shapes only; the gateway decides. ---
+
+/** A Clients window: its buckets (a minute or an hour), and from when its counts begin when that
+ * is inside it (`restarted`: this process's in-memory counts; `counting_began`: the shared
+ * store's). */
+export interface ClientSpan {
+  name: string;
+  bucket_ms: number;
+  first_ms: number;
+  end_ms: number;
+  since_ms: number | null;
+  since_reason: string | null;
+}
+
+/** Open incidents counted by state: counts only (console-ia-v2-plan Q2). */
+export interface OpenByState {
+  pending: number;
+  firing: number;
+  acknowledged: number;
+}
+
+/** `GET /v1/admin/orgs`: every organization a page at a time, by id. */
+export interface OrganizationRow {
+  organization_id: string;
+  name: string;
+  kind: string;
+  enabled: boolean;
+  applications: number;
+}
+
+export interface OrganizationList {
+  organizations: OrganizationRow[];
+  next: string | null;
+}
+
+export interface OrganizationUsage {
+  organization_id: string;
+  requests: Figure;
+  error_rate: Figure;
+  fallback_rate: Figure;
+  open_incidents: OpenByState;
+}
+
+/** The platform's totals; `open_incidents` is null past the organizations they count. */
+export interface PlatformTotals {
+  requests: Figure;
+  error_rate: Figure;
+  fallback_rate: Figure;
+  open_incidents: OpenByState | null;
+}
+
+/** `GET /v1/admin/platform/usage`: the organization list's page, with the same cursor. */
+export interface PlatformUsage {
+  window: ClientSpan;
+  organizations: OrganizationUsage[];
+  totals: PlatformTotals;
+  next: string | null;
+}
+
+export interface ClientApplication {
+  application_id: string;
+  name: string;
+  requests: Figure;
+  error_rate: Figure;
+  fallback_rate: Figure;
+  latency_total_p50: Figure;
+  open_incidents: OpenByState;
+}
+
+/** `GET /v1/admin/platform/orgs/<org>/applications/metrics`: one client's applications. */
+export interface ClientApplications {
+  window: ClientSpan;
+  applications: ClientApplication[];
+  next: string | null;
+}
+
+export interface ClientBucket {
+  start_ms: number;
+  requests: Figure;
+  error_rate: Figure;
+  fallback_rate: Figure;
+  latency_total_p50: Figure;
+}
+
+/** `GET /v1/admin/platform/orgs/<org>/applications/<app>/metrics`: one application over time. */
+export interface ClientApplicationMetrics {
+  application_id: string;
+  name: string;
+  window: ClientSpan;
+  open_incidents: OpenByState;
+  buckets: ClientBucket[];
+}

@@ -48,9 +48,10 @@ const ROLES: Expected[] = [
   {
     account: OPERATOR,
     name: "platform-admin",
-    navigation: ["Home", "Monitoring"],
-    landing: "Home",
-    home: ["Platform", /^Organization /],
+    // Clients is the platform owner's landing (docs/57): the platform's health, then the list.
+    navigation: ["Home", "Clients", "Monitoring"],
+    landing: "Clients",
+    home: ["Platform"],
     hidden: "#/channels",
     tabs: null,
   },

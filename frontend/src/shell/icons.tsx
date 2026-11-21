@@ -4,6 +4,7 @@ import {
   Activity,
   AppWindow,
   BellRing,
+  Briefcase,
   Building2,
   Gauge,
   House,
@@ -24,6 +25,7 @@ export const ITEM_ICONS: Record<ItemId, LucideIcon> = {
   channels: Send,
   incidents: TriangleAlert,
   monitor: Activity,
+  clients: Briefcase,
 };
 
 /** An application, where the sidebar lists one by name. */

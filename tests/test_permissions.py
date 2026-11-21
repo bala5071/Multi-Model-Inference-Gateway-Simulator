@@ -43,6 +43,7 @@ from gateway.permissions import (
     Level,
     Resource,
     ScopeType,
+    Wired,
     authorize,
     render_matrix,
 )
@@ -52,7 +53,10 @@ REPO = Path(__file__).resolve().parent.parent
 ORG, OTHER_ORG = "org-a", "org-b"
 APP, SIBLING_APP, OTHER_APP = "app-1", "app-2", "app-9"
 USER = "usr_00000000000000aa"
-READ_VERBS = {"list", "read", "aggregate", "read_organization", "read_application"}
+READ_VERBS = {
+    "list", "read", "aggregate", "read_organization", "read_application",
+    "read_client_applications",
+}  # fmt: skip
 
 
 def _is_write(action: str) -> bool:
@@ -470,10 +474,11 @@ def test_every_route_of_every_app_declares_itself() -> None:
     # endpoints (docs/33), the settings endpoints (docs/40) on 10 more paths, the two
     # preset endpoints (docs/42), the alert rule endpoints (docs/44) on 6 more, the
     # incident endpoints (docs/45) on 4 more, the alert channel endpoints (docs/46) on 7
-    # more (test send among them), and the console's reads (docs/51) on 3 more: the plans, the
-    # organization's figures and its open incident counts.
+    # more (test send among them), the console's reads (docs/51) on 3 more: the plans, the
+    # organization's figures and its open incident counts, and Clients (docs/57) on 4 more: the
+    # organization list, the platform's usage and a client's applications and one of them.
     assert len({p for v, p in requires_routes if v == "accounts"}) == 5
-    assert len({p for v, p in requires_routes if v == "default server"}) == 55
+    assert len({p for v, p in requires_routes if v == "default server"}) == 59
 
 
 def test_a_route_without_a_declaration_is_found() -> None:
@@ -495,7 +500,7 @@ def test_a_route_without_a_declaration_is_found() -> None:
 # action's `wired` label (docs/51: `usage.read_organization`, later to console) does not. The
 # value was the same on main before docs/51 and after. A new row (the IA v2 plan's Q1 and Q4)
 # updates it in its own reviewed commit, never to make an unexplained failure pass.
-WHO_MAY_DO_WHAT = "106578744f1c8c85a0a2ec07677364bde58415be9ac16841bc3828b521d9cf43"
+WHO_MAY_DO_WHAT = "88a9853a13f3ad6b2d2349df09dbf0b81d21dbdd3edf017530dbbb2144434a3b"
 
 
 def test_who_may_do_what_is_pinned() -> None:
@@ -510,4 +515,65 @@ def test_who_may_do_what_is_pinned() -> None:
         for action, row in PERMISSIONS.items()
     )
     digest = hashlib.sha256(json.dumps(cells).encode()).hexdigest()
-    assert (len(cells), digest) == (59, WHO_MAY_DO_WHAT)
+    assert (len(cells), digest) == (60, WHO_MAY_DO_WHAT)
+
+
+# --- the platform owner's metrics-only row (console-ia-v2-plan section 13, docs/57) -----------
+
+CLIENT_ROW = "usage.read_client_applications"
+# Section 13: every other read and write in a client stays refused to platform_admin.
+REFUSED_IN_A_CLIENT = (
+    "applications.list",
+    "applications.read",
+    "application_keys.list",
+    "application_keys.issue",
+    "application_keys.rotate",
+    "application_keys.revoke",
+    "settings.read",
+    "settings.write",
+    "org_settings.read",
+    "org_settings.write",
+    "alert_rules.read",
+    "alert_rules.write",
+    "alert_channels.read",
+    "alert_channels.write",
+    "incidents.read",
+    "incidents.read_organization",
+    "incidents.acknowledge",
+    "usage.read_organization",
+    "usage.read_application",
+    *sorted(a for a in PERMISSIONS if a.startswith(("mode.set_", "provider_keys."))),
+)
+
+
+def test_the_client_row_is_a_read_for_platform_admin_at_organization_level() -> None:
+    row = PERMISSIONS[CLIENT_ROW]
+    assert (row.level, row.step_up, row.consume, row.wired) == (
+        Level.ORGANIZATION,
+        False,
+        False,
+        Wired.CONSOLE,
+    )
+    assert {f"{role.value}@{rel.value}" for role, rel in row.allowed} == {"platform_admin@platform"}
+    assert not _is_write(CLIENT_ROW)
+
+
+@pytest.mark.parametrize("name", list(ASSIGNMENTS))
+def test_only_platform_admin_reads_a_clients_applications_and_only_at_organization_level(
+    name: str,
+) -> None:
+    actor = _actor(ASSIGNMENTS[name])
+    allowed = {r for r in RESOURCES if authorize(actor, CLIENT_ROW, RESOURCES[r]).allowed}
+    if name == "platform_admin":
+        assert allowed == {"own organization", "other organization"}
+    else:
+        assert allowed == set()
+
+
+def test_every_other_action_in_a_client_stays_refused_to_platform_admin() -> None:
+    actor = _actor(ASSIGNMENTS["platform_admin"])
+    assert len(REFUSED_IN_A_CLIENT) >= 21  # mode.set_* and provider_keys.* are there
+    for action in REFUSED_IN_A_CLIENT:
+        assert action in PERMISSIONS, action
+        for resource in ("own organization", "other organization", "own application"):
+            assert not authorize(actor, action, RESOURCES[resource]).allowed, (action, resource)

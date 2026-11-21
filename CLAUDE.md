@@ -109,11 +109,14 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   handler claimed (docs/42); the CLI's and the settings endpoints' (exists)
 - `alertrecorder.py` — `AlertRecorder`: per application and per minute, how its requests
   ended, in fixed field names and fixed-edge latency histograms (`EDGES`, `snap`,
-  `percentile`); never awaits, no I/O; told by `app.py`'s `AlertOutcomeMiddleware` (docs/43)
-  (exists)
+  `percentile`); never awaits, no I/O; told by `app.py`'s `AlertOutcomeMiddleware` (docs/43);
+  each request also counts in its application's hour and its organization's minute and hour
+  (`APP_HOUR`, `ORG_MINUTE`, `ORG_HOUR`, docs/57) (exists)
 - `alertrollups.py` — `AlertRollups`, `InMemoryAlertRollups` (the recorder writes into it at
   once) and `RollupFlusher` (every 10 s to Valkey's `ValkeyAlertRollups`, one batch id applied
-  once, kept 10 minutes, then dropped and the minutes marked incomplete) (docs/43) (exists)
+  once, kept 10 minutes, then dropped and the minutes marked incomplete) (docs/43); the hour
+  and organization keys beside the minutes (`add_extras`, `read_extras`), hours kept
+  `KEEP_HOURS` (26), in memory by `_forget` and in Valkey by expiry (docs/57) (exists)
 - `alertrules.py` — `validate_rule`, `DEFAULT_RULES` (ids from `default_rule_id`), `RuleStore`
   on memory, SQLite (migration 15) and Postgres (schema 4), `RuleService` (versions, the cap
   of 50, restore-defaults, the preview from the rollups, audited) and `resolve_rule`; channels
@@ -172,7 +175,10 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
 - `usagefigures.py` — the console's Applications list figures (`requests`, `error_rate`,
   `latency_total_p50`) through `signals.evaluate` over the evaluator's window of complete
   minutes, `window_for` (`since_ms` after a restart with in-memory rollups), `unavailable`,
-  `above_range`; pure (docs/51) (exists)
+  `above_range`; pure (docs/51); and Clients' figures (docs/57): `CLIENT_WINDOWS` (`60m`,
+  `24h`), `span_for` (complete buckets; `since_reason` `restarted` or `counting_began`),
+  `client_figures` through `signals.evaluate_counts`, `TOTALS_CAP` (1,000 organizations,
+  `above_cap` past it) and each answer's field allowlist (exists)
 - `breaker.py` — `Breakers`: per (organization, provider) circuit breakers and the slow-provider
   warning, on the injected clock, `circuit_breaker` events; `admit_attempt` says whether an
   admission is a half-open probe, whose slot frees itself after 120 s (`PROBE_MS`) (exists)
@@ -351,7 +357,9 @@ Planned modules under `src/gateway/` (added step by step; most do not exist yet)
   `/v1/auth/capabilities`, what a session may do among `NAVIGATION_ACTIONS`, answered inside
   `make_requires` with the same `authorize` (docs/50), and the console's reads (docs/51: the
   plan templates, the organization's figures from the alert rollups, the open incident counts,
-  the mode on every application row), every answer `Cache-Control: no-store` (exists)
+  the mode on every application row), and Clients (docs/57: the organization list, the
+  platform's usage, a client's applications and one of them, metrics only, through
+  `usage.read_client_applications`), every answer `Cache-Control: no-store` (exists)
 
 Outside the package, `benchmarks/` is a package run with `python -m`:
 
@@ -426,6 +434,9 @@ Outside the package, `benchmarks/` is a package run with `python -m`:
 - `benchmarks/console_reads.py` — the Applications list's reads in process (the figures over
   in-memory rollups, the open incident counts and the list with its modes on SQLite), for a page
   of 50 and of 100; the numbers in PR 1's description and `docs/51` (exists)
+- `benchmarks/rollup_bounds.py` — the recorder's hour keys at 5,000 applications over 27 hours:
+  keys and memory in memory and (`--valkey`) in Valkey with each kind's expiry, and one flush
+  before and after the hour keys; CI's `valkey` job runs it; the numbers in `docs/57` (exists)
 
 - `benchmarks/report.py` — generates `docs/REPORT.md` and `docs/report/*.png` from the
   benchmarks above (`make report`). Sections 1 to 3 run on the calibrated profiles
@@ -442,7 +453,8 @@ make an unexplained failure pass.
 `frontend/` is one page at `/dashboard/` (`index.html`, React, TypeScript, Vite, uPlot; the shell
 in `src/shell/`, docs/50): the monitoring (`src/App.tsx`), which only reads the monitoring API
 (`docs/15`), and the admin console (`src/console/`, docs/47, docs/49 and docs/51: settings, alert
-rules, channels, incidents, the organization's Applications, Add application, API keys), behind
+rules, channels, incidents, the organization's Applications, Add application, API keys; Clients,
+the platform owner's landing and its metrics-only client view, docs/57), behind
 one login, one header and one navigation drawn from
 `GET /v1/auth/capabilities` (no role name in `src/`, outside the gateway's fixtures). The whole
 page is under the console's content security policy; `console.html` is the old address, a stub

@@ -135,6 +135,13 @@ class ApplicationStore(Protocol):
         """Every organization, in the order they were added."""
         ...
 
+    async def page_organizations(
+        self, after: str | None, limit: int
+    ) -> list[tuple[Organization, int]]:
+        """Up to ``limit`` organizations by id, after ``after`` (compared, never looked up), each
+        with how many applications it has, in one read (docs/57)."""
+        ...
+
     async def set_organization_disabled(self, organization_id: str, disabled: bool) -> None:
         """Raise ``KeyError`` if there is no such organization."""
         ...
@@ -244,6 +251,18 @@ class InMemoryApplicationStore:
 
     async def list_organizations(self) -> list[Organization]:
         return list(self._organizations.values())
+
+    async def page_organizations(
+        self, after: str | None, limit: int
+    ) -> list[tuple[Organization, int]]:
+        found = sorted(
+            (o for o in self._organizations.values() if o.id > (after or "")), key=lambda o: o.id
+        )[:limit]
+        counts = {o.id: 0 for o in found}
+        for a in self._applications.values():
+            if a.organization_id in counts:
+                counts[a.organization_id] += 1
+        return [(o, counts[o.id]) for o in found]
 
     async def set_organization_disabled(self, organization_id: str, disabled: bool) -> None:
         organization = self._organizations.get(organization_id)
@@ -446,6 +465,17 @@ class SqliteApplicationStore:
             f"SELECT {_ORG_COLUMNS} FROM organizations ORDER BY rowid"
         ).fetchall()
         return [_organization(row) for row in rows]
+
+    async def page_organizations(
+        self, after: str | None, limit: int
+    ) -> list[tuple[Organization, int]]:
+        rows = self._connection.execute(
+            f"SELECT {_ORG_COLUMNS}, (SELECT COUNT(*) FROM applications a"
+            " WHERE a.organization_id = organizations.id)"
+            " FROM organizations WHERE id > ? ORDER BY id LIMIT ?",
+            (after or "", limit),
+        ).fetchall()
+        return [(_organization(row[:-1]), int(row[-1])) for row in rows]
 
     async def set_organization_disabled(self, organization_id: str, disabled: bool) -> None:
         cursor = self._connection.execute(

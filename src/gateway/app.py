@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from gateway.adapters.base import HttpAdapter
-from gateway.alertrecorder import MINUTE_MS, AlertRecorder
+from gateway.alertrecorder import APP_HOUR, MINUTE_MS, ORG_HOUR, ORG_MINUTE, AlertRecorder
 from gateway.alertrollups import (
     AlertRollups,
     InMemoryAlertRollups,
@@ -348,8 +348,23 @@ from gateway.state import (
 )
 from gateway.timeseries import TimeSeriesStore
 from gateway.usage import ChatSource, UsageStore
+from gateway.usagefigures import (
+    ABOVE_CAP,
+    ORGANIZATION_FIGURES,
+    TOTALS_CAP,
+    Span,
+    client_buckets,
+    client_figures,
+    client_unavailable,
+    figures,
+    open_incidents,
+    span_for,
+    span_view,
+    summed_open,
+    window_for,
+    window_view,
+)
 from gateway.usagefigures import WINDOWS as FIGURE_WINDOWS
-from gateway.usagefigures import figures, window_for, window_view
 from gateway.usagefigures import unavailable as unavailable_figures
 from gateway.users import User
 from gateway.valkey import ValkeyCounters, account_windows, shared_counters_from
@@ -1587,6 +1602,8 @@ class AlertNote:
 
     kind: str
     application_id: str | None = None
+    # Its organization, for the recorder's organization keys (docs/57).
+    organization_id: str | None = None
     ttft_ms: float | None = None
     total_ms: float | None = None
     downgraded: bool = False
@@ -1636,6 +1653,7 @@ class AlertOutcomeMiddleware:
             hosted_attempts=trace.hosted_attempts if trace is not None else 0,
             hosted=trace is not None and trace.provider_class == HOSTED,
             downgraded=note.downgraded,
+            organization_id=note.organization_id,
         )
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
@@ -1969,6 +1987,208 @@ def _usage_routes(
             # a page's figures never hold up the requests being served.
             await clock.sleep_ms(0.0)
         return JSONResponse({"window": window_view(span), "applications": rows, "next": page.next})
+
+
+def _platform_usage_routes(
+    app: FastAPI,
+    accounts: AccountAccess,
+    management: ManagementService,
+    rollups: AlertRollups,
+    incidents: IncidentStore,
+    epoch: EpochSource,
+    started_ms: float | None,
+    clock: Clock,
+) -> None:
+    """The platform owner's Clients pages (docs/57): the organization list
+    (``organizations.list``), every organization's figures and the platform's totals
+    (``usage.aggregate``), and one client's applications, metrics only
+    (``usage.read_client_applications``). Each through ``requires``; a missing organization or
+    an application outside the client in the path is refused as a forbidden one. Each answer
+    holds only the fields of ``usagefigures``' allowlists: ids, names, a kind, counts, rates,
+    percentiles and open-incident counts by state; never a key, setting, mode, channel, rule,
+    incident text or id, or provider."""
+    requires = app.state.requires
+    service = accounts.service
+    stores = Stores(service.organizations, service.store)
+
+    async def platform(request: Request) -> Resource | None:
+        return Resource.platform()
+
+    async def client(request: Request) -> Resource | None:
+        return await resolve_organization(stores, request.path_params["org"])
+
+    async def client_application(request: Request) -> Resource | None:
+        p = request.path_params
+        found = await resolve_application(stores, p["org"], p["app"])
+        return Resource.organization(p["org"]) if found is not None else None
+
+    listing = requires("organizations.list", platform)
+    aggregating = requires("usage.aggregate", platform)
+    reading_client = requires("usage.read_client_applications", client)
+    reading_client_application = requires("usage.read_client_applications", client_application)
+
+    async def read_kind(
+        kind: str, window: str, subjects: Sequence[str]
+    ) -> tuple[Span, list[list[MinuteRollup]] | None]:
+        """``subjects``' buckets of ``kind`` over ``window``, and the window as read: from when
+        the counts begin, if inside it. None when the rollups cannot be read."""
+        now = epoch.epoch_ms()
+        wanted = span_for(window, now)
+        try:
+            read, since = await rollups.read_extras(kind, [(s, wanted.buckets) for s in subjects])
+        except StateUnavailableError:
+            return span_for(window, now, started_ms), None
+        return span_for(window, now, started_ms, since), read
+
+    async def read_applications(
+        window: str, ids: Sequence[str]
+    ) -> tuple[Span, list[list[MinuteRollup]] | None]:
+        if window == "24h":
+            return await read_kind(APP_HOUR, window, ids)
+        span = span_for(window, epoch.epoch_ms(), started_ms)
+        try:
+            return span, await rollups.read_many([(i, span.buckets) for i in ids])
+        except StateUnavailableError:
+            return span, None
+
+    @app.get(ADMIN_PREFIX + "/orgs")
+    async def list_organizations(
+        limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+        after: str | None = Query(default=None, max_length=64),
+        auth: Authorized = listing,
+    ) -> JSONResponse:
+        page = await management.page_organizations(after, limit, actor=auth.actor)
+        rows = [
+            {
+                "organization_id": organization.id,
+                "name": organization.name,
+                "kind": organization.kind.value,
+                "enabled": not organization.disabled,
+                "applications": count,
+            }
+            for organization, count in page.items
+        ]
+        return JSONResponse({"organizations": rows, "next": page.next})
+
+    async def platform_totals(window: str) -> dict[str, object]:
+        """The platform's figures over ``window``: every organization's buckets summed, read a
+        page of ``MAX_PAGE_SIZE`` at a time up to ``TOTALS_CAP`` organizations; past the cap the
+        totals say so rather than count part of the platform."""
+        kind = ORG_MINUTE if window == "60m" else ORG_HOUR
+        summed: list[MinuteRollup] = []
+        unreadable = False
+        open_total = open_incidents(None)
+        after: str | None = None
+        counted = 0
+        while True:
+            found = await management.store.page_organizations(after, MAX_PAGE_SIZE)
+            counted += len(found)
+            if counted > TOTALS_CAP:
+                return {
+                    **client_unavailable(ORGANIZATION_FIGURES, ABOVE_CAP),
+                    "open_incidents": None,
+                }
+            ids = [organization.id for organization, _ in found]
+            if ids:
+                _, read = await read_kind(kind, window, ids)
+                if read is None:
+                    unreadable = True
+                else:
+                    summed.extend(r for rows in read for r in rows)
+                for i in ids:
+                    for state, n in summed_open(await incidents.open_counts(i)).items():
+                        open_total[state] += n
+                    await clock.sleep_ms(0.0)
+            if len(found) < MAX_PAGE_SIZE:
+                break
+            after = ids[-1]
+        figures_found = (
+            client_unavailable(ORGANIZATION_FIGURES)
+            if unreadable
+            else client_figures(summed, ORGANIZATION_FIGURES)
+        )
+        return {**figures_found, "open_incidents": open_total}
+
+    @app.get(ADMIN_PREFIX + "/platform/usage")
+    async def platform_usage(
+        window: Literal["60m", "24h"] = Query(default="60m"),
+        limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+        after: str | None = Query(default=None, max_length=64),
+        auth: Authorized = aggregating,
+    ) -> JSONResponse:
+        page = await management.page_for_aggregate(after, limit, actor=auth.actor)
+        ids = [organization.id for organization, _ in page.items]
+        span, read = await read_kind(ORG_MINUTE if window == "60m" else ORG_HOUR, window, ids)
+        rows = []
+        for i, organization_id in enumerate(ids):
+            found = (
+                client_unavailable(ORGANIZATION_FIGURES)
+                if read is None
+                else client_figures(read[i], ORGANIZATION_FIGURES)
+            )
+            open_now = summed_open(await incidents.open_counts(organization_id))
+            rows.append({"organization_id": organization_id, **found, "open_incidents": open_now})
+            # The event loop back between two organizations, as the evaluator does (docs/45).
+            await clock.sleep_ms(0.0)
+        return JSONResponse(
+            {
+                "window": span_view(span),
+                "organizations": rows,
+                "totals": await platform_totals(window),
+                "next": page.next,
+            }
+        )
+
+    @app.get(ADMIN_PREFIX + "/platform/orgs/{org}/applications/metrics")
+    async def client_applications(
+        org: str,
+        window: Literal["60m", "24h"] = Query(default="60m"),
+        limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+        after: str | None = Query(default=None, max_length=64),
+        auth: Authorized = reading_client,
+    ) -> JSONResponse:
+        page = await management.page_for_client(org, after, limit, actor=auth.actor)
+        span, read = await read_applications(window, [a.id for a in page.items])
+        counts = await incidents.open_counts(org)
+        rows = []
+        for i, application in enumerate(page.items):
+            found = client_unavailable() if read is None else client_figures(read[i])
+            rows.append(
+                {
+                    "application_id": application.id,
+                    "name": application.name,
+                    **found,
+                    "open_incidents": open_incidents(counts.get(application.id)),
+                }
+            )
+            await clock.sleep_ms(0.0)
+        return JSONResponse({"window": span_view(span), "applications": rows, "next": page.next})
+
+    @app.get(ADMIN_PREFIX + "/platform/orgs/{org}/applications/{app}/metrics")
+    async def client_application_metrics(
+        org: str,
+        app_id: str = Path_(alias="app"),
+        window: Literal["60m", "24h"] = Query(default="60m"),
+        auth: Authorized = reading_client_application,
+    ) -> JSONResponse:
+        application = await management.client_application(org, app_id, actor=auth.actor)
+        span, read = await read_applications(window, [application.id])
+        if read is None:
+            buckets = [
+                {"start_ms": b * span.bucket_ms, **client_unavailable()} for b in span.buckets
+            ]
+        else:
+            buckets = client_buckets(read[0], span)
+        counts = await incidents.open_counts(org)
+        return JSONResponse(
+            {
+                "application_id": application.id,
+                "name": application.name,
+                "window": span_view(span),
+                "open_incidents": open_incidents(counts.get(application.id)),
+                "buckets": buckets,
+            }
+        )
 
 
 class CreateProviderBody(BaseModel):
@@ -4101,17 +4321,31 @@ def create_app(
             _alert_rule_routes(app, accounts, rule_service)
             if channels is not None:
                 _channel_routes(app, accounts, channels, test_sends)
+            incident_store = (
+                incidents
+                if incidents is not None
+                else InMemoryIncidentStore(epoch if epoch is not None else ClockEpoch(clock))
+            )
             _incident_routes(
                 app,
                 accounts,
-                incidents
-                if incidents is not None
-                else InMemoryIncidentStore(epoch if epoch is not None else ClockEpoch(clock)),
+                incident_store,
                 epoch if epoch is not None else ClockEpoch(clock),
                 channels.notices.outbox
                 if channels is not None and channels.notices is not None
                 else None,
             )
+            if alert_rollups is not None:
+                _platform_usage_routes(
+                    app,
+                    accounts,
+                    management,
+                    alert_rollups,
+                    incident_store,
+                    epoch if epoch is not None else ClockEpoch(clock),
+                    rollups_started_ms,
+                    clock,
+                )
         if management is not None and applications is not None and settings_store is not None:
             _settings_routes(
                 app,
@@ -4617,6 +4851,7 @@ def create_app(
             found = keyed(await keys.authenticate(credentials.strip()))
             if (note := noted()) is not None:
                 note.application_id = found.application.id
+                note.organization_id = found.application.organization_id
             return found
 
         @app.post("/v1/generate", response_model=GenerateResponse)
@@ -4752,6 +4987,7 @@ def create_app(
                 found = keyed(await keys.authenticate(credentials.strip()))
                 if (note := noted()) is not None:
                     note.application_id = found.application.id
+                    note.organization_id = found.application.organization_id
             except InvalidApiKeyError:
                 return _openai_error(
                     401,
