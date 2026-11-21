@@ -9,7 +9,9 @@
   "platform": {
     "monitoring.read": false,
     "control.write": false,
-    "playground.use": false
+    "playground.use": false,
+    "organizations.list": false,
+    "usage.aggregate": false
   },
   "organization": {
     "users.list": false,

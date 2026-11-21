@@ -1201,6 +1201,22 @@ class PostgresApplicationStore(_Store):
         rows = await self._fetch(f"SELECT {_ORG_COLUMNS} FROM organizations ORDER BY ord")
         return [_organization(tuple(r.values())) for r in rows]
 
+    async def page_organizations(
+        self, after: str | None, limit: int
+    ) -> list[tuple[Organization, int]]:
+        rows = await self._fetch(
+            f"SELECT {_ORG_COLUMNS}, (SELECT COUNT(*) FROM applications a"
+            " WHERE a.organization_id = organizations.id) AS application_count"
+            " FROM organizations WHERE id > $1 ORDER BY id LIMIT $2",
+            after or "",
+            limit,
+        )
+        found = []
+        for r in rows:
+            values = tuple(r.values())
+            found.append((_organization(values[:-1]), int(values[-1])))
+        return found
+
     async def set_organization_disabled(self, organization_id: str, disabled: bool) -> None:
         touched = await self._execute(
             "UPDATE organizations SET disabled = $1 WHERE id = $2", int(disabled), organization_id

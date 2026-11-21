@@ -40,7 +40,7 @@ from gateway.audit import (
     TargetType,
 )
 from gateway.clock import EpochSource
-from gateway.organizations import check_application_id, normalize_name
+from gateway.organizations import Organization, check_application_id, normalize_name
 from gateway.permissions import Actor, Resource, authorize
 from gateway.routing import Plan, PlanLimits, PlansConfig
 from gateway.settings import Scope, SettingsStore
@@ -360,6 +360,47 @@ class ManagementService:
             organization_id, after, check_page_size(limit) + 1
         )
         return page_of(found, limit, lambda a: a.id)
+
+    async def page_organizations(
+        self, after: str | None, limit: int, *, actor: Actor | None = None
+    ) -> Page[tuple[Organization, int]]:
+        """One page of every organization by id, each with its application count
+        (``organizations.list``, docs/57)."""
+        _require(actor, "organizations.list", Resource.platform())
+        found = await self.store.page_organizations(after, check_page_size(limit) + 1)
+        return page_of(found, limit, lambda o: o[0].id)
+
+    async def page_for_aggregate(
+        self, after: str | None, limit: int, *, actor: Actor | None = None
+    ) -> Page[tuple[Organization, int]]:
+        """The page ``page_organizations`` gives, for the platform's usage figures
+        (``usage.aggregate``, docs/57): the same order and cursor, so both name the same
+        organizations."""
+        _require(actor, "usage.aggregate", Resource.platform())
+        found = await self.store.page_organizations(after, check_page_size(limit) + 1)
+        return page_of(found, limit, lambda o: o[0].id)
+
+    async def page_for_client(
+        self, organization_id: str, after: str | None, limit: int, *, actor: Actor | None = None
+    ) -> Page[Application]:
+        """One page of a client's applications by id, for the platform owner's metrics-only view
+        (``usage.read_client_applications``, docs/57)."""
+        _require(actor, "usage.read_client_applications", Resource.organization(organization_id))
+        found = await self.store.page_applications(
+            organization_id, after, check_page_size(limit) + 1
+        )
+        return page_of(found, limit, lambda a: a.id)
+
+    async def client_application(
+        self, organization_id: str, application_id: str, *, actor: Actor | None = None
+    ) -> Application:
+        """One application of a client, for the same view; ``KeyError`` when it is not that
+        client's (the route's resolver has already refused it)."""
+        _require(actor, "usage.read_client_applications", Resource.organization(organization_id))
+        application = await self.store.get_application(application_id)
+        if application is None or application.organization_id != organization_id:
+            raise KeyError(application_id)
+        return application
 
     def plan_templates(
         self, organization_id: str, *, actor: Actor | None = None

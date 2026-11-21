@@ -7,6 +7,10 @@ import { FakeEventSource, installFakeEventSource } from "../test/fakeEventSource
 import {
   applicationsAlice,
   capabilities,
+  clientsNorth,
+  clientsNorthShop,
+  clientsOrgs,
+  clientsUsage,
   controlSimulated,
   incidentCountsAlice,
   keysAlice,
@@ -90,6 +94,21 @@ function gateway(me: Me, answer: Capabilities = capabilities.alice) {
         return json(200, answer);
       case "GET /healthz":
         return json(200, { status: "ok", alert_evaluator: "ok" });
+      case "GET /readyz":
+        return json(200, { status: "ready" });
+      // Clients (docs/57): the gateway's own answers for root.
+      case "GET /v1/admin/orgs":
+        if (state !== "in") return refuse(401, "session_required");
+        return json(200, clientsOrgs);
+      case "GET /v1/admin/platform/usage":
+        if (state !== "in") return refuse(401, "session_required");
+        return json(200, clientsUsage);
+      case "GET /v1/admin/platform/orgs/north/applications/metrics":
+        if (state !== "in") return refuse(401, "session_required");
+        return json(200, clientsNorth);
+      case "GET /v1/admin/platform/orgs/north/applications/north-shop/metrics":
+        if (state !== "in") return refuse(401, "session_required");
+        return json(200, clientsNorthShop);
       case "POST /v1/auth/step-up":
         if (state !== "in") return refuse(401, "session_required");
         if ((body as { password: string }).password !== PASSWORD) {
@@ -185,6 +204,7 @@ function says(answer: Capabilities, level: string, action: string): boolean {
  */
 function landingName(answer: Capabilities): string {
   if (answer.organization["applications.list"] === true) return "Applications";
+  if (answer.platform["organizations.list"] === true) return "Clients";
   const own = ownApplications(answer);
   if (own.length !== 1) return "Home";
   return applicationsAlice.applications.find((a) => a.application_id === own[0])?.name ?? "Home";
@@ -293,7 +313,12 @@ describe("places the session may not open", () => {
 
 describe("home", () => {
   it("has a platform section for a platform answer, and says who manages organizations", async () => {
-    const { fetcher } = gateway("in", capabilities.root);
+    // A platform answer without the organization list: such a session keeps Home.
+    const answer: Capabilities = {
+      ...capabilities.root,
+      platform: { ...capabilities.root.platform, "organizations.list": false },
+    };
+    const { fetcher } = gateway("in", answer);
     open(fetcher);
     const home = await screen.findByRole("region", { name: "Home" });
     expect(within(home).getByRole("region", { name: "Platform" })).toHaveTextContent(
@@ -985,4 +1010,68 @@ describe("the Applications list's search and filters (docs/56)", () => {
     // Nothing was asked of the gateway: the page's rows only.
     expect(seen.length).toBe(reads);
   });
+});
+
+describe("clients (docs/57)", () => {
+  it("lands root on Clients: the platform's health, then one row per organization", async () => {
+    window.location.hash = "#/home";
+    const { fetcher, seen } = gateway("in", capabilities.root);
+    open(fetcher);
+    const clients = await screen.findByRole("region", { name: "Clients" });
+    const health = await within(clients).findByRole("region", { name: "Platform" });
+    expect(health).toHaveTextContent("Alert evaluator");
+    expect(health).toHaveTextContent("ready");
+    expect(clients).toHaveTextContent("Platform settings are environment variables");
+    // In-memory counts that began inside the window: said, on the page.
+    expect(clients).toHaveTextContent("when the gateway restarted: not a whole 60 minutes");
+    const table = within(clients).getByRole("table", { name: "Clients" });
+    for (const name of ["North", "South", "Solo"]) {
+      expect(within(table).getByRole("link", { name })).toBeInTheDocument();
+    }
+    expect(seen.some((s) => s.path.startsWith("/v1/admin/orgs?limit=50"))).toBe(true);
+    expect(seen.some((s) => s.path.startsWith("/v1/admin/platform/usage?window=60m"))).toBe(true);
+  });
+
+  it("opens a client with the banner, metrics only, and one application over time", async () => {
+    window.location.hash = "#/clients";
+    const { fetcher } = gateway("in", capabilities.root);
+    const user = open(fetcher);
+    const clients = await screen.findByRole("region", { name: "Clients" });
+    await user.click(await within(clients).findByRole("link", { name: "North" }));
+    const client = await screen.findByRole("region", { name: "north" });
+    expect(within(client).getByRole("note")).toHaveTextContent(
+      "Viewing as platform owner: metrics only",
+    );
+    const table = await within(client).findByRole("table", { name: "Applications" });
+    // Nothing to change and nowhere to change it: only each application's figures.
+    const links = within(client)
+      .getAllByRole("link")
+      .map((link) => link.getAttribute("href"));
+    expect(links).toEqual(["#/clients/north/north-blog", "#/clients/north/north-shop"]);
+    expect(within(client).queryByRole("button", { name: /save|edit|add|delete/i })).toBeNull();
+    await user.click(within(table).getByRole("link", { name: "Shop" }));
+    const one = await screen.findByRole("region", { name: "north / north-shop" });
+    expect(await within(one).findByRole("table", { name: "Shop, each minute" })).toBeVisible();
+    expect(window.location.hash).toBe("#/clients/north/north-shop");
+  });
+
+  it.each<CapabilityUser>(["alice", "vera", "nina", "olive", "cleo", "bob"])(
+    "%s on #/clients gets the landing with one sentence and no request",
+    async (name) => {
+      for (const hash of ["#/clients", "#/clients/north", "#/clients/north/north-shop"]) {
+        window.location.hash = hash;
+        const { fetcher, seen } = gateway("in", capabilities[name]);
+        const { unmount } = render(
+          <ThemeProvider>
+            <Shell fetcher={fetcher} />
+          </ThemeProvider>,
+        );
+        const landed = await screen.findByRole("region", { name: landingName(capabilities[name]) });
+        expect(within(landed).getAllByRole("alert")[0]).toHaveTextContent(NOT_AVAILABLE);
+        expect(seen.some((s) => s.path.includes("/v1/admin/platform"))).toBe(false);
+        expect(seen.some((s) => s.path.startsWith("/v1/admin/orgs?"))).toBe(false);
+        unmount();
+      }
+    },
+  );
 });

@@ -128,8 +128,8 @@ def _rows() -> list[Permission]:
     rows = [
         # Organizations and aggregate data: platform_admin only.
         ("organizations.create", p, (_PLATFORM,), True, w.NOW),
-        ("organizations.list", p, (_PLATFORM,), False, w.NOW),
-        ("usage.aggregate", p, (_PLATFORM,), False, w.LATER),
+        ("organizations.list", p, (_PLATFORM,), False, w.CONSOLE),
+        ("usage.aggregate", p, (_PLATFORM,), False, w.CONSOLE),
         ("organizations.disable", o, (_PLATFORM,), True, w.NOW),
         ("organizations.enable", o, (_PLATFORM,), True, w.NOW),
         # Users: platform_admin in any organization, org_admin in its own.
@@ -148,6 +148,11 @@ def _rows() -> list[Permission]:
         ("applications.create", o, (_ORG_ADMIN,), False, w.STEP_7),
         ("applications.list", o, (_ORG_ADMIN, "viewer@own_organization"), False, w.STEP_7),
         ("usage.read_organization", o, (_ORG_ADMIN, "viewer@own_organization"), False, w.CONSOLE),
+        # The platform owner's view of one client's applications, metrics only (console-ia-v2-plan
+        # section 13, docs/57): counts, rates and percentiles from a fixed allowlist, never a key,
+        # setting, mode, channel, rule, incident text or provider. Act-as stays the only way to
+        # change anything in a client.
+        ("usage.read_client_applications", o, (_PLATFORM,), False, w.CONSOLE),
         # Model providers and their keys belong to the organization (docs/32): only its
         # org_admin configures them or sets a key; platform_admin may see that they exist and
         # switch one off or on. No action reads a key.
@@ -262,7 +267,13 @@ PERMISSIONS: Mapping[str, Permission] = {row.action: row for row in _rows()}
 # is the role table's alone; each is declared by the route its screen loads first (both pinned by
 # tests/test_capabilities.py).
 NAVIGATION_ACTIONS: Mapping[Level, tuple[str, ...]] = {
-    Level.PLATFORM: ("monitoring.read", "control.write", "playground.use"),
+    Level.PLATFORM: (
+        "monitoring.read",
+        "control.write",
+        "playground.use",
+        "organizations.list",
+        "usage.aggregate",
+    ),
     Level.ORGANIZATION: (
         "users.list",
         "applications.list",

@@ -282,10 +282,17 @@ jobs:
         run: uv sync --locked
       - name: Start Valkey (pinned by digest, published on 127.0.0.1 only)
         run: docker compose -f docker-compose.valkey.yml up --detach --wait
+      # Every test marked valkey, in every file (the recorder's and the alert cycle's too).
       - name: The tests marked valkey
         env:
           GATEWAY_TEST_VALKEY_URL: redis://127.0.0.1:6380/0
-        run: uv run pytest -m valkey -ra tests/test_valkey.py
+        run: uv run pytest -m valkey -ra
+      # The recorder's hour keys on CI's hardware (docs/57): keys, memory and expiry at 5,000
+      # applications over 27 hours, and one flush before and after the hour keys.
+      - name: The rollup bounds and the flush, measured on CI's hardware
+        env:
+          GATEWAY_VALKEY_URL: redis://127.0.0.1:6380/0
+        run: uv run python -m benchmarks.rollup_bounds --valkey
       - name: Stop
         if: always()
         run: docker compose -f docker-compose.valkey.yml down

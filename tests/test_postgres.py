@@ -562,6 +562,9 @@ async def _scenario(s: StateBackend) -> list[Any]:
         await a.list_applications("north"),
         await a.page_applications("north", None, 2),
         await a.page_applications("north", "app1", 2),
+        # The organization list a page at a time with each one's application count (docs/57).
+        await a.page_organizations(None, 2),
+        await a.page_organizations("default", 10),
     ]
     for i in range(3):
         await a.add_key(

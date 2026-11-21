@@ -1,0 +1,33 @@
+{
+  "organizations": [
+    {
+      "organization_id": "default",
+      "name": "default",
+      "kind": "business",
+      "enabled": true,
+      "applications": 0
+    },
+    {
+      "organization_id": "north",
+      "name": "North",
+      "kind": "business",
+      "enabled": true,
+      "applications": 2
+    },
+    {
+      "organization_id": "solo",
+      "name": "Solo",
+      "kind": "individual",
+      "enabled": true,
+      "applications": 0
+    },
+    {
+      "organization_id": "south",
+      "name": "South",
+      "kind": "business",
+      "enabled": true,
+      "applications": 1
+    }
+  ],
+  "next": null
+}

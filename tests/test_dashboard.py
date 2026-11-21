@@ -215,6 +215,40 @@ async def _console_reads() -> dict[str, Any]:
     return answers
 
 
+async def _clients_reads() -> dict[str, Any]:
+    """Clients (docs/57), as root (platform_admin) gets them: the organization list, the
+    platform's usage over 60 minutes (just after a restart, so the window says since when) and 24
+    hours, north's applications and north-shop over 60 minutes and 24 hours."""
+    from test_client_usage import ONE, USAGE, at, complete_after_hour, get, record
+    from test_console_reads import Opener, console
+
+    answers: dict[str, Any] = {}
+    async with console() as c:
+        root = await c.login("root")
+        c.at_minute(30)
+        record(c, "north-shop", "north", 22, status=200, total_ms=12.0)
+        record(c, "north-shop", "north", 3, status=502, code="upstream_unavailable")
+        record(c, "north-blog", "north", 4, status=200, total_ms=40.0)
+        record(c, "south-shop", "south", 30, kind="chat", status=200, total_ms=90.0,
+               fallbacks=("upstream_5xx",))  # fmt: skip
+        opener = Opener(c.incidents)
+        await opener.open("north", "north-shop", "firing")
+        await opener.open("south", "south-shop", "pending")
+        c.evaluated_after(40)
+        answers["clients-orgs-root.json"] = (await get(c, root, "/v1/admin/orgs")).json()
+        answers["clients-usage-root.json"] = (await get(c, root, USAGE)).json()
+        answers["clients-north-root.json"] = (
+            await get(c, root, "/v1/admin/platform/orgs/north/applications/metrics")
+        ).json()
+        answers["clients-north-shop-root.json"] = (await get(c, root, at(ONE))).json()
+        complete_after_hour(c, 3)
+        answers["clients-usage-24h-root.json"] = (await get(c, root, f"{USAGE}?window=24h")).json()
+        answers["clients-north-shop-24h-root.json"] = (
+            await get(c, root, f"{at(ONE)}?window=24h")
+        ).json()
+    return answers
+
+
 async def test_frontend_fixtures_are_what_the_gateway_produces() -> None:
     """The frontend's types and tests are checked against these files.
 
@@ -229,6 +263,7 @@ async def test_frontend_fixtures_are_what_the_gateway_produces() -> None:
         "control-off.json": await _plain_control(),
         **await _capabilities(),
         **await _console_reads(),
+        **await _clients_reads(),
     }
     if os.environ.get(UPDATE_ENV) == "1":
         FIXTURES.mkdir(parents=True, exist_ok=True)

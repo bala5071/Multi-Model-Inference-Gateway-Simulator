@@ -7,7 +7,11 @@ import type { Snapshot } from "../api/types";
 import type {
   ApplicationPage,
   Capabilities,
+  ClientApplicationMetrics,
+  ClientApplications,
   FiguresPage,
+  OrganizationList,
+  PlatformUsage,
   KeyPage,
   OpenCountsAnswer,
   PlanList,
@@ -18,6 +22,12 @@ import keysAliceJson from "./fixtures/keys-alice.json";
 import metricsAliceJson from "./fixtures/metrics-alice.json";
 import metricsAliceRestartJson from "./fixtures/metrics-alice-restart.json";
 import plansAliceJson from "./fixtures/plans-alice.json";
+import clientsOrgsRootJson from "./fixtures/clients-orgs-root.json";
+import clientsUsageRootJson from "./fixtures/clients-usage-root.json";
+import clientsUsage24hRootJson from "./fixtures/clients-usage-24h-root.json";
+import clientsNorthRootJson from "./fixtures/clients-north-root.json";
+import clientsNorthShopRootJson from "./fixtures/clients-north-shop-root.json";
+import clientsNorthShop24hRootJson from "./fixtures/clients-north-shop-24h-root.json";
 import controlOffJson from "./fixtures/control-off.json";
 import controlSimulatedJson from "./fixtures/control-simulated.json";
 import passthroughJson from "./fixtures/snapshot-passthrough.json";
@@ -70,3 +80,12 @@ export const metricsAliceRestart: FiguresPage = metricsAliceRestartJson;
 export const incidentCountsAlice: OpenCountsAnswer = incidentCountsAliceJson;
 export const plansAlice: PlanList = plansAliceJson;
 export const keysAlice: KeyPage = keysAliceJson;
+/** Clients (docs/57), as root gets them: the organization list, the platform's usage over 60
+ * minutes just after a restart and over 24 hours, north's applications, and north-shop over 60
+ * minutes and 24 hours. */
+export const clientsOrgs: OrganizationList = clientsOrgsRootJson;
+export const clientsUsage: PlatformUsage = clientsUsageRootJson;
+export const clientsUsage24h: PlatformUsage = clientsUsage24hRootJson;
+export const clientsNorth: ClientApplications = clientsNorthRootJson;
+export const clientsNorthShop: ClientApplicationMetrics = clientsNorthShopRootJson;
+export const clientsNorthShop24h: ClientApplicationMetrics = clientsNorthShop24hRootJson;

@@ -234,6 +234,9 @@ async def test_the_routes_are_the_documented_endpoints() -> None:
             and "/incidents" not in route.path  # note 45's, checked against its table there
             # The console's reads: note 51's, checked against its table in test_console_reads.
             and route.path.removeprefix(ORG) not in ("/plans", "/metrics")
+            # Clients: note 57's, checked against its table in test_client_usage.
+            and route.path != "/v1/admin/orgs"
+            and not route.path.startswith("/v1/admin/platform/")
         ):
             [declaration] = declaration_of(route)
             assert declaration.kind == "requires"

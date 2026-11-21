@@ -15,7 +15,7 @@ The table it comes from, and what each relation means, are in docs/28-roles.md.
 | app_admin | n/a | n/a | n/a | n/a | deny |
 | viewer | n/a | n/a | n/a | n/a | deny |
 
-## `organizations.list` (level platform, wired now)
+## `organizations.list` (level platform, wired console)
 
 | role | platform | own_organization | application_in_own_organization | own_application | other |
 |---|---|---|---|---|---|
@@ -24,7 +24,7 @@ The table it comes from, and what each relation means, are in docs/28-roles.md.
 | app_admin | n/a | n/a | n/a | n/a | deny |
 | viewer | n/a | n/a | n/a | n/a | deny |
 
-## `usage.aggregate` (level platform, wired later)
+## `usage.aggregate` (level platform, wired console)
 
 | role | platform | own_organization | application_in_own_organization | own_application | other |
 |---|---|---|---|---|---|
@@ -158,6 +158,15 @@ The table it comes from, and what each relation means, are in docs/28-roles.md.
 | org_admin | n/a | allow | n/a | n/a | deny |
 | app_admin | n/a | n/a | n/a | n/a | deny |
 | viewer | n/a | allow | n/a | n/a | deny |
+
+## `usage.read_client_applications` (level organization, wired console)
+
+| role | platform | own_organization | application_in_own_organization | own_application | other |
+|---|---|---|---|---|---|
+| platform_admin | allow | n/a | n/a | n/a | n/a |
+| org_admin | n/a | deny | n/a | n/a | deny |
+| app_admin | n/a | n/a | n/a | n/a | deny |
+| viewer | n/a | deny | n/a | n/a | deny |
 
 ## `providers.list` (level organization, wired A5)
 

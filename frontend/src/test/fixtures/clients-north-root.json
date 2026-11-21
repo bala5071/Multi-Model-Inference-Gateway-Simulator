@@ -1,0 +1,63 @@
+{
+  "window": {
+    "name": "60m",
+    "bucket_ms": 60000,
+    "first_ms": 1793612460000,
+    "end_ms": 1793616060000,
+    "since_ms": 1793613600000.0,
+    "since_reason": "restarted"
+  },
+  "applications": [
+    {
+      "application_id": "north-blog",
+      "name": "Blog",
+      "requests": {
+        "value": 4.0,
+        "why_not": null
+      },
+      "error_rate": {
+        "value": null,
+        "why_not": "too_few"
+      },
+      "fallback_rate": {
+        "value": null,
+        "why_not": "too_few"
+      },
+      "latency_total_p50": {
+        "value": null,
+        "why_not": "too_few"
+      },
+      "open_incidents": {
+        "pending": 0,
+        "firing": 0,
+        "acknowledged": 0
+      }
+    },
+    {
+      "application_id": "north-shop",
+      "name": "Shop",
+      "requests": {
+        "value": 25.0,
+        "why_not": null
+      },
+      "error_rate": {
+        "value": 12.0,
+        "why_not": null
+      },
+      "fallback_rate": {
+        "value": null,
+        "why_not": "too_few"
+      },
+      "latency_total_p50": {
+        "value": 13.454342644059432,
+        "why_not": null
+      },
+      "open_incidents": {
+        "pending": 0,
+        "firing": 1,
+        "acknowledged": 0
+      }
+    }
+  ],
+  "next": null
+}

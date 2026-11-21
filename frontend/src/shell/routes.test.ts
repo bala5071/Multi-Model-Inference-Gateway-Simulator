@@ -26,6 +26,11 @@ const EVERY: Route[] = [
   ...APP_TABS.map((tab) => page("app one/two", tab)),
   page("north-shop", "incidents", "inc_1"),
   page("app one/two", "incidents", "inc 1/2"),
+  { screen: "clients" },
+  { screen: "client", organizationId: "north", applicationId: null },
+  { screen: "client", organizationId: "org a/b", applicationId: null },
+  { screen: "client", organizationId: "north", applicationId: "north-shop" },
+  { screen: "client", organizationId: "org a/b", applicationId: "app 1/2" },
 ];
 
 describe("routes", () => {
@@ -93,6 +98,8 @@ describe("routes", () => {
       "#/app/north-shop/keys/x",
       "#/app/north-shop/incidents/a/b",
       "#/keys/north-shop",
+      "#/clients//north-shop",
+      "#/clients/north/north-shop/x",
     ]) {
       expect(parseRoute(hash)).toEqual({ screen: "unknown" });
     }
@@ -106,6 +113,17 @@ describe("routes", () => {
       expect(routeHash(page("north-shop", tab))).toBe(`#/app/north-shop/${tab}`);
     // An incident id is written only on the Incidents tab.
     expect(routeHash(page("north-shop", "settings", "inc_1"))).toBe("#/app/north-shop/settings");
+  });
+
+  it("writes the Clients addresses (docs/57)", () => {
+    expect(routeHash({ screen: "clients" })).toBe("#/clients");
+    expect(routeHash({ screen: "client", organizationId: "north", applicationId: null })).toBe(
+      "#/clients/north",
+    );
+    expect(
+      routeHash({ screen: "client", organizationId: "a/b", applicationId: "north-shop" }),
+    ).toBe("#/clients/a%2Fb/north-shop");
+    expect(parseRoute("#/clients/north/")).toEqual({ screen: "unknown" });
   });
 
   it("carries a route's application", () => {
@@ -165,6 +183,27 @@ describe("crumbs (docs/54, docs/56)", () => {
       "Applications",
       "North shop",
     ]);
+  });
+
+  it("names Clients, then the client, then its application (docs/57)", () => {
+    const clients = { screen: "clients" } as const;
+    expect(words(clients, clients)).toEqual(["Clients"]);
+    expect(words(home, clients)).toEqual(["Clients"]);
+    expect(
+      words({ screen: "client", organizationId: "south", applicationId: null }, clients),
+    ).toEqual(["Clients", "south"]);
+    const trail = crumbs(
+      { screen: "client", organizationId: "south", applicationId: "south-shop" },
+      "default",
+      clients,
+    );
+    expect(trail.map((c) => c.label)).toEqual(["Clients", "south", "south-shop"]);
+    expect(trail[0]?.route).toEqual(clients);
+    expect(trail[1]?.route).toEqual({
+      screen: "client",
+      organizationId: "south",
+      applicationId: null,
+    });
   });
 
   it("links Applications only for a session that may open the list", () => {

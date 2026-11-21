@@ -180,6 +180,46 @@ describe("applications (docs/51)", () => {
   });
 });
 
+describe("clients (docs/57)", () => {
+  const client = { screen: "client", organizationId: "north", applicationId: null } as const;
+
+  it("lands a platform session that may list the organizations on Clients", () => {
+    expect(landing(capabilities.root)).toEqual({ screen: "clients" });
+    expect(landing(only({ platform: { "organizations.list": true } }))).toEqual({
+      screen: "clients",
+    });
+    // An organization's list comes first: such a session lands on its Applications.
+    expect(
+      landing(
+        only({
+          platform: { "organizations.list": true },
+          organization: { "applications.list": true },
+        }),
+      ),
+    ).toEqual({ screen: "apps" });
+  });
+
+  it("shows Clients and opens its places only where the answer allows the list", () => {
+    const listing = only({ platform: { "organizations.list": true } });
+    expect(isShown(item("clients"), listing)).toBe(true);
+    expect(isShown(item("clients"), only({ platform: { "monitoring.read": true } }))).toBe(false);
+    for (const route of [{ screen: "clients" } as const, client]) {
+      expect(opens(route, listing)).toBe(true);
+      expect(opens(route, capabilities.alice)).toBe(false);
+      expect(opens(route, capabilities.bob)).toBe(false);
+    }
+    expect(itemOf(client)).toBe("clients");
+    expect(target(item("clients"), client)).toEqual({ screen: "clients" });
+    expect(item("clients").group).toBe("Platform");
+  });
+
+  it("is shown to root only, of the gateway's fixtures", () => {
+    for (const [name, answer] of Object.entries(capabilities)) {
+      expect([name, isShown(item("clients"), answer)]).toEqual([name, name === "root"]);
+    }
+  });
+});
+
 describe("initials (docs/54)", () => {
   it("takes up to two letters for the avatar", () => {
     expect(initials("admin-e2e")).toBe("AE");

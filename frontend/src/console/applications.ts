@@ -8,7 +8,7 @@ import type {
   Figure,
   FiguresPage,
   FigureWindow,
-  OpenCounts,
+  OpenByState,
   OpenCountsAnswer,
 } from "./types";
 
@@ -32,6 +32,8 @@ const WHY_NOT: Record<string, string> = {
   incomplete: "incomplete",
   unavailable: "unavailable",
   above_range: "above the measured range",
+  // The platform's totals past the organizations they count (docs/57).
+  above_cap: "not counted: too many organizations",
 };
 
 /** A latency in milliseconds, as the page writes it. */
@@ -99,7 +101,7 @@ function status(kind: StatusKind): Status {
  * could not be read; `evaluator` is `/healthz`'s word, or `null` when it could not be read.
  */
 export function applicationStatus(
-  counts: OpenCounts | undefined | null,
+  counts: OpenByState | undefined | null,
   evaluator: string | null,
   requests: Figure,
 ): Status {
@@ -113,7 +115,7 @@ export function applicationStatus(
 }
 
 /** Open incidents in words: how many, and in which states. */
-export function openText(counts: OpenCounts | undefined | null): string {
+export function openText(counts: OpenByState | undefined | null): string {
   if (counts === null) return "unknown";
   if (counts === undefined) return "0";
   const parts = (["firing", "pending", "acknowledged"] as const)

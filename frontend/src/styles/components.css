@@ -571,3 +571,15 @@ button.tooltip-trigger {
 .list-filters .field {
   min-width: 180px;
 }
+
+/* Clients (docs/57): the window switch, and the platform's health above the list. */
+.window-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin: var(--s-3) 0;
+}
+
+.platform-health {
+  margin-bottom: var(--s-4);
+}

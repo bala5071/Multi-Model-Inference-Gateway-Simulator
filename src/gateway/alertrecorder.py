@@ -70,6 +70,19 @@ KINDS = ("generate", "chat")
 Counts = dict[str, int]
 MinuteKey = tuple[str, int]  # (application id, minute since the epoch)
 
+# The recorder's other keys (docs/57, console-ia-v2-plan section 3 (b)): each request also counts
+# in its application's hour and its organization's minute and hour, with the same fixed fields.
+# A key is (kind, application or organization id, minute or hour since the epoch). They are
+# kept apart from the minute rollups, which the evaluator reads, so an id can never be taken for
+# another kind's.
+HOUR_MS = 60 * MINUTE_MS
+APP_HOUR = "app-hour"
+ORG_MINUTE = "org-minute"
+ORG_HOUR = "org-hour"
+EXTRA_KINDS = (APP_HOUR, ORG_MINUTE, ORG_HOUR)
+HOUR_KINDS = frozenset({APP_HOUR, ORG_HOUR})
+ExtraKey = tuple[str, str, int]
+
 
 def bucket(ms: float) -> int:
     """The histogram bucket of ``ms``: the index of the first edge at or above it."""
@@ -102,7 +115,11 @@ def status_class(status: int) -> str:
 
 
 class RollupSink(Protocol):
-    def absorb(self, deltas: Mapping[MinuteKey, Mapping[str, int]]) -> None:
+    def absorb(
+        self,
+        deltas: Mapping[MinuteKey, Mapping[str, int]],
+        extras: Mapping[ExtraKey, Mapping[str, int]] | None = None,
+    ) -> None:
         """Take counts at once, without I/O: the in-memory rollups."""
         ...
 
@@ -118,6 +135,7 @@ class AlertRecorder:
         self._epoch = epoch
         self._sink = sink
         self._pending: dict[MinuteKey, Counts] = {}
+        self._pending_extras: dict[ExtraKey, Counts] = {}
 
     def record(
         self,
@@ -132,12 +150,15 @@ class AlertRecorder:
         hosted_attempts: int = 0,
         hosted: bool = False,
         downgraded: bool = False,
+        organization_id: str | None = None,
     ) -> None:
-        """One finished request of ``application_id``. Latencies only for an answered one."""
+        """One finished request of ``application_id`` (of ``organization_id``, when known: it
+        then counts in the organization's keys too). Latencies only for an answered one."""
         if kind not in KINDS:
             raise ValueError(f"unknown request kind {kind!r}")
-        key = (application_id, int(self._epoch.epoch_ms() // MINUTE_MS))
-        counts: Counts = {} if self._sink is not None else self._pending.setdefault(key, {})
+        minute = int(self._epoch.epoch_ms() // MINUTE_MS)
+        key = (application_id, minute)
+        counts: Counts = {}
 
         def add(field: str, n: int = 1) -> None:
             counts[field] = counts.get(field, 0) + n
@@ -165,14 +186,33 @@ class AlertRecorder:
             add(f"ttft:{bucket(ttft_ms)}")
         if total_ms is not None:
             add(f"total:{bucket(total_ms)}")
+        hour = minute // 60
+        extras: dict[ExtraKey, Counts] = {(APP_HOUR, application_id, hour): counts}
+        if organization_id is not None:
+            extras[(ORG_MINUTE, organization_id, minute)] = counts
+            extras[(ORG_HOUR, organization_id, hour)] = counts
         if self._sink is not None:
-            self._sink.absorb({key: counts})
+            self._sink.absorb({key: counts}, extras)
+            return
+        _merge(self._pending.setdefault(key, {}), counts)
+        for extra in extras:
+            _merge(self._pending_extras.setdefault(extra, {}), counts)
 
     def take(self) -> dict[MinuteKey, Counts]:
         """Every count since the last take, and none kept: the deltas to flush."""
         taken, self._pending = self._pending, {}
         return taken
 
+    def take_extras(self) -> dict[ExtraKey, Counts]:
+        """The hour and organization keys' counts since the last take, and none kept."""
+        taken, self._pending_extras = self._pending_extras, {}
+        return taken
+
     def pending(self) -> int:
         """How many (application, minute) entries are waiting: the recorder's memory."""
         return len(self._pending)
+
+
+def _merge(into: Counts, counts: Mapping[str, int]) -> None:
+    for name, n in counts.items():
+        into[name] = into.get(name, 0) + n

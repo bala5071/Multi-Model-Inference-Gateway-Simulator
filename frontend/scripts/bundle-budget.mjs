@@ -28,8 +28,11 @@ const BUDGET = {
   font: 0,
 };
 const FONT = /\.(woff2?|ttf|otf|eot)$/i;
-// Chunks that must never be in the initial download (docs/56): their names' prefixes.
-const ON_DEMAND = (process.env.BUNDLE_ON_DEMAND ?? "App-,ApplicationPage-").split(",");
+// Chunks that must never be in the initial download (docs/56, Clients docs/57): their names'
+// prefixes.
+const ON_DEMAND = (process.env.BUNDLE_ON_DEMAND ?? "App-,ApplicationPage-,ClientsScreen-").split(
+  ",",
+);
 
 const names = readdirSync(ASSETS).sort();
 if (!names.some((name) => name.endsWith(".js"))) {
