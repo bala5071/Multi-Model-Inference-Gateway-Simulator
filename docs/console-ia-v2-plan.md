@@ -842,3 +842,25 @@ lists of 16.6. Existing names are untouched. (b) Exact match only, as today, wit
 
 **Q7. Kinds.** (a) Both `business` and `individual`. (b) `business` only for now.
 **Recommendation: (a)**: the code handles both, and the test for G2 covers it.
+
+### 16.12 The approval, and the order of work
+
+Approved on 2026-11-21: Q1 to Q7, each as recommended, with these additions.
+
+1. **PR 3a lands first** (#59, merged).
+2. **Then a small separate PR, before any 3b code:** remove `platform_admin@platform` from
+   `users.reset_password` and `users.create`, which also takes both away over HTTP. The operator's
+   CLI stays the recovery path. It updates `docs/28-roles.md` and the who-may-do-what pin, tests
+   that the owner is refused with the same bytes as a forbidden request, and tests that the CLI
+   still recovers a locked-out admin. Nothing else.
+3. **Only then 3b's code**, as a draft on `main`.
+4. The two-instance Postgres tests for the 14 gaps must run in CI's `postgres` job, and the PR must
+   show them running and passing. For an individual organization, the two-instance test must cover
+   the seat rule.
+5. Every PR lists every check run on its head commit from both workflows, with ids, before it is
+   reported, and is marked ready only when all are green. Nothing is merged by the agent.
+
+**What the owner keeps after step 2.** Removing the two rows does not make the owner metrics-only
+in a client. Over HTTP it can still list, disable, enable and unlock a client's users, read a
+provider's status and disable or enable a provider. None of these gives it a credential or a
+session in the client, and changing them is outside step 2. `docs/28-roles.md` says so.
