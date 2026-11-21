@@ -597,3 +597,248 @@ Sections 15.1 to 15.4 are approved as written, with these conditions:
 
 **Valkey timing** comes from CI's `valkey` job, labelled as CI's hardware; the request path is timed
 here, on SQLite and in memory, against the perf gate. No server and no Docker are started here.
+
+## 16. PR 3b (create an organization): the plan, before any code (2026-11-21)
+
+**Status: proposed. No code is written until this section is approved.** It adds routes, touches
+authentication and adds a migration. It implements Q6 C (section 8): one audited call creates a
+new organization and its first org_admin, needs a fresh password, works for new organizations only,
+and the owner knows the temporary password until the first login.
+
+Every fact below was read from the code at **7dd7f63** (the tree of 3fcc60a, PR 3a). Results marked
+*run* came from an in-process script on that commit's test world (no server, no password printed).
+Nothing about Postgres concurrency here has been run yet: those are the tests of 16.8.
+
+### 16.1 What the code showed, and what it changes
+
+| # | Finding | Where | Consequence |
+|---|---|---|---|
+| A1 | **PR 3a is not on `main`.** #57 merged into `console-ia/pr3a-clients` at 01:45:17, after #56 had merged that branch to `main` at 01:44:09. `main` (9fe94f9) has the 3a plan but no Clients code, row, recorder change or docs/57. | `git merge-base`, `gh pr view` | Q1. 3b's code cannot start until it lands. |
+| A2 | **The owner can already take over any existing client's admin.** *Run:* platform_admin reset `alice` (north's org_admin) through the existing route, got the temporary password, logged in, changed it, and that session read north's settings (200), which platform_admin itself is refused (403). Alice's own session was ended. | `users.reset_password`, `permissions.py:139`, `app.py:1775` | "Act-as stays the only way" (section 13) and "cannot appoint an admin in an existing client" (section 8) are **not true today**. Q2. |
+| A3 | **A second path to the same place.** *Run:* the existing `POST .../users` on an existing, empty *individual* organization made the owner's new user its org_admin. | `users.create`, `_add_user`, `auth.py:586` | The same claim. Q2. |
+| A4 | `organizations.create` exists, with step-up but **not** consume-on-use. Q6 C needs consume. | `permissions.py:130` | One changed row and a new `WHO_MAY_DO_WHAT` pin. |
+| A5 | `organizations.create` is "wired now" but nothing enforces it: the CLI's `create-organization` calls the store directly, outside the write lock, with **no audit row**. | `scripts/manage.py`, `_store_command` | The CLI moves onto the same service (G4). |
+| A6 | `new_organization` accepts any non-empty id. *Run:* `..`, `.` and `a/b` are accepted, and the audit id pattern also allows `.` and `..`. A browser normalizes `..` out of a URL path, so such an id would address a different route. | `organizations.py`, `audit.py` | Ids are made by the server (Q3). |
+| A7 | `_add_user` already grants org_admin in an individual organization. A second grant raises a unique violation. | `auth.py:586` | Business grants once here; individual must not grant twice (G2). |
+| A8 | `create_user_with_temporary_password` opens its own write transaction, and Postgres refuses a nested one. | `auth.py:548`, `postgres.py:895` | The new call uses `_add_user` inside **one** transaction. |
+| A9 | A reset does not re-read the user after hashing. Used for a reissue, it could overwrite a password the admin set meanwhile. | `auth.py:751-762` | G10. |
+| A10 | Login creates its session without re-checking the hash it verified, so a login in flight during a reissue ends with a session the reissue did not revoke. It can do nothing (must change password, and the old password no longer verifies) but it should not exist. | `auth.py:1026` | G12. |
+| A11 | *Run:* malformed JSON answers 422 **before** authorization, even with no session. It reveals no resource, but it is not the forbidden bytes. | FastAPI reads a declared body first | The new routes parse the body after `requires` (16.2). |
+| A12 | A temporary password has no expiry. | `users.py` | Q5. |
+| A13 | `test_no_navigation_action_needs_step_up` keeps step-up actions out of the capabilities answer. | `tests/test_capabilities.py` | The button follows `organizations.list`, the same role row, pinned in `test_console_probes.py` as the key buttons are. |
+| A14 | The audit log has no organization column and no read route (`audit.read_*` is wired later). An existing `password_reset` row does not name the organization. | `audit.py`, `permissions.py:195` | The new rows name it in their details (16.3). |
+
+### 16.2 Routes and permission rows
+
+| Route | Action | Who | Step-up | Cap | Answer |
+|---|---|---|---|---|---|
+| `POST /v1/admin/orgs` (**new route**) | `organizations.create` (**changed row**: consume-on-use, wired `console`) | `platform_admin@platform` | consume | 10 attempts an hour per user | 201: the organization, the admin (id, username), `temporary_password`, its expiry |
+| `POST /v1/admin/platform/orgs/{org}/first-admin/reissue` (**new route, if Q4 (a)**) | `organizations.reissue_first_admin` (**new row**, organization level) | `platform_admin@platform` | consume | the same counter | 200: username, `temporary_password`, its expiry |
+| `GET /v1/admin/orgs` (exists) | `organizations.list` | unchanged | none | page of 50, at most 100 | one more allowlisted field: `first_admin_pending`, `{username, expires_at_ms}` or `null` |
+
+Authorization, in order, for both new routes: session (401), CSRF, password-change gate, roles read
+now, resource resolved, `authorize`, then the step-up claim. **Only then** is the body read
+(at most 4 KiB) and validated, so a caller without the right gets the same refusal whatever it
+sent (A11). The service checks the action again behind `requires`, as the management endpoints do;
+inside the transaction it also checks `users.create` and the org_admin grant on the new organization.
+
+The row changes land in **their own commit**: `permissions.py`, the matrix, docs/28, the pin, and
+the tests that pin them. Both routes are local only and `no-store`.
+
+**Rate limit.** The existing `user_creation` window (in Valkey when counters are shared), under a
+key of its own built from the **user id**. Today's user-creation cap is per session, and a new login
+resets it. Every attempt counts, whatever its outcome. Past it: 429
+`organization_creation_limited`, audited. A refused attempt gives its step-up window back (existing
+rule), so this cap is what bounds probing for taken names and usernames.
+
+### 16.3 Audit rows
+
+No row ever holds the password, its hash, or a refused name or username.
+
+| Event | Rows, in the transaction of the change | Owner's trail (`actor_user_id`) | New organization's trail |
+|---|---|---|---|
+| Created | `organization_created` (**new action**); `user_created` (`reason: temporary_password`, `must_change_password`); `role_granted` (org_admin) | all three | `organization_id` or `scope_id` on all three |
+| Reissued | `password_reset` (`reason: first_admin_reissued`, **new**; `step_up_consumed`, `organization_id`); `sessions_revoked` if any | yes | `organization_id` on both (the second gains it) |
+| First password change | `password_changed`; `first_admin_activated` (**new**): from here the owner no longer knows the password | no: the actor is the new admin | `organization_id` |
+| Refused | `management_refused` (reason, action) or the existing `step_up_required`, after the rollback | yes | none: nothing was created |
+
+### 16.4 The temporary password
+
+- **Made** on the server by the existing `_temporary_password`: 18 bytes from `secrets.token_bytes`
+  (144 bits), 24 base64url characters, drawn again until the password policy accepts it. Nobody
+  types or chooses it. Only its argon2id hash is stored.
+- **Shown once**, in the body of that one `no-store` POST response, built after the commit. Never in
+  a URL, header, log, audit row, error, event, metric or browser storage; no route reads it back.
+- **In the browser** it lives only in the dialog's React state, in a read-only text field with
+  autocomplete and spellcheck off (so no password manager or cloud spellchecker sees it). It is
+  cleared when the dialog closes or the session ends.
+- **Forced change at first login** is the existing gate: until the password is changed, every
+  `requires` route answers `password_change_required`. The change needs the temporary password,
+  a different new one, and passes the policy.
+- **If the owner leaves before copying it**, it is gone. The organization stays; its row on Clients
+  shows "first admin has not logged in" and a **Reissue** action (Q4): a fresh password, the old one
+  dead at once, any session it opened revoked, the rows of 16.3. Reissue works only while the marker
+  below exists. Once the admin has changed the password it answers as missing.
+- **The marker.** Migration 19 and Postgres schema 8 add one new table (no rebuild),
+  `first_admin_pending` (`organization_id` primary key, `user_id` unique, `issued_by`,
+  `issued_at_ms`, `expires_at_ms`), written in the create transaction. It is deleted in the same
+  transaction as the first password change, and by any other reset of that user. `must_change_password`
+  cannot serve as the marker: it is also true for a real admin whose password was reset, and a
+  reissue on that account would be a takeover.
+
+### 16.5 Atomicity and races
+
+The create call: count the attempt; validate; read-only pre-check (so a collision costs no hash);
+hash **outside** any transaction; then one `write_transaction()` (on Postgres, the global advisory
+write lock) that re-checks everything and writes the organization, user, grant, marker and audit
+rows; `token.changed()` inside it; commit; only then build the response.
+
+| Gap | What could go wrong | How it is closed | Two-instance test (Postgres) |
+|---|---|---|---|
+| G1 | Organization created, user not | One transaction for all five writes; any failure rolls all back | Fail each write in turn: no row of any kind remains |
+| G2 | Double grant in an individual organization | Grant only for `business` | Both kinds hold exactly one org_admin row |
+| G3 | Two owners, the same name | Re-check under the lock, then the `UNIQUE` index; the loser gets 409 `organization_name_taken` | Both instances at once: one 201, one 409, one organization |
+| G4 | The CLI writes outside the lock, unaudited (A5) | `create-organization` moves onto the service, in the transaction, audited | CLI path against HTTP, at once |
+| G5 | Names differing only by case slip past a check (Q6) | The comparison runs under the write lock, and every writer takes it (G4) | `Acme` and `acme` at once: one wins |
+| G6 | Two calls, the same username | Re-check in the transaction, then `UNIQUE`; the loser's whole transaction rolls back, so no empty organization is left | Different names, same username: one organization |
+| G7 | Crash mid-way | The transaction rolls back; nothing exists | Kill the connection before commit |
+| G8 | Crash or lost response **after** commit | The organization exists and the password is lost. A retry gets 409, never a second organization; **Reissue** recovers | Answer dropped after commit, then reissue |
+| G9 | Double submit, or a window used twice | `claim_step_up` is one atomic claim; `changed()` inside the transaction, so a failed commit never gives a used window back | Same session, both instances: one proceeds |
+| G10 | Reissue overwrites a password just set (A9) | Inside the transaction: the marker still exists **and** the hash is the one read before hashing; otherwise 409 | Reissue against password change: the admin's password survives or the change is refused, never a mix |
+| G11 | Two reissues at once | The same compare: one wins, the other gets 409 and shows nothing | Both instances: exactly one password works |
+| G12 | Login in flight during a reissue (A10) | The session is written in a request transaction that re-reads the hash; if it moved, the same `LoginFailedError` through the same steps | Login held at its verify, reissue commits: no live session |
+| G13 | Reissue against disable, or the organization disabled | Re-read in the transaction; refused | Both orders |
+| G14 | Write lock times out | 503, nothing written, window given back | Hold the lock past the timeout |
+
+### 16.6 Input rules
+
+| Field | Rule | What the form says |
+|---|---|---|
+| Organization name | `normalize_name`: NFC, 1 to 100 characters, no leading or trailing space, no control, format, zero-width or bidirectional characters. Unique; case-insensitive for new names if Q6 (a). Reserved (case-folded): `default`, `platform`, `admin`, `system`, `root`. | "Up to 100 characters. Shown to you and to this client's admin." |
+| Kind | `business` (default) or `individual` | "An individual organization has exactly one member." |
+| First admin's username | `normalize_username`: ASCII, 3 to 64 of letters, digits, `.`, `-`, `_`, case-folded. Unique **across all organizations**. Reserved: `admin`, `root`, `system`, `operator`, `platform`. | "3 to 64 letters, digits, dots, dashes or underscores. Usernames are unique across all clients." |
+| Organization id | Made by the server, `org_<16 hex>` if Q3 (a); never an input | Not shown as a field |
+
+Unknown fields are refused. A refusal names the field and the rule and never echoes the value.
+Look-alike names across scripts are still not prevented (a limit `normalize_name` documents).
+
+**Missing equals forbidden.** Every role but the owner gets the same 403 bytes from both routes,
+whatever the body. On reissue, a missing organization, one with no pending admin, one whose admin
+has activated and a disabled one all answer those bytes, **for the owner too**.
+
+### 16.7 The console
+
+- **"Create organization"** on Clients, shown when the gateway's answer allows `organizations.list`
+  (A13). It opens a native `<dialog>` through `ui/Dialog`: name, kind, username, Cancel, Create.
+- **Create** asks for the password first (`guarded(..., true)`, the existing step-up dialog stacked
+  over this one) and is disabled while the call runs.
+- **The reveal panel** replaces the form in the same dialog:
+  - the username and temporary password in read-only fields, each with **Copy**;
+  - the warning: **"You will not see this password again. Copy it now and give it to the admin
+    over a secure channel. It must be changed at first login."**;
+  - the expiry if Q5 (a), and "Until then, you know this admin's password";
+  - **Done**, enabled only after ticking "I have copied the password". If the clipboard is refused,
+    the panel says so and the field stays selectable.
+- **Escape and backdrop do not close the panel** (the `cancel` event is held), and leaving the page
+  while it is open raises the browser's warning. Closing it clears the value and reloads the list.
+- **Reissue** on a pending row: a confirmation that names the consequence, the step-up, then the same panel.
+- The client's heading shows its **name**, since ids are generated (one allowlisted field on the
+  client's metrics answer). Under the existing CSP; inside the Clients chunk; the bundle gate is kept.
+
+### 16.8 Tests
+
+- **Per role and direct address:** every role of the test world on both routes, in pytest and e2e;
+  the button is absent for all but the owner; `#/clients` by address as in PR 3a.
+- **Same bytes:** every role, with valid, invalid and malformed bodies and no body, and each missing
+  case of 16.6.
+- **Structural (authentication):** every login refusal, the new ones included, takes the same steps,
+  plus the early-return mutation.
+- **Leak scan with planted controls.** The real password and a planted copy in each place must be
+  handled: the real one **absent**, the planted one **found**, so a blind scan fails. Places: every
+  other response body, server output and logs, audit rows, `localStorage`, `sessionStorage`,
+  IndexedDB, `document.cookie`, the address and its fragment, request URLs, console messages.
+- **Postgres, two instances:** one test per row of 16.5, in CI's `postgres` job, on `pg_world(2)`
+  with a barrier, so each pair really overlaps. Parity with SQLite for the new store methods.
+- **Migration:** 19 up, schema 8 up and rollback, `pg_migrate` copies the new table.
+- **e2e, the whole path:** the owner creates an organization, passes step-up, copies the password
+  and closes the panel; the new admin logs in, is forced to change the password, reaches
+  Applications; the old password fails; Reissue is gone. A second path: leave before copying,
+  reissue, the first password is dead. Keyboard, 390 px, axe in both themes, CSP, CI-image baselines
+  each looked at, screenshots per role.
+- **Timing:** the create call and one login, before and after the marker read, on SQLite, three runs,
+  hardware recorded; the perf gate.
+
+**Mutation checks**, each restored and shown by sha256:
+
+| # | Mutation | Must be caught by |
+|---|---|---|
+| 1 | An existing organization accepted | create tests |
+| 2 | The grant made outside the transaction | G1 |
+| 3 | Step-up not consumed | row and route tests |
+| 4 | `organizations.create` allowed for org_admin | per-role, pin |
+| 5 | Body read before `requires` | same-bytes |
+| 6 | Individual granted twice | G2 |
+| 7 | The name re-check removed from the transaction | G3, G5 |
+| 8 | The username re-check removed | G6 |
+| 9 | `changed()` moved after the commit | G9 |
+| 10 | Reissue allowed with no marker | missing equals forbidden |
+| 11 | Reissue's hash compare removed | G10, G11 |
+| 12 | Marker not deleted at first password change | reissue after activation |
+| 13 | Old sessions not revoked on reissue | reissue test |
+| 14 | Login's hash re-check removed | G12 |
+| 15 | Temporary password added to an audit row | leak scan |
+| 16 | Temporary password logged | leak scan |
+| 17 | Cap keyed by session instead of user | cap test |
+| 18 | Reserved name accepted | input tests |
+| 19 | Expired password accepted, if Q5 (a) | login test |
+| 20 | `must_change_password` false on the new admin | forced-change test |
+| 21 | Panel closes on Escape | frontend test |
+
+### 16.9 Risks
+
+- **The owner knows the first admin's password until it is changed.** Accepted by Q6 C, made visible
+  by `first_admin_activated`, and bounded by Q5. There is no email, so the handover is by hand.
+- **A password copied to the clipboard** stays there, under the operating system's control. The panel cannot clear it reliably.
+- **Global usernames:** a taken-username answer reveals that the name exists elsewhere. The owner can
+  already list users; the cap bounds it.
+- **More than 1,000 organizations** turn the platform totals to `above_cap` (PR 3a's cap). Creating
+  organizations makes that reachable; nothing breaks.
+- **This touches login** (G12, Q5), the most sensitive path here, hence the structural test and two mutations.
+
+### 16.10 Out of scope
+
+A users screen; the roles routes (option D stays rejected); deleting, renaming, disabling or
+enabling an organization from the console; inviting by email; act-as (PR 5); prices (PR 4); bulk
+creation; preventing look-alike names across scripts.
+
+### 16.11 Questions, before any code
+
+**Q1. Landing PR 3a.** Its code is on `console-ia/pr3a-clients`, not `main` (A1). (a) Open a PR
+from that branch to `main`, wait for CI, you merge it, then 3b builds on `main`. (b) Stack 3b's code on
+that branch. **Recommendation: (a).**
+
+**Q2. The owner's existing path into clients (A2, A3).** (a) A small separate PR **before** 3b's code:
+remove `platform_admin@platform` from `users.reset_password` and `users.create`, keeping the
+operator's CLI as the recovery path, and add both to section 13's pinned refusals. (b) The same
+inside 3b, in its own commit. (c) Keep today's behavior and correct sections 8 and 13 to say the owner
+can take over a client's admin, audited. **Recommendation: (a)**: it is a security fix to shipped
+behavior, and Reissue is only "narrow" if the broad route is gone.
+
+**Q3. The organization's id.** (a) Made by the server, `org_<16 hex>`, as application ids are. (b)
+Typed by the owner, as a checked lowercase slug: readable URLs, one more field, reserved words and a
+collision answer. **Recommendation: (a).**
+
+**Q4. Reissue.** (a) The narrow new row and route, only while the first admin is pending, with the
+marker table. (b) Reuse `users.reset_password`: no new row or table, but it depends on the broad
+power Q2 removes. (c) No reissue: a lost password needs the operator's CLI. **Recommendation: (a).**
+
+**Q5. Does an unused temporary password expire?** (a) After 72 hours; Reissue makes a new one.
+Adds one check to login. (b) Never, as today, until the first login. **Recommendation: (a)**: an
+org_admin credential the owner knows should not live forever.
+
+**Q6. Name uniqueness and reserved words.** (a) New names unique ignoring case, plus the reserved
+lists of 16.6. Existing names are untouched. (b) Exact match only, as today, with the reserved lists.
+**Recommendation: (a)**: `Acme` and `acme` as two clients is an operator's mistake waiting to happen.
+
+**Q7. Kinds.** (a) Both `business` and `individual`. (b) `business` only for now.
+**Recommendation: (a)**: the code handles both, and the test for G2 covers it.
