@@ -45,7 +45,8 @@ uv run python scripts/manage.py disable-user --username alice     # ends every s
 ```
 
 Roles decide what an account may do ([docs/28](28-roles.md)): `platform_admin`
-(organizations; users in any organization), `org_admin` (its organization), `app_admin` (its
+(organizations; listing, disabling, enabling and unlocking users, never creating one or
+resetting a password), `org_admin` (its organization), `app_admin` (its
 application) and `viewer` (usage, read only). Membership alone grants nothing. Roles are granted
 from the CLI; `--as USERNAME` keeps the operator within that user's roles (it can only
 narrow what the operator may do), and the audit log records the operator as having acted,

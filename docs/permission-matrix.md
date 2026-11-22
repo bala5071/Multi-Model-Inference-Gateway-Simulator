@@ -55,7 +55,7 @@ The table it comes from, and what each relation means, are in docs/28-roles.md.
 
 | role | platform | own_organization | application_in_own_organization | own_application | other |
 |---|---|---|---|---|---|
-| platform_admin | allow | n/a | n/a | n/a | n/a |
+| platform_admin | deny | n/a | n/a | n/a | n/a |
 | org_admin | n/a | allow | n/a | n/a | deny |
 | app_admin | n/a | n/a | n/a | n/a | deny |
 | viewer | n/a | deny | n/a | n/a | deny |
@@ -82,7 +82,7 @@ The table it comes from, and what each relation means, are in docs/28-roles.md.
 
 | role | platform | own_organization | application_in_own_organization | own_application | other |
 |---|---|---|---|---|---|
-| platform_admin | allow | n/a | n/a | n/a | n/a |
+| platform_admin | deny | n/a | n/a | n/a | n/a |
 | org_admin | n/a | allow | n/a | n/a | deny |
 | app_admin | n/a | n/a | n/a | n/a | deny |
 | viewer | n/a | deny | n/a | n/a | deny |
