@@ -144,8 +144,10 @@ docs/51), `later` (declared, no endpoint planned in A2).
 - **The operator's CLI is the recovery path.** `manage.py reset-password` and `unlock-user`,
   run without `--as`, recover a locked-out admin. With `--as` they are held to that user's
   roles, so `--as` a platform_admin no longer resets a password in a client. The CLI clears
-  the database lockout but cannot reach a running server's in-memory login limiter, which
-  can refuse that username until its 15-minute window passes or the server restarts.
+  the database lockout but cannot reach a running server's login limiter, which refuses that
+  username while five failed attempts fall within the last 15 minutes. A refused attempt
+  counts as another, so the admin should wait before trying again. Restarting the server
+  clears the in-memory limiter; it does not clear the shared one in Valkey.
 
 ## Granting, beyond the table
 
