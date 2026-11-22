@@ -15,7 +15,7 @@ CLI in `scripts/manage.py`. Tests: `tests/test_permissions.py`, `tests/test_role
 
 | Role | Held at | Covers |
 |---|---|---|
-| `platform_admin` | the platform | organizations and aggregate data; users in any organization; appointing org_admins (CLI) |
+| `platform_admin` | the platform | organizations and aggregate data; listing, disabling, enabling and unlocking users in any organization, never creating one or resetting a password; appointing org_admins (CLI) |
 | `org_admin` | an organization | that organization, and every application in it |
 | `app_admin` | an application | that application |
 | `viewer` | an organization or an application | usage and the application list in its scope |
@@ -66,10 +66,10 @@ docs/51), `later` (declared, no endpoint planned in A2).
 | `usage.aggregate` | platform | `platform_admin@platform` | | console |
 | `organizations.disable` | organization | `platform_admin@platform` | yes | now |
 | `organizations.enable` | organization | `platform_admin@platform` | yes | now |
-| `users.create` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | now |
+| `users.create` | organization | `org_admin@own_organization` | yes | now |
 | `users.disable` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | now |
 | `users.enable` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | now |
-| `users.reset_password` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | now |
+| `users.reset_password` | organization | `org_admin@own_organization` | yes | now |
 | `users.unlock` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | now |
 | `users.list` | organization | `org_admin@own_organization`, `platform_admin@platform` | | step 7 |
 | `roles.assign` | organization | `org_admin@own_organization`, `platform_admin@platform` | yes | now |
@@ -131,9 +131,21 @@ docs/51), `later` (declared, no endpoint planned in A2).
   relation, so nothing at application level is ever allowed to it (application keys, roles,
   provider keys, modes, an application's usage or audit entries). A test asserts it for every
   application-level action. `usage.read_client_applications` (docs/57) is at organization level:
-  a client's applications' counts, rates and percentiles from a fixed allowlist, metrics only;
-  every other read and write in a client stays refused to it (a test asks each through its
-  route), and acting as a member of the client stays the only way to change anything there.
+  a client's applications' counts, rates and percentiles from a fixed allowlist, metrics only.
+- **platform_admin cannot take over a client's account.** It can neither create a user nor
+  reset a password, unless it also holds `org_admin` of its own organization, and then only
+  there. Either would hand it a credential for the client. Over HTTP it is refused with the
+  bytes of any forbidden request, whether the target exists or not
+  (`tests/test_owner_user_routes.py`).
+- **What platform_admin can still change in a client**, over HTTP: disable, enable and unlock
+  a user, and disable or enable a provider. It can also list the users and read a provider's
+  status. None of these gives it a credential or a session in the client. Every other read
+  and write there is refused (a test asks each through its route).
+- **The operator's CLI is the recovery path.** `manage.py reset-password` and `unlock-user`,
+  run without `--as`, recover a locked-out admin. With `--as` they are held to that user's
+  roles, so `--as` a platform_admin no longer resets a password in a client. The CLI clears
+  the database lockout but cannot reach a running server's in-memory login limiter, which
+  can refuse that username until its 15-minute window passes or the server restarts.
 
 ## Granting, beyond the table
 
@@ -159,9 +171,8 @@ docs/51), `later` (declared, no endpoint planned in A2).
 
 `create_user`, shared by the CLI and (step 7) the endpoint, makes an account start with
 `must_change_password` when whoever creates it knows the password and is not of its
-organization: a platform_admin creating a user in an organization it is not a member of, and
-the operator at the CLI (a member of no organization). Accounts an org_admin creates in its own
-organization do not. Tested on the CLI path; step 7 tests the endpoint. The creation is audited
+organization: the operator at the CLI (a member of no organization). Accounts an org_admin
+creates in its own organization do not. Tested on the CLI path; step 7 tests the endpoint. The creation is audited
 with its actor and whether the password must be changed, for that organization's org_admin to
 see. **This changes step 4's CLI:** `manage.py create-user` without `--as` now makes an account
 that must change its password at first login.

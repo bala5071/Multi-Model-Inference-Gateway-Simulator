@@ -366,7 +366,7 @@ async def test_a_revoked_role_is_gone_at_the_next_request(world: World) -> None:
         assert (await admin.get(alice, "/north/users")).json() == FORBIDDEN
 
 
-async def test_platform_admin_manages_users_anywhere_and_no_application(world: World) -> None:
+async def test_platform_admin_unlocks_users_anywhere_and_no_application(world: World) -> None:
     async with admin_console(world) as admin:
         root = await admin.login("root")
         await admin.step_up(root)
@@ -546,10 +546,11 @@ async def test_usernames_are_global_and_every_conflict_is_audited(world: World) 
 
 async def test_an_individual_organization_takes_one_member_over_http(world: World) -> None:
     async with admin_console(world) as admin:
-        root = await admin.login("root")
-        await admin.step_up(root)
-        assert (await admin.post(root, "/solo/users", {"username": "only"})).status_code == 201
-        second = await admin.post(root, "/solo/users", {"username": "second"})
+        # The operator makes its one member, who is its org_admin (the owner cannot, docs/28).
+        ready_user(world.accounts, "only", PASSWORD, "solo")
+        only = await admin.login("only")
+        await admin.step_up(only)
+        second = await admin.post(only, "/solo/users", {"username": "second"})
         assert (second.status_code, second.json()["error"]["code"]) == (409, "organization_full")
     reasons = [
         e.event.details["reason"] for e in await _audit(world, AuditAction.MANAGEMENT_REFUSED)

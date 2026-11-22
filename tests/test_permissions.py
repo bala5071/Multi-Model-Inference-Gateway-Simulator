@@ -180,7 +180,9 @@ def test_what_each_role_can_and_cannot_do() -> None:
         (app_admin, "application_keys.issue", "sibling application", False),
         (app_admin, "users.create", "own organization", False),
         (platform_admin, "organizations.create", "platform", True),
-        (platform_admin, "users.create", "other organization", True),
+        (platform_admin, "users.create", "other organization", False),
+        (platform_admin, "users.reset_password", "other organization", False),
+        (platform_admin, "users.unlock", "other organization", True),
         (platform_admin, "application_keys.issue", "own application", False),
         (platform_admin, "applications.create", "own organization", False),
         (viewer, "applications.list", "own organization", True),
@@ -500,7 +502,7 @@ def test_a_route_without_a_declaration_is_found() -> None:
 # action's `wired` label (docs/51: `usage.read_organization`, later to console) does not. The
 # value was the same on main before docs/51 and after. A new row (the IA v2 plan's Q1 and Q4)
 # updates it in its own reviewed commit, never to make an unexplained failure pass.
-WHO_MAY_DO_WHAT = "88a9853a13f3ad6b2d2349df09dbf0b81d21dbdd3edf017530dbbb2144434a3b"
+WHO_MAY_DO_WHAT = "98aa00a65825778ff286f3315236bc4542dc4a6d73219a73901d8b2f95c2396c"
 
 
 def test_who_may_do_what_is_pinned() -> None:

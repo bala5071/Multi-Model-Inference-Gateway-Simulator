@@ -79,14 +79,19 @@ def test_accounts_made_by_an_outsider_must_change_their_password(
     # The operator (no --as) is a member of no organization: alice, bob and sid already
     # had to change theirs (the fixture made them that way).
     assert _user(world, "bob").must_change_password is True
-    # A platform_admin outside the organization: the new account must change its password.
-    assert run(world, "create-user --username carl --organization north --as root") == 0
+    # The operator again, for a new account: it must change its password.
+    assert run(world, "create-user --username carl --organization north") == 0
     assert _user(world, "carl").must_change_password is True
     assert "must change its password at first login" in capsys.readouterr().err
+    # A platform_admin creates no user, in a client or in its own organization (docs/28).
+    assert run(world, "create-user --username gus --organization north --as root") == 1
+    assert run(world, "create-user --username gus --organization default --as root") == 1
+    assert "not permitted: users.create" in capsys.readouterr().err
     # The organization's own org_admin: it need not.
     assert run(world, "create-user --username dina --organization north --as alice") == 0
     assert _user(world, "dina").must_change_password is False
-    # A platform_admin who is a member of the organization (root is in default): need not.
+    # A platform_admin who is also the org_admin of its own organization, there: need not.
+    assert run(world, "grant-role --username root --role org_admin --organization default") == 0
     assert run(world, "create-user --username erik --organization default --as root") == 0
     assert _user(world, "erik").must_change_password is False
     # Nobody else may create users there.
@@ -98,23 +103,23 @@ def test_accounts_made_by_an_outsider_must_change_their_password(
 def test_the_creation_is_audited_with_the_operator_acting_as_a_user(
     world: dict[str, str],
 ) -> None:
-    assert run(world, "create-user --username carl --organization north --as root") == 0
+    assert run(world, "create-user --username carl --organization north --as alice") == 0
     connection = open_database(world["GATEWAY_DATABASE"])
-    root = run_now(SqliteAccountStore(connection).find_user("root"))
+    alice = run_now(SqliteAccountStore(connection).find_user("alice"))
     carl = run_now(SqliteAccountStore(connection).find_user("carl"))
     entries = run_now(AuditLog(SqliteAuditStore(connection)).entries())
     connection.close()
-    assert root is not None
+    assert alice is not None
     assert carl is not None
     [created] = [
         e.event
         for e in entries
         if e.event.target_id == carl.id and e.event.action.value == "user_created"
     ]
-    # The operator acted (no user is the actor), within root's roles (acting_as).
+    # The operator acted (no user is the actor), within alice's roles (acting_as).
     assert created.actor_user_id is None
-    assert created.details["acting_as"] == root.id
-    assert created.details["must_change_password"] is True
+    assert created.details["acting_as"] == alice.id
+    assert created.details["must_change_password"] is False
     assert created.details["organization_id"] == "north"
 
 

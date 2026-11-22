@@ -132,11 +132,13 @@ def _rows() -> list[Permission]:
         ("usage.aggregate", p, (_PLATFORM,), False, w.CONSOLE),
         ("organizations.disable", o, (_PLATFORM,), True, w.NOW),
         ("organizations.enable", o, (_PLATFORM,), True, w.NOW),
-        # Users: platform_admin in any organization, org_admin in its own.
-        ("users.create", o, (_PLATFORM, _ORG_ADMIN), True, w.NOW),
+        # Users: org_admin in its own organization. platform_admin may list, disable, enable
+        # and unlock them, but neither create one nor reset a password: either would hand it
+        # a client's account. The operator's CLI is the recovery path (docs/28).
+        ("users.create", o, (_ORG_ADMIN,), True, w.NOW),
         ("users.disable", o, (_PLATFORM, _ORG_ADMIN), True, w.NOW),
         ("users.enable", o, (_PLATFORM, _ORG_ADMIN), True, w.NOW),
-        ("users.reset_password", o, (_PLATFORM, _ORG_ADMIN), True, w.NOW),
+        ("users.reset_password", o, (_ORG_ADMIN,), True, w.NOW),
         # Unlocking lifts a lockout, a defense: step-up, like the other user changes.
         ("users.unlock", o, (_PLATFORM, _ORG_ADMIN), True, w.NOW),
         ("users.list", o, (_PLATFORM, _ORG_ADMIN), False, w.STEP_7),
